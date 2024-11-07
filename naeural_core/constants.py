@@ -1,4 +1,4 @@
-from PyE2.const import (
+from naeural_client.const import (
   PAYLOAD_CT,
   COMMANDS,
   STATUS_TYPE,
@@ -222,7 +222,7 @@ class CONFIG_STARTUP_v2:
 
 class PLUGIN_SEARCH:
   # SEARCH_PACKAGES
-  SEARCH_IN_PACKAGES = ["PyE2", "naeural_core"]
+  SEARCH_IN_PACKAGES = ["naeural_client", "naeural_core"]
 
   # CONFIG
   LOC_CONFIG_RETRIEVE_PLUGINS = 'plugins.config'

@@ -1,4 +1,4 @@
-from PyE2 import BaseDecentrAIObject
+from naeural_client import BaseDecentrAIObject
 
 import numpy as np
 import matplotlib.pyplot as plt

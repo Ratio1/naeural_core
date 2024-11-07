@@ -30,7 +30,7 @@ class _BasicTFKerasMixin(object):
     super(_BasicTFKerasMixin, self).__init__()
 
     try:
-      from PyE2.logging.logger_mixins.pickle_serialization_mixin import _PickleSerializationMixin
+      from naeural_client.logging.logger_mixins.pickle_serialization_mixin import _PickleSerializationMixin
     except ModuleNotFoundError:
       raise ModuleNotFoundError("Cannot use _BasicTFKerasMixin without having _PickleSerializationMixin")
 

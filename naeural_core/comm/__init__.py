@@ -1,2 +1,2 @@
 from .communication_manager import CommunicationManager
-from PyE2.comm import AMQPWrapper, MQTTWrapper
+from naeural_client.comm import AMQPWrapper, MQTTWrapper

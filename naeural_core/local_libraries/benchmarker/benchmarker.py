@@ -2,7 +2,7 @@ import os
 import inspect
 import importlib
 
-from PyE2 import BaseDecentrAIObject
+from naeural_client import BaseDecentrAIObject
 class Benchmarker(BaseDecentrAIObject):
   def __init__(self, config, **kwargs):
     self.custom_models_list = []

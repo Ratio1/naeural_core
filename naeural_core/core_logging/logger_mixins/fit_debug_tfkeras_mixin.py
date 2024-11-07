@@ -19,7 +19,7 @@ class _FitDebugTFKerasMixin(object):
     super(_FitDebugTFKerasMixin, self).__init__()
 
     try:
-      from PyE2.logging.logger_mixins.timers_mixin import _TimersMixin
+      from naeural_client.logging.logger_mixins.timers_mixin import _TimersMixin
     except ModuleNotFoundError:
       raise ModuleNotFoundError("Cannot use _FitDebugTFKerasMixin without having _TimersMixin")
 

@@ -14,8 +14,8 @@ from time import sleep, time
 from datetime import timedelta
 
 from naeural_core import Logger
-from PyE2 import BaseDecentrAIObject
-from PyE2.logging.logger_mixins.json_serialization_mixin import NPJson
+from naeural_client import BaseDecentrAIObject
+from naeural_client.logging.logger_mixins.json_serialization_mixin import NPJson
 from naeural_core.local_libraries.model_server_v2.request_utils import get_api_request_body, MSCT
 
 from naeural_core.main.ver import __VER__ as __CORE_VER__

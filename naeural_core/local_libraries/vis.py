@@ -6,7 +6,7 @@ from tqdm import tqdm
 from PIL import Image
 from enum import Enum
 from abc import abstractmethod
-from PyE2 import BaseDecentrAIObject
+from naeural_client import BaseDecentrAIObject
 
 
 __version__ = '1.0.1.1'

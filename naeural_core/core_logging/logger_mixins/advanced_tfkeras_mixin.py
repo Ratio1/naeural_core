@@ -29,7 +29,7 @@ class _AdvancedTFKerasMixin(object):
       raise ModuleNotFoundError("Cannot use _AdvancedTFKerasMixin without having _BasicTFKerasMixin")
 
     try:
-      from PyE2.logging.logger_mixins.pickle_serialization_mixin import _PickleSerializationMixin
+      from naeural_client.logging.logger_mixins.pickle_serialization_mixin import _PickleSerializationMixin
     except ModuleNotFoundError:
       raise ModuleNotFoundError("Cannot use _AdvancedTFKerasMixin without having _PickleSerializationMixin")
 

@@ -1,7 +1,7 @@
 from naeural_core import constants as ct
 
 from naeural_core import Logger
-from PyE2 import _PluginsManagerMixin
+from naeural_client import _PluginsManagerMixin
 from naeural_core import DecentrAIObject
 
 class Manager(DecentrAIObject, _PluginsManagerMixin):

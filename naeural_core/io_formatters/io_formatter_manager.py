@@ -1,6 +1,6 @@
 from naeural_core.manager import Manager
 # from naeural_core import constants as ct
-from PyE2.io_formatter import IOFormatterWrapper
+from naeural_client.io_formatter import IOFormatterWrapper
 
 class IOFormatterManager(Manager):
 

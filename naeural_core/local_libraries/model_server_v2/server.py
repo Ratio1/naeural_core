@@ -9,8 +9,8 @@ from time import sleep
 from threading import Lock
 
 from naeural_core import Logger
-from PyE2 import BaseDecentrAIObject, _PluginsManagerMixin
-from PyE2.logging.logger_mixins.json_serialization_mixin import NPJson
+from naeural_client import BaseDecentrAIObject, _PluginsManagerMixin
+from naeural_client.logging.logger_mixins.json_serialization_mixin import NPJson
 
 from naeural_core.local_libraries.model_server_v2.request_utils import get_api_request_body, MSCT
 

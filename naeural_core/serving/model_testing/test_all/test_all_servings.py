@@ -4,7 +4,7 @@ import os
 import pandas as pd
 
 # local dependencies
-from PyE2 import load_dotenv
+from naeural_client import load_dotenv
 from naeural_core import constants as ct
 from naeural_core import Logger
 from naeural_core.serving.model_testing.base import Base

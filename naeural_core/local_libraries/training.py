@@ -11,7 +11,7 @@ from functools import partial
 from time import time
 import itertools
 
-from PyE2 import BaseDecentrAIObject
+from naeural_client import BaseDecentrAIObject
 
 __VER__ = '0.2.0.0'
 

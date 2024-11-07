@@ -1,5 +1,5 @@
 
-# TODO: move all string to PyE2
+# TODO: move all string to naeural_client
 class NMonConst:
   NMON_CMD_HISTORY = 'history'
   NMON_CMD_LAST_CONFIG = 'last_config'

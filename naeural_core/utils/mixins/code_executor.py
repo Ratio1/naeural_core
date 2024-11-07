@@ -1,4 +1,4 @@
-from PyE2 import BaseCodeChecker
+from naeural_client import BaseCodeChecker
 
 class _CodeExecutorMixin(BaseCodeChecker):
   """

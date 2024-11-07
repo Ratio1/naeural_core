@@ -69,7 +69,7 @@ class FastApiWebAppPlugin(BasePlugin):
   def get_package_base_path(self, package_name):
     """
     Return the file path of an installed package parent directory.
-    This method was copied from the _PluginsManagerMixin class from PyE2 SDK.
+    This method was copied from the _PluginsManagerMixin class from naeural_client SDK.
 
     Parameters
     ----------

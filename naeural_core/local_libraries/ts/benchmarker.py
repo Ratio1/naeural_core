@@ -10,7 +10,7 @@ import textwrap
 
 
 
-from PyE2 import BaseDecentrAIObject
+from naeural_client import BaseDecentrAIObject
 from .baselines import _AVAIL_baselines, get_avail_baselines, _cleanup
 from . import metrics
 

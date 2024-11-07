@@ -1,5 +1,5 @@
 from naeural_core.business.default.web_app.fast_api_web_app import FastApiWebAppPlugin as BasePlugin
-from PyE2 import Payload, Session
+from naeural_client import Payload, Session
 
 __VER__ = '0.1.0.0'
 

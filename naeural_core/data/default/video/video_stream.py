@@ -8,7 +8,7 @@ as well as the config for the backend, and the plugin will automatically select 
 backend and initialize it. After this, this plugin will act like the backend plugin.
 """
 
-from PyE2 import _PluginsManagerMixin
+from naeural_client import _PluginsManagerMixin
 
 from naeural_core import DecentrAIObject
 from naeural_core import constants as ct

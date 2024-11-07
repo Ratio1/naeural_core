@@ -1,6 +1,6 @@
 # TODO Bleo: WIP
 from naeural_core.serving.base import ContinousServingProcess as BaseServingProcess
-from PyE2 import _PluginsManagerMixin
+from naeural_client import _PluginsManagerMixin
 from naeural_core.local_libraries.nn.th.training.pipelines.base import BaseTrainingPipeline
 from naeural_core.utils.thread_raise import ctype_async_raise
 import torch as th

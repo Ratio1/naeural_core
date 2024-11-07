@@ -2,7 +2,7 @@ __version__ = '1.0.0.0'
 
 import os
 import azureml
-from PyE2 import BaseDecentrAIObject
+from naeural_client import BaseDecentrAIObject
 
 from azureml.core import Workspace
 from azureml.core.model import Model, InferenceConfig

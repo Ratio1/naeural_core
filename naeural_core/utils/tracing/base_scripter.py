@@ -9,7 +9,7 @@ import numpy as np
 import abc
 
 from naeural_core.local_libraries.nn.th.utils import th_resize_with_pad
-from PyE2 import load_dotenv
+from naeural_client import load_dotenv
 
 
 load_dotenv()

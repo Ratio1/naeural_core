@@ -899,7 +899,7 @@ class Orchestrator(DecentrAIObject,
       module = notif[ct.MODULE]
       module += ' (EE core v{})'.format(__CORE_VER__)
       # we add ver in notif info
-      notif['INFO'] = 'EE app v{}, core v{}, PyE2 v{}, info text: '.format(__APP_VER__, __CORE_VER__, self.log.version) + str(notif['INFO'])
+      notif['INFO'] = 'EE app v{}, core v{}, SDK v{}, info text: '.format(__APP_VER__, __CORE_VER__, self.log.version) + str(notif['INFO'])
       notif_msg = 'EE core v{}: '.format(__CORE_VER__) + str(notif['NOTIFICATION'])
       
       notif_type = notif['NOTIFICATION_TYPE']

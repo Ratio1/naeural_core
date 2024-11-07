@@ -1,0 +1,21 @@
+{
+    "LIVE_FEED": false,
+    "NAME": "TestMovie",
+    "PLUGINS": [
+        {
+            "LOCATIONS": [
+                {
+                    "BOTTOM": 720,
+                    "LEFT": 0,
+                    "LOCATION_NAME": "CT_Z0",
+                    "RIGHT": 1280,
+                    "TOP": 0
+                }
+            ],
+            "SIGNATURE": "CAMERA_TAMPERING_01"
+        }
+    ],
+    "RECONNECTABLE": true,
+    "TYPE": "VideoStream",
+    "URL": "C:/Users/ETA/Dropbox/DATA/_vapor_data/_iqa/_data/Camera movement test #5.mp4"
+}

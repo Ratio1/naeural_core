@@ -1,0 +1,60 @@
+# This workflow will upload a Python Package using Twine when a release is created
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python#publishing-to-package-registries
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: Publish naeural_core Python 🐍 distributions 📦 to PyPI
+
+on: push
+
+jobs:
+  build-n-publish:
+    name: Build and publish Python 🐍 distributions 📦 to PyPI
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade build twine
+      - name: Bump version
+        run: python naeural_core/main/ver.py
+
+      - name: Build package
+        run: >-
+          python -m
+          build
+          --sdist
+          --wheel
+          --outdir dist/
+
+      - name: Set environment variable for PyPI token - export TOKEN_VAR to GITHUB_ENV
+        id: set_pypi_token
+        run: |
+          ACTOR_UPPER=$(echo "${{ github.actor }}" | tr '[:lower:]' '[:upper:]')
+          TOKEN_VAR="PYPI_${ACTOR_UPPER}"
+          echo "TOKEN_VAR=$TOKEN_VAR" >> $GITHUB_ENV
+
+      - name: Set environment variable for PyPI token - export PYPI_TOKEN to GITHUB_ENV
+        run: |
+          echo "Token var: ${{ env.TOKEN_VAR }}"
+          echo "PYPI_TOKEN=${{ secrets[env.TOKEN_VAR] }}" >> $GITHUB_ENV
+
+      - name: Print environment variables (for debugging)
+        run: |
+          echo "Actor: ${{ github.actor }}"
+          echo "PYPI_VAR: ${{ env.TOKEN_VAR }}"
+
+      - name: Publish distribution 📦 to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ env.PYPI_TOKEN  }}

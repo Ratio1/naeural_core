@@ -1,0 +1,12 @@
+{
+  "EFF_DET0": {
+      "GRAPH": "effdet_1020x574/efficientdetd0_b1_1020x574/efficientdet-d0_frozen.pb",
+      "INPUT_0_IMAGES": "image_arrays:0",
+      "INPUT_1_MIN_SCORE": "min_score_thresh:0",
+      "INPUT_2_IOU": "iou_threshold_thresh:0",
+      "OUTPUT_0": "detections:0",
+      "IOU_THRESHOLD": 0.3,
+      "MEMORY_FRACTION": 0.3,
+      "MODEL_THRESHOLD": 0.2
+    }
+}

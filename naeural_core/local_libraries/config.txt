@@ -1,0 +1,4 @@
+{
+  "BASE_FOLDER": "Dropbox",
+  "APP_FOLDER": "_libraries_testdata"
+}

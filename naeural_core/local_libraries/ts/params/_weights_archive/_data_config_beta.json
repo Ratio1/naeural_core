@@ -1,0 +1,12 @@
+{
+    "lif1": {
+        "DESC": "Continuation of last {s_n1} {s_units} trend (fast version).",
+        "FUNCF": "_autoreg_lin_trend_v_0_1_0_3",
+        "VER": "0.1.0.3"
+    },
+    "arim": {
+        "DESC": "",
+        "FUNCF": "_autoreg_ARIMA_v_0_1_0_3",
+        "VER": "0.1.0.3"
+    }
+}

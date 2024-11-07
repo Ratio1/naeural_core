@@ -1,0 +1,37 @@
+{
+    "avgh": {
+        "DESC": "Averege over the whole analysed {s_units} history",
+        "VER": "0.1.2.0",
+        "FUNCF": "_autoreg_avg_v_0_1_2_0"
+    },
+    "seas": {
+        "DESC": "Repetitions from {s_n1} to {s_n1} {s_units} looking back and weighting {s_n2} periods (older is less important)",
+        "VER": "0.1.2.0",
+        "FUNCF": "_autoreg_season_avg_v_0_1_2_0"
+    },
+    "sea2": {
+        "DESC": "Repetitions from {s_n1} to {s_n1} {s_units} averaged with repetitions from {s_n2} to {s_n2} {s_units} over 2 past periods",
+        "VER": "0.1.2.0",
+        "FUNCF": "_autoreg_season_avg_ensemble_x2_v_0_1_2_0"
+    },
+    "sea4": {
+        "DESC": "Repetitions from {s_n1} to {s_n1} {s_units} averaged with repetitions from {s_n2} to {s_n2} {s_units} over 4 past periods",
+        "VER": "0.1.2.0",
+        "FUNCF": "_autoreg_season_avg_ensemble_x4_v_0_1_2_0"
+    },
+    "lin1": {
+        "DESC": "Continuation of last {s_n1} {s_units} trend.",
+        "VER": "0.1.2.0",
+        "FUNCF": "_autoreg_linear1_v_0_1_2_0"
+    },
+    "lin2": {
+        "DESC": "Continuation of last {s_n2} {s_units} trend using {s_n1} back periods each with {s_n2} {s_units}",
+        "VER": "0.1.2.0",
+        "FUNCF": "_autoreg_linear2_v_0_1_2_0"
+    },
+    "lin3": {
+        "DESC": "Continuation of last {s_n2} {s_units} trend using {s_n1} back periods each with {s_n2} {s_units}",
+        "VER": "0.1.2.0",
+        "FUNCF": "_autoreg_linear3_v_0_1_2_0"
+    }
+}

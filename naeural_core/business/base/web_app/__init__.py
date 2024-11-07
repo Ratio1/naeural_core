@@ -1,0 +1,1 @@
+from .base_web_app_plugin import BaseWebAppPlugin

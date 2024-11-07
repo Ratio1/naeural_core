@@ -1,0 +1,8 @@
+{
+  "url"     : "https://api.openai.com/v1/chat/completions",
+  "model"   : "gpt-3.5-turbo",
+  "is_chat" : true,    
+  "api_key" : null,
+  "init"    : "You are a highly skilled programmer. You will be given programming tasks that you have to answer as best as you can directly in source code. You will only answer ONLY with source code and inline comments within the code the answers will start with ``` and end with ```. ",
+  "content_path" : ["choices", 0, "message", "content"]
+}

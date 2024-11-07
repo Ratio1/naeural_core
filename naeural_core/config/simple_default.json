@@ -1,0 +1,39 @@
+
+{
+  "NAME" : "pipeline-name",
+  "TYPE" : "<data capture signature>",
+  "CAP_RESOLUTION" : 30,
+
+  "DEFAULT_PLUGIN" : "<plugin signature>",
+
+  "DEFAULT_PLUGIN_CONFIG" : {
+    "PARAM_1" : "VALUE_1",
+    "PARAM_2" : "VALUE_2"
+  },
+
+  "PLUGINS" : [
+    {
+      "SIGNATURE" : "<signature of plugin A>",
+      "INSTANCES" : [
+        {
+          "INSTANCE_ID" : "<name of instace>",
+          "PARAM_A1" : "VALUE_A1",
+          "PARAM_A2" : "VALUE_A2"
+        }
+      ]
+    },
+    {
+      "SIGNATURE" : "<signature of plugin B>",
+      "INSTANCES" : [
+        {
+          "INSTANCE_ID" : "<name of instace>",
+          "PARAM_B1" : "VALUE_B1",
+          "PARAM_B2" : "VALUE_B2"
+        }
+      ]
+    }
+
+  ]
+
+}
+

@@ -1,0 +1,25 @@
+       "HEATMAP_GRID_01": {
+            "INFERENCE_GRAPHS": [
+                "EFF_DET0"
+            ],
+            "INFERENCE_ON_FULL_IMAGE": [
+                true
+            ],
+            "OBJECT_TYPE": [
+                "person"
+            ],
+            "PRC_INTERSECT": 0.5,
+            "SIGNATURE": "HEATMAP_GRID_01",
+            "GRID_X_COUNT" : 16,
+            "GRID_Y_COUNT" : 9,
+            "PROCESS_DELAY" : 1,
+            "HEATMAP_RECORD_INTERVAL" : 60,
+            "HEAT_RANGE" : [
+              [0.00, 0.01, "green"],
+              [0.02, 0.09, "light blue"],
+              [0.10, 0.29, "blue"],
+              [0.30, 0.49, "yellow"],
+              [0.50, 0.70, "orange"],
+              [0.71, 1.00, "red"]
+            ]
+        },

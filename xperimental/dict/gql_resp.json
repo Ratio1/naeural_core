@@ -1,0 +1,243 @@
+{
+    "pluginStreamConfigByFields": [
+        {
+            "CAP_RESOLUTION": 20,
+            "LIVE_FEED": true,
+            "NAME": "null (1)",
+            "PLUGINS": [
+                {
+                    "INSTANCES": [
+                        {
+                            "PLUGIN_INSTANCE_PARAMETER_LIST": [
+                                {
+                                    "NAME": "ALERT_REDUCE_VALUE",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "ALERT_MODE",
+                                    "TYPEVALUE": "String",
+                                    "VALUE": "mean"
+                                },
+                                {
+                                    "NAME": "ALERT_LOWER_VALUE",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "1"
+                                },
+                                {
+                                    "NAME": "ALERT_RAISE_VALUE",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "3"
+                                },
+                                {
+                                    "NAME": "ALERT_LOWER_CONFIRMATION_TIME",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "6"
+                                },
+                                {
+                                    "NAME": "ALERT_RAISE_CONFIRMATION",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "1"
+                                },
+                                {
+                                    "NAME": "ALERT_DATA_COUNT",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "2"
+                                },
+                                {
+                                    "NAME": "ENABLE_AUDIT",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "true"
+                                },
+                                {
+                                    "NAME": "SINGLE_INSTANCE",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "SEND_PAYLOAD",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "SEND_IMAGES",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "PRC_INTERSECT",
+                                    "TYPEVALUE": "Float",
+                                    "VALUE": "0.4"
+                                },
+                                {
+                                    "NAME": "COORDS",
+                                    "TYPEVALUE": "String",
+                                    "VALUE": "NONE"
+                                },
+                                {
+                                    "NAME": "DEMO_MODE",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "DEBUG_OBJECTS",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "CONFIDENCE_THRESHOLD",
+                                    "TYPEVALUE": "Float",
+                                    "VALUE": "0.3"
+                                },
+                                {
+                                    "NAME": "OBJECT_TYPE",
+                                    "TYPEVALUE": "Array(String)",
+                                    "VALUE": "[\"person\"]"
+                                },
+                                {
+                                    "NAME": "AI_ENGINE",
+                                    "TYPEVALUE": "Array(String)",
+                                    "VALUE": "[\"general_detector\"]"
+                                },
+                                {
+                                    "NAME": "POINTS",
+                                    "TYPEVALUE": "Array(Array(Integer))",
+                                    "VALUE": "[[0,0],[1280,0],[1280,720],[0,720],[0,0]]"
+                                },
+                                {
+                                    "NAME": "INSTANCE_ID",
+                                    "TYPEVALUE": "String",
+                                    "VALUE": "0e8132d6-1c11-4117-a60b-6d46cd8420a5"
+                                }
+                            ]
+                        }
+                    ],
+                    "SIGNATURE": "MULTIZONE_PEOPLE_PRESENCE_CROWDED_01"
+                },
+                {
+                    "INSTANCES": [
+                        {
+                            "PLUGIN_INSTANCE_PARAMETER_LIST": [
+                                {
+                                    "NAME": "ALERT_REDUCE_VALUE",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "ALERT_MODE",
+                                    "TYPEVALUE": "String",
+                                    "VALUE": "mean"
+                                },
+                                {
+                                    "NAME": "ALERT_LOWER_VALUE",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "1"
+                                },
+                                {
+                                    "NAME": "ALERT_RAISE_VALUE",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "3"
+                                },
+                                {
+                                    "NAME": "ALERT_LOWER_CONFIRMATION_TIME",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "6"
+                                },
+                                {
+                                    "NAME": "ALERT_RAISE_CONFIRMATION",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "1"
+                                },
+                                {
+                                    "NAME": "ALERT_DATA_COUNT",
+                                    "TYPEVALUE": "Integer",
+                                    "VALUE": "2"
+                                },
+                                {
+                                    "NAME": "ENABLE_AUDIT",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "true"
+                                },
+                                {
+                                    "NAME": "SINGLE_INSTANCE",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "SEND_PAYLOAD",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "SEND_IMAGES",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "PRC_INTERSECT",
+                                    "TYPEVALUE": "Float",
+                                    "VALUE": "0.4"
+                                },
+                                {
+                                    "NAME": "COORDS",
+                                    "TYPEVALUE": "String",
+                                    "VALUE": "NONE"
+                                },
+                                {
+                                    "NAME": "DEMO_MODE",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "DEBUG_OBJECTS",
+                                    "TYPEVALUE": "Boolean",
+                                    "VALUE": "false"
+                                },
+                                {
+                                    "NAME": "CONFIDENCE_THRESHOLD",
+                                    "TYPEVALUE": "Float",
+                                    "VALUE": "0.3"
+                                },
+                                {
+                                    "NAME": "OBJECT_TYPE",
+                                    "TYPEVALUE": "Array(String)",
+                                    "VALUE": "[\"person\"]"
+                                },
+                                {
+                                    "NAME": "AI_ENGINE",
+                                    "TYPEVALUE": "Array(String)",
+                                    "VALUE": "[\"general_detector\"]"
+                                },
+                                {
+                                    "NAME": "POINTS",
+                                    "TYPEVALUE": "Array(Array(Integer))",
+                                    "VALUE": "[[0,0],[1280,0],[1280,720],[0,720],[0,0]]"
+                                },
+                                {
+                                    "NAME": "INSTANCE_ID",
+                                    "TYPEVALUE": "String",
+                                    "VALUE": "bcee4a1b-5749-43d5-a567-13cc77cc6914"
+                                }
+                            ]
+                        }
+                    ],
+                    "SIGNATURE": "MULTIZONE_PEOPLE_PRESENCE_CROWDED_01"
+                }
+            ],
+            "RECONNECTABLE": true,
+            "STREAM": {
+                "ID": 1,
+                "Name": "Live stream"
+            },
+            "STREAM_CONFIG_METADATA": {
+                "DATA_HELPER_NAME": null,
+                "DATA_HELPER_PARAMS": null,
+                "TRANSCODER_H": 720,
+                "TRANSCODER_W": 1280
+            },
+            "TYPE": "Transcoder",
+            "URL": "shm_id_1_rgb"
+        }
+    ]
+}
+

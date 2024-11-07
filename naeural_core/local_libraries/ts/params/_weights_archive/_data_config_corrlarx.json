@@ -1,0 +1,28 @@
+{
+    "cor1": {
+        "DESC": "Auto-regressive correlated moving averages for minimum 2 years periods",
+        "VER": "0.1.0.5",
+        "FUNCF": "_autoreg_corr1_v_0_1_0_5"
+    },
+    "larx": {
+        "DESC": "Auto-regressive model with season pattern discovery",
+        "VER": "0.2.0.0",
+        "PARAMS": {
+            "DEBUG": true
+        },
+        "FUNCF": "_autoreg_lar_v_0_2_0_0"
+    },
+    "lxco": {
+        "DESC": "Ensembling correlated moving averages with auto-regresive models",
+        "VER": "0.1.0.5",
+        "PARAMS": {
+            "DEBUG": true
+        },
+        "FUNCF": "_autoreg_cor_larx_fixed_v_0_1_0_5"
+    },
+    "cofe": {
+        "VER": "0.1.0.5",
+        "DESC": "Ensemble of correlated moving averages",
+        "FUNCF": "_autoreg_corr2_ens_fixed_v_0_1_0_5"
+    }
+}

@@ -1,0 +1,7 @@
+
+x_full = x[best_boxes]
+
+top_probas, top_classes = x_full[i, 5:].sort(descending=True)
+top_classes = top_classes[:,1:5]
+top_probas = top_probas[:,1:5]
+new_output = torch.cat((x[i], top_classes, top_probas), 1)

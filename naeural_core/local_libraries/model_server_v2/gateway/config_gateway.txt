@@ -1,0 +1,9 @@
+{
+    "CONFIG_ENDPOINTS" : {
+        "fake" : {
+            "NR_WORKERS" : 7,
+            "HOST" : "127.0.0.1",
+            "MINUS" : 3
+        }
+    }
+}

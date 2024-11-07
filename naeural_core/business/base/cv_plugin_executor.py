@@ -20,9 +20,9 @@ from naeural_core.business.mixins_base import _LimitedDataMixin
 
 # TODO: this will be moved or replaced
 try:
-  from extensions.business.mixins_base import _MultiClassTrackerMixin
+  from extensions.business.mixins_base.multi_class_tracker_mixin import _MultiClassTrackerMixin
 except:
-  from naeural_core.business.mixins_base import _MultiClassTrackerMixin
+  from naeural_core.business.mixins_base.multi_class_tracker_mixin import _MultiClassTrackerMixin
 
 from naeural_core.business.mixins_libs import _AlertWitnessMixin
 

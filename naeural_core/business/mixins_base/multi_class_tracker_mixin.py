@@ -347,7 +347,7 @@ class _MultiClassTrackerMixin:
 
         """
         tracker = self._get_tracker(object_type)
-        return tracker.get_object_type_history_deque(object_id) if tracker else deque()
+        return tracker.get_object_type_history_deque(object_id) if tracker else self.deque(maxlen=100)
 
     def _get_type_history_info(self, object_id, object_type):
         """
@@ -748,7 +748,7 @@ class _MultiClassTrackerMixin:
 
         """
         tracker = self._get_tracker(object_type)
-        return tracker.get_object_type_history_deque(object_id) if tracker else deque()
+        return tracker.get_object_type_history_deque(object_id) if tracker else self.deque(maxlen=100)
 
     def trackapi_most_seen_type(self, object_id, object_type):
         """

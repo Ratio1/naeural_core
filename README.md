@@ -107,10 +107,10 @@ SMIS 143488},
 ```
 
 ```bibtex
-@misc{PyE2,
+@misc{naeural_client,
   author = {Stefan Saraev, Andrei Damian},
-  title = {PyE2: Python SDK for Naeural Edge Protocol},
+  title = {naeural_client: a Python SDK for Naeural Edge Protocol},
   year = {2024},
-  howpublished = {\url{https://github.com/NaeuralEdgeProtocol/PyE2}},
+  howpublished = {\url{https://github.com/NaeuralEdgeProtocol/naeural_client}},
 }
 ```

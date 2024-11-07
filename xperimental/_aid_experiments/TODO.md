@@ -29,7 +29,7 @@
     - netmon must give "epoch" status of each node
     - status of hb-chain and epoch-status saved in BC
   
-  - net-mon string consts in pye2
+  - net-mon string consts in naeural_client
   - cleanup data & output
 
   - blockchain "mempool" implementation on all nodes

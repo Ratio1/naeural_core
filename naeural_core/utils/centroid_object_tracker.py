@@ -792,3 +792,8 @@ class CentroidObjectTracker:
             return self.objects_history[object_id]['rectangle']
         else:
             return [0, 0, 0, 0]
+
+
+if __name__ == "__main__":
+
+  eng = CentroidObjectTracker()

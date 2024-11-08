@@ -21,6 +21,9 @@ _CONFIG = {
   "TOPIC": "#DEFAULT",
   "SECURED": "#DEFAULT",
   "PROTOCOL": "#DEFAULT",
+  
+  "MESSAGE_FILTER": {},
+  "PATH_FILTER" : [None, None, None, None],
 
   "URL": None,
   "STREAM_CONFIG_METADATA": {
@@ -196,7 +199,10 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     return
 
 
-  def _extract_and_process_one_message(self):
+  def __extract_and_process_one_message(self):
+    """
+    This method extracts one message from the message queue and processes it via __process_iot_message
+    """
     msg = self.message_queue.popleft()
     dict_msg = json.loads(msg)
     processed_message, message_type = self.__process_iot_message(dict_msg)
@@ -216,24 +222,21 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
 
   def _extract_and_process_messages(self, nr_messages=1):
     """ This method extracts and processes a number of messages from the message queue"""
-    # TODO: finish this method
-    # _add_struct_data_inputs(mutliple_messages)
+    for _ in range(nr_messages):
+      self.__extract_and_process_one_message()
     return
 
 
   def _run_data_aquisition_step(self):
-    # TODO: review STREAM_WINDOW and ONE_AT_A_TIME params from 2022-2023
-    # TODO: add support for multiple messages in one step
     if len(self.message_queue) == 0:
       return
     
     if self.cfg_one_at_a_time:
-      self._extract_and_process_one_message()
+      nr_messages = 1
     else:
-      L = min(len(self.message_queue), self.cfg_stream_window)
-      # TODO: use _extract_and_process_messages(L)
-      for _ in range(L):
-        self._extract_and_process_one_message()
+      nr_messages = min(len(self.message_queue), self.cfg_stream_window)
+
+    self._extract_and_process_messages(nr_messages)
     return
 
 
@@ -241,10 +244,12 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     """Decode the message if it is in a format supported by an Execution Engine, and then parse and filter it to support custom logic.
     The former is useful when there are multiple Execution Engines in a network and all send messages with different formatters.
 
-    Args:
+    Parameters:
+    ----------
         msg (dict): The raw message received by the listener
 
     Returns:
+    ----------    
         dict/img: The message that will be sent downstream, maybe formatted, parsed and filtered
     """
     result = msg
@@ -258,7 +263,7 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
       result = msg
     # endif formatter is not None
 
-    result = self._filter_message(result)
+    result = self.__filter_message(result)
     if result is not None:
       result = self._parse_message(result)
     # endif result is not None
@@ -273,6 +278,50 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     # endif decide message type
 
     return result, message_type
+  
+  
+  def __filter_message_by_path(self, unfiltered_message):
+    """Filter messages that get passed forward using the path filter
+
+    Parameters:
+    ----------
+        unfiltered_message (dict): message received from the queue server, possibly formatted if it was in a format supported by the Execution Engine
+
+    Returns:
+    ----------
+        dict: the message that satisfies certain conditions or None if it does not satisfy them
+    """
+    path_filter = self.cfg_path_filter
+    result = unfiltered_message
+    if isinstance(unfiltered_message, dict):
+      path = unfiltered_message.get(self.ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
+      for i in range(4):
+        if path_filter[i] is not None and path_filter[i] != path[i]:
+          result = None
+          break
+    return result
+
+
+
+  def __filter_message(self, unfiltered_message):
+    """Filter messages that get passed forward
+
+    Args:
+        unfiltered_message (dict): message received from the queue server, possibly formatted if it was in a format supported by the Execution Engine
+
+    Returns:
+        dict: the message that satisfies certain conditions or None if it does not satisfy them
+    """
+    # first filter by path
+    result = self.__filter_message_by_path(unfiltered_message)
+    if result is not None:
+      # then filter by message filter dict
+      dct_filter = self.cfg_message_filter
+      if dct_filter is not None:
+        is_valid = self.dict_in_dict(dct_filter, result)
+      if is_valid:
+        result = self._filter_message(result)
+    return result
 
 
   @abc.abstractmethod

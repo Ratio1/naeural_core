@@ -155,10 +155,12 @@ class _NetworkMonitorMixin:
       )
       elapsed_t = round(self.time() - start_t, 5)
       payload_params[NMonConst.NMON_RES_NODE_HISTORY] = info
+      
     elif request_type == NMonConst.NMON_CMD_LAST_CONFIG:
       self.P("Received edge node status request for '{}'".format(target_addr))
       info = self.netmon.network_node_pipelines(addr=target_addr)    
       payload_params[NMonConst.NMON_RES_PIPELINE_INFO] = info
+      
     else:
       self.P("Network monitor on `{}` received invalid request type `{}` for target:address <{}:{}>".format(
         self.e2_addr, request_type, target_addr, eeid

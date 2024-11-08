@@ -1794,6 +1794,25 @@ class _UtilsBaseMixin(
     b_encoded = base64.b64encode(b_code)
     str_encoded = b_encoded.decode('utf-8')
     return str_encoded
+  
+  
+  def dict_in_dict(self, dct1 : dict, dct2 : dict):
+    """
+    Check if dct1 is in dct2
+
+    Parameters
+    ----------
+    dct1 : dict
+        the first dictionary
+    dct2 : dict
+        the dictionary where we check if dct1 is contained in 
+
+    Returns
+    -------
+    bool
+        True if dct1 is in dct2
+    """
+    return self.log.match_template(dct2, dct1)
 
 
 
@@ -1808,8 +1827,43 @@ if __name__ == '__main__':
   e.log = log  
   e.P = print
   
+  TEST_D_IN_D = True
   TEST_DICTS = False
-  TEST_GIT = True
+  TEST_GIT = False
+  
+  if TEST_D_IN_D:
+    d2 = {
+      "SIGNATURE" : "TEST1",
+      "DATA" : {
+        "A" : 1,
+        "B" : 2,
+        "C" : {
+          "C1" : 10,
+          "C2" : 20
+        }
+      }
+    }
+    
+    d10 = {
+      "SIGNATURE" : "TEST1",
+      "DATA" : {
+        "C" : {
+          "C2" : 20
+        }
+      }
+    }
+    
+    d11 = {
+      "SIGNATURE" : "TEST1",
+      "DATA" : {
+        "C" : {
+          "C2" : 1,
+        }
+      }
+    }
+    
+    log.P("Test 1: d10 in d2: {}".format(e.dict_in_dict(d10, d2)))
+    log.P("Test 2: d11 in d2: {}".format(e.dict_in_dict(d11, d2)))
   
   if TEST_DICTS:
 

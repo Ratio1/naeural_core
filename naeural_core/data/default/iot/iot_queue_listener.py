@@ -1,3 +1,57 @@
+"""
+Example pipeline:
+
+{
+  "NAME" : "IoT-Example",
+  "TYPE" : "IoTQueueListener",
+  
+  "PATH_FILTER" : [None, None, "IOT_PLUGIN_DEMO_1", None],
+  "MESSAGE_FILTER" : {},
+  
+  "PLUGINS" : [
+    {
+      "SIGNATURE" : "IOT_PLUGIN_DEMO_1",
+      "INSTANCES" : [
+        {
+          "INSTANCE_ID" : "IOT_PLUGIN_DEMO_1_INSTANCE_1",
+          "USE_TYPE" : "A",
+          "PROCESS_DELAY" : 0.1
+        }
+      ]
+    },
+    {
+      "SIGNATURE" : "IOT_PLUGIN_DEMO_1",
+      "INSTANCES" : [
+        {
+          "INSTANCE_ID" : "IOT_PLUGIN_DEMO_1_INSTANCE_2",
+          "USE_TYPE" : "B",
+          "PROCESS_DELAY" : 0.1
+        }
+      ]
+    },
+    {
+      "SIGNATURE" : "IOT_PLUGIN_DEMO_1",
+      "INSTANCES" : [
+        {
+          "INSTANCE_ID" : "IOT_PLUGIN_DEMO_1_INSTANCE_3",
+          "USE_TYPE" : "C",
+          "PROCESS_DELAY" : 0.1
+        }
+      ]
+    }        
+  ]
+}
+
+
+IOT_PLUGIN_DEMO_1:
+  process:
+    if datainput['USE_TYPE'] != MYTYPE:
+      return
+    do_the_processing(datainput)
+
+"""
+
+
 from naeural_core.data.base.base_iot_queue_listener import \
     BaseIoTQueueListenerDataCapture
 

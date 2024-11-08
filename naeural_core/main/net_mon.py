@@ -1420,8 +1420,16 @@ class NetworkMonitor(DecentrAIObject):
     
     
     def network_node_pipelines(self, addr):
-      hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
-      return hb.get(ct.HB.CONFIG_STREAMS)
+      """ 
+      This function returns the pipelines of a remote node based on the cached information.
+      Formerly, it was based on the heartbeat information as shown below, but now it is based on the cached information.
+      
+        hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+        return hb.get(ct.HB.CONFIG_STREAMS)
+      
+      """
+      node_info = self.__nodes_pipelines.get(addr, {})
+      return node_info.get('pipelines', [])
     
     
     def network_node_hb_interval(self, addr):

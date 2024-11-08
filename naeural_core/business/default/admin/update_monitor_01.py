@@ -329,17 +329,27 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
         url0 = url0.format(branch)
       resp = None
       try:
-        headers = {'Authorization': 'token ' + token}      
+        headers = {}
+        if token not in [None, "", "git_version_access_token"]:
+          headers = {'Authorization': 'token ' + token}      
+        self.P("Retrieving version with url: {} and headers: {}".format(url0, headers))
         resp0 = self.requests.get(url0, headers=headers)
+        status_code = resp0.status_code
         resp = resp0.content.decode()
-        self.P("Retrieved for `{}:{}` data: {}".format(
+        self.P("Retrieved for `{}:{}` status: {} data:\n{}".format(
           "docker" if self.runs_in_docker else "git-src", branch,
+          status_code,
           resp[:100].replace('\n', ' '))
         )
-        if self.cfg_use_yaml:
-          ver = self.get_version_from_yaml(resp)
+        if resp0.status_code == 200:
+          if self.cfg_use_yaml:
+            ver = self.get_version_from_yaml(resp)
+          else:
+            ver = self.get_version_from_raw(resp)
         else:
-          ver = self.get_version_from_raw(resp)
+          self.P("Failed to retrieve version with url:{}, headers:{}. Response status: {} was: {}".format(
+            url0, headers, status_code, resp), color='r'
+          )
       except Exception as exc:
         self.P("Exception while retrieving version with url:{} , headers:{}. Response was: {}, exception: {}".format(
           url0, headers, resp, exc), color='r')

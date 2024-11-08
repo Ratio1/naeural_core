@@ -1029,13 +1029,18 @@ class _UtilsBaseMixin(
 
     if user is not None and token is not None:
       repo_url = repo_url.replace('https://', f'https://{user}:{token}@')
+      
+    USE_GIT_IGNORE_AUTH = False # for git pull -c does not work
 
     try:
       command = None
       if self.os_path.exists(repo_path) and pull_if_exists:
         # Repository already exists, perform git pull
         self.P(f"git_clone: Repo exists at {repo_path} -> pulling...")
-        command = ["git", GIT_IGNORE_AUTH, "pull"]
+        if USE_GIT_IGNORE_AUTH:
+          command = ["git", GIT_IGNORE_AUTH, "pull"]
+        else:
+          command = ["git", "pull"]
         results = subprocess.check_output(
             command,
             cwd=repo_path,
@@ -1045,7 +1050,10 @@ class _UtilsBaseMixin(
         )
       else:
         # Clone the repository
-        command = ["git", GIT_IGNORE_AUTH,"clone", repo_url, repo_path]
+        if USE_GIT_IGNORE_AUTH:
+          command = ["git", GIT_IGNORE_AUTH,"clone", repo_url, repo_path]
+        else:
+          command = ["git", "clone", repo_url, repo_path]
         results = subprocess.check_output(
             command,
             stderr=subprocess.STDOUT,

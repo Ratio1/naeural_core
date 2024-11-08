@@ -47,6 +47,8 @@ from naeural_core.serving.ai_engines.utils import (
 from naeural_core.utils.plugins_base.persistence_serialization_mixin import _PersistenceSerializationMixin
 from naeural_core.utils.system_shared_memory import NumpySharedMemory
 
+GIT_IGNORE_AUTH = "-c http.https://github.com/.extraheader="
+
 class NestedDotDict(dict):
   # TODO: maybe use https://github.com/mewwts/addict/blob/master/addict/addict.py
   __getattr__ = defaultdict.__getitem__
@@ -1033,7 +1035,7 @@ class _UtilsBaseMixin(
       if self.os_path.exists(repo_path) and pull_if_exists:
         # Repository already exists, perform git pull
         self.P(f"git_clone: Repo exists at {repo_path} -> pulling...")
-        command = ["git", "pull"]
+        command = ["git", GIT_IGNORE_AUTH, "pull"]
         results = subprocess.check_output(
             command,
             cwd=repo_path,
@@ -1043,7 +1045,7 @@ class _UtilsBaseMixin(
         )
       else:
         # Clone the repository
-        command = ["git", "clone", repo_url, repo_path]
+        command = ["git", GIT_IGNORE_AUTH,"clone", repo_url, repo_path]
         results = subprocess.check_output(
             command,
             stderr=subprocess.STDOUT,
@@ -1136,8 +1138,8 @@ class _UtilsBaseMixin(
 
     if user is not None and token is not None:
       repo_url = repo_url.replace('https://', f'https://{user}:{token}@')
-
-    command = ["git", "ls-remote", repo_url, "HEAD"]
+      
+    command = ["git", GIT_IGNORE_AUTH, "ls-remote", repo_url, "HEAD"]
     try:
       results = subprocess.check_output(
         command,

@@ -47,7 +47,7 @@ from naeural_core.serving.ai_engines.utils import (
 from naeural_core.utils.plugins_base.persistence_serialization_mixin import _PersistenceSerializationMixin
 from naeural_core.utils.system_shared_memory import NumpySharedMemory
 
-GIT_IGNORE_AUTH = "-c http.https://github.com/.extraheader="
+GIT_IGNORE_AUTH = ["-c","http.https://github.com/.extraheader="]
 
 class NestedDotDict(dict):
   # TODO: maybe use https://github.com/mewwts/addict/blob/master/addict/addict.py
@@ -1030,7 +1030,7 @@ class _UtilsBaseMixin(
     if user is not None and token is not None:
       repo_url = repo_url.replace('https://', f'https://{user}:{token}@')
       
-    USE_GIT_IGNORE_AUTH = False # for git pull -c does not work
+    USE_GIT_IGNORE_AUTH = True # for git pull -c does not work
 
     try:
       command = None
@@ -1038,7 +1038,7 @@ class _UtilsBaseMixin(
         # Repository already exists, perform git pull
         self.P(f"git_clone: Repo exists at {repo_path} -> pulling...")
         if USE_GIT_IGNORE_AUTH:
-          command = ["git", GIT_IGNORE_AUTH, "pull"]
+          command = ["git"] + GIT_IGNORE_AUTH + ["pull"]
         else:
           command = ["git", "pull"]
         results = subprocess.check_output(
@@ -1051,7 +1051,7 @@ class _UtilsBaseMixin(
       else:
         # Clone the repository
         if USE_GIT_IGNORE_AUTH:
-          command = ["git", GIT_IGNORE_AUTH,"clone", repo_url, repo_path]
+          command = ["git"] + GIT_IGNORE_AUTH + ["clone", repo_url, repo_path]
         else:
           command = ["git", "clone", repo_url, repo_path]
         results = subprocess.check_output(
@@ -1061,7 +1061,7 @@ class _UtilsBaseMixin(
             # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
         )      
       # end if
-      self.P(f"git_clone: {' '.join(command)}:\n{results}")
+      self.P(f"git_clone: `{' '.join(command)}` results:\n{results}")
     except subprocess.CalledProcessError as exc:
       self.P(f"git_clone: Error '{exc.cmd}' returned  {exc.returncode} with output:\n{exc.output}", color='r')
       repo_path = None
@@ -1104,7 +1104,7 @@ class _UtilsBaseMixin(
         # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
       )
       if results is not None:
-        printer(f"git_get_local_commit_hash: rev-parse results: {results}")
+        printer(f"git_get_local_commit_hash: `rev-parse` results:\n{results}")
         lines = results.split('\n')
         if len(lines) > 0:
           commit_hash = lines[0].split()[0]        
@@ -1147,7 +1147,7 @@ class _UtilsBaseMixin(
     if user is not None and token is not None:
       repo_url = repo_url.replace('https://', f'https://{user}:{token}@')
       
-    command = ["git", GIT_IGNORE_AUTH, "ls-remote", repo_url, "HEAD"]
+    command = ["git"] + GIT_IGNORE_AUTH + ["ls-remote", repo_url, "HEAD"]
     try:
       results = subprocess.check_output(
         command,
@@ -1156,7 +1156,7 @@ class _UtilsBaseMixin(
         # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
       )
       if results is not None:
-        printer(f"git_get_last_commit_hash: ls-remote: '{results}'")
+        printer(f"git_get_last_commit_hash: `ls-remote` results:\n{results}")
         lines = results.split('\n')
         if len(lines) > 0:
           commit_hash = lines[0].split()[0]        

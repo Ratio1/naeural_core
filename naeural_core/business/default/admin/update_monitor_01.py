@@ -65,7 +65,9 @@ __VER__ = '0.1.0.0'
 _CONFIG = {
   **BasePluginExecutor.CONFIG,
 
-  "WORKING_HOURS"       : [["08:30", "09:30"]],    
+  # default working hours should be non-stop
+  'WORKING_HOURS': [], 
+  # "WORKING_HOURS"       : [["08:30", "09:30"]],    
   
   "FORCE_RESTART_AFTER" : 3600 * 24 * 1,  # days restart time
   "REBOOT_ON_RESTART"   : False,
@@ -76,7 +78,7 @@ _CONFIG = {
   
   'SERVER_URL'          : '',
 
-  "PROCESS_DELAY"       : 100,
+  "PROCESS_DELAY"       : 300,
 
   "VERSION_TOKEN"       : None,
   "VERSION_URL"         : None,
@@ -116,6 +118,9 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
       "last_new"    : None,
     }
     self.__state = self.cacheapi_load_json(default=DEFAULT_STATE)
+    self.P("Update Monitor initialized:\nState: {}\nWorking hours: {}".format(
+      self.__state, self.cfg_working_hours
+    ))
     return
   
     

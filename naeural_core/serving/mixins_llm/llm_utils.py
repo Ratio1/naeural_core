@@ -16,6 +16,7 @@ class LlmCT:
   REQ = 'request'
   RES = 'response'
   SYS = 'system_info'
+  CTX = 'context'
 
   PRED = 'prediction'
   TEXT = 'text'

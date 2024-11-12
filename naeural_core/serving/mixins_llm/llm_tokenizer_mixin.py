@@ -26,7 +26,25 @@ class LlmTokenizerMixin(object):
       self.tokenizer.chat_template = LlmCT.LLAMA3_CHAT_TEMPLATE
     return
 
-  def _get_prompt_from_template(self, request, history, system_info):
+  def add_context_to_request(self, request, context):
+    """
+    Adds context to the request.
+
+    Parameters
+    ----------
+    request : str
+        the request
+    context : str
+        the context
+
+    Returns
+    -------
+    str
+        the request with context
+    """
+    return f'{request} - please answer while also considering the following: {context}'
+
+  def _get_prompt_from_template(self, request, history, system_info, context=None):
     """
     Uses Jinja template to generate a prompt.
 
@@ -38,6 +56,8 @@ class LlmTokenizerMixin(object):
         the list of previous requests and responses in the same format as for `_get_prompt`
     system_info : str
         the system prompt
+    context : str, optional
+        the context for the prompt
 
     Returns
     -------
@@ -75,6 +95,9 @@ class LlmTokenizerMixin(object):
     #endif history check
 
     assert isinstance(request, str), "`request` must be a string"
+    if context is not None and isinstance(context, str):
+      request = self.add_context_to_request(request, context)
+    # endif context provided
     chat.append({LlmCT.ROLE_KEY: LlmCT.REQUEST_ROLE, LlmCT.DATA_KEY: request})
     from_template = self.tokenizer.apply_chat_template(
       chat, tokenize=False,

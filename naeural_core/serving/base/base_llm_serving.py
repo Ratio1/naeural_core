@@ -327,10 +327,12 @@ class BaseLlmServing(
       request = inp.get(LlmCT.REQ, None)
       history = inp.get(LlmCT.HIST, None)
       system_info = inp.get(LlmCT.SYS, None)
+      request_context = inp.get(LlmCT.CTX, None)
       prompt = self._get_prompt_from_template(
         request=request,
         history=history,
-        system_info=system_info
+        system_info=system_info,
+        context=request_context
       )
       # Note that we are passing 'pt' in return_tensors to get torch tensors.
       tokens = self.tokenizer.encode(

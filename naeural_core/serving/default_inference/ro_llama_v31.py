@@ -75,6 +75,9 @@ _CONFIG = {
 
 class RoLlamaV31(BaseServingProcess):
 
+  def add_context_to_request(self, request, context):
+    return f"{request} - Te rog sa raspunzi luand in considerare si urmatoarele: {context}"
+
   def _setup_llm(self):
     # just override this method as the base class has a virtual method that raises an exception
     return

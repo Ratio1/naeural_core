@@ -78,7 +78,7 @@ class NaeuralFastApiWebApp(BasePlugin):
 
   def __process_payload_response(self, payload: dict):
     data = {k.lower(): v for k, v in payload.items()}
-    signature = payload.get('signature', None)
+    signature = data.get('signature', None)
     if self.__ignore_signature(signature):
       return
     request_id = data.get('request_id', None)

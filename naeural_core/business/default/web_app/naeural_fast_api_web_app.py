@@ -1,5 +1,5 @@
 from naeural_core.business.default.web_app.fast_api_web_app import FastApiWebAppPlugin as BasePlugin
-from naeural_client import Payload, Session
+from naeural_client import Session
 
 __VER__ = '0.1.0.0'
 
@@ -7,6 +7,7 @@ _CONFIG = {
   **BasePlugin.CONFIG,
 
   'SAVE_PERIOD': 60,
+  "ALLOW_EMPTY_INPUTS": True,
 
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES'],
@@ -35,9 +36,6 @@ class NaeuralFastApiWebApp(BasePlugin):
       config=self.global_shmem['config_communication']['PARAMS'],
       log=self.log,
       bc_engine=self.global_shmem[self.ct.BLOCKCHAIN_MANAGER],
-      on_payload=self.on_payload,
-      on_heartbeat=self.on_heartbeat,
-      on_notification=self.on_notification,
     )
     super(NaeuralFastApiWebApp, self).on_init()
     self.__maybe_load_persistence_data()
@@ -78,19 +76,21 @@ class NaeuralFastApiWebApp(BasePlugin):
     """
     return payload_data
 
-  def on_payload(self, sess: Session, node_id: str, pipeline: str, signature: str, instance: str, payload: Payload):
+  def __process_payload_response(self, payload: dict):
+    data = {k.lower(): v for k, v in payload.items()}
+    signature = payload.get('signature', None)
     if self.__ignore_signature(signature):
       return
-    data = {k.lower(): v for k, v in payload.data.items()}
     request_id = data.get('request_id', None)
     if request_id is not None and request_id in self.unsolved_requests:
-      self.requests_responses[request_id] = self.process_response_payload(self.deepcopy(payload.data))
+      self.requests_responses[request_id] = self.process_response_payload(self.deepcopy(payload))
     return
 
-  def on_heartbeat(self, sess: Session, node_id: str, data: dict):
-    return
-
-  def on_notification(self, sess: Session, node_id: str, data: dict):
+  def __maybe_register_responses(self):
+    payloads = self.dataapi_struct_datas()
+    for idx, payload in payloads.items():
+      self.__process_payload_response(payload)
+    # endfor payloads
     return
 
   def get_request_meta(self, **kwargs):
@@ -166,52 +166,56 @@ class NaeuralFastApiWebApp(BasePlugin):
   def maybe_get_network_response(self, request_id):
     return self.__maybe_get_network_response(request_id)
 
-  def webapp_get_persistence_data_object(self):
-    """
-    Here the user can define a dictionary with the data that needs to be saved in the plugin's cache.
-    For example, the user can save the plugin's state as follows:
-    return {'state': self.state}
-    Returns
-    -------
-    res : dict - the data object to be saved
-    """
-    return {}
+  """BEGIN PERSISTENCE"""
+  if True:
+    def webapp_get_persistence_data_object(self):
+      """
+      Here the user can define a dictionary with the data that needs to be saved in the plugin's cache.
+      For example, the user can save the plugin's state as follows:
+      return {'state': self.state}
+      Returns
+      -------
+      res : dict - the data object to be saved
+      """
+      return {}
 
-  def __webapp_persistence_save(self):
-    data_obj = self.webapp_get_persistence_data_object()
-    if len(data_obj.keys()) > 0:
-      self.persistence_serialization_save(obj=data_obj)
-    # endif data object not empty
-    return
+    def __webapp_persistence_save(self):
+      data_obj = self.webapp_get_persistence_data_object()
+      if len(data_obj.keys()) > 0:
+        self.persistence_serialization_save(obj=data_obj)
+      # endif data object not empty
+      return
 
-  def maybe_persistence_save(self):
-    is_save_time = self.last_save_time is None or (self.time() - self.last_save_time > self.cfg_save_period)
-    if self.force_persistence or is_save_time:
-      self.last_save_time = self.time()
-      self.__webapp_persistence_save()
-      self.force_persistence = False
-    # endif save time
-    return
+    def maybe_persistence_save(self):
+      is_save_time = self.last_save_time is None or (self.time() - self.last_save_time > self.cfg_save_period)
+      if self.force_persistence or is_save_time:
+        self.last_save_time = self.time()
+        self.__webapp_persistence_save()
+        self.force_persistence = False
+      # endif save time
+      return
 
-  def webapp_load_persistence_data_object(self, data):
-    """
-    Here the user can define the logic to load the data object saved in the plugin's cache.
-    For example, the user can update the plugin's state based on the loaded data as follows:
-    self.state = data['state']
-    Parameters
-    ----------
-    data : dict - the data object to be loaded
-    """
-    return
+    def webapp_load_persistence_data_object(self, data):
+      """
+      Here the user can define the logic to load the data object saved in the plugin's cache.
+      For example, the user can update the plugin's state based on the loaded data as follows:
+      self.state = data['state']
+      Parameters
+      ----------
+      data : dict - the data object to be loaded
+      """
+      return
 
-  def __maybe_load_persistence_data(self):
-    saved_data = self.persistence_serialization_load()
-    if saved_data is not None:
-      self.webapp_load_persistence_data_object(saved_data)
-    # endif saved data available
-    return
+    def __maybe_load_persistence_data(self):
+      saved_data = self.persistence_serialization_load()
+      if saved_data is not None:
+        self.webapp_load_persistence_data_object(saved_data)
+      # endif saved data available
+      return
+  """END PERSISTENCE"""
 
   def process(self):
     super(NaeuralFastApiWebApp, self).process()
     self.maybe_persistence_save()
+    self.__maybe_register_responses()
     return

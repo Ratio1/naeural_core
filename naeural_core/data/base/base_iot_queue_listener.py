@@ -23,7 +23,7 @@ _CONFIG = {
   "PROTOCOL": "#DEFAULT",
   
   "MESSAGE_FILTER": {},
-  "PATH_FILTER" : [None, None, None, None],
+  "PATH_FILTER": [None, None, None, None],
 
   "URL": None,
   "STREAM_CONFIG_METADATA": {
@@ -38,6 +38,7 @@ _CONFIG = {
   },
   'RECONNECTABLE': True,
   'STREAM_WINDOW': 256,
+  'LIVE_FEED': False,
   'ONE_AT_A_TIME': False,
 
   'VALIDATION_RULES': {

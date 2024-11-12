@@ -297,9 +297,13 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     if isinstance(unfiltered_message, dict):
       path = unfiltered_message.get(self.ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
       for i in range(4):
-        if path_filter[i] is not None and path_filter[i] != path[i]:
-          result = None
-          break
+        _path_filter =  path_filter[i]
+        if _path_filter is not None:
+          if not isinstance(_path_filter, list):
+            _path_filter = [_path_filter]
+          if path[i] not in _path_filter:
+            result = None
+            break
     return result
 
 

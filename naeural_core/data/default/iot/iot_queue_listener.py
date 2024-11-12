@@ -5,7 +5,11 @@ Example pipeline:
   "NAME" : "IoT-Example",
   "TYPE" : "IoTQueueListener",
   
-  "PATH_FILTER" : [None, None, "IOT_PLUGIN_DEMO_1", None],
+  "PATH_FILTER" : [
+    None, None, 
+    ["IOT_PLUGIN_DEMO_1", "IOT_PLUGIN_DEMO_2"], 
+    None
+  ],
   "MESSAGE_FILTER" : {},
   
   "PLUGINS" : [

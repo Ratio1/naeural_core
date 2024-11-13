@@ -18,32 +18,31 @@ BLOCKCHAIN_MANAGER = 'BLOCKCHAIN_MANAGER'
 
 WHITELIST_COMMANDS_FILE = 'whitelist_commands.json'
 TEMPLATE_WHITELIST_COMMANDS = [
-  # TODO: add other commands
   # !! NetMon queries
-  {
-    "ACTION": COMMANDS.UPDATE_PIPELINE_INSTANCE,
-    "PAYLOAD": {
-      "SIGNATURE": "NET_MON_01",
-      "INSTANCE_ID": "NET_MON_01_INST",
-      "INSTANCE_CONFIG": {
-        "INSTANCE_COMMAND": {
-        }
-      }
-    }
-  },
+  # {
+  #   "ACTION": COMMANDS.UPDATE_PIPELINE_INSTANCE,
+  #   "PAYLOAD": {
+  #     "SIGNATURE": "NET_MON_01",
+  #     "INSTANCE_ID": "NET_MON_01_INST",
+  #     "INSTANCE_CONFIG": {
+  #       "INSTANCE_COMMAND": {
+  #       }
+  #     }
+  #   }
+  # },
   
-  # !! Get config startup
-  {
-    "ACTION": COMMANDS.UPDATE_PIPELINE_INSTANCE,
-    "PAYLOAD": {
-      "SIGNATURE": "UPDATE_MONITOR_01",
-      "INSTANCE_CONFIG": {
-        "INSTANCE_COMMAND": {
-          "COMMAND": "GET_CONFIG",
-        }
-      }
-    },
-  },
+  # # !! Get config startup
+  # {
+  #   "ACTION": COMMANDS.UPDATE_PIPELINE_INSTANCE,
+  #   "PAYLOAD": {
+  #     "SIGNATURE": "UPDATE_MONITOR_01",
+  #     "INSTANCE_CONFIG": {
+  #       "INSTANCE_COMMAND": {
+  #         "COMMAND": "GET_CONFIG",
+  #       }
+  #     }
+  #   },
+  # },
   # !! Edit config startup - requires authorization
   # {
   #   "ACTION": COMMANDS.UPDATE_PIPELINE_INSTANCE,
@@ -94,17 +93,17 @@ ADMIN_PIPELINE = {
     "MAX_SERVER_QUOTA"  : 95
   },
 
-  "REST_CUSTOM_EXEC_01": {
-    "ALLOW_EMPTY_INPUTS": True,
-    "RUN_WITHOUT_IMAGE": True,
-    "SEND_MANIFEST_EACH": 301
-  },
+  # "REST_CUSTOM_EXEC_01": {
+  #   "ALLOW_EMPTY_INPUTS": True,
+  #   "RUN_WITHOUT_IMAGE": True,
+  #   "SEND_MANIFEST_EACH": 301
+  # },
 
-  "SELF_CHECK_01": {
-    "DISK_LOW_PRC": 0.15,
-    "MEM_LOW_PRC": 0.15,
-    "PROCESS_DELAY": 20
-  },
+  # "SELF_CHECK_01": {
+  #   "DISK_LOW_PRC": 0.15,
+  #   "MEM_LOW_PRC": 0.15,
+  #   "PROCESS_DELAY": 20
+  # },
 
   "NET_MON_01": {
     "PROCESS_DELAY": 20,
@@ -119,14 +118,14 @@ ADMIN_PIPELINE = {
     "VERSION_URL": "https://raw.githubusercontent.com/NaeuralEdgeProtocol/edge_node/ver.py"
   },
   
-  "K8S_MONITOR_01": {
-    "PROCESS_DELAY": 10,
-  },
+  # "K8S_MONITOR_01": {
+  #   "PROCESS_DELAY": 10,
+  # },
 
-  "SYSTEM_HEALTH_MONITOR_01": {
-    "PROCESS_DELAY": 180,
-    "KERNEL_LOG_LEVEL" : "emerg,alert,crit,err"
-  }
+  # "SYSTEM_HEALTH_MONITOR_01": {
+  #   "PROCESS_DELAY": 180,
+  #   "KERNEL_LOG_LEVEL" : "emerg,alert,crit,err"
+  # }
 }
 
 ADMIN_PIPELINE_NETMON = 'NET_MON_01'

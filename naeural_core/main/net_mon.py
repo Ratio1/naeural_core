@@ -281,22 +281,22 @@ class NetworkMonitor(DecentrAIObject):
 
   # Helper protected methods section
   if True:
-    def __network_nodes_list(self):
+    def __network_nodes_list(self, from_hb=False):
       if self.all_heartbeats is None:
         return []
 
-      history_keys = list(self.all_heartbeats.keys())
+      nodes_addrs = list(self.all_heartbeats.keys())
+      if from_hb:          
+        nodes_addrs = []
+        for key in self.all_heartbeats:
+          hb = self.all_heartbeats[key][-1]
+          addr = hb.get(ct.HB.EE_ADDR, None)
+          if addr is not None:
+            nodes_addrs.append(addr)
+        # end for
+      # endif from_hb
 
-      known_nodes = []
-
-      for key in history_keys:
-        hb = self.all_heartbeats[key][-1]
-        addr = hb.get(ct.HB.EE_ADDR, None)
-        if addr is not None:
-          known_nodes.append(addr)
-      # end for
-
-      return known_nodes
+      return nodes_addrs
 
     def __network_node_past_hearbeats_by_number(self, addr, nr=1, reverse_order=True):
       if addr not in self.__network_nodes_list():
@@ -338,6 +338,7 @@ class NetworkMonitor(DecentrAIObject):
       return lst_heartbeats
 
     def __network_node_last_heartbeat(self, addr, return_empty_dict=False):
+      __addr_no_prefix = self.__remove_address_prefix(addr) 
       if addr not in self.__network_nodes_list():
         msg = "`_network_node_last_heartbeat`: ADDR '{}' not available".format(addr)
         if not return_empty_dict:
@@ -346,7 +347,6 @@ class NetworkMonitor(DecentrAIObject):
           self.P(msg, color='r')
           return {}
         #endif raise or return
-      __addr_no_prefix = self.__remove_address_prefix(addr) 
       return self.all_heartbeats[__addr_no_prefix][-1]
 
     def __network_node_last_valid_heartbeat(self, addr, minutes=3):
@@ -760,6 +760,10 @@ class NetworkMonitor(DecentrAIObject):
       return dct_results
 
     def network_known_nodes(self):
+      """
+      Return a dict with the known nodes and their last timestamp and pipeline config
+      The addresses are without the prefix
+      """
       return self.__nodes_pipelines
 
     def network_known_configs(self):

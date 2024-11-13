@@ -299,6 +299,7 @@ class NetworkMonitor(DecentrAIObject):
       return nodes_addrs
 
     def __network_node_past_hearbeats_by_number(self, addr, nr=1, reverse_order=True):
+      addr = self.__remove_address_prefix(addr)
       if addr not in self.__network_nodes_list():
         self.P("`_network_node_past_hearbeats_by_number`: ADDR '{}' not available".format(addr))
         return
@@ -311,6 +312,7 @@ class NetworkMonitor(DecentrAIObject):
       return lst_heartbeats
 
     def __network_node_past_heartbeats_by_interval(self, addr, minutes=60, dt_now=None, reverse_order=True):
+      addr = self.__remove_address_prefix(addr)
       if addr not in self.__network_nodes_list():
         self.P("`_network_node_past_heartbeats_by_interval`: ADDR '{}' not available".format(addr))
         return
@@ -339,7 +341,7 @@ class NetworkMonitor(DecentrAIObject):
 
     def __network_node_last_heartbeat(self, addr, return_empty_dict=False):
       __addr_no_prefix = self.__remove_address_prefix(addr) 
-      if addr not in self.__network_nodes_list():
+      if __addr_no_prefix not in self.__network_nodes_list():
         msg = "`_network_node_last_heartbeat`: ADDR '{}' not available".format(addr)
         if not return_empty_dict:
           raise ValueError(msg)
@@ -729,7 +731,8 @@ class NetworkMonitor(DecentrAIObject):
       
     
     def network_node_info_available(self, addr):
-      return addr in self.__network_nodes_list()
+      _addr_no_prefix = self.__remove_address_prefix(addr)
+      return _addr_no_prefix in self.__network_nodes_list()
     
     
     def network_node_last_heartbeat(self, addr):

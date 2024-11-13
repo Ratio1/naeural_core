@@ -514,6 +514,10 @@ class Orchestrator(DecentrAIObject,
   def in_mlstop(self):
     return self.__main_loop_stopped
   
+  
+  def get_pipelines_view(self):
+    return list(self._current_dct_config_streams.values())
+  
   def get_node_running_time(self):
     return self.running_time
 

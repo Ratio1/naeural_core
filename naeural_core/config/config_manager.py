@@ -592,6 +592,7 @@ class ConfigManager(
     self.load_streams_configurations()
     self.P("OK! The device can start", color='g')
     return 
+  
 
   
   

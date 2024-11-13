@@ -618,7 +618,7 @@ class ApplicationMonitor(DecentrAIObject):
         
     lst_config_streams = []    
     if self.owner.config_manager is not None and hb_contains_pipelines:
-      lst_config_streams = list(self.owner.config_manager.dct_config_streams.values())
+      lst_config_streams = self.owner.get_pipelines_view()
 
     address = self.owner.e2_addr      
     is_supervisor = self.owner.is_supervisor_node

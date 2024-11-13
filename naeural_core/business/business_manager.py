@@ -269,6 +269,7 @@ class BusinessManager(Manager):
             docker_branch=self.owner.docker_source,
             debug_config_changes=debug_config_changes,
             version=_module_version,
+            pipelines_view_function=self.owner.get_pipelines_view,
             pipeline_use_local_comms_only=self._dct_config_streams[stream_name].get(ct.CONFIG_STREAM.K_USE_LOCAL_COMMS_ONLY, False),
           )
           self.set_loop_stage('2.bm.refresh.new_instance_done: {}:{}:{}'.format(stream_name, signature, instance_id))

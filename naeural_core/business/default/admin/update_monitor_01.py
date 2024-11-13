@@ -219,6 +219,14 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     return
   
   
+  def _send_pipelines_payload(self):
+    result = self.add_payload_by_fields(
+      ee_pipelines=self.node_pipelines,
+      ee_is_encrypted=True,      
+    )
+    return
+  
+  
   ###
 
   def on_command(self, data, **kwargs):
@@ -248,6 +256,10 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     elif command == 'GET_WHITELIST':
       self.P("Running on-demand whitelist request ...")
       self._send_whitelist_payload()
+      
+    elif command == 'GET_PIPELINES':
+      self.P("Running on-demand pipelines request ...")
+      self._send_pipelines_payload()
     #endif commands
     return
 

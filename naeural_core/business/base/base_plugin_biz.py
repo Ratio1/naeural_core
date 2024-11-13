@@ -346,6 +346,7 @@ class BasePluginExecutor(
                docker_branch='main',
                debug_config_changes=False,
                pipeline_use_local_comms_only=False,
+               pipelines_view_function=None,
                **kwargs):
     self.__version__ = version
 
@@ -358,6 +359,8 @@ class BasePluginExecutor(
     self.__plugins_shmem = plugins_shmem  # plugins shared memory
 
     self.__debug_config_changes = debug_config_changes
+    
+    self.__pipelines_view_function = pipelines_view_function # view function for this node pipelines
 
     self._painter = None
     self.__ee_ver = ee_ver
@@ -476,10 +479,22 @@ class BasePluginExecutor(
   @property
   def global_shmem(self):
     return self.__global_shmem
-
+  
   @property
   def plugins_shmem(self):
     return self.__plugins_shmem
+  
+  
+  @property
+  def node_pipelines(self):
+    if self.__pipelines_view_function is not None:
+      return self.__pipelines_view_function()
+    return None
+  
+  @property
+  def local_pipelines(self):
+    return self.node_pipelines
+  
 
   @property
   def is_supervisor_node(self):
@@ -1673,7 +1688,8 @@ class BasePluginExecutor(
       if 'plugin_category' not in kwargs:
         kwargs['plugin_category'] = 'general'
 
-      kwargs[self.ct.PAYLOAD_DATA.EE_IS_ENCRYPTED] = self.cfg_encrypt_payload
+      if self.ct.PAYLOAD_DATA.EE_IS_ENCRYPTED.lower() not in kwargs and self.ct.PAYLOAD_DATA.EE_IS_ENCRYPTED.upper() not in kwargs:
+        kwargs[self.ct.PAYLOAD_DATA.EE_IS_ENCRYPTED] = self.cfg_encrypt_payload
 
       payload = GeneralPayload(
         owner=self,

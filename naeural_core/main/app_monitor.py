@@ -605,11 +605,12 @@ class ApplicationMonitor(DecentrAIObject):
     hb_contains_pipelines = self.owner.cfg_hb_contains_pipelines
     hb_contains_active_plugins = self.owner.cfg_hb_contains_active_plugins
     
+    _active_plugin = self.owner.business_manager.get_active_plugins_instances(
+        as_dict=True # send business plugin instances info as objects (NOT as lists)
+      ) # this call is REQUIRED for internal state update
     active_business_plugins = []
     if self.owner.business_manager is not None and hb_contains_active_plugins:
-      active_business_plugins = self.owner.business_manager.get_active_plugins_instances(
-        as_dict=True # send business plugin instances info as objects (NOT as lists)
-      )
+      active_business_plugins = _active_plugin
     
 
     s_os = platform.platform()

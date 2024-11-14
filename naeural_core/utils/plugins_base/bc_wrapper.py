@@ -118,3 +118,39 @@ class BCWrapper:
     """
     return self.__bc.whitelist
   
+  
+  def maybe_remove_addr_prefix(self, address: str):
+    """
+    Removes the address prefix from the current node's address
+    
+    Parameters
+    ----------
+    
+    address: str
+        The address to remove the prefix from
+
+    Returns
+    -------
+    str
+        The address of the current node without the prefix
+    """
+    return self.__bc.maybe_remove_prefix(address)
+  
+  
+  def maybe_remove_prefix(self, address: str):
+    """
+    Removes the prefix from the address. Alias of `maybe_remove_addr_prefix`
+    
+    Parameters
+    ----------
+    
+    address: str
+        The address to remove the prefix from
+
+    Returns
+    -------
+    str
+        The address without the prefix
+    """
+    return self.maybe_remove_addr_prefix(address)
+  

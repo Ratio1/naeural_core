@@ -37,8 +37,8 @@ class _CommandControlCommMixin(object):
         if data is not None:
           msg_id, (receiver_id, receiver_addr, command), _ = data
           command = self._prepare_command(command, receiver_addr)
-          self.P("Sending new command to '{}' (LOG_SEND_COMMANDS={}){}".format(
-              receiver_id,
+          self.P("Sending '{}'  <{}> (LOG_SEND_COMMANDS={}){}".format(
+              receiver_id, receiver_addr,
               self.cfg_log_send_commands,
               ":\n{}".format(self.log.dict_pretty_format(command)) if self.cfg_log_send_commands else ''
             ), color='g'

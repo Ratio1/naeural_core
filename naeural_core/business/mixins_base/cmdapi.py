@@ -36,6 +36,7 @@ class _CmdAPIMixin(object):
     if isinstance(command_content, dict) and PAYLOAD_DATA.TIME not in command_content:
       command_content[PAYLOAD_DATA.TIME] = self.log.now_str(nice_print=True)
     box_id = self.net_mon.network_node_eeid(node_address)
+    self.P("CMDAPI: Sending command '{}' for node '{}' <{}>".format(command_type, box_id, node_address))
     self._commands.append((box_id, node_address, self.use_local_comms_only, command_type, command_content))
     return
   

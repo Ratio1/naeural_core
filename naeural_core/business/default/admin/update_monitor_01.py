@@ -230,7 +230,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
   ###
 
   def on_command(self, data, **kwargs):
-    self.P("Update Monitor on {} received: {}".format(self.eeid, str(data)[:100]))
+    self.P("Update Monitor on {} received: '{}'".format(self.eeid, str(data)[:100]))
     command = 'UPDATE_CHECK'
     target_id = None
     if isinstance(data, dict):
@@ -347,7 +347,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
       resp = None
       try:
         headers = {}
-        if token not in [None, "", "git_version_access_token"]:
+        if token not in [None, "", "git_version_access_token", "token_for_accessing_private_repositories"]:
           headers = {'Authorization': 'token ' + token}      
         self.P("Retrieving version with url: {} and headers: {}".format(url0, headers))
         resp0 = self.requests.get(url0, headers=headers)

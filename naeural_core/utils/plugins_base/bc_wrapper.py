@@ -86,7 +86,7 @@ class BCWrapper:
     str
        the base64 encoded encrypted data
     """
-    return self.__bc.encrypt(plaintext=str_data, recipient=str_recipient)
+    return self.__bc.encrypt(plaintext=str_data, receiver_address=str_recipient)
   
   def decrypt_str(self, str_b64data : str, str_sender : str):
     """
@@ -104,7 +104,7 @@ class BCWrapper:
     str
        the decrypted data (string) that can be then decoded to the original data
     """
-    return self.__bc.decrypt(encrypted_data_b64=str_b64data, sender=str_sender)
+    return self.__bc.decrypt(encrypted_data_b64=str_b64data, sender_address=str_sender)
   
   
   def get_whitelist(self):

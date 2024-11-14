@@ -1574,6 +1574,8 @@ class NetworkMonitor(DecentrAIObject):
 
         gpu_name=gpu_name,
         SCORE=score,        
+        
+        eeid=self.network_node_eeid(addr),
         #comms:
         comms=dct_comms,
         #end comms

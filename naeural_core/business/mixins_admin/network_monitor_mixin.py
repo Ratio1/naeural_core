@@ -45,6 +45,11 @@ class _NetworkMonitorMixin:
     return dct_eeid_nodes
   
   def _add_to_history(self):
+    """
+    TODO: WARNING: The dict should NOT be indexed via the eeid but rather using the address
+      a bad actor could use a existing eeid to overwrite the data of another node
+        
+    """    
     nodes = self.netmon.network_nodes_status()
     new_nodes = []
     new_nodes_addr = []

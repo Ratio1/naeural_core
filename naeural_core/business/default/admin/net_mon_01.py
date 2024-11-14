@@ -176,13 +176,15 @@ class NetMon01Plugin(
         str_log = "***** Supervisor node sending status for network of {} nodes *****".format(len(current_network))
         known_nodes = self.netmon.network_known_nodes()
         for addr in known_nodes:
-          eeid = "'{}'".format(self.netmon.network_node_eeid(addr)[:9])
-          eeid = "{:<10}".format(eeid)
+          eeid = self.netmon.network_node_eeid(addr)
+          str_eeid = "'{}'".format(eeid[:8])
+          str_eeid = "{:<11}".format(str_eeid)
           node_info = known_nodes[addr]
+          working_status = current_network.get(eeid, {}).get('working', False)
           pipelines = node_info['pipelines']
           last_received = node_info['timestamp']
           ago = round(self.time() - last_received, 2)
-          str_log += f"\n - Node: <{addr}> {eeid} ago {ago}s had {len(pipelines)} pipelines"
+          str_log += f"\n - Node: <{addr}> {eeid} ago {ago}s had {len(pipelines)} pipelines, status: {working_status}"
         self.P(str_log)
         self.__supervisor_log_time = self.time()
       #endif supervisor log time       

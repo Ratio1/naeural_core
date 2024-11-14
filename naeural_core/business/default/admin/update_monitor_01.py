@@ -220,6 +220,8 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
   
   
   def _send_pipelines_payload(self):
+    my_pipelines = self.node_pipelines
+    self.P(f"Sending {len(my_pipelines)} pipelines req by '{self.modified_by_id}' <{self.modified_by_addr}>...")
     result = self.add_payload_by_fields(
       ee_pipelines=self.node_pipelines,
       ee_is_encrypted=True,      
@@ -230,7 +232,12 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
   ###
 
   def on_command(self, data, **kwargs):
-    self.P("Update Monitor on {} received: '{}'".format(self.eeid, str(data)[:100]))
+    self.P("UPDATE_MONITOR on {} received:\nFROM: '{}' <{}>\nINIT:  '{}' <{}>\nDATA:  '{}'".format(
+      self.modified_by_id, self.modified_by_addr,
+      self.initiator_id, self.initiator_addr,
+      self.eeid, 
+      str(data)[:100]
+    ))
     command = 'UPDATE_CHECK'
     target_id = None
     if isinstance(data, dict):
@@ -244,15 +251,18 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
       )
       self._process_update_check()
     #end update_check command
+    
     elif command == 'GET_CONFIG':
       self.P("Running on-demand config send...")
       self._send_config_payload()
     #end get_config command
+    
     elif command == 'SAVE_CONFIG':
       self.P("Running on-demand config saving...")
       data = data.get('DATA') 
       self._process_config_payload(data=data)
     #end save_config command      
+    
     elif command == 'GET_WHITELIST':
       self.P("Running on-demand whitelist request ...")
       self._send_whitelist_payload()

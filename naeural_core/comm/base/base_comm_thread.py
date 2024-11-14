@@ -661,15 +661,26 @@ class BaseCommThread(
     dct_outgoing[ct.PAYLOAD_DATA.EE_FORMATTER] = formatter_name    
     dct_output = {}
     
-    if ee_encrypted_payload and initiator_addr is not None:
+    destination_addr, destination_id = None, None
+    if initiator_addr is not None:
+      destination_addr = initiator_addr
+      destination_id = initiator_id
+    else:
+      destination_addr = modified_by_addr
+      destination_id = modified_by_id
+    #endif destination    
+    if ee_encrypted_payload and destination_addr is not None:
       # encrypt the payload
       str_data = self.log.safe_json_dumps(dct_outgoing, ensure_ascii=False)
       str_enc_data = self.bc_engine.encrypt(
         plaintext=str_data,
-        receiver_address=initiator_addr,
+        receiver_address=destination_addr,
       )
       dct_output[ct.PAYLOAD_DATA.EE_ENCRYPTED_DATA] = str_enc_data
       dct_output[ct.PAYLOAD_DATA.EE_IS_ENCRYPTED] = True
+      if self.cfg_debug_log_payloads:
+        self.P("Encrypted {} for '{}' <{}>".format(
+          payload_path, destination_id, destination_addr))
     else:
       # just copy data
       dct_output = {

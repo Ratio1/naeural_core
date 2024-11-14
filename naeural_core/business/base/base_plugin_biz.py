@@ -354,7 +354,7 @@ class BasePluginExecutor(
 
     self.__blockchain_manager = global_shmem[ct.BLOCKCHAIN_MANAGER]  # blockchain manager
 
-    self.bc = BCWrapper(self.__blockchain_manager)  # blockchain wrapper (for encryption/decryption
+    self.__bc = BCWrapper(self.__blockchain_manager)  # blockchain wrapper (for encryption/decryption
 
     self.__plugins_shmem = plugins_shmem  # plugins shared memory
 
@@ -455,6 +455,19 @@ class BasePluginExecutor(
     super(BasePluginExecutor, self).__init__(log=log, prefix_log='[PLEX]', **kwargs)
     self.init_timestamp = self.log.now_str(nice_print=True, short=False)
     return
+  
+  @property
+  def bc(self):
+    """
+    This property returns the blockchain manager object that is used by the plugin and expose the following functions:
+      - address
+      - sign
+      - verify
+      - encrypt_str
+      - decrypt_str
+      
+    """
+    return self.__bc
 
   @property
   def ee_ver(self):

@@ -183,8 +183,11 @@ class NetMon01Plugin(
           working_status = current_network.get(eeid, {}).get('working', False)
           pipelines = node_info['pipelines']
           last_received = node_info['timestamp']
-          ago = round(self.time() - last_received, 2)
-          str_log += f"\n - Node: <{addr}> {eeid} ago {ago}s had {len(pipelines)} pipelines, status: {working_status}"
+          ago = "{:5.1f}".format(round(self.time() - last_received, 2))
+          ago = ago.strip()[:5]
+          str_log += "\n - Node: <{}> {} ago {}s had {} pipelines, status: {}".format(
+            addr, str_eeid, ago, len(pipelines), working_status
+          )
         self.P(str_log)
         self.__supervisor_log_time = self.time()
       #endif supervisor log time       

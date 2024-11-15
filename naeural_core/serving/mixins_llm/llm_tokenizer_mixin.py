@@ -57,7 +57,7 @@ class LlmTokenizerMixin(object):
     system_info : str
         the system prompt
     context : str, optional
-        the context for the prompt
+        the context for the prompt - CURRENTLY DISABLED
 
     Returns
     -------
@@ -95,9 +95,11 @@ class LlmTokenizerMixin(object):
     #endif history check
 
     assert isinstance(request, str), "`request` must be a string"
-    if context is not None and isinstance(context, str):
-      request = self.add_context_to_request(request, context)
-    # endif context provided
+    if False:
+      if context is not None and isinstance(context, str):
+        request = self.add_context_to_request(request, context)
+      # endif context provided
+    # The context feature is disabled until further improvements are made.
     chat.append({LlmCT.ROLE_KEY: LlmCT.REQUEST_ROLE, LlmCT.DATA_KEY: request})
     from_template = self.tokenizer.apply_chat_template(
       chat, tokenize=False,

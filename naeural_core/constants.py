@@ -84,14 +84,15 @@ ADMIN_PIPELINE = {
     "LOCAL_COMMS_ENABLED_ON_STARTUP": False
   },
 
-  "MINIO_MONIT_01": {
-    "PROCESS_DELAY": 20,
-    "MINIO_HOST": None,
-    "MINIO_ACCESS_KEY": None,
-    "MINIO_SECRET_KEY": None,
-    "MINIO_SECURE": None,
-    "MAX_SERVER_QUOTA"  : 95
-  },
+  
+  # "MINIO_MONIT_01": {
+  #   "PROCESS_DELAY": 20,
+  #   "MINIO_HOST": None,
+  #   "MINIO_ACCESS_KEY": None,
+  #   "MINIO_SECRET_KEY": None,
+  #   "MINIO_SECURE": None,
+  #   "MAX_SERVER_QUOTA"  : 95
+  # },
 
   # "REST_CUSTOM_EXEC_01": {
   #   "ALLOW_EMPTY_INPUTS": True,

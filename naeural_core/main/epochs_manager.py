@@ -45,6 +45,7 @@ FN_FULL = FN_SUBFOLDER + '/' + FN_NAME
 EPOCHMON_MUTEX = 'epochmon_mutex'
 
 GENESYS_EPOCH_DATE = '2024-03-10 00:00:00'
+INITIAL_SYNC_EPOCH = 0 # TODO: add initial sync epoch
 
 NODE_ALERT_INTERVAL = EPOCH_INTERVAL_SECONDS
 
@@ -96,10 +97,12 @@ class EpochsManager(Singleton):
         name: str,
         first_seen: None | str datetime,
         last_seen: None | str datetime,
-
-        # TODO: add this
-        epochs_signatures: list(list(dict))
+        signatures: list(list(dict))
       }
+    }
+    self.__full_data = {
+      'NODES': self.__data,
+      'LAST_SYNC_EPOCH': int,
     }
     """
     self.__genesis_date = self.log.str_to_date(GENESYS_EPOCH_DATE).replace(tzinfo=timezone.utc)
@@ -107,6 +110,7 @@ class EpochsManager(Singleton):
     self.owner = owner
     self.__current_epoch = None
     self.__data = {}
+    self.__full_data = {}
     self.__debug = debug
     self._set_dbg_date(debug_date)
 
@@ -171,11 +175,11 @@ class EpochsManager(Singleton):
     self.P("Saving epochs status...")
     
     with self.log.managed_lock_resource(EPOCHMON_MUTEX):
-      _data_copy = deepcopy(self.__data)
+      _full_data_copy = deepcopy(self.__full_data)
     # endwith lock
-    
+
     self.log.save_pickle_to_data(
-      data=_data_copy, 
+      data=_full_data_copy, 
       fn=FN_NAME,
       subfolder_path=FN_SUBFOLDER,
     )
@@ -191,7 +195,19 @@ class EpochsManager(Singleton):
         subfolder_path=FN_SUBFOLDER
       )
       if epochs_status is not None:
-        self.__data = epochs_status
+        if 'NODES' not in epochs_status:
+          # old format
+          self.__data = epochs_status
+          self.__full_data = {
+            'NODES': self.__data,
+            'LAST_SYNC_EPOCH': INITIAL_SYNC_EPOCH,
+          }
+        else:
+          # new format
+          self.__full_data = epochs_status
+          self.__data = epochs_status['NODES']
+        # end if using new format
+
         self.__add_empty_fields()
         self.P("Epochs status loaded with ....", boxed=True)
       else:
@@ -699,6 +715,16 @@ class EpochsManager(Singleton):
       ))
     return stats
 
+  def get_last_sync_epoch(self):
+    """
+    Returns the last sync epoch.
+
+    Returns
+    -------
+    int
+      The last sync epoch.
+    """
+    return self.__full_data['LAST_SYNC_EPOCH']
 
   def get_epoch_availability(self, epoch):
     """
@@ -732,6 +758,11 @@ class EpochsManager(Singleton):
     """
     Updates the epoch availability for a given epoch.
 
+    !! IMPORTANT !!
+    ---------------
+    Make sure the epoch is strictly greater than the last sync epoch.
+    It is ideal that this method is called with `epoch == last_sync_epoch + 1`.
+
     Parameters
     ----------
     epoch : int
@@ -740,11 +771,18 @@ class EpochsManager(Singleton):
     availability_table : dict
       The availability table.
     """
+    last_sync_epoch = self.get_last_sync_epoch()
+
+    assert epoch > last_sync_epoch, \
+      f"Epoch {epoch} is not greater than last sync epoch {last_sync_epoch}"
+
     for node_addr in availability_table:
       if node_addr not in self.__data:
         self.__initialize_new_node(node_addr)
       self.__data[node_addr][EPCT.EPOCHS][epoch] = availability_table[node_addr]["VALUE"]
       self.__data[node_addr][EPCT.SIGNATURES][epoch] = availability_table[node_addr]["SIGNATURES"]
+    self.__full_data['LAST_SYNC_EPOCH'] = epoch
+
     return
 
 

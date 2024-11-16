@@ -61,6 +61,8 @@ class NetworkMonitor(DecentrAIObject):
     self.network_hashinfo = {}
     # simple pipeline caching mechanism for live node monitoring
     self.__nodes_pipelines = {} 
+    self.__registered_hb_pipelines = 0
+    self.__registered_direct_pipelines = 0
     # end simple pipeline caching mechanism
     self.__epoch_manager = epoch_manager
     self.__blockchain_manager = blockchain_manager
@@ -236,6 +238,7 @@ class NetworkMonitor(DecentrAIObject):
     pipelines = hb.get(ct.HB.PIPELINES, None)
     if pipelines is not None:
       self.__register_node_pipelines(addr, pipelines)
+      self.__registered_hb_pipelines += 1
     return
   
 
@@ -741,11 +744,13 @@ class NetworkMonitor(DecentrAIObject):
     
     def register_node_pipelines(self, addr, pipelines):
       self.__register_node_pipelines(addr, pipelines)
+      self.__registered_direct_pipelines += 1
       return
     
-    
-    
-    
+    def get_hb_vs_direct_pipeline_sources(self):
+      return self.__registered_hb_pipelines, self.__registered_direct_pipelines
+
+
     def register_heartbeat(self, addr, data):
       # save the timestamp when received the heartbeat,
       # helpful to know when computing the availability score

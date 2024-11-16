@@ -421,8 +421,16 @@ class ConfigManager(
     self.P("Setting-up admin jobs pipeline...")    
     default_admin_pipeline = {
       ct.CONFIG_STREAM.K_NAME     : self.admin_pipeline_name,
-      ct.CONFIG_STREAM.K_TYPE     : ct.CONFIG_STREAM.VOID_STREAM,
-      ct.CONFIG_STREAM.K_PLUGINS  : []
+      ct.CONFIG_STREAM.K_TYPE     : "NetworkListener",
+      ct.CONFIG_STREAM.K_PLUGINS  : [],
+
+      "PATH_FILTER" : [
+        None, None, 
+        ["UPDATE_MONITOR_01", "NET_MON_01"],
+        None
+      ],
+      "MESSAGE_FILTER" : {},
+
     }
     # get the mandatory admin pipeline template 
     # this does NOT contain instances, only the plugin signatures 

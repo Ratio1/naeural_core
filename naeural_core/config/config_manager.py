@@ -503,6 +503,10 @@ class ConfigManager(
     
     if needs_save:
       self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(dct_current_admin, indent=4)))
+      dct_current_admin = {
+        **dct_current_admin,
+        **default_admin_pipeline, # we add the default type, etc
+      }
       self._save_stream_config(dct_current_admin)
     else:
       self.P("  Admin pipeline is already correctly configured - no need to save")

@@ -105,6 +105,10 @@ ADMIN_PIPELINE = {
   #   "MEM_LOW_PRC": 0.15,
   #   "PROCESS_DELAY": 20
   # },
+  
+  "NET_CONFIG_MONITOR" : {
+    "PROCESS_DELAY": 0,
+  },
 
   "NET_MON_01": {
     "PROCESS_DELAY": 20,

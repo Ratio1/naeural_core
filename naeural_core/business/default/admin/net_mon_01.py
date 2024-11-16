@@ -177,17 +177,19 @@ class NetMon01Plugin(
         known_nodes = self.netmon.network_known_nodes()
         for addr in known_nodes:
           eeid = self.netmon.network_node_eeid(addr)
-          str_eeid = "'{}'".format(eeid[:8])
-          str_eeid = "{:<11}".format(str_eeid)
+          str_eeid = "'{}'".format(eeid[:10])
+          str_eeid = "{:<13}".format(str_eeid)
           node_info = known_nodes[addr]
           working_status = current_network.get(eeid, {}).get('working', False)
           pipelines = node_info['pipelines']
           last_received = node_info['timestamp']
           ago = "{:5.1f}".format(round(self.time() - last_received, 2))
           ago = ago.strip()[:5]
+          nr_hb, nr_dir = self.netmon.get_hb_vs_direct_pipeline_sources()
           str_log += "\n - Node: <{}> {} ago {}s had {} pipelines, status: {}".format(
             addr, str_eeid, ago, len(pipelines), working_status
           )
+          str_log += "\n  Sources: {} direct, {} hb".format(nr_dir, nr_hb)
         self.P(str_log)
         self.__supervisor_log_time = self.time()
       #endif supervisor log time       

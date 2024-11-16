@@ -50,7 +50,7 @@ _CONFIG = {
   
   'SHOW_EACH' : 60,
   
-  'DEBUG_NETMON_COUNT' : 2,
+  'DEBUG_NETMON_COUNT' : 10,
   
   'VALIDATION_RULES' : {
     **BasePlugin.CONFIG['VALIDATION_RULES'],
@@ -67,6 +67,13 @@ class NetConfigMonitorPlugin(BasePlugin):
     self.__last_shown = 0
     self.__allowed_nodes = {} # contains addresses with no prefixes
     self.__debug_netmon_count = self.cfg_debug_netmon_count
+    return
+  
+  
+  def __check_dct_metadata(self):
+    stream_metadata = self.dataapi_stream_metadata()
+    if stream_metadata is not None:
+      self.P(f"Stream metadata:\n {self.json_dumps(stream_metadata, indent=2)}")
     return
   
   
@@ -181,10 +188,14 @@ class NetConfigMonitorPlugin(BasePlugin):
     else:
       self.__new_nodes_this_iter = 0
       peers_status = self.__get_active_nodes_summary_with_peers(current_network)
+      
       if self.__debug_netmon_count > 0:
         # self.P(f"NetMon debug:\n{self.json_dumps(self.__get_active_nodes(current_network), indent=2)}")
         self.P(f"Peers status:\n{self.json_dumps(peers_status, indent=2)}")
+        self.__check_dct_metadata()
         self.__debug_netmon_count -= 1
+      #endif debug initial iterations
+      
       for addr in peers_status:
         if addr == self.ee_addr:
           # its us, no need to check whitelist
@@ -219,9 +230,9 @@ class NetConfigMonitorPlugin(BasePlugin):
       decrypted_data = self.json_loads(str_decrypted_data)
       if decrypted_data is not None:
         received_pipelines = decrypted_data.get("EE_PIPELINES", [])
-        self.P("Decrypted data size {} with {} pipelines (speed: {:.1f} Hz):\n{}".format(
+        self.P("Decrypted data size {} with {} pipelines (speed: {:.1f} Hz, q: {}/{}):\n{}".format(
           len(str_decrypted_data), len(received_pipelines),
-          self.actual_plugin_resolution, 
+          self.actual_plugin_resolution, self.input_queue_size, self.cfg_max_inputs_queue_size,
           self.json_dumps([
             {
               k:v for k,v in x.items() 

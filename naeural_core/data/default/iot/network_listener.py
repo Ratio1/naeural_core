@@ -1,8 +1,21 @@
+"""
+TODO: Modify stream window for more than 1 data step after plugins such as net-config support multiple data steps.
+
+2024-11-16: This is a single data step DCT designed for plugins that expect only one data step from upstream.
+
+"""
+
 from naeural_core.data.default.iot.iot_queue_listener import IoTQueueListenerDataCapture
 
 
 _CONFIG = {
   **IoTQueueListenerDataCapture.CONFIG,
+  
+  'MAX_DEQUE_LEN'   : 32, 
+  'STREAM_WINDOW'   : 1,
+  'ONE_AT_A_TIME'   : True,
+  
+
 
   'VALIDATION_RULES': {
     **IoTQueueListenerDataCapture.CONFIG['VALIDATION_RULES'],

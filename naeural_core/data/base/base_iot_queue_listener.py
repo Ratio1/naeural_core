@@ -15,7 +15,6 @@ _CONFIG = {
   'LIVE_FEED'       : False,  
 
   'RECONNECTABLE': True,
-  'STREAM_WINDOW': 256,
   'ONE_AT_A_TIME': False,
 
 

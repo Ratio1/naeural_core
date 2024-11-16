@@ -11,7 +11,13 @@ from naeural_core.comm import AMQPWrapper, MQTTWrapper
 _CONFIG = {
   **DataCaptureThread.CONFIG,
 
-  'CAP_RESOLUTION' : 50, # overwrite default cap resolution - we should iterate faster on IoT data
+  'CAP_RESOLUTION'  : 50, # overwrite default cap resolution - we should iterate faster on IoT data
+  'LIVE_FEED'       : False,  
+
+  'RECONNECTABLE': True,
+  'STREAM_WINDOW': 256,
+  'ONE_AT_A_TIME': False,
+
 
   "HOST": '#DEFAULT',
   "PORT": '#DEFAULT',
@@ -36,10 +42,6 @@ _CONFIG = {
     "SECURED": "#DEFAULT",
     "PROTOCOL": "#DEFAULT",
   },
-  'RECONNECTABLE': True,
-  'STREAM_WINDOW': 256,
-  'LIVE_FEED': False,
-  'ONE_AT_A_TIME': False,
 
   'VALIDATION_RULES': {
     **DataCaptureThread.CONFIG['VALIDATION_RULES'],

@@ -3,6 +3,9 @@ from naeural_core.data.default.iot.iot_queue_listener import IoTQueueListenerDat
 
 _CONFIG = {
   **IoTQueueListenerDataCapture.CONFIG,
+  
+  'MAX_DEQUE_LEN'   : 32, 
+
 
   'VALIDATION_RULES': {
     **IoTQueueListenerDataCapture.CONFIG['VALIDATION_RULES'],

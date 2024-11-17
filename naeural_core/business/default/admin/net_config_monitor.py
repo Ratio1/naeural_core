@@ -222,18 +222,23 @@ class NetConfigMonitorPlugin(BasePlugin):
     is_encrypted = data.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
     encrypted_data = data.get(self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA, None)
     if is_encrypted and encrypted_data is not None:
+      dest = data.get(self.const.PAYLOAD_DATA.EE_DESTINATION, "")
+      if dest != self.ee_addr:
+        self.P(f"Received encrypted data for '{dest}' but I am '{self.ee_addr}'. Ignoring.", color='r')
+        return
       self.P("Received UPDATE_MONITOR_01 encrypted data. Decrypting...")
       try:
         # next operation will fail if the data was not send to us
         str_decrypted_data = self.bc.decrypt_str(
           str_b64data=encrypted_data,
           str_sender=sender,
+          # embed_compressed=True, # we expect the data to be compressed
         )
         decrypted_data = self.json_loads(str_decrypted_data)
       except Exception as e:
         # TODO: remove this debug info as the reason are obvious
         data_summary = {k:v for k,v in data.items() if k != self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA}
-        self.P(f"Failed to decrypt data from {sender}:\n {self.json_dumps(data_summary)}", color='r')
+        self.P(f"Failed to decrypt data from {sender}:\n {self.json_dumps(data_summary, indent=2)}", color='r')
         decrypted_data = None
       #endtry
       if decrypted_data is not None:

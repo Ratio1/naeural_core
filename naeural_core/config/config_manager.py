@@ -423,14 +423,16 @@ class ConfigManager(
     # we setup the default admin pipeline type and params  
     defualt_admin_pipeline_setup = {
       ct.CONFIG_STREAM.K_NAME     : self.admin_pipeline_name,
-      ct.CONFIG_STREAM.K_TYPE     : "NetworkListener",
-      "PATH_FILTER" : [
+      ct.CONFIG_STREAM.K_TYPE     : ct.CONFIG_STREAM.DEFAULT_ADMIN_PIPELINE_TYPE,
+      
+      
+      ct.CONFIG_STREAM.PIPELINE_OPTIONS.NETWORK_LISTENER_PATH_FILTER : [
         None, None, 
         ["UPDATE_MONITOR_01", "NET_MON_01"],
         None
       ],
-      "MESSAGE_FILTER" : {},
-      "ADMIN_PIPELINE_VER" : ADMIN_PIPELINE_VER,
+      ct.CONFIG_STREAM.PIPELINE_OPTIONS.NETWORK_LISTENER_MESSAGE_FILTER : {},
+      ct.CONFIG_STREAM.PIPELINE_OPTIONS.ADMIN_PIPELINE_VER : ADMIN_PIPELINE_VER,
     }
     # we setup the default admin pipeline
     default_admin_pipeline = {

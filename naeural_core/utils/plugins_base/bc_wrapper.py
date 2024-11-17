@@ -16,7 +16,13 @@ class BCWrapper:
     """
     return self.__bc.address
   
-  def sign(self, dct_data: dict, add_data: bool = True, use_digest: bool = True, replace_nan: bool = True) -> str:
+  def sign(
+    self, 
+    dct_data: dict, 
+    add_data: bool = True, 
+    use_digest: bool = True, 
+    replace_nan: bool = True
+  ) -> str:
     """
     Generates the signature for a dict object.
     Does not add the signature to the dict object
@@ -70,7 +76,7 @@ class BCWrapper:
     """
     return self.__bc.verify(dct_data=dct_data, signature=str_signature, sender_address=sender_address)
 
-  def encrypt_str(self, str_data : str, str_recipient : str):
+  def encrypt_str(self, str_data : str, str_recipient : str, compress: bool = True):
     """
     Encrypts a string using the public key of the recipient using asymmetric encryption
 
@@ -78,17 +84,25 @@ class BCWrapper:
     ----------
     str_data : str
         the data to be encrypted (string)
+        
     str_recipient : str
         the recipient's address (string) used as the public key
+        
+    compress: bool, optional
+        whether to compress the data before encryption. Default `True`
 
     Returns
     -------
     str
        the base64 encoded encrypted data
     """
-    return self.__bc.encrypt(plaintext=str_data, receiver_address=str_recipient)
+    encrypted_data = self.__bc.encrypt(
+      plaintext=str_data, receiver_address=str_recipient,
+      compressed=compress, embed_compressed=True,
+    )
+    return encrypted_data
   
-  def decrypt_str(self, str_b64data : str, str_sender : str):
+  def decrypt_str(self, str_b64data : str, str_sender : str, embed_compressed: bool = True):
     """
     Decrypts a base64 encoded string using the private key of the sender using asymmetric encryption
 
@@ -96,15 +110,23 @@ class BCWrapper:
     ----------
     str_b64data : str
         The base64 encoded encrypted data
+        
     str_sender : str
         The sender's address (string) used as the public key for decryption
+        
+    embed_compressed: bool, optional
+        whether the compression flag is embedded in the data. Default `True`. Modify this only for special cases.
 
     Returns
     -------
     str
        the decrypted data (string) that can be then decoded to the original data
     """
-    return self.__bc.decrypt(encrypted_data_b64=str_b64data, sender_address=str_sender)
+    decompressed_data = self.__bc.decrypt(
+      encrypted_data_b64=str_b64data, sender_address=str_sender,
+      embed_compressed=embed_compressed, 
+    )
+    return decompressed_data
   
   
   def get_whitelist(self):

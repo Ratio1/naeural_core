@@ -602,7 +602,11 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
       is_encrypted = json_msg.get(ct.COMMS.COMM_RECV_MESSAGE.K_EE_IS_ENCRYPTED, False)
       if is_encrypted:
         encrypted_data = json_msg.pop(ct.COMMS.COMM_RECV_MESSAGE.K_EE_ENCRYPTED_DATA, None)
-        str_data = self.blockchain_manager.decrypt(encrypted_data, sender_addr)
+        str_data = self.blockchain_manager.decrypt(
+          encrypted_data_b64=encrypted_data, sender_address=sender_addr,
+          # decompress=False, # we expect the data to be compressed and the compression flag is embedded in the data
+          # embed_compressed=True, # we expect the data to be compressed
+        )
         if str_data is None:
           self.P("  Decryption failed. Message dropped.", color='r')
         else:

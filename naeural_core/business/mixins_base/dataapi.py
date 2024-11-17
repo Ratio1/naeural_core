@@ -454,7 +454,7 @@ class _DataAPIMixin(object):
       """
       return self.dataapi_specific_image(idx=0, full=full, raise_if_error=raise_if_error)
 
-    def dataapi_struct_datas(self, full=False):
+    def dataapi_struct_datas(self, full=False, as_list=False):
       """
       API for accessing all the structured datas in the 'INPUTS' list
 
@@ -463,27 +463,53 @@ class _DataAPIMixin(object):
       full : bool, optional
         Specifies whether the structured datas are returned full (the whole input dictionary) or not (just the value of 'STRUCT_DATA' in the input dictionary)
         The default value is False
+        
+      as_list : bool, optional
+        Specifies whether the structured datas are returned as a list or not - will work only if `full==False`
 
       Returns
       -------
-      dict{int : dict} (if full==True) / dict{int : object} (if full==False)
-        The substreams that have structured data.
-        For the second example in the class docstring ('multi_modal_2_images_one_sensor_stream'), the API will return
-          {
-            0: {
-              'IMG' : None,
-              'STRUCT_DATA' : an_object,
-              'INIT_DATA' : None,
-              'TYPE' : 'STRUCT_DATA',
-              'METADATA' : {Dictionary with current input metadata}
-            }
-          } if full==True
+      if as_list==False:
+      
+        dict{int : dict} (if full==True) / dict{int : object} (if full==False)
+          The substreams that have structured data.
+          For the second example in the class docstring ('multi_modal_2_images_one_sensor_stream'), the API will return
+            {
+              0: {
+                'IMG' : None,
+                'STRUCT_DATA' : an_object_or_most_likely_a_dict,
+                'INIT_DATA' : None,
+                'TYPE' : 'STRUCT_DATA',
+                'METADATA' : {Dictionary with current input metadata}
+              }
+            } if full==True
 
-          or
+            or
 
-          {
-            0 : an_object
-          } if full==False
+            {
+              0 : an_object_or_most_likely_a_dict
+            } if full==False
+            
+      if as_list==True:
+      
+        list[an_object_or_most_likely_a_dict] 
+      
+      
+      Usage examples
+      --------------
+      
+      ```
+        datas = dataapi_struct_datas(full=True, as_list=False)
+        indexes = list(datas.keys())
+        for idx in indexes:
+          struct_data = datas[idx]
+          # do something with struct_data
+          
+          
+        datas = dataapi_struct_datas(full=False, as_list=True)
+        for struct_data in datas:
+          # do something with struct_data
+        
       """
       lst_inp_struct_data = list(filter(lambda x: x['TYPE'] == 'STRUCT_DATA', self.dataapi_inputs()))
       dct_idx_to_struct_data = {i : x for i,x in enumerate(lst_inp_struct_data)}
@@ -497,6 +523,13 @@ class _DataAPIMixin(object):
         if (hasattr(v, '__len__') and len(v) == 0) or (v is None):
           dct_idx_to_struct_data.pop(k)
       #endfor
+      
+      if as_list and not full:
+        result = []
+        for i in range(len(dct_idx_to_struct_data)):
+          result.append(dct_idx_to_struct_data[i])
+      else:
+        result = dct_idx_to_struct_data
 
       return dct_idx_to_struct_data
 

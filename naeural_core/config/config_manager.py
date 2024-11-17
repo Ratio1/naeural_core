@@ -416,21 +416,28 @@ class ConfigManager(
   
   
   def maybe_setup_admin_pipeline(self):
+    ADMIN_PIPELINE_VER = "2.0.0"
     INSTANCE_STR = "{}_INST"
     pipeline_name = self.admin_pipeline_name
-    self.P("Setting-up admin jobs pipeline...")    
-    default_admin_pipeline = {
+    self.P("Setting-up admin jobs pipeline...")  
+    # we setup the default admin pipeline type and params  
+    defualt_admin_pipeline_setup = {
       ct.CONFIG_STREAM.K_NAME     : self.admin_pipeline_name,
       ct.CONFIG_STREAM.K_TYPE     : "NetworkListener",
-      ct.CONFIG_STREAM.K_PLUGINS  : [],
-
       "PATH_FILTER" : [
         None, None, 
         ["UPDATE_MONITOR_01", "NET_MON_01"],
         None
       ],
       "MESSAGE_FILTER" : {},
-
+      "ADMIN_PIPELINE_VER" : ADMIN_PIPELINE_VER,
+    }
+    # we setup the default admin pipeline
+    default_admin_pipeline = {
+      **defualt_admin_pipeline_setup,
+      ct.CONFIG_STREAM.K_PLUGINS  : [
+        # no plugins in the default admin pipeline - will be added later based on the template
+        ],
     }
     # get the mandatory admin pipeline template 
     # this does NOT contain instances, only the plugin signatures 
@@ -509,10 +516,12 @@ class ConfigManager(
     #endif current is null or not      
     
     if needs_save:
+      # we make sure we respect the default configuration
       dct_current_admin = {
         **dct_current_admin,
-        **default_admin_pipeline, # we add the default type, etc
+        **defualt_admin_pipeline_setup, # we add the default type, etc
       }
+      self.dct_config_streams[pipeline_name] = dct_current_admin # update the admin pipeline in the memory cache      
       self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(dct_current_admin, indent=2)))
       self._save_stream_config(dct_current_admin)
     else:

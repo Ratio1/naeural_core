@@ -678,6 +678,7 @@ class BaseCommThread(
       )
       dct_output[ct.PAYLOAD_DATA.EE_ENCRYPTED_DATA] = str_enc_data
       dct_output[ct.PAYLOAD_DATA.EE_IS_ENCRYPTED] = True
+      dct_output[ct.PAYLOAD_DATA.EE_DESTINATION] = destination_addr
       if self.cfg_debug_log_payloads:
         self.P("Encrypted {} for '{}' <{}>".format(
           payload_path, destination_id, destination_addr))

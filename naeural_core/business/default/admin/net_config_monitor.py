@@ -223,11 +223,19 @@ class NetConfigMonitorPlugin(BasePlugin):
     encrypted_data = data.get(self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA, None)
     if is_encrypted and encrypted_data is not None:
       self.P("Received UPDATE_MONITOR_01 encrypted data. Decrypting...")
-      str_decrypted_data = self.bc.decrypt_str(
-        str_b64data=encrypted_data,
-        str_sender=sender,
-      )
-      decrypted_data = self.json_loads(str_decrypted_data)
+      try:
+        # next operation will fail if the data was not send to us
+        str_decrypted_data = self.bc.decrypt_str(
+          str_b64data=encrypted_data,
+          str_sender=sender,
+        )
+        decrypted_data = self.json_loads(str_decrypted_data)
+      except Exception as e:
+        # TODO: remove this debug info as the reason are obvious
+        data_summary = {k:v for k,v in data.items() if k != self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA}
+        self.P(f"Failed to decrypt data from {sender}:\n {self.json_dumps(data_summary)}", color='r')
+        decrypted_data = None
+      #endtry
       if decrypted_data is not None:
         received_pipelines = decrypted_data.get("EE_PIPELINES", [])
         self.P("Decrypted data size {} with {} pipelines (speed: {:.1f} Hz, q: {}/{}):\n{}".format(
@@ -254,7 +262,10 @@ class NetConfigMonitorPlugin(BasePlugin):
   
     
   def __maybe_process_received(self):
+    # this is single data step so we can process the data
+    # TODO: change to dataapi_struct_datas
     data = self.dataapi_struct_data()
+    
     if data is not None:
       payload_path = data.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
       eeid = payload_path[0]

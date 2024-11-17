@@ -462,14 +462,21 @@ class ConfigManager(
       needs_save = True # save the new admin pipeline
       self.P("  No admin pipleine found. Added administration pipeline")
     else:
+      admin_pipeline_type = dct_current_admin.get(ct.CONFIG_STREAM.K_TYPE, None)
       # pipeline found - check if all mandatory plugins are present
       lst_current_signatures = [x[ct.PLUGIN_INFO.SIGNATURE] for x in dct_current_admin[ct.CONFIG_STREAM.K_PLUGINS]]
       # get all the instances of the current admin pipeline assuming single instances
       dct_curr_plugins_instances = {
         x[ct.PLUGIN_INFO.SIGNATURE] : x[ct.BIZ_PLUGIN_DATA.INSTANCES][0]  for x in dct_current_admin[ct.CONFIG_STREAM.K_PLUGINS] 
       }
-      self.P("Found pre-configured admin pipeline with {}".format(lst_current_signatures))
+      self.P("Found admin pipeline type `{}` with {}".format(admin_pipeline_type, lst_current_signatures))
       # get the "reference" admin pipeline with the default configuration in same signature: data format as the current admin pipeline
+      if admin_pipeline_type != dct_admin_pipeline[ct.CONFIG_STREAM.K_TYPE]:
+        self.P("Admin pipeline type is `{}` - should be `{}`".format(
+          admin_pipeline_type, dct_admin_pipeline[ct.CONFIG_STREAM.K_TYPE]
+        ))
+        needs_save = True # update the admin pipeline type at save time
+      #endif admin pipeline type is not correct
       dct_std = {x[ct.PLUGIN_INFO.SIGNATURE] : x for x in dct_admin_pipeline[ct.CONFIG_STREAM.K_PLUGINS]}
       self.P("  Required signatures from template: {}".format(lst_admin_signatures))
       for plg in lst_admin_signatures:
@@ -502,11 +509,11 @@ class ConfigManager(
     #endif current is null or not      
     
     if needs_save:
-      self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(dct_current_admin, indent=4)))
       dct_current_admin = {
         **dct_current_admin,
         **default_admin_pipeline, # we add the default type, etc
       }
+      self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(dct_current_admin, indent=2)))
       self._save_stream_config(dct_current_admin)
     else:
       self.P("  Admin pipeline is already correctly configured - no need to save")

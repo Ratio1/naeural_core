@@ -675,6 +675,8 @@ class BaseCommThread(
       str_enc_data = self.bc_engine.encrypt(
         plaintext=str_data,
         receiver_address=destination_addr,
+        #compressed=True, # default is True
+        #embed_compressed=True, # default is True - data will be 13:end instead of 12:end due to compression flag
       )
       dct_output[ct.PAYLOAD_DATA.EE_ENCRYPTED_DATA] = str_enc_data
       dct_output[ct.PAYLOAD_DATA.EE_IS_ENCRYPTED] = True
@@ -734,6 +736,8 @@ class BaseCommThread(
       str_enc_data = self.bc_engine.encrypt(
         plaintext=str_data,
         receiver_address=receiver_address,
+        #compressed=True, # default is True
+        #embed_compressed=True, # default is True - data will be 13:end instead of 12:end due to compression flag
       )
       critical_data = {
         ct.COMMS.COMM_SEND_MESSAGE.K_EE_IS_ENCRYPTED: True,

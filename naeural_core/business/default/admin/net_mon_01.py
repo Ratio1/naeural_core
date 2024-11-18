@@ -185,10 +185,10 @@ class NetMon01Plugin(
           last_received = node_info['timestamp']
           ago = "{:5.1f}".format(round(self.time() - last_received, 2))
           ago = ago.strip()[:5]
-          nr_hb, nr_dir = self.netmon.get_hb_vs_direct_pipeline_sources()
           str_log += "\n - Node: <{}> {} ago {}s had {} pipelines, status: {}".format(
             addr, str_eeid, ago, len(pipelines), working_status
           )
+        nr_dir, nr_hb = self.netmon.get_hb_vs_direct_pipeline_sources()
         str_log +=   "\n   Sources: {} direct, {} hb".format(nr_dir, nr_hb)
         self.P(str_log)
         self.__supervisor_log_time = self.time()

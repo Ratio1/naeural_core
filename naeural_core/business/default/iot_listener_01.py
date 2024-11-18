@@ -36,7 +36,7 @@ class IotListener01Plugin(BaseClass):
     self.last_netmon_check = self.time()
     lst_available = self.netmon.available_nodes
     self.P(f"Available nodes: {lst_available}")
-    lst_accessible = self.netmon.accessible_nodes()
+    lst_accessible = self.netmon.accessible_nodes
     self.P(f"Accessible nodes: {lst_accessible}")
     known_configs = self.netmon.network_known_configs()
     self.P(f"Known configurations: {self.json_dumps(known_configs, indent=2)}")

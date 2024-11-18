@@ -155,7 +155,7 @@ class NetConfigMonitorPlugin(BasePlugin):
         to_send = []
         for node_addr in self.__allowed_nodes:
           last_request = self.__allowed_nodes[node_addr].get("last_config_get", 0)
-          if (self.time() - last_request) > self.cfg_request_configs_each:
+          if (self.time() - last_request) > self.cfg_request_configs_each and self.__allowed_nodes[node_addr]["is_online"]:
             to_send.append(node_addr)
           #endif enough time since last request of this node
         #endfor __allowed_nodes
@@ -189,6 +189,17 @@ class NetConfigMonitorPlugin(BasePlugin):
       self.__new_nodes_this_iter = 0
       peers_status = self.__get_active_nodes_summary_with_peers(current_network)
       
+      # mark all nodes that are not online
+      non_online = {
+        x.get("address"):x.get("eeid") for x in current_network.values() 
+        if x.get("working", False) != self.const.DEVICE_STATUS_ONLINE
+      }
+      for cached_addr in self.__allowed_nodes:
+        if cached_addr in non_online:
+          self.__allowed_nodes[cached_addr]["is_online"] = False
+          self.P(f"Marking node '{non_online[cached_addr]}' <{cached_addr}> as offline.", color='r')
+      # endfor marking non online nodes
+      
       if self.__debug_netmon_count > 0:
         # self.P(f"NetMon debug:\n{self.json_dumps(self.__get_active_nodes(current_network), indent=2)}")
         self.P(f"Peers status:\n{self.json_dumps(peers_status, indent=2)}")
@@ -205,10 +216,13 @@ class NetConfigMonitorPlugin(BasePlugin):
           if addr not in self.__allowed_nodes:
             self.__allowed_nodes[addr] = {
               "whitelist" : peers_status[addr]["whitelist"],
-              "last_config_get" : 0
+              "last_config_get" : 0,
             } 
             self.__new_nodes_this_iter += 1
           #endif addr not in __allowed_nodes
+          if not self.__allowed_nodes[addr].get("is_online", True):
+            self.P("Node '{}' <{}> is back online.".format(peers_status[addr]["eeid"], addr))
+          self.__allowed_nodes[addr]["is_online"] = True # by default we assume the node is online due to `__get_active_nodes_summary_with_peers`
         #endif addr allows me
       #endfor each addr in peers_status
       if self.__new_nodes_this_iter > 0:

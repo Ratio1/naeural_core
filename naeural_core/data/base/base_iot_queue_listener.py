@@ -129,10 +129,10 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     )
 
     # define the wrapper server
-    if self._conn_type == 'amqp':
-      self.wrapper_server = AMQPWrapper(**wrapper_kwargs)
-    elif self._conn_type == 'mqtt':
+    if self._conn_type == 'mqtt':
       self.wrapper_server = MQTTWrapper(**wrapper_kwargs)
+    elif self._conn_type == 'amqp':
+      self.wrapper_server = AMQPWrapper(**wrapper_kwargs)
     else:
       raise ValueError("Cannot understand reduce controller type: {}".format(self.wrapper_server))
 
@@ -152,10 +152,13 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     """Connect to the server and send a notification with the result of the attempt.
     """
     if self.wrapper_server.connection is None or not self.connected:
+      self.P("Trying to connect to the pub-sub server...")
+      self.subscribed = False
       dct_ret = self.wrapper_server.server_connect()
       self.connected = dct_ret['has_connection']
       msg = dct_ret['msg']
       msg_type = dct_ret['msg_type']
+      self.P("IoT DCT status post reconnect:\n{}".format(self.json_dumps(msg, indent=2)))
       self._create_notification(
         notif=msg_type,
         msg=msg
@@ -165,6 +168,7 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
   def _maybe_reconnect(self):
     self._maybe_reconnect_to_controller_server()
     if not self.subscribed:
+      self.P("Trying to subscribe to the pub-sub server...")
       if self._conn_type == 'amqp':
         dct_ret = self.wrapper_server.establish_one_way_connection('recv')
       elif self._conn_type == 'mqtt':
@@ -173,6 +177,7 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
         dct_ret = None
       # endif
 
+      self.P("IoT DCT status post subscribe:\n{}".format(self.json_dumps(dct_ret, indent=2)))
       self.subscribed = dct_ret['has_connection']
       msg = dct_ret['msg']
       msg_type = dct_ret['msg_type']

@@ -723,10 +723,14 @@ class BaseCommThread(
     return dct_output
 
   def _prepare_command(self, command, receiver_address=None):
-    critical_data = {
-      ct.COMMS.COMM_SEND_MESSAGE.K_ACTION: command.pop(ct.COMMS.COMM_SEND_MESSAGE.K_ACTION),
-      ct.COMMS.COMM_SEND_MESSAGE.K_PAYLOAD: command.pop(ct.COMMS.COMM_SEND_MESSAGE.K_PAYLOAD),
-    }
+    try:
+      critical_data = {
+        ct.COMMS.COMM_SEND_MESSAGE.K_ACTION: command.pop(ct.COMMS.COMM_SEND_MESSAGE.K_ACTION),
+        ct.COMMS.COMM_SEND_MESSAGE.K_PAYLOAD: command.pop(ct.COMMS.COMM_SEND_MESSAGE.K_PAYLOAD),
+      }
+    except Exception as exc:
+      self.P("Failed to prepare command {}:\n{}".format(exc, self.json_dumps(command, indent=3)), color='r')
+      return None
 
     encrypt_payload = self.cfg_encrypted_comms
 

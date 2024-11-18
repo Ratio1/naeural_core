@@ -40,8 +40,8 @@ class IotListener01Plugin(BaseClass):
     self.P(f"Accessible nodes: {lst_accessible}")
     known_configs = self.netmon.network_known_configs()
     self.P(f"Known configurations: {self.json_dumps(known_configs, indent=2)}")
-    active_pipelines = [self.netmon.network_node_pipelines(node) for node in lst_accessible]
-    self.P(f"Active pipelines: {active_pipelines}")
+    accessible_pipelines = [self.netmon.network_node_pipelines(node) for node in lst_accessible]
+    self.P(f"Accessible pipelines: {accessible_pipelines}")
     return
 
   def process(self):

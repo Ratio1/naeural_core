@@ -1814,6 +1814,80 @@ class _UtilsBaseMixin(
     """
     return self.log.match_template(dct2, dct1)
 
+  def check_payload_data(self, data, verbose=0):
+    """
+    # TODO: maybe add this to naeural_client Session, or move it to Logger.
+    Method for checking if a payload is addressed to us and decrypting it if necessary.
+    Parameters
+    ----------
+    data : dict
+        The payload data to be checked and maybe decrypted.
+
+    verbose : int, optional
+        The verbosity level. The default is 0.
+    Returns
+    -------
+    dict
+        The original payload data if not encrypted.
+        The decrypted payload data if encrypted and the payload was addressed to us.
+        None if the payload was encrypted but not addressed to us.
+    """
+    # Extract the sender, the data and if the data is encrypted.
+    sender = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
+    is_encrypted = data.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
+    encrypted_data = data.get(self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA, None)
+    # Remove the encrypted data from the payload data if it exists.
+    result = {k: v for k, v in data.items() if k != self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA}
+
+    if is_encrypted and encrypted_data:
+      # Extract the destination and check if the data is addressed to us.
+      dest = data.get(self.const.PAYLOAD_DATA.EE_DESTINATION, "")
+      if dest != self.e2_addr:
+        # TODO: maybe still return the encrypted data for logging purposes
+        if verbose > 0:
+          self.P(f"Payload data not addressed to us. Destination: {dest}. Ignoring.")
+        # endif verbose
+        return None
+      # endif destination check
+
+      try:
+        # This should fail in case the data was not sent to us.
+        str_decrypted_data = self.bc.decrypt_str(
+          str_b64data=encrypted_data, str_sender=sender,
+          # embed_compressed=True, # we expect the data to be compressed
+        )
+        decrypted_data = self.json_loads(str_decrypted_data)
+      except Exception as exc:
+        self.P(f"Error while decrypting payload data from {sender}:\n{exc}")
+        if verbose > 0:
+          self.P(f"Received data:\n{self.dict_to_str(result)}")
+        # endif verbose
+        decrypted_data = None
+      # endtry decryption
+      if decrypted_data is not None:
+        # If the decrypted data is not a dictionary, we embed it in a dictionary.
+        # TODO: maybe review this part
+        if not isinstance(decrypted_data, dict):
+          decrypted_data = {'EE_DECRYPTED_DATA': decrypted_data}
+        # endif not dict
+        if verbose > 0:
+          decrypted_keys = list(decrypted_data.keys())
+          self.P(f"Decrypted data keys: {decrypted_keys}")
+        # endif verbose
+        # Merge the decrypted data with the original data.
+        result = {
+          **result,
+          **decrypted_data
+        }
+      else:
+        if verbose > 0:
+          self.P(f"Decryption failed. Returning original data.")
+        # endif verbose
+      # endif decrypted_data is not None
+    # endif is_encrypted
+    return result
+
+# endclass _UtilsBaseMixin
 
 
 

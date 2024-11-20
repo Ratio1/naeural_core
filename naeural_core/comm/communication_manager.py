@@ -609,7 +609,9 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         if dest_addr is not None and dest_addr != self.blockchain_manager.address:
           self.P("INCOMING:   Message is encrypted but not for this device. Decryption will fail.", color='r')
         str_data = self.blockchain_manager.decrypt(
-          encrypted_data_b64=encrypted_data, sender_address=sender_addr,
+          encrypted_data_b64=encrypted_data, 
+          sender_address=sender_addr,
+          debug=True, # TODO: put this to False
           # decompress=False, # we expect the data to be compressed and the compression flag is embedded in the data
           # embed_compressed=True, # we expect the data to be compressed
         )

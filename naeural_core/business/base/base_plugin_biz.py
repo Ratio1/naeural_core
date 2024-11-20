@@ -60,6 +60,7 @@ _CONFIG = {
   'RESEND_LAST_STATUS_ON_IDLE': 0,
 
   'FORCED_PAUSE': False,
+  'DISABLED': False,
   
 
   # set this to 1 for real time processing (data will be lost and only latest data be avail)
@@ -741,21 +742,24 @@ class BasePluginExecutor(
       return True
     # endif elapsed < delay thus wait more until elapsed >= delay
     return False
-
+  
+  
   @property
   def is_plugin_temporary_stopped(self):
     msg = None
     status = None
     notif_code = None
-    if self._was_stopped_last_iter and not self.cfg_forced_pause:
+    forced_pause = self.cfg_forced_pause
+    disabled = self.cfg_disabled
+    stopped = forced_pause or disabled
+    if self._was_stopped_last_iter and not stopped:
       # just received "resume"
-      msg = "WARNING: Plugin will now RESUME due to `FORCED_PAUSE` change to {}".format(self.cfg_forced_pause)
+      msg = f"WARNING: Plugin will now RESUME. `FORCED_PAUSE`={forced_pause}, `DISABLED`={disabled}"
       status = "RESUMING"
       notif_code = ct.NOTIFICATION_CODES.PLUGIN_RESUME_OK
-    elif not self._was_stopped_last_iter and self.cfg_forced_pause:
+    elif not self._was_stopped_last_iter and stopped:
       # just received "stop"
-      msg = "WARNING: Plugin will now STOP indefinitelly due to `FORCED_PAUSE` change to {}".format(
-        self.cfg_forced_pause)
+      msg = f"WARNING: Plugin will now STOP. `FORCED_PAUSE`={forced_pause}, `DISABLED`={disabled}"
       status = "PAUSING"
       notif_code = ct.NOTIFICATION_CODES.PLUGIN_PAUSE_OK
       if self.cfg_ignore_working_hours:
@@ -770,18 +774,20 @@ class BasePluginExecutor(
         msg=msg,
         displayed=True,
         forced_pause=self.cfg_forced_pause,
+        disabled=self.cfg_disabled,
         status=status,
         notif_code=notif_code,
       )
       self.add_payload_by_fields(
         info=msg,
         forced_pause=self.cfg_forced_pause,
+        disabled=self.cfg_disabled,
         status=status,
         notif_code=notif_code,
       )
     # end if process just resumed or just stopped
-    self._was_stopped_last_iter = self.cfg_forced_pause
-    return self.cfg_forced_pause
+    self._was_stopped_last_iter = stopped
+    return stopped
 
   @property
   def is_plugin_stopped(self):

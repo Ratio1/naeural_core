@@ -56,8 +56,6 @@ class NaeuralFastApiWebApp(BasePlugin):
   def __ignore_signature(self, signature):
     if not isinstance(self.relevant_plugin_signatures(), list):
       return False
-    if signature is None:
-      return True
     if len(self.relevant_plugin_signatures()) > 0:
       relevants_lower = [s.lower() for s in self.relevant_plugin_signatures()]
       return signature.lower() not in relevants_lower
@@ -79,20 +77,13 @@ class NaeuralFastApiWebApp(BasePlugin):
     return payload_data
 
   def __process_payload_response(self, payload: dict):
-    # In case of encrypted data, try to decrypt it.
-    payload_data = self.check_payload_data(payload)
-    if payload_data is None:
-      return
-    # Normalize keys to lowercase for easier processing.
-    data = {k.lower(): v for k, v in payload_data.items()}
+    data = {k.lower(): v for k, v in payload.items()}
     signature = data.get('signature', None)
-    # Check if the signature is relevant for this plugin.
     if self.__ignore_signature(signature):
       return
-    # Check if the payload is a response to a request sent by this plugin.
     request_id = data.get('request_id', None)
     if request_id is not None and request_id in self.unsolved_requests:
-      self.requests_responses[request_id] = self.process_response_payload(self.deepcopy(payload_data))
+      self.requests_responses[request_id] = self.process_response_payload(self.deepcopy(payload))
     return
 
   def __maybe_register_responses(self):

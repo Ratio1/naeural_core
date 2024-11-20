@@ -109,7 +109,7 @@ class NetworkMonitor(DecentrAIObject):
     list[str]
         The list of remote nodes that allow the current node to connect to them.
     """
-    return [x for x in self.available_nodes if self.network_node_is_accessible(x)]
+    return [x for x in self.all_nodes if self.network_node_is_accessible(x)]
 
   @property
   def epoch_manager(self):

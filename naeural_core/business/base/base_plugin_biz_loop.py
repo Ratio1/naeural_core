@@ -386,6 +386,7 @@ class _BasePluginLoopMixin(object):
     return triggered  
   
   def __on_init(self):
+    self.P("Running build-in & custom on_init events...")
     if self.cfg_disabled:
       self.P(f"WARNING: This plugin instance of `{self.__class__.__name__}` is DISABLED", boxed=True, color='r')
     if self.cfg_dataset_builder:
@@ -405,7 +406,7 @@ class _BasePluginLoopMixin(object):
       PROCESS_DELAY > FORCE_PAUSE > WORKING_HOURS
       
     """
-    self._on_init()
+    self.__on_init()
     self.P("Thread initialized.", color='g')
 
     while not self.done_loop:

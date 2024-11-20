@@ -88,12 +88,12 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     if self.blockchain_manager is not None:
       result = self.blockchain_manager.verify(cmd, return_full_info=True, verify_allowed=verify_allowed)
       if not result.valid:
-        self.P("Command received from sender (verify allowed: {}) addr <{}> signature verification failed: {}".format(
+        self.P("INCOMING: Command received from sender (verify allowed: {}) addr <{}> signature verification failed: {}".format(
           verify_allowed, result.sender, result.message
           ),color='r'
         )
       else:
-        self.P("Command received from sender (verify allowed: {}) addr <{}> signature verification OK.".format(
+        self.P("INCOMING: Command received from sender (verify allowed: {}) addr <{}> signature verification OK.".format(
           verify_allowed, result.sender
         ))
     else:
@@ -456,7 +456,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
       data_json=payload,
       fname=fn,
       subfolder_path='received_commands',
-      verbose=False
+      verbose=True
     )
     return
 
@@ -540,20 +540,23 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     initiator_id = json_msg.get(ct.COMMS.COMM_RECV_MESSAGE.K_INITIATOR_ID, None)
     session_id = json_msg.get(ct.COMMS.COMM_RECV_MESSAGE.K_SESSION_ID, None)
     sender_addr = json_msg.get(ct.COMMS.COMM_RECV_MESSAGE.K_SENDER_ADDR, None)
+    # next line is actually redundant as it should always be the same as the device_id
+    # it was left here for compatibiliy with the normal payload structure
+    dest_addr = json_msg.get(ct.PAYLOAD_DATA.EE_DESTINATION, None)
     
     if self.save_received_commands:
-      self.P("Saving received command ...")
+      self.P("INCOMING: Saving received command ...")
       self._save_input_command(json_msg)
     #endif save_received_commands
 
-    self.P("Received message with action '{}' from <{}:{}>".format(
+    self.P("INCOMING: Received message with action '{}' from <{}:{}>".format(
       action, initiator_id, session_id),
       color='y'
     )
     failed = False
     
     if device_id != self._device_id and device_id != self.blockchain_manager.address:
-      self.P('  Message is not for the current device {} != {} ({})'.format(
+      self.P('INCOMING:   Message is not for the current device {} != {} ({})'.format(
         device_id, self._device_id, self.blockchain_manager.address), color='y')
       failed = True
       
@@ -564,12 +567,12 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     verify_msg = self._verify_command_signature(json_msg, verify_allowed=_verify_allowed_at_signature) 
     if not verify_msg.valid:
       if self.is_secured:
-        msg = "Received invalid command from {}({}):{} due to '{}'. Command will be DROPPED.".format(
+        msg = "INCOMING: Received invalid command from {}({}):{} due to '{}'. Command will be DROPPED.".format(
           initiator_id, verify_msg.sender, json_msg, verify_msg.message
         )
         failed = True
       else:
-        msg = "Received invalid command from {}({}):{} due to '{}'. Command is accepted due to UNSECURED node.".format(
+        msg = "INCOMING: Received invalid command from {}({}):{} due to '{}'. Command is accepted due to UNSECURED node.".format(
           initiator_id, verify_msg.sender, json_msg, verify_msg.message
         )
         failed = False
@@ -587,7 +590,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
       )
     else:
       if _verify_allowed_at_signature:
-        msg = "Command from {}({}) signature VALIDATED (verify allowed: {}).".format(
+        msg = "INCOMING: Command from {}({}) signature VALIDATED (verify allowed: {}).".format(
           initiator_id, verify_msg.sender, _verify_allowed_at_signature
         )
         self.P(msg)
@@ -596,19 +599,27 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
 
 
     if failed:
-      self.P("  Message dropped.", color='r')      
+      self.P("INCOMING:   Message dropped.", color='r')      
     else:
       # Not failed, lets process
       is_encrypted = json_msg.get(ct.COMMS.COMM_RECV_MESSAGE.K_EE_IS_ENCRYPTED, False)
       if is_encrypted:
         encrypted_data = json_msg.pop(ct.COMMS.COMM_RECV_MESSAGE.K_EE_ENCRYPTED_DATA, None)
+        # TODO: reduce log redundancy
+        if dest_addr is not None and dest_addr != self.blockchain_manager.address:
+          self.P("INCOMING:   Message is encrypted but not for this device. Decryption will fail.", color='r')
         str_data = self.blockchain_manager.decrypt(
-          encrypted_data_b64=encrypted_data, sender_address=sender_addr,
+          encrypted_data_b64=encrypted_data, 
+          sender_address=sender_addr,
+          debug=True, # TODO: put this to False
           # decompress=False, # we expect the data to be compressed and the compression flag is embedded in the data
           # embed_compressed=True, # we expect the data to be compressed
         )
         if str_data is None:
-          self.P("  Decryption failed. Message dropped.", color='r')
+          self.P("INCOMING:   Decryption failed with SDKv{}. Message will be probably dropped.".format(
+            self.log.version), 
+            color='r'
+          )
         else:
           try:
             dict_data = json.loads(str_data)
@@ -616,20 +627,20 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
             payload = dict_data.get(ct.COMMS.COMM_RECV_MESSAGE.K_PAYLOAD, None)
             json_msg.update(dict_data)
           except Exception as e:
-            self.P("Error while decrypting message: {}\n{}".format(str_data, e), color='r')
+            self.P("INCOMING: Error while decrypting message: {}\n{}".format(str_data, e), color='r')
       # endif is_encrypted
 
       # TODO: change this value to False when all participants send encrypted messages
       if not is_encrypted and not self._environment_variables.get("ACCEPT_UNENCRYPTED_COMMANDS", True):
-        self.P("  Message is not encrypted. Message dropped because `ACCEPT_UNENCRYPTED_COMMANDS=False`.", color='r')
+        self.P("INCOMING:   Message is not encrypted. Message dropped because `ACCEPT_UNENCRYPTED_COMMANDS=False`.", color='r')
       else:
         # now that the message is decrypted, we can check if it is allowed or not as well
         # as if it is whitelisted or not
-        self.P("Message pre-processed (is_encrypted: {}), verifying allow list...".format(
+        self.P("INCOMING: Message pre-processed (is_encrypted: {}), verifying allow list...".format(
           is_encrypted
         ))
         allowed, allowed_msg = self._verify_command_allowed(json_msg)
-        self.P("  Command allowed: {}. Reason: {}".format(allowed, allowed_msg), color=None if allowed else 'r')
+        self.P("INCOMING:   Command allowed check: {}. Reason: {}".format(allowed, allowed_msg), color=None if allowed else 'r')
         if allowed:
           self.process_decrypted_command(
             action=action,

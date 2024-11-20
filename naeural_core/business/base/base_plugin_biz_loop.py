@@ -385,6 +385,14 @@ class _BasePluginLoopMixin(object):
     #end has instance command
     return triggered  
   
+  def __on_init(self):
+    if self.cfg_disabled:
+      self.P(f"WARNING: This plugin instance of `{self.__class__.__name__}` is DISABLED", boxed=True, color='r')
+    if self.cfg_dataset_builder:
+      self.P(f"WARNING: Dataset builder active for `{self.__class__.__name__}`", boxed=True, color='r')      
+    self._on_init()
+    return
+  
 
   def plugin_loop(self):
     """

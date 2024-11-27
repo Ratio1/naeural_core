@@ -176,3 +176,101 @@ class BCWrapper:
     """
     return self.maybe_remove_addr_prefix(address)
   
+
+
+### EVM
+
+
+  @property
+  def eth_address(self):
+    """
+    Returns the EVM address of the current node. 
+
+    Returns
+    -------
+    str
+        The address of the current node in the blockchain
+    """
+    return self.__bc.eth_address
+  
+
+  def eth_sign_message(self, types: list, values: list):
+    """
+    Signs a message using the EVM account of the current node
+
+    Parameters
+    ----------
+    types : list
+        The types of the values to be signed
+        
+    values : list
+        The values to be signed
+
+    Returns
+    -------
+    dict
+        A dictionary with the following keys
+        - types: list
+            The types of the values that were signed
+        - values: list
+            The values that were signed
+        - signature: str
+            The signature of the data
+        - address: str
+            The address of the EVM account used to sign the data
+    """
+    return self.__bc.eth_sign_message(types=types, values=values)  
+  
+  
+  def eth_sign_node_epochs(self, node: str, epochs: list, epochs_vals: list, signature_only: bool = True):
+    """
+    Signs the epochs availabilities for a given node using the EVM account of the current node
+
+    Parameters
+    ----------
+    node : str
+        The address of the node
+        
+    epochs : list
+        The epochs to be signed
+        
+    epochs_vals : list
+        The values of the epochs to be signed
+        
+    signature_only : bool, optional
+        Whether to return only the signature. Default `False`
+
+    Returns
+    -------
+    dict or just str
+        A dictionary with the following keys
+        - node: str
+            The address of the node
+        - epochs_vals: list
+            The values of the epochs that were signed
+        - eth_signature: str
+            The EVM signature of the data
+        - eth_address: str
+            The address of the EVM account used to sign the data
+    """
+    return self.__bc.eth_sign_node_epochs(
+      node=node, epochs=epochs, epochs_vals=epochs_vals, signature_only=signature_only
+    )
+    
+    
+  def node_address_to_eth_address(self, node_address: str):
+    """
+    Converts a node address to an EVM address
+
+    Parameters
+    ----------
+    node_address : str
+        The address of the node
+
+    Returns
+    -------
+    str
+        The EVM address of the node
+    """
+    return self.__bc.node_address_to_eth_address(node_address)
+  

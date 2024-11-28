@@ -107,7 +107,7 @@ class _GPUMixin(object):
 
       nvsmires, device_props, dct_proc_info = None, None, None
       try:
-        from pynvml.smi import nvidia_smi
+        from pynvml_utils import nvidia_smi
         import pynvml
         nvsmi = nvidia_smi.getInstance()
         nvsmires = nvsmi.DeviceQuery('memory.free, memory.total, memory.used, utilization.gpu, temperature.gpu, fan.speed')
@@ -291,7 +291,7 @@ class _GPUMixin(object):
     if not vars(self).get('__no_gpu_avail', False):
       device_info = self.get_gpu_info(device_id=device_id)
       if device_info is not None and len(device_info) > 0:
-        res = device_info['GPU_FAN_SPEED']
+        res = device_info.get('GPU_FAN_SPEED')
     return res
     
 

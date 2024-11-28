@@ -17,7 +17,10 @@ _CONFIG = {
 
   'PROCESS_DELAY'       : 180,
   'KERNEL_LOG_LEVEL'    : 'emerg,alert,crit,err',
-  'MAX_TEMPERATURE'     : None,
+  
+  # we preconfigure this to 100°C. If the user wants to change this or
+  # use the actual sensor threshold then set this to None.  
+  'MAX_TEMPERATURE'     : 100, 
   
   'SYSTEM_HEALTH_MONITOR_DEBUG': True,
 
@@ -188,11 +191,11 @@ class SystemHealthMonitor01Plugin(BasePluginExecutor):
     gpu_load, mem_load, fan_speed = None, None, None
     
     if len(gpu_info) > 0:
-      fan_speed = gpu_info['GPU_FAN_SPEED']
+      fan_speed = gpu_info.get('GPU_FAN_SPEED')
       gpu_load = gpu_info['GPU_USED']
       mem_load = round(gpu_info['ALLOCATED_MEM'] / gpu_info['TOTAL_MEM'] * 100, 1)
-      if fan_speed == 0:
-        msg = "GPU fan is not spinning. This could be critical issue."
+      if fan_speed in [0, None]:
+        msg = "GPU fan is not spinning. This is a critical issue!"
     else:
       gpu_id = None
     
@@ -223,8 +226,8 @@ class SystemHealthMonitor01Plugin(BasePluginExecutor):
     #endfor all hooks
     msg = msg.rstrip()
 
-    if len(msg) > 0:
-      self.P(msg, color='red')
+    if len(msg) > 0:      
+      self.P(f"System health error:\n{msg}", color='red')
       self.add_payload_by_fields(is_alert=True, status=msg)
     #endif signal found errors
     self.maybe_show_debug_info()

@@ -314,10 +314,14 @@ class NetworkMonitor(DecentrAIObject):
         lst_heartbeats = box_heartbeats[-nr:]
       return lst_heartbeats
 
-    def __network_node_past_heartbeats_by_interval(self, addr, minutes=60, dt_now=None, reverse_order=True):
+    def __network_node_past_heartbeats_by_interval(
+      self, addr, minutes=60, dt_now=None, reverse_order=True,
+      debug_unavailable=False
+    ):
       addr = self.__remove_address_prefix(addr)
       if addr not in self.__network_nodes_list():
-        self.P("`_network_node_past_heartbeats_by_interval`: ADDR '{}' not available".format(addr), color='r')
+        if debug_unavailable:
+          self.P("`_network_node_past_heartbeats_by_interval`: ADDR '{}' not available".format(addr), color='r')
         return []
       
       if dt_now is None:
@@ -342,14 +346,15 @@ class NetworkMonitor(DecentrAIObject):
         lst_heartbeats = list(reversed(lst_heartbeats))
       return lst_heartbeats
 
-    def __network_node_last_heartbeat(self, addr, return_empty_dict=False):
+    def __network_node_last_heartbeat(self, addr, return_empty_dict=False, debug_unavailable=False):
       __addr_no_prefix = self.__remove_address_prefix(addr) 
       if __addr_no_prefix not in self.__network_nodes_list():
         msg = "`_network_node_last_heartbeat`: ADDR '{}' not available".format(addr)
         if not return_empty_dict:
           raise ValueError(msg)
         else:
-          self.P(msg, color='r')
+          if debug_unavailable:
+            self.P(msg, color='r')
           return {}
         #endif raise or return
       return self.all_heartbeats[__addr_no_prefix][-1]

@@ -42,6 +42,8 @@ _CONFIG = {
   'PLUGIN_LOOP_RESOLUTION' : 50, # we force this to be 50 Hz from the standard 20 Hz  
   'MAX_INPUTS_QUEUE_SIZE' : 128, # increase the queue size to 128 from std 1
   
+  'VERBOSE_NETCONFIG_LOGS' : False,
+  
   'PROCESS_DELAY' : 0,
   
   'SEND_EACH' : 10,
@@ -65,6 +67,7 @@ class NetConfigMonitorPlugin(BasePlugin):
     self.__last_data_time = 0
     self.__new_nodes_this_iter = 0
     self.__last_shown = 0
+    self.__recvs = self.defaultdict(int)
     self.__allowed_nodes = {} # contains addresses with no prefixes
     self.__debug_netmon_count = self.cfg_debug_netmon_count
     return
@@ -73,7 +76,8 @@ class NetConfigMonitorPlugin(BasePlugin):
   def __check_dct_metadata(self):
     stream_metadata = self.dataapi_stream_metadata()
     if stream_metadata is not None:
-      self.P(f"Stream metadata:\n {self.json_dumps(stream_metadata, indent=2)}")
+      if self.cfg_verbose_netconfig_logs:
+        self.P(f"Stream metadata:\n {self.json_dumps(stream_metadata, indent=2)}")
     return
   
   
@@ -131,16 +135,19 @@ class NetConfigMonitorPlugin(BasePlugin):
 
 
   def __maybe_review_known(self):
-    if ((self.time() - self.__last_shown) < self.cfg_show_each) or (len(self.__allowed_nodes) == 0):
+    if ((self.time() - self.__last_shown) < self.cfg_show_each):
       return
     self.__last_shown = self.time()
-    msg = "Known nodes: "    
-    for addr in self.__allowed_nodes:
-      eeid = self.netmon.network_node_eeid(addr)
-      pipelines = self.__allowed_nodes[addr].get("pipelines", [])
-      names = [p.get("NAME", "NONAME") for p in pipelines]
-      msg += f"\n  - '{eeid}' <{addr}> has {len(pipelines)} pipelines: {names}"
-    #endfor __allowed_nodes
+    msg = "Known nodes: "
+    if len(self.__allowed_nodes) == 0:
+      msg += "\n=== No allowed nodes to show ==="
+    else:
+      for addr in self.__allowed_nodes:
+        eeid = self.netmon.network_node_eeid(addr)
+        pipelines = self.__allowed_nodes[addr].get("pipelines", [])
+        names = [p.get("NAME", "NONAME") for p in pipelines]
+        msg += f"\n  - '{eeid}' <{addr}> has {len(pipelines)} pipelines: {names}"
+      #endfor __allowed_nodes    
     self.P(msg)
     return
 
@@ -149,9 +156,11 @@ class NetConfigMonitorPlugin(BasePlugin):
     if self.time() - self.__last_data_time > self.cfg_send_each:
       self.__last_data_time = self.time()
       if len(self.__allowed_nodes) == 0:
-        self.P("No allowed nodes to send requests to. Waiting for network data...")
+        if self.cfg_verbose_netconfig_logs:
+          self.P("No allowed nodes to send requests to. Waiting for network data...")
       else:
-        self.P("Initiating pipeline requests to allowed nodes...")
+        if self.cfg_verbose_netconfig_logs:
+          self.P("Initiating pipeline requests to allowed nodes...")
         to_send = []
         for node_addr in self.__allowed_nodes:
           last_request = self.__allowed_nodes[node_addr].get("last_config_get", 0)
@@ -160,13 +169,16 @@ class NetConfigMonitorPlugin(BasePlugin):
           #endif enough time since last request of this node
         #endfor __allowed_nodes
         if len(to_send) == 0:
-          self.P("No nodes need update.")
+          if self.cfg_verbose_netconfig_logs:
+            self.P("No nodes need update.")
         else:
-          self.P(f"Local {len(self.local_pipelines)} pipelines. Sending requests to {len(to_send)} nodes...")        
+          if self.cfg_verbose_netconfig_logs:
+            self.P(f"Local {len(self.local_pipelines)} pipelines. Sending requests to {len(to_send)} nodes...")        
           # now send some requests
           for node_addr in to_send:
             node_ee_id = self.netmon.network_node_eeid(node_addr)
-            self.P(f"Sending GET_PIPELINES to '{node_ee_id}' <{node_addr}>...")
+            if self.cfg_verbose_netconfig_logs:
+              self.P(f"Sending GET_PIPELINES to '{node_ee_id}' <{node_addr}>...")
             self.cmdapi_send_instance_command(
               pipeline="admin_pipeline",
               signature="UPDATE_MONITOR_01",
@@ -184,7 +196,8 @@ class NetConfigMonitorPlugin(BasePlugin):
   
   def __maybe_process_netmon(self, current_network : dict):
     if len(current_network) == 0:
-      self.P("Received NET_MON_01 data without CURRENT_NETWORK data.", color='r ')
+      if self.cfg_verbose_netconfig_logs:
+        self.P("Received NET_MON_01 data without CURRENT_NETWORK data.", color='r ')
     else:
       self.__new_nodes_this_iter = 0
       peers_status = self.__get_active_nodes_summary_with_peers(current_network)
@@ -238,9 +251,11 @@ class NetConfigMonitorPlugin(BasePlugin):
     if is_encrypted and encrypted_data is not None:
       dest = data.get(self.const.PAYLOAD_DATA.EE_DESTINATION, "")
       if dest != self.ee_addr:
-        self.P(f"Received encrypted data for '{dest}' but I am '{self.ee_addr}'. Ignoring.", color='r')
+        if self.cfg_verbose_netconfig_logs:
+          self.P(f"Received encrypted data for '{dest}' but I am '{self.ee_addr}'. Ignoring.", color='r')
         return
-      self.P("Received UPDATE_MONITOR_01 encrypted data. Decrypting...")
+      if self.cfg_verbose_netconfig_logs:
+        self.P("Received UPDATE_MONITOR_01 encrypted data. Decrypting...")
       try:
         # next operation will fail if the data was not send to us
         str_decrypted_data = self.bc.decrypt_str(
@@ -252,22 +267,24 @@ class NetConfigMonitorPlugin(BasePlugin):
       except Exception as e:
         # TODO: remove this debug info as the reason are obvious
         data_summary = {k:v for k,v in data.items() if k != self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA}
-        self.P(f"Failed to decrypt data from {sender}:\n {self.json_dumps(data_summary, indent=2)}", color='r')
+        if self.cfg_verbose_netconfig_logs:
+          self.P(f"Failed to decrypt data from {sender}:\n {self.json_dumps(data_summary, indent=2)}", color='r')
         decrypted_data = None
       #endtry
       if decrypted_data is not None:
         received_pipelines = decrypted_data.get("EE_PIPELINES", [])
-        self.P("Decrypted data size {} with {} pipelines (speed: {:.1f} Hz, q: {}/{}):\n{}".format(
-          len(str_decrypted_data), len(received_pipelines),
-          self.actual_plugin_resolution, self.input_queue_size, self.cfg_max_inputs_queue_size,
-          self.json_dumps([
-            {
-              k:v for k,v in x.items() 
-              if k in ["NAME", "TYPE", "MODIFIED_BY_ADDR", "LAST_UPDATE_TIME"]
-            } 
-            for x in received_pipelines], 
-            indent=2),
-        ))
+        if self.cfg_verbose_netconfig_logs:
+          self.P("Decrypted data size {} with {} pipelines (speed: {:.1f} Hz, q: {}/{}):\n{}".format(
+            len(str_decrypted_data), len(received_pipelines),
+            self.actual_plugin_resolution, self.input_queue_size, self.cfg_max_inputs_queue_size,
+            self.json_dumps([
+              {
+                k:v for k,v in x.items() 
+                if k in ["NAME", "TYPE", "MODIFIED_BY_ADDR", "LAST_UPDATE_TIME"]
+              } 
+              for x in received_pipelines], 
+              indent=2),
+          ))
         sender_no_prefix = self.bc.maybe_remove_prefix(sender)
         self.__allowed_nodes[sender_no_prefix]["pipelines"] = received_pipelines
         # now we can add the pipelines to the netmon cache
@@ -276,7 +293,7 @@ class NetConfigMonitorPlugin(BasePlugin):
         self.P("Failed to decrypt data.", color='r')
       #endif decrypted_data is not None
     else:
-      self.P("Received unencrypted data.")
+      self.P("Received unencrypted data. Dropping.", color='r')
     return  
   
     
@@ -285,24 +302,31 @@ class NetConfigMonitorPlugin(BasePlugin):
     # TODO: change to dataapi_struct_datas
     data = self.dataapi_struct_data()
     
+    NET_MON_01 = "NET_MON_01"
+    UPDATE_MONITOR_01 = "UPDATE_MONITOR_01"
+    SIGNATURES = [NET_MON_01, UPDATE_MONITOR_01]
+    
     if data is not None:
       payload_path = data.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
       eeid = payload_path[0]
       signature = payload_path[2]
       sender = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
       is_encrypted = data.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
-      self.P("Received {}'{}' data from {}".format(
-        "ENC " if is_encrypted else "",
-        signature, f"'{eeid}' <{sender}>" if sender != self.ee_addr else "SELF",
-      ))
+      if self.cfg_verbose_netconfig_logs:
+        self.P("Received {}'{}' data from {}".format(
+          "ENC " if is_encrypted else "",
+          signature, f"'{eeid}' <{sender}>" if sender != self.ee_addr else "SELF",
+        ))
       if sender == self.ee_addr:
         return
-      if signature == "NET_MON_01":        
+      if signature in SIGNATURES:
+        self.__recvs[signature] += 1
+      if signature == NET_MON_01:        
         current_network = data.get("CURRENT_NETWORK", {})
         self.__maybe_process_netmon(current_network)
       #endif signature == "NET_MON_01"
       
-      elif signature == "UPDATE_MONITOR_01":        
+      elif signature == UPDATE_MONITOR_01:        
         self.__maybe_process_update_monitor_data(data)
       #endif signature == "UPDATE_MONITOR_01"
       

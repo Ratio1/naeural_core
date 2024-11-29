@@ -1244,7 +1244,9 @@ class NetworkMonitor(DecentrAIObject):
       
 
       """
-      hb = self.__network_node_last_heartbeat(addr=addr)
+      hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      if len(hb) == 0:
+        return 9999999999 if as_sec else None
 
       ts = hb.get(ct.HB.RECEIVED_TIME)
       tz = self.log.timezone

@@ -317,8 +317,8 @@ class NetworkMonitor(DecentrAIObject):
     def __network_node_past_heartbeats_by_interval(self, addr, minutes=60, dt_now=None, reverse_order=True):
       addr = self.__remove_address_prefix(addr)
       if addr not in self.__network_nodes_list():
-        self.P("`_network_node_past_heartbeats_by_interval`: ADDR '{}' not available".format(addr))
-        return
+        self.P("`_network_node_past_heartbeats_by_interval`: ADDR '{}' not available".format(addr), color='r')
+        return []
       
       if dt_now is None:
         dt_now = dt.now()
@@ -580,8 +580,8 @@ class NetworkMonitor(DecentrAIObject):
       return lst
 
     def __network_node_last_device_status(self, addr):
-      hearbeat = self.__network_node_last_heartbeat(addr=addr)
-      return hearbeat[ct.HB.DEVICE_STATUS]
+      hearbeat = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)      
+      return hearbeat.get(ct.HB.DEVICE_STATUS, "UNKNOWN")
   #endif
 
   # "ACTIVE_PLUGINS" section (protected methods)
@@ -855,8 +855,6 @@ class NetworkMonitor(DecentrAIObject):
       return True
 
     def network_node_simple_status(self, addr, dt_now=None):
-
-
       if ct.DEVICE_STATUS_EXCEPTION in self.__network_node_past_device_status_by_interval(addr=addr, minutes=60):
         return "PAST-EXCEPTION"
       
@@ -865,6 +863,10 @@ class NetworkMonitor(DecentrAIObject):
 
       last_status = self.__network_node_last_device_status(addr=addr)
       return last_status
+    
+    
+    def network_node_is_online(self, addr, dt_now=None):
+      return self.network_node_simple_status(addr=addr, dt_now=dt_now) == ct.DEVICE_STATUS_ONLINE            
     
     
     def network_node_py_ver(self, addr):

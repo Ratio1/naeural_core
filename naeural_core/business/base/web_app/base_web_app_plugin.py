@@ -16,12 +16,14 @@ _CONFIG = {
   'RUN_WITHOUT_IMAGE': True,
   'PROCESS_DELAY': 5,
   
-  'GIT_REQUEST_DELAY' : 60 * 10, # 10 minutes
+  'GIT_REQUEST_DELAY': 60 * 10,  # 10 minutes
 
   'USE_NGROK': False,
+  'USE_NGROK_API': False,
   'NGROK_ENABLED': False,
   'NGROK_DOMAIN': None,
   'NGROK_EDGE_LABEL': None,
+  'NGROK_URL_PING_INTERVAL': 30,
 
   'ASSETS': None,
 
@@ -57,7 +59,10 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     self.__git_commit_hash = None
     self.__git_request_time = 0
-    
+    self.ngrok_initiated = False
+    self.ngrok_started = False
+    self.ngrok_listener = None
+    self.__last_ngrok_url_ping_ts = 0
 
     
     self.__allocate_port()
@@ -841,16 +846,47 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     return
 
+  def on_close(self):
+    super(BaseWebAppPlugin, self).on_close()
+    if self.ngrok_listener is not None:
+      self.P(f"Closing Ngrok listener...")
+      self.ngrok_listener.close()
+    # endif ngrok listener opened
+    return
+
+  def __maybe_ngrok_ping(self):
+    # Check if the Ngrok API is used.
+    if not self.cfg_use_ngrok_api:
+      return
+    # Check if the listener is available.
+    if self.ngrok_listener is None:
+      return
+    # Check if the listener has a URL.
+    # In case a Ngrok edge label or domain is provided no URL will be available since the user should already have it.
+    if self.ngrok_listener.url() is None:
+      return
+    if self.__last_ngrok_url_ping_ts is None or self.time() - self.__last_ngrok_url_ping_ts >= self.cfg_ngrok_url_ping_interval:
+      self.__last_ngrok_url_ping_ts = self.time()
+      self.add_payload_by_fields(
+        ngrok_url=self.ngrok_listener.url(),
+      )
+    # endif last ngrok url ping
+    return
 
   def _process(self):  # Check: _process as opposed to process
     
-    self.__maybe_init_assets() # Check: auto-updates point here?
+    self.__maybe_init_assets()  # Check: auto-updates point here?
+
+    self.maybe_init_ngrok()
 
     self.__maybe_run_all_setup_commands()
+
+    self.maybe_start_ngrok()
 
     self.__maybe_run_all_start_commands()
 
     self.__maybe_print_all_logs() # Check: must review 
 
     super(BaseWebAppPlugin, self)._process() # Check: why is this required
+    self.__maybe_ngrok_ping()
     return

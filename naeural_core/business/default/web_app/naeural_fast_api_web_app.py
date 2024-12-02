@@ -78,27 +78,70 @@ class NaeuralFastApiWebApp(BasePlugin):
     """
     return payload_data
 
-  def __process_payload_response(self, payload: dict):
+  def __process_payload_response(self, payload_data: dict):
+    """
+    Processes the payload data received from the network and updates the requests_responses dictionary.
+
+    Parameters
+    ----------
+
+    payload_data : dict
+        The payload data.
+    """
+    signature = payload_data.get('signature', None)
+    # Check if the signature is relevant for this plugin.
+    if self.__ignore_signature(signature):
+      return
+    # Check if the payload is a response to a request sent by this plugin.
+    request_id = payload_data.get('request_id', None)
+    if request_id is not None and request_id in self.unsolved_requests:
+      self.requests_responses[request_id] = self.process_response_payload(self.deepcopy(payload_data))
+    return
+
+  def __preprocess_payload_data(self, payload):
+    """
+    Preprocesses the payload data received from the network.
+    First, it checks if the payload data is encrypted and tries to decrypt it.
+    Then, it normalizes the keys to lowercase for easier processing.
+
+    Parameters
+    ----------
+
+    payload : dict
+        The payload data.
+
+    Returns
+    -------
+
+    res : dict
+        The preprocessed payload data.
+    """
     # In case of encrypted data, try to decrypt it.
     payload_data = self.check_payload_data(payload)
     if payload_data is None:
       return
     # Normalize keys to lowercase for easier processing.
-    data = {k.lower(): v for k, v in payload_data.items()}
-    signature = data.get('signature', None)
-    # Check if the signature is relevant for this plugin.
-    if self.__ignore_signature(signature):
-      return
-    # Check if the payload is a response to a request sent by this plugin.
-    request_id = data.get('request_id', None)
-    if request_id is not None and request_id in self.unsolved_requests:
-      self.requests_responses[request_id] = self.process_response_payload(self.deepcopy(payload_data))
+    return {k.lower(): v for k, v in payload_data.items()}
+
+  def handle_received_payload(self, payload_data):
+    """
+    Handles the received payload data.
+    This method should be overridden by the user to define the logic for processing the payload data.
+
+    Parameters
+    ----------
+
+    payload_data : dict
+        The payload data.
+    """
     return
 
-  def __maybe_register_responses(self):
+  def __maybe_handle_payloads(self):
     payloads = self.dataapi_struct_datas()
     for idx, payload in payloads.items():
-      self.__process_payload_response(payload)
+      preprocessed_payload = self.__preprocess_payload_data(payload)
+      self.__process_payload_response(preprocessed_payload)
+      self.handle_received_payload(preprocessed_payload)
     # endfor payloads
     return
 
@@ -226,5 +269,5 @@ class NaeuralFastApiWebApp(BasePlugin):
   def process(self):
     super(NaeuralFastApiWebApp, self).process()
     self.maybe_persistence_save()
-    self.__maybe_register_responses()
+    self.__maybe_handle_payloads()
     return

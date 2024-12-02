@@ -82,7 +82,7 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
         str/int: the specified value defined by the user or the default value
     """
     params = self.shmem['config_communication']['PARAMS']
-    ret = params[property]
+    ret = params.get(property)
     if self.config.get(property) != '#DEFAULT':
       ret = self.config.get(property)
     elif property in self.cfg_stream_config_metadata and self.cfg_stream_config_metadata.get(property) != '#DEFAULT':

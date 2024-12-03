@@ -678,6 +678,8 @@ class BaseDocEmbServing(BaseServingProcess):
           doc = req_params.get('doc', None)
           context = req_params.get('context', None)
           docs = req_params.get('docs', []) if doc is None else [doc]
+          # TODO: with this implementation a context may be influenced by multiple sets of users.
+          #  This can lead to a context that is not representative for any of the users.
           self.__add_docs(docs, context)
           results.append(self.get_result_dict(request_id=req_id))
         elif req_type == DocEmbCt.QUERY:

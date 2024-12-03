@@ -27,19 +27,19 @@ class _NgrokMixinPlugin(object):
       super_setup_commands = super(_NgrokMixinPlugin, self).get_setup_commands()
     except AttributeError:
       super_setup_commands = []
-    if self.cfg_use_ngrok_api:
+    if self.cfg_ngrok_use_api:
       # In this case the authentification will be made through the api in the actual code,
       # instead of the command line.
       return super_setup_commands
     # endif ngrok api used
 
-    if self.cfg_use_ngrok or self.cfg_ngrok_enabled:
+    if self.cfg_ngrok_enabled:
       return [self.__get_ngrok_auth_command()] + super_setup_commands
     else:
       return super_setup_commands
 
   def maybe_init_ngrok(self):
-    if self.cfg_use_ngrok_api and not self.ngrok_initiated:
+    if self.cfg_ngrok_use_api and not self.ngrok_initiated:
       self.ngrok_initiated = True
       ngrok.set_auth_token(self.__get_ng_token())
       self.P(f"Ngrok initiated for {self.unique_identification}.")
@@ -65,7 +65,7 @@ class _NgrokMixinPlugin(object):
 
   def maybe_start_ngrok(self):
     # Maybe make this asynchronous?
-    if self.cfg_use_ngrok_api and not self.ngrok_started:
+    if self.cfg_ngrok_use_api and not self.ngrok_started:
       self.ngrok_started = True
       self.P(f"Ngrok starting for {self.unique_identification}...")
       self.ngrok_listener = ngrok.forward(**self.get_ngrok_tunnel_kwargs())
@@ -78,12 +78,12 @@ class _NgrokMixinPlugin(object):
       super_start_commands = super(_NgrokMixinPlugin, self).get_start_commands()
     except AttributeError:
       super_start_commands = []
-    if self.cfg_use_ngrok_api:
+    if self.cfg_ngrok_use_api:
       # In case of using the ngrok api, the tunnel will be started through the api
       return super_start_commands
     # endif ngrok api used
 
-    if self.cfg_use_ngrok or self.cfg_ngrok_enabled:
+    if self.cfg_ngrok_enabled:
       return [self.__get_ngrok_start_command()] + super_start_commands
     else:
       return super_start_commands

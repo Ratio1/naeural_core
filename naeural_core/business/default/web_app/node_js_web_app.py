@@ -6,7 +6,6 @@ _CONFIG = {
   **BasePlugin.CONFIG,
   'PROCESS_DELAY': 5,
 
-  'USE_NGROK': True,
   'NGROK_ENABLED': True,
   'NGROK_DOMAIN': None,
   'NGROK_EDGE_LABEL': None,

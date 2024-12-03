@@ -1,3 +1,4 @@
+import gc
 import os
 from pathlib import Path
 
@@ -718,6 +719,7 @@ class TensorRTModel(ModelBackendWrapper):
     config.add_optimization_profile(profile)
 
     # Empty cache before building the engine.
+    gc.collect()
     th.cuda.empty_cache()
 
     # Write built engine to disk.

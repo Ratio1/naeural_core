@@ -1,3 +1,4 @@
+import gc
 import traceback
 import platform
 
@@ -122,6 +123,7 @@ class _GPUMixin(object):
       # now we iterate all devices
       n_gpus = th.cuda.device_count()
       if n_gpus > 0:
+        gc.collect()
         th.cuda.empty_cache()
       current_pid_has_usage = False
       current_pid_gpus = []

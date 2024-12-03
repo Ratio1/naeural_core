@@ -324,7 +324,14 @@ class ModelServingProcess(
 
   def _pack_results(self, results):
     res = OrderedDict()
+    # TODO: should the additional be added after the rest?
     meta = OrderedDict()
+    additional_meta = self.get_additional_metadata()
+    if isinstance(additional_meta, dict):
+      meta.update(additional_meta)
+    else:
+      meta['ADDITIONAL_META'] = additional_meta
+    # endif additional meta
     
     if results is None or len(results) == 0:
       meta[ct.ERROR] = 'No inputs received for inference'
@@ -403,16 +410,22 @@ class ModelServingProcess(
     }
 
     for stream_input in inputs:
-      stream_name = stream_input['STREAM_NAME']
+      stream_name = stream_input.get('STREAM_NAME')
+      if stream_name is None:
+        continue
       self._stream_index_mapping[stream_name] = []
-      lst_sub_stream_inputs = stream_input['INPUTS']
+      lst_sub_stream_inputs = stream_input.get('INPUTS') or []
       _serving_params = stream_input.get('SERVING_PARAMS', {})
 
       for _input in lst_sub_stream_inputs:
-        if _input['TYPE'] == data_type:
-          dct_picked['DATA'].append(_input[_input['TYPE']])
+        input_type = _input.get('TYPE')
+        if input_type == data_type:
+          picked_data = _input.get(data_type)
+          if picked_data is None:
+            continue
+          dct_picked['DATA'].append(picked_data)
           dct_picked['SERVING_PARAMS'].append(_serving_params)
-          dct_picked['INIT_DATA'].append(_input['INIT_DATA'])
+          dct_picked['INIT_DATA'].append(_input.get('INIT_DATA'))
           dct_picked['STREAM_NAME'].append(stream_name)
           self._stream_index_mapping[stream_name].append(len(dct_picked['DATA'])-1)
         #endif
@@ -499,14 +512,16 @@ class ModelServingProcess(
       if self.predict_server_name != self.server_name:
         self.P("Running '{}' for covered server '{}'".format(self.server_name, self.predict_server_name))
 
-    if not self.cfg_runs_on_empty_input and isinstance(inputs[0], dict):
+    dct_picked = {
+      'DATA': inputs,
+      'EMPTY': False
+    }
+    if isinstance(inputs[0], dict):
       dct_picked = self._pick_inference_inputs(inputs, self.cfg_picked_input)
-    else:
-      dct_picked = {
-        'DATA' : inputs,
-        'EMPTY' : False
-      }
     #endif
+    if self.cfg_runs_on_empty_input:
+      dct_picked['EMPTY'] = False
+    # endif empty input allowed
 
     if self.TRY_PREDICT:
       try:
@@ -629,6 +644,7 @@ class ModelServingProcess(
             self.P("Received unknown command '{}'".format(cmd.upper()), color='r')
           # endif select cmd type
         else:
+          # TODO: add on_idle method here
           # now we are on IDLE - no cmd received so we can do quick internal kitchen
           if tm_last_timers_dump is None or (time() - tm_last_timers_dump) > self.serving_timers_idle_dump:
             self.P("Idle timers dump {}s reached. Dumping timers".format(self.serving_timers_idle_dump))
@@ -698,7 +714,17 @@ class ModelServingProcess(
   def _on_init(self):
     self.on_init()
     return
-  
+
+  def get_additional_metadata(self):
+    """
+    This method is called to add metadata to what is sent to the serving manager.
+    Returns
+    -------
+
+    dict
+        The additional metadata to be sent to the serving manager
+    """
+    return {}
 
   @abc.abstractmethod
   def pre_process(self, inputs):

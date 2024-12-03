@@ -68,8 +68,8 @@ class BaseScripter(metaclass=abc.ABCMeta):
     return
 
   def clear_cache(self):
-    th.cuda.empty_cache()
     gc.collect()
+    th.cuda.empty_cache()
     return
 
   def start_timer(self, name):

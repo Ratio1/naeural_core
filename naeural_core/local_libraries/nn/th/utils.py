@@ -1,9 +1,16 @@
+import gc
 import numpy as np
 import torch as th
 import torchvision as tv
 from naeural_core.local_libraries.nn.utils import get_dropout_rate
 
 __VER__ = '0.2.0.0'
+
+
+def clear_cache():
+  gc.collect()
+  th.cuda.empty_cache()
+  return
 
 
 def Pr(s=''):

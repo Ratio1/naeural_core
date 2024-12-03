@@ -400,8 +400,7 @@ class BaseLlmServing(
     self.P(f'Done inference in {elapsed} seconds')
     yhat = yhat.cpu().numpy()
     batch_tokens = batch_tokens.cpu().numpy()
-    gc.collect()
-    self.th.cuda.empty_cache()
+    self.th_utils.clear_cache()
     # Calculate number of generated token per seconds and add it to __tps
     # in order to track inference performance. Generated padding is not
     # counted since it is an artefact of the batching strategy.

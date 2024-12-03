@@ -1,4 +1,5 @@
 # global dependencies
+import gc
 import random
 import torch as th
 import pandas as pd
@@ -292,6 +293,7 @@ class Base(DecentrAIObject):
         self._dct_res[k] = []
       self._dct_res[k].append(v)
 
+    gc.collect()
     th.cuda.empty_cache()
     return preds
 

@@ -1035,7 +1035,7 @@ class UnifiedFirstStage(
         lst_gpu_status_pre = self.log.gpu_info(mb=True)
 
       del self.th_model
-      th.cuda.empty_cache()
+      self.th_utils.clear_cache()
 
       freed = 0
       idx = None

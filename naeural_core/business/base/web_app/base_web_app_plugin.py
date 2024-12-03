@@ -18,8 +18,7 @@ _CONFIG = {
   
   'GIT_REQUEST_DELAY': 60 * 10,  # 10 minutes
 
-  'USE_NGROK': False,
-  'USE_NGROK_API': False,
+  'NGROK_USE_API': False,
   'NGROK_ENABLED': False,
   'NGROK_DOMAIN': None,
   'NGROK_EDGE_LABEL': None,
@@ -47,7 +46,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
   using some implementation of a web server.
 
   You can also deploy your web application to the internet using ngrok.
-  To do this, set the `USE_NGROK` flag to True in config and set the necessary
+  To do this, set the `NGROK_ENABLED` flag to True in config and set the necessary
   environment variables.
 
   TODO: add ngrok necessary data in the config (after securing the configs)
@@ -64,7 +63,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.ngrok_listener = None
     self.__last_ngrok_url_ping_ts = 0
 
-    
+    # TODO: move this to process
     self.__allocate_port()
 
     self.prepared_env = None
@@ -856,7 +855,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
   def __maybe_ngrok_ping(self):
     # Check if the Ngrok API is used.
-    if not self.cfg_use_ngrok_api:
+    if not self.cfg_ngrok_use_api:
       return
     # Check if the listener is available.
     if self.ngrok_listener is None:

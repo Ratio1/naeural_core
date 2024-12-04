@@ -140,6 +140,8 @@ class NaeuralFastApiWebApp(BasePlugin):
     payloads = self.dataapi_struct_datas()
     for idx, payload in payloads.items():
       preprocessed_payload = self.__preprocess_payload_data(payload)
+      if preprocessed_payload is None:
+        continue
       self.__process_payload_response(preprocessed_payload)
       self.handle_received_payload(preprocessed_payload)
     # endfor payloads

@@ -29,6 +29,16 @@ The full algoritm of this plugin is as follows:
 4. At next iteration I will send COMMAND to UPDATE_MONITOR_01 for any required and allowed nodes.
 5. If I receive data from UPDATE_MONITOR_01, I will *decrypt* it and update the list of pipelines for the sender node.
 
+
+TODO: use NetworkProcesserPlugin as base
+TODO: refactor so that everything is happening based on payloads and NOT on commands!
+1. instance A sends payload to instance B
+2. instance B receive the payload and processes it
+3. instance B sends payload to instance A
+
+
+...
+
 """
 from naeural_core.business.base import BasePluginExecutor as BasePlugin
 
@@ -46,9 +56,9 @@ _CONFIG = {
   
   'PROCESS_DELAY' : 0,
   
-  'SEND_EACH' : 10,
+  'SEND_EACH' : 10, # runs the send logc every 10 seconds
   
-  'REQUEST_CONFIGS_EACH' : 30,
+  'REQUEST_CONFIGS_EACH' : 30, # minimum time between requests to the same node
   
   'SHOW_EACH' : 60,
   

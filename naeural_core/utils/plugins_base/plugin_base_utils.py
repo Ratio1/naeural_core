@@ -459,7 +459,7 @@ class _UtilsBaseMixin(
       ```      
 
     """
-    return str(uuid.uuid4())[:13].replace('-','')
+    return str(uuid.uuid4())[:size].replace('-','')
   
   @property
   def json(self):

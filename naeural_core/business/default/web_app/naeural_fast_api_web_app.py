@@ -163,6 +163,8 @@ class NaeuralFastApiWebApp(BasePlugin):
     -------
     res : bool
         True if the request was successfully registered, False otherwise.
+    msg : str
+        The error message in case of failure.
     """
     try:
       if 'request_id' not in kwargs:
@@ -177,10 +179,11 @@ class NaeuralFastApiWebApp(BasePlugin):
         self.requests_meta[request_id]['timeout'] = request_timeout
       self.unsolved_requests.add(request_id)
       self.send_network_request(**kwargs)
-      return True
+      return True, None
     except Exception as e:
-      self.P(f'Error registering request: {e}', color='r')
-      return False
+      msg = f'Error registering request: {e}'
+      self.P(msg, color='r')
+      return False, msg
 
   def register_network_request(self, **kwargs):
     return self.__register_network_request(**kwargs)

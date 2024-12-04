@@ -72,9 +72,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.script_temp_dir = tempfile.mkdtemp()
 
     self.assets_initialized = False
-    self.failed = False    
-    
-    self.__setup_commands()
+    self.failed = False
+    self.__commands_ready = False
 
     self.can_run_start_commands = self.cfg_auto_start
 
@@ -872,8 +871,16 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     # endif last ngrok url ping
     return
 
+  def __maybe_setup_commands(self):
+    if self.__commands_ready:
+      return
+    self.__setup_commands()
+    self.__commands_ready = True
+    return
+
   def _process(self):  # Check: _process as opposed to process
-    
+    self.__maybe_setup_commands()
+
     self.__maybe_init_assets()  # Check: auto-updates point here?
 
     self.maybe_init_ngrok()

@@ -56,7 +56,7 @@ class BCWrapper:
       replace_nan=replace_nan
     )
   
-  def verify(self, dct_data: str, str_signature: str, sender_address: str) -> bool:
+  def verify(self, dct_data: str, str_signature: str = None, sender_address: str = None) -> bool:
     """
     Verifies a signature using the public key of the signer
 
@@ -64,10 +64,13 @@ class BCWrapper:
     ----------
     dct_data : dict
         the data that was signed
+        
     str_signature : str
-        the base64 encoded signature
+        the base64 encoded signature. Default `None` will be taken from the data
+        
     str_signer : str
-        the signer's address (string) used as the public key for verification
+        the signer's address (string) used as the public key for verification.
+        Default `None` will be taken from the data
 
     Returns
     -------

@@ -494,14 +494,15 @@ class BaseDocEmbServing(BaseServingProcess):
         # endif input is a string
 
         predict_kwargs = serving_params[i] if i < len(serving_params) else {}
-        request_id = inp.get(DocEmbCt.REQUEST_ID, None)
+        normalized_input = {k.upper(): v for k, v in inp.items()}
+        request_id = normalized_input.get(DocEmbCt.REQUEST_ID, None)
         if request_id is None:
           msg = f"Warning! Request {i} must have a request id specified in `{DocEmbCt.REQUEST_ID}`."
           self.P(msg)
         # endif request_id provided
 
         # Check request type
-        request_type = inp.get(DocEmbCt.REQUEST_TYPE, DocEmbCt.DEFAULT_REQUEST_TYPE)
+        request_type = normalized_input.get(DocEmbCt.REQUEST_TYPE, DocEmbCt.DEFAULT_REQUEST_TYPE)
         if request_type not in DocEmbCt.REQUEST_TYPES:
           msg = f"Error! `{DocEmbCt.REQUEST_TYPE}` value must be one of {DocEmbCt.REQUEST_TYPES}. Received {request_type}."
           self.P(msg)
@@ -510,7 +511,7 @@ class BaseDocEmbServing(BaseServingProcess):
         # endif request type is not valid
 
         # Check request params
-        request_params = inp.get(DocEmbCt.REQUEST_PARAMS, {})
+        request_params = normalized_input.get(DocEmbCt.REQUEST_PARAMS, {})
         if not isinstance(request_params, dict) and request_type != DocEmbCt.LIST_CONTEXT:
           msg = f"Error! `{DocEmbCt.REQUEST_PARAMS}` value must be a dict. Received {type(request_params)}!"
           self.P(msg)

@@ -36,6 +36,20 @@ TODO: refactor so that everything is happening based on payloads and NOT on comm
 2. instance B receive the payload and processes it
 3. instance B sends payload to instance A
 
+    {
+      "NET_CONFIG_DATA" : {
+        "OP" : "GET_PIPELINES",
+        ...
+      }
+    }
+
+    {
+      "NET_CONFIG_DATA" : {
+        "OP" : "CONFIG",
+        ...
+      }
+    }
+
 
 ...
 

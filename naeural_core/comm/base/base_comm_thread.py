@@ -597,6 +597,8 @@ class BaseCommThread(
     )
     
     ee_encrypted_payload = bool(ee_encrypted_payload) or self.cfg_encrypted_comms
+    destination_addr = dct_output.get(ct.PAYLOAD_DATA.EE_DESTINATION)
+    destination_id = None
     
     ee_id = dct_original.get(ct.EE_ID, None)
     session_id = dct_original.get(ct.PAYLOAD_DATA.SESSION_ID, None)
@@ -661,13 +663,14 @@ class BaseCommThread(
     dct_outgoing[ct.PAYLOAD_DATA.EE_FORMATTER] = formatter_name    
     dct_output = {}
     
-    destination_addr, destination_id = None, None
-    if initiator_addr is not None:
-      destination_addr = initiator_addr
-      destination_id = initiator_id
-    else:
-      destination_addr = modified_by_addr
-      destination_id = modified_by_id
+    if destination_addr is None:
+      destination_addr, destination_id = None, None
+      if initiator_addr is not None:
+        destination_addr = initiator_addr
+        destination_id = initiator_id
+      else:
+        destination_addr = modified_by_addr
+        destination_id = modified_by_id
     #endif destination    
     if ee_encrypted_payload and destination_addr is not None:
       # encrypt the payload

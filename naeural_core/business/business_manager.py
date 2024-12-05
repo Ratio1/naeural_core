@@ -20,7 +20,7 @@ class BusinessManager(Manager):
     self.owner = owner
     self.__netmon_instance = None
     self._dct_config_streams = None
-    self.is_supervisor_node = False
+    self.is_supervisor_node = None
     self.comm_shared_memory = {
       'payloads' : {},
       'commands' : {},
@@ -63,6 +63,17 @@ class BusinessManager(Manager):
     in_use_ai_engines = self.fetch_ai_engines()
     return in_use_ai_engines
   
+  def maybe_toggle_supervisor_node(self, plg):
+    # setup special plugins area
+    if plg._signature.upper() == ct.ADMIN_PIPELINE_NETMON.upper():
+      if self.is_supervisor_node is None and plg.cfg_supervisor:
+        self.P("Running as SUPERVISOR node", boxed=True, color='b')
+      self.is_supervisor_node = plg.cfg_supervisor
+      self.shmem['is_supervisor_node'] = self.is_supervisor_node
+      self.__netmon_instance = plg
+    # end setup special plugins area
+    return
+    
 
   def get_active_plugins_instances(self, as_dict=True):
     active = []
@@ -74,13 +85,8 @@ class BusinessManager(Manager):
       sid, sign, iid, apr, it, et, lct, fet, let, owh, cei, cpi, lpt, tpc = [None] * 14
       info = None
       
-      # setup special plugins area
-      if plg._signature.upper() == ct.ADMIN_PIPELINE_NETMON.upper():
-        self.is_supervisor_node = plg.cfg_supervisor
-        self.shmem['is_supervisor_node'] = self.is_supervisor_node
-        self.__netmon_instance = plg
-      # end setup special plugins area
-      
+      self.maybe_toggle_supervisor_node(plg)
+
       try:
         # this section MUST be protected as it will call plugin code
         sid = plg._stream_id
@@ -272,6 +278,7 @@ class BusinessManager(Manager):
             pipelines_view_function=self.owner.get_pipelines_view,
             pipeline_use_local_comms_only=self._dct_config_streams[stream_name].get(ct.CONFIG_STREAM.K_USE_LOCAL_COMMS_ONLY, False),
           )
+          self.maybe_toggle_supervisor_node(plugin)
           self.set_loop_stage('2.bm.refresh.new_instance_done: {}:{}:{}'.format(stream_name, signature, instance_id))
         except Exception as exc:
           plugin = None

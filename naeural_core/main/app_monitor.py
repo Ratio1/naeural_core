@@ -605,6 +605,7 @@ class ApplicationMonitor(DecentrAIObject):
     hb_contains_pipelines = self.owner.cfg_hb_contains_pipelines
     hb_contains_active_plugins = self.owner.cfg_hb_contains_active_plugins
     
+    # The following is required to update the internal state of the business manager
     _active_plugin = self.owner.business_manager.get_active_plugins_instances(
         as_dict=True # send business plugin instances info as objects (NOT as lists)
       ) # this call is REQUIRED for internal state update

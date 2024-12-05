@@ -382,6 +382,8 @@ class BasePluginExecutor(
     self._signature_hash = None
     self._threaded_execution_chain = threaded_execution_chain
     self._timers_section = None
+    
+    self._init_process_finalized = False
 
     self._instance_config = None
     
@@ -394,6 +396,7 @@ class BasePluginExecutor(
     )
 
     # error handling vars
+      
 
     self._last_data_input = time()  # last time the loop encountered data
     self._last_alert_on_no_data = time()
@@ -1242,6 +1245,29 @@ class BasePluginExecutor(
   def stop_timer(self, tmr_id, skip_first_timing=False, periodic=False):
     self.end_timer(tmr_id=tmr_id, skip_first_timing=skip_first_timing, periodic=periodic)
     return
+  
+
+  def __on_config(self):
+    """
+    Called when the instance has just been reconfigured
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None.
+
+    """
+    self._on_config()
+    if not self._init_process_finalized and not self.cfg_disabled :
+      self.P("Plugin was disabled initially. Running initialization.")
+      self._on_init()
+      self._init_process_finalized = True
+    #endif
+    return
+    
 
   def maybe_update_instance_config(self, upstream_config, session_id=None, modified_by_addr=None, modified_by_id=None):
     """
@@ -1324,7 +1350,7 @@ class BasePluginExecutor(
       # call on-config handler
       self.__set_loop_stage(s='maybe_update_instance_config._on_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
-      self._on_config()
+      self.__on_config()
       # resume loop
       self.__set_loop_stage(s='maybe_update_instance_config.reset_exec_counter_after_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))

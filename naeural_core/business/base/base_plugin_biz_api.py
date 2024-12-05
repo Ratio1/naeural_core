@@ -179,5 +179,7 @@ class _BasePluginAPIMixin:
 
     """
     self.P("Default plugin {} `_on_config` called...".format(self.__class__.__name__))
+    if hasattr(self, 'on_config'):
+      self.on_config()
     return
   

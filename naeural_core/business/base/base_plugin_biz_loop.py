@@ -389,9 +389,11 @@ class _BasePluginLoopMixin(object):
     self.P("Running build-in & custom on_init events...")
     if self.cfg_disabled:
       self.P(f"WARNING: This plugin instance of `{self.__class__.__name__}` is DISABLED", boxed=True, color='r')
+      return
     if self.cfg_dataset_builder:
       self.P(f"WARNING: Dataset builder active for `{self.__class__.__name__}`", boxed=True, color='r')      
     self._on_init()
+    self._init_process_finalized = True
     return
   
 

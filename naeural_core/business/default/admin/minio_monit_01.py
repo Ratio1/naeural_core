@@ -30,7 +30,7 @@ _CONFIG = {
   
   'PROCESS_DELAY'       : 5,
   
-  'MINIO_IDLE_SECONDS'  : 600,
+  'MINIO_IDLE_SECONDS'  : 7200, # total idle time after full inspection of all buckets
   
   'MAX_FILES_PER_ITER'  : 2_000,
 
@@ -345,11 +345,10 @@ class MinioMonit01Plugin(BasePluginExecutor):
         )
 
       if self.__errors_during_iteration > 0:
-        self.__minio_idle_wait_time = 10
+        self.__minio_idle_wait_time = self.cfg_minio_idle_seconds // 2
         self.P("Errors during iteration: {}, lowering idle time to {}s".format(
           self.__errors_during_iteration, self.__minio_idle_wait_time), color='r'
         )
-        self.__minio_idle_wait_time = 10
       else:
         self.__minio_idle_wait_time = self.cfg_minio_idle_seconds
       #endif time check

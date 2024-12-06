@@ -421,14 +421,13 @@ class ConfigManager(
     pipeline_name = self.admin_pipeline_name
     self.P("Setting-up admin jobs pipeline...")  
     # we setup the default admin pipeline type and params  
-    defualt_admin_pipeline_setup = {
+    default_admin_pipeline_setup = {
       ct.CONFIG_STREAM.K_NAME     : self.admin_pipeline_name,
       ct.CONFIG_STREAM.K_TYPE     : ct.CONFIG_STREAM.DEFAULT_ADMIN_PIPELINE_TYPE,
-      
-      
+            
       ct.CONFIG_STREAM.PIPELINE_OPTIONS.NETWORK_LISTENER_PATH_FILTER : [
         None, None, 
-        ["UPDATE_MONITOR_01", "NET_MON_01"],
+        ["UPDATE_MONITOR_01", "NET_MON_01", "NET_CONFIG_MONITOR"], # move to consts
         None
       ],
       ct.CONFIG_STREAM.PIPELINE_OPTIONS.NETWORK_LISTENER_MESSAGE_FILTER : {},
@@ -436,7 +435,7 @@ class ConfigManager(
     }
     # we setup the default admin pipeline
     default_admin_pipeline = {
-      **defualt_admin_pipeline_setup,
+      **default_admin_pipeline_setup,
       ct.CONFIG_STREAM.K_PLUGINS  : [
         # no plugins in the default admin pipeline - will be added later based on the template
         ],
@@ -471,6 +470,9 @@ class ConfigManager(
       needs_save = True # save the new admin pipeline
       self.P("  No admin pipleine found. Added administration pipeline")
     else:
+      admin_pipeline_dct_filter = dct_current_admin.get(ct.CONFIG_STREAM.PIPELINE_OPTIONS.NETWORK_LISTENER_PATH_FILTER, [])
+      if admin_pipeline_dct_filter != default_admin_pipeline_setup[ct.CONFIG_STREAM.PIPELINE_OPTIONS.NETWORK_LISTENER_PATH_FILTER]:
+        needs_save = True
       admin_pipeline_type = dct_current_admin.get(ct.CONFIG_STREAM.K_TYPE, None)
       # pipeline found - check if all mandatory plugins are present
       lst_current_signatures = [x[ct.PLUGIN_INFO.SIGNATURE] for x in dct_current_admin[ct.CONFIG_STREAM.K_PLUGINS]]
@@ -521,7 +523,7 @@ class ConfigManager(
       # we make sure we respect the default configuration
       dct_current_admin = {
         **dct_current_admin,
-        **defualt_admin_pipeline_setup, # we add the default type, etc
+        **default_admin_pipeline_setup, # we add the default type, etc
       }
       self.dct_config_streams[pipeline_name] = dct_current_admin # update the admin pipeline in the memory cache      
       self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(dct_current_admin, indent=2)))

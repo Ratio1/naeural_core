@@ -531,7 +531,8 @@ class _DataAPIMixin(object):
       else:
         result = dct_idx_to_struct_data
 
-      return dct_idx_to_struct_data
+      return result
+
 
     def dataapi_specific_struct_data(self, idx=0, full=False, raise_if_error=False):
       """

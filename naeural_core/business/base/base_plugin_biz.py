@@ -1587,6 +1587,52 @@ class BasePluginExecutor(
       payload = self._create_payload(**kwargs)
       self.add_payload(payload)
       return
+    
+    def send_encrypted_payload(self, node_addr, **kwargs):
+      """
+      Sends an encrypted payload to a specific node address
+
+      Parameters
+      ----------
+      node_addr : str
+        The node address to send the payload to
+        
+      **kwargs : dict
+        The payload fields to send
+
+      Returns
+      -------
+      None.
+
+      """
+      payload = {
+        **kwargs,
+        self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED : True,    
+        self.const.PAYLOAD_DATA.EE_DESTINATION : node_addr,  
+      }
+      self.add_payload_by_fields(**payload)
+      return
+    
+    
+    def add_encrypted_payload_by_fields(self, node_addr, **kwargs):
+      """
+      Sends an encrypted payload to a specific node address. Alias for `send_encrypted_payload`
+
+      Parameters
+      ----------
+      node_addr : str
+        The node address to send the payload to
+        
+      **kwargs : dict
+        The payload fields to send
+
+      Returns
+      -------
+      None.
+      """      
+      self.send_encrypted_payload(node_addr=node_addr, **kwargs)
+      return
+    
 
     def create_and_send_payload(self, **kwargs):
       """

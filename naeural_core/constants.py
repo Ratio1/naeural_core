@@ -3,6 +3,7 @@ from naeural_client.const import (
   COMMANDS,
   STATUS_TYPE,
   PAYLOAD_DATA,
+  NET_CONFIG,
   CONFIG_STREAM,
   BIZ_PLUGIN_DATA,
   PLUGIN_INFO,

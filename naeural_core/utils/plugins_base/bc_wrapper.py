@@ -179,6 +179,24 @@ class BCWrapper:
     """
     return self.maybe_remove_addr_prefix(address)
   
+  
+  def maybe_add_prefix(self, address: str):
+    """
+    Adds the prefix to the address
+    
+    Parameters
+    ----------
+    
+    address: str
+        The address to add the prefix to
+
+    Returns
+    -------
+    str
+        The address with the prefix
+    """
+    return self.__bc._add_prefix(address)
+  
 
 
 ### EVM

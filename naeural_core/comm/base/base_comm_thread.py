@@ -597,7 +597,7 @@ class BaseCommThread(
     )
     
     ee_encrypted_payload = bool(ee_encrypted_payload) or self.cfg_encrypted_comms
-    destination_addr = dct_output.get(ct.PAYLOAD_DATA.EE_DESTINATION)
+    destination_addr = dct_original.get(ct.PAYLOAD_DATA.EE_DESTINATION)
     destination_id = None
     
     ee_id = dct_original.get(ct.EE_ID, None)

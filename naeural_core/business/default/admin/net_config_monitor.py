@@ -32,11 +32,17 @@ __VER__ = '1.1.0'
 _CONFIG = {
   
   **BasePlugin.CONFIG,
+  
   'ALLOW_EMPTY_INPUTS' : True,
+  
   'PLUGIN_LOOP_RESOLUTION' : 50, # we force this to be 50 Hz from the standard 20 Hz  
   'MAX_INPUTS_QUEUE_SIZE' : 128, # increase the queue size to 128 from std 1
   
-  'VERBOSE_NETCONFIG_LOGS' : True,
+
+  # DEBUGGING
+  "FULL_DEBUG_PAYLOADS" : False,     
+  "VERBOSE_NETCONFIG_LOGS" : False, 
+  # END DEBUGGING
   
   'PROCESS_DELAY' : 0,
   
@@ -54,9 +60,12 @@ _CONFIG = {
 }
 
 class NetConfigMonitorPlugin(BasePlugin):
+  CONFIG = _CONFIG
   
   
   def on_init(self):
+    super().on_init() # this is mandatory
+    
     self.P("Network peer config watch demo initializing...")
     self.__last_data_time = 0
     self.__new_nodes_this_iter = 0
@@ -147,33 +156,38 @@ class NetConfigMonitorPlugin(BasePlugin):
   
   
   def __send_get_cfg(self, node_addr):
+    node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
     node_ee_id = self.netmon.network_node_eeid(node_addr)
     if self.cfg_verbose_netconfig_logs:
-      self.P(f"Sending GET_PIPELINES to <{node_addr}> '{node_ee_id}'...")    
-    data = {
-      "OP" : "GET_CONFIG",
-      "DEST" : node_addr,
+      self.P(f"Sending {self.const.NET_CONFIG.REQUEST_COMMAND} to '{node_ee_id}' <{node_addr}>...")    
+    payload = {
+      self.const.NET_CONFIG.NET_CONFIG_DATA : {
+        self.const.NET_CONFIG.OPERATION   : self.const.NET_CONFIG.REQUEST_COMMAND,
+        self.const.NET_CONFIG.DESTINATION : node_addr,
+      },
     }
-    self.add_payload_by_fields(
-      net_config_data=data,
-      ee_is_encrypted=True,    
-      ee_destination=node_addr,  
+    self.send_encrypted_payload(
+      node_addr=node_addr,
+      **payload
     )
     return
   
   
   def __send_set_cfg(self, node_addr):
+    node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
     my_pipelines = self.node_pipelines
-    self.P(f"Sending {len(my_pipelines)} pipelines req by '{self.modified_by_id}' <{self.modified_by_addr}>...")
-    data = {
-      "OP" : "SET_CONFIG",
-      "DEST" : node_addr,
-      "DATA" : my_pipelines,
-    }    
-    self.add_payload_by_fields(
-      net_config_data=data,
-      ee_is_encrypted=True,  
-      ee_destination=node_addr,    
+    ee_id = self.netmon.network_node_eeid(node_addr)
+    self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} pipelines req by '{ee_id}' <{node_addr}>...")
+    payload = {
+      self.const.NET_CONFIG.NET_CONFIG_DATA : {
+        self.const.NET_CONFIG.OPERATION : self.const.NET_CONFIG.STORE_COMMAND,
+        self.const.NET_CONFIG.DESTINATION : node_addr,
+        "DATA" : my_pipelines,
+      }
+    }
+    self.send_encrypted_payload(
+      node_addr=node_addr,
+      **payload
     )
     return    
 
@@ -213,12 +227,20 @@ class NetConfigMonitorPlugin(BasePlugin):
 
   
   def on_payload_net_config_monitor(self, payload: dict):
+    sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     receiver = payload.get(self.const.PAYLOAD_DATA.EE_DESTINATION, None)
     
     if receiver != self.ee_addr:
       if self.cfg_verbose_netconfig_logs:
-        self.P(f"Received payload for '{receiver}' but I am '{self.ee_addr}'. Ignoring.", color='r')
+        payload_path = payload.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
+        is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
+        self.P("Received {}payload for <{}> but I am <{}>: {}'".format(
+        "ENCRYPTED " if is_encrypted else "", receiver, self.ee_addr, payload_path), color='r'
+        )
       return
+    else:
+      if self.cfg_verbose_netconfig_logs:
+        self.P(f"Received request from <{sender}>")
     
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     sender_no_prefix = self.bc.maybe_remove_prefix(sender)
@@ -231,18 +253,18 @@ class NetConfigMonitorPlugin(BasePlugin):
         net_config_data = decrypted_data.get("NET_CONFIG_DATA", {})
         op = net_config_data.get("OP", "UNKNOWN")
         # now we can process the data based on the operation
-        if op == "SET_CONFIG":
+        if op == self.STORE_COMMAND:
           if self.cfg_verbose_netconfig_logs:            
-            self.P(f"Received SET_CONFIG data from '{sender_id}' <{sender}'.")
+            self.P(f"Received {self.STORE_COMMAND} data from '{sender_id}' <{sender}'.")
           received_pipelines = net_config_data.get("DATA", [])    
           # process in local cache
           self.__allowed_nodes[sender_no_prefix]["pipelines"] = received_pipelines
           # now we can add the pipelines to the netmon cache
           self.netmon.register_node_pipelines(addr=sender_no_prefix, pipelines=received_pipelines)
         #finished SET_CONFIG
-        elif op == "GET_CONFIG":
+        elif op == self.REQUEST_COMMAND:
           if self.cfg_verbose_netconfig_logs:
-            self.P(f"Received GET_CONFIG data from '{sender_id}' <{sender}'.")
+            self.P(f"Received {self.REQUEST_COMMAND} data from '{sender_id}' <{sender}'.")
           self.__send_set_cfg(sender)
         #finished GET_CONFIG
         #endif ops

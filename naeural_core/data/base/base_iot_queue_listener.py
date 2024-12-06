@@ -13,6 +13,10 @@ _CONFIG = {
 
   'CAP_RESOLUTION'  : 50, # overwrite default cap resolution - we should iterate faster on IoT data
   'LIVE_FEED'       : False,  
+  
+  'MAX_IDLE_TIME'   : 60,  
+  
+  'DEBUG_IOT_PAYLOADS' : False,
 
   'RECONNECTABLE': True,
   'ONE_AT_A_TIME': False,
@@ -308,6 +312,8 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
           if not isinstance(_path_filter, list):
             _path_filter = [_path_filter]
           if path[i] not in _path_filter:
+            if self.cfg_debug_iot_payloads:
+              self.P(f"Path filter {path_filter} dropped {path}")
             result = None
             break
     return result

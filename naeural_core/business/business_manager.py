@@ -1,5 +1,6 @@
 import json
 import gc
+import os
 
 import traceback
 
@@ -20,7 +21,8 @@ class BusinessManager(Manager):
     self.owner = owner
     self.__netmon_instance = None
     self._dct_config_streams = None
-    self.is_supervisor_node = None
+    self.is_supervisor_node = self._str_to_bool(os.environ.get('EE_SUPERVISOR', False)) 
+    self.__first_supervisor_check_done = False
     self.comm_shared_memory = {
       'payloads' : {},
       'commands' : {},
@@ -42,6 +44,19 @@ class BusinessManager(Manager):
     self._graceful_stop_instances = defaultdict(lambda: 0)
     super(BusinessManager, self).__init__(log=log, prefix_log='[BIZM]', **kwargs)
     return
+  
+  def _str_to_bool(self, s):
+    result = False
+    if isinstance(s, bool):
+      result = s
+    if s is None:
+      result = False
+    if isinstance(s, int):
+      result = bool(s)
+    if isinstance(s, str):
+      s = s.lower()
+      result = s == 'true'
+    return result
 
   def startup(self):
     super().startup()
@@ -66,9 +81,10 @@ class BusinessManager(Manager):
   def maybe_toggle_supervisor_node(self, plg):
     # setup special plugins area
     if plg._signature.upper() == ct.ADMIN_PIPELINE_NETMON.upper():
-      if self.is_supervisor_node is None and plg.cfg_supervisor:
-        self.P("Running as SUPERVISOR node", boxed=True, color='b')
-      self.is_supervisor_node = plg.cfg_supervisor
+      if not self.__first_supervisor_check_done and plg.cfg_supervisor:
+        self.P("Running as SUPERVISOR node", boxed=True)
+        self.__first_supervisor_check_done = True
+      self.is_supervisor_node = self._str_to_bool(plg.cfg_supervisor)
       self.shmem['is_supervisor_node'] = self.is_supervisor_node
       self.__netmon_instance = plg
     # end setup special plugins area

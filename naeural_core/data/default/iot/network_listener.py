@@ -15,6 +15,9 @@ _CONFIG = {
   'STREAM_WINDOW'   : 1,
   'ONE_AT_A_TIME'   : True,
   
+  'DEBUG_IOT_PAYLOADS' : False,
+  
+  
 
 
   'VALIDATION_RULES': {
@@ -28,4 +31,9 @@ class NetworkListenerDataCapture(IoTQueueListenerDataCapture):
 
   def __init__(self, **kwargs):
     super(NetworkListenerDataCapture, self).__init__(**kwargs)
+    return
+  
+  def _init(self):
+    super(NetworkListenerDataCapture, self)._init()
+    self.P(f"Initializing Network Listener DCT with filter {self.cfg_path_filter} and message filter {self.cfg_message_filter}")
     return

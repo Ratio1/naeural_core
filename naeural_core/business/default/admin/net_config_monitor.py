@@ -150,12 +150,11 @@ class NetConfigMonitorPlugin(BasePlugin):
         eeid = self.netmon.network_node_eeid(addr)
         pipelines = self.__allowed_nodes[addr].get("pipelines", [])
         names = [p.get("NAME", "NONAME") for p in pipelines]
-        extra = ""
+        me_msg = ""
         if addr == self.ee_addr:
           pipelines = self.node_pipelines
-          extra += " (ME)"
-        msg += f"\n  - '{eeid}' <{addr}> has {len(pipelines)} pipelines: {names}"
-        msg += extra
+          me_msg = " (ME)"
+        msg += f"\n  - '{eeid}' <{addr}>{me_msg} has {len(pipelines)} pipelines: {names}"
       #endfor __allowed_nodes    
     self.P(msg)
     return

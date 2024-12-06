@@ -253,18 +253,18 @@ class NetConfigMonitorPlugin(BasePlugin):
         net_config_data = decrypted_data.get("NET_CONFIG_DATA", {})
         op = net_config_data.get("OP", "UNKNOWN")
         # now we can process the data based on the operation
-        if op == self.STORE_COMMAND:
+        if op == self.const.NET_CONFIG.STORE_COMMAND:
           if self.cfg_verbose_netconfig_logs:            
-            self.P(f"Received {self.STORE_COMMAND} data from '{sender_id}' <{sender}'.")
+            self.P(f"Received {self.const.NET_CONFIG.STORE_COMMAND} data from '{sender_id}' <{sender}'.")
           received_pipelines = net_config_data.get("DATA", [])    
           # process in local cache
           self.__allowed_nodes[sender_no_prefix]["pipelines"] = received_pipelines
           # now we can add the pipelines to the netmon cache
           self.netmon.register_node_pipelines(addr=sender_no_prefix, pipelines=received_pipelines)
         #finished SET_CONFIG
-        elif op == self.REQUEST_COMMAND:
+        elif op == self.const.NET_CONFIG.REQUEST_COMMAND:
           if self.cfg_verbose_netconfig_logs:
-            self.P(f"Received {self.REQUEST_COMMAND} data from '{sender_id}' <{sender}'.")
+            self.P(f"Received {self.const.NET_CONFIG.REQUEST_COMMAND} data from '{sender_id}' <{sender}'.")
           self.__send_set_cfg(sender)
         #finished GET_CONFIG
         #endif ops

@@ -182,7 +182,8 @@ class NetConfigMonitorPlugin(BasePlugin):
     node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
     my_pipelines = self.node_pipelines
     ee_id = self.netmon.network_node_eeid(node_addr)
-    self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{ee_id}' <{node_addr}>...")
+    if self.cfg_verbose_netconfig_logs:
+      self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{ee_id}' <{node_addr}>...")
     payload = {
       self.const.NET_CONFIG.NET_CONFIG_DATA : {
         self.const.NET_CONFIG.OPERATION : self.const.NET_CONFIG.STORE_COMMAND,

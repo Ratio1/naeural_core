@@ -233,7 +233,7 @@ class NetConfigMonitorPlugin(BasePlugin):
   
   def __check_allowed_request(self, node_addr):
     allowed_list = self.bc.get_whitelist()
-    node_addr = self.bc.maybe_add_prefix(node_addr)
+    node_addr = self.bc.maybe_remove_addr_prefix(node_addr)
     result = True
     if node_addr not in allowed_list:
       result = False

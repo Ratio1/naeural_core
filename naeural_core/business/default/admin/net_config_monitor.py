@@ -257,7 +257,6 @@ class NetConfigMonitorPlugin(BasePlugin):
       if self.cfg_verbose_netconfig_logs:
         self.P(f"Received request from <{sender}>")
     
-    sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     sender_no_prefix = self.bc.maybe_remove_prefix(sender)
     sender_id = self.netmon.network_node_eeid(sender_no_prefix)
     is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)

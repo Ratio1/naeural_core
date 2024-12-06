@@ -134,7 +134,7 @@ class BCWrapper:
   
   def get_whitelist(self):
     """
-    Returns the whitelist of the current node
+    Returns the list of nodes that are allowed to connect to the current node
 
     Returns
     -------
@@ -142,6 +142,18 @@ class BCWrapper:
         The list of addresses that are whitelisted
     """
     return self.__bc.whitelist
+  
+  
+  def get_allowed_nodes(self):
+    """
+    Returns the list of nodes that are allowed to connect to the current node. Alias of `get_whitelist`
+
+    Returns
+    -------
+    list
+        The list of addresses that are allowed to connect
+    """
+    return self.get_whitelist()
   
   
   def maybe_remove_addr_prefix(self, address: str):

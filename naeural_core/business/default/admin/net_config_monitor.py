@@ -146,10 +146,15 @@ class NetConfigMonitorPlugin(BasePlugin):
       msg += "\n=== No allowed nodes to show ==="
     else:
       for addr in self.__allowed_nodes:
+        addr = self.bc.maybe_add_prefix(addr)
         eeid = self.netmon.network_node_eeid(addr)
         pipelines = self.__allowed_nodes[addr].get("pipelines", [])
         names = [p.get("NAME", "NONAME") for p in pipelines]
-        msg += f"\n  - '{eeid}' <{addr}> has {len(pipelines)} pipelines: {names}"
+        me_msg = ""
+        if addr == self.ee_addr:
+          pipelines = self.node_pipelines
+          me_msg = " (ME)"
+        msg += f"\n  - '{eeid}' <{addr}>{me_msg} has {len(pipelines)} pipelines: {names}"
       #endfor __allowed_nodes    
     self.P(msg)
     return
@@ -177,7 +182,8 @@ class NetConfigMonitorPlugin(BasePlugin):
     node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
     my_pipelines = self.node_pipelines
     ee_id = self.netmon.network_node_eeid(node_addr)
-    self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} pipelines req by '{ee_id}' <{node_addr}>...")
+    if self.cfg_verbose_netconfig_logs:
+      self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{ee_id}' <{node_addr}>...")
     payload = {
       self.const.NET_CONFIG.NET_CONFIG_DATA : {
         self.const.NET_CONFIG.OPERATION : self.const.NET_CONFIG.STORE_COMMAND,
@@ -224,6 +230,15 @@ class NetConfigMonitorPlugin(BasePlugin):
     #endif time to send
     return
   
+  
+  def __check_allowed_request(self, node_addr):
+    allowed_list = self.bc.get_whitelist()
+    node_addr = self.bc.maybe_remove_addr_prefix(node_addr)
+    result = True
+    if node_addr not in allowed_list:
+      result = False
+    return result
+  
 
   
   def on_payload_net_config_monitor(self, payload: dict):
@@ -242,7 +257,6 @@ class NetConfigMonitorPlugin(BasePlugin):
       if self.cfg_verbose_netconfig_logs:
         self.P(f"Received request from <{sender}>")
     
-    sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     sender_no_prefix = self.bc.maybe_remove_prefix(sender)
     sender_id = self.netmon.network_node_eeid(sender_no_prefix)
     is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
@@ -262,10 +276,20 @@ class NetConfigMonitorPlugin(BasePlugin):
           # now we can add the pipelines to the netmon cache
           self.netmon.register_node_pipelines(addr=sender_no_prefix, pipelines=received_pipelines)
         #finished SET_CONFIG
+        
         elif op == self.const.NET_CONFIG.REQUEST_COMMAND:
           if self.cfg_verbose_netconfig_logs:
             self.P(f"Received {self.const.NET_CONFIG.REQUEST_COMMAND} data from '{sender_id}' <{sender}'.")
-          self.__send_set_cfg(sender)
+          ###
+          ### At this point we can check if the sender is allowed to request our pipelines
+          ### While this is handled naturally by the comms for the normal commands in this
+          ### case we need to check the whitelist directly.
+          ###
+          if self.__check_allowed_request(sender_no_prefix):
+            self.__send_set_cfg(sender)
+          else:
+            if self.cfg_verbose_netconfig_logs:
+              self.P(f"Node '{sender_id}' <{sender}> is not allowed to request my pipelines.")
         #finished GET_CONFIG
         #endif ops
     else:

@@ -281,6 +281,11 @@ class NetConfigMonitorPlugin(BasePlugin):
         elif op == self.const.NET_CONFIG.REQUEST_COMMAND:
           if self.cfg_verbose_netconfig_logs:
             self.P(f"Received {self.const.NET_CONFIG.REQUEST_COMMAND} data from '{sender_id}' <{sender}'.")
+          ###
+          ### At this point we can check if the sender is allowed to request our pipelines
+          ### While this is handled naturally by the comms for the normal commands in this
+          ### case we need to check the whitelist directly.
+          ###
           if self.__check_allowed_request(sender_no_prefix):
             self.__send_set_cfg(sender)
           else:

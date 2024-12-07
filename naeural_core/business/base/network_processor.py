@@ -25,7 +25,7 @@ class NetworkProcessorPlugin(BaseClass):
   CONFIG = _CONFIG
   
 
-  def on_init(self):
+  def _on_init(self):
     self.__non_dicts = 0
     self.__handlers = {}
     # we get all the functions that start with on_payload_
@@ -39,7 +39,9 @@ class NetworkProcessorPlugin(BaseClass):
     else:
       self.P("Payload handlers found for: {}".format(list(self.__handlers.keys())), color="green")
     self._network_processor_initialized = True
-    self.P("NetworkProcessorPlugin v{} initialization completed.".format(__VER__), color="green")
+    
+    self.P("NetworkProcessorPlugin v{} base initialization completed. Proceeding to custom init...".format(__VER__), color="green")
+    self.on_init()
     return
   
   def maybe_check_initialized(self):

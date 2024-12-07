@@ -63,10 +63,8 @@ class NetConfigMonitorPlugin(BasePlugin):
   CONFIG = _CONFIG
   
   
-  def on_init(self):
-    super().on_init() # this is mandatory
-    
-    self.P("Network peer config watch demo initializing...")
+  def on_init(self):   
+    self.P("Network fleet peer configuration monitor initializing...")
     self.__last_data_time = 0
     self.__new_nodes_this_iter = 0
     self.__last_shown = 0

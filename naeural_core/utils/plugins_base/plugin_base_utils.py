@@ -1818,12 +1818,16 @@ class _UtilsBaseMixin(
   def receive_and_decrypt_payload(self, data, verbose=0):
     """
     Method for receiving and decrypting a payload addressed to us.
+    
     Parameters
     ----------
     data : dict
         The payload to be decrypted.
+        
     verbose : int, optional
         The verbosity level. The default is 0.
+        
+        
     Returns
     -------
     dict
@@ -1841,6 +1845,7 @@ class _UtilsBaseMixin(
       dest = data.get(self.const.PAYLOAD_DATA.EE_DESTINATION, [])
       if not isinstance(dest, list):
         dest = [dest]
+      # now we check if the data is addressed to us
       if self.e2_addr not in dest:
         # TODO: maybe still return the encrypted data for logging purposes
         if verbose > 0:
@@ -1863,6 +1868,7 @@ class _UtilsBaseMixin(
         # endif verbose
         decrypted_data = None
       # endtry decryption
+      
       if decrypted_data is not None:
         # If the decrypted data is not a dictionary, we embed it in a dictionary.
         # TODO: maybe review this part

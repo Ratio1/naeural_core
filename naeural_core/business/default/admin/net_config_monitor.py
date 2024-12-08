@@ -259,7 +259,7 @@ class NetConfigMonitorPlugin(BasePlugin):
     is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
 
     if is_encrypted:
-      decrypted_data = self.check_payload_data(payload)
+      decrypted_data = self.receive_and_decrypt_payload(data=payload)
       if decrypted_data is not None:
         net_config_data = decrypted_data.get("NET_CONFIG_DATA", {})
         op = net_config_data.get("OP", "UNKNOWN")

@@ -598,7 +598,7 @@ class BaseCommThread(
     
     ee_encrypted_payload = bool(ee_encrypted_payload) or self.cfg_encrypted_comms
     destination_addr = dct_original.get(ct.PAYLOAD_DATA.EE_DESTINATION)
-    destination_id = None
+    destination_id = dct_original.get(ct.PAYLOAD_DATA.EE_DESTINATION_ID) # only for logging atm
     
     ee_id = dct_original.get(ct.EE_ID, None)
     session_id = dct_original.get(ct.PAYLOAD_DATA.SESSION_ID, None)
@@ -677,9 +677,7 @@ class BaseCommThread(
       str_data = self.log.safe_json_dumps(dct_outgoing, ensure_ascii=False)
       str_enc_data = self.bc_engine.encrypt(
         plaintext=str_data,
-        receiver_address=destination_addr,
-        #compressed=True, # default is True
-        #embed_compressed=True, # default is True - data will be 13:end instead of 12:end due to compression flag
+        receiver_address=destination_addr, # this can be a address or a list of addresses
       )
       dct_output[ct.PAYLOAD_DATA.EE_ENCRYPTED_DATA] = str_enc_data
       dct_output[ct.PAYLOAD_DATA.EE_IS_ENCRYPTED] = True

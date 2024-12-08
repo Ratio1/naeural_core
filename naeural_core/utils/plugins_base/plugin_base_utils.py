@@ -1814,23 +1814,20 @@ class _UtilsBaseMixin(
     """
     return self.log.match_template(dct2, dct1)
 
-  def check_payload_data(self, data, verbose=0):
+
+  def receive_and_decrypt_payload(self, data, verbose=0):
     """
-    # TODO: maybe add this to naeural_client Session, or move it to Logger.
-    Method for checking if a payload is addressed to us and decrypting it if necessary.
+    Method for receiving and decrypting a payload addressed to us.
     Parameters
     ----------
     data : dict
-        The payload data to be checked and maybe decrypted.
-
+        The payload to be decrypted.
     verbose : int, optional
         The verbosity level. The default is 0.
     Returns
     -------
     dict
-        The original payload data if not encrypted.
-        The decrypted payload data if encrypted and the payload was addressed to us.
-        None if the payload was encrypted but not addressed to us.
+        The decrypted payload addressed to us.
     """
     # Extract the sender, the data and if the data is encrypted.
     sender = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
@@ -1841,13 +1838,15 @@ class _UtilsBaseMixin(
 
     if is_encrypted and encrypted_data:
       # Extract the destination and check if the data is addressed to us.
-      dest = data.get(self.const.PAYLOAD_DATA.EE_DESTINATION, "")
-      if dest != self.e2_addr:
+      dest = data.get(self.const.PAYLOAD_DATA.EE_DESTINATION, [])
+      if not isinstance(dest, list):
+        dest = [dest]
+      if self.e2_addr not in dest:
         # TODO: maybe still return the encrypted data for logging purposes
         if verbose > 0:
           self.P(f"Payload data not addressed to us. Destination: {dest}. Ignoring.")
         # endif verbose
-        return None
+        return {}
       # endif destination check
 
       try:
@@ -1886,6 +1885,27 @@ class _UtilsBaseMixin(
       # endif decrypted_data is not None
     # endif is_encrypted
     return result
+
+
+  def check_payload_data(self, data, verbose=0):
+    """
+    Method for checking if a payload is addressed to us and decrypting it if necessary.
+    Parameters
+    ----------
+    data : dict
+        The payload data to be checked and maybe decrypted.
+
+    verbose : int, optional
+        The verbosity level. The default is 0.
+    Returns
+    -------
+    dict
+        The original payload data if not encrypted.
+        The decrypted payload data if encrypted and the payload was addressed to us.
+        None if the payload was encrypted but not addressed to us.
+    """
+    return self.receive_and_decrypt_payload(data=data, verbose=verbose)
+
 
 # endclass _UtilsBaseMixin
 

@@ -52,7 +52,7 @@ _CONFIG = {
   
   'SHOW_EACH' : 60,
   
-  'DEBUG_NETMON_COUNT' : 10,
+  'DEBUG_NETMON_COUNT' : 1,
   
   'VALIDATION_RULES' : {
     **BasePlugin.CONFIG['VALIDATION_RULES'],
@@ -144,12 +144,12 @@ class NetConfigMonitorPlugin(BasePlugin):
       msg += "\n=== No allowed nodes to show ==="
     else:
       for addr in self.__allowed_nodes:
-        addr = self.bc.maybe_add_prefix(addr)
+        prefixed_addr = self.bc.maybe_add_prefix(addr)
         eeid = self.netmon.network_node_eeid(addr)
         pipelines = self.__allowed_nodes[addr].get("pipelines", [])
         names = [p.get("NAME", "NONAME") for p in pipelines]
         me_msg = ""
-        if addr == self.ee_addr:
+        if prefixed_addr == self.ee_addr:
           pipelines = self.node_pipelines
           me_msg = " (ME)"
         msg += f"\n  - '{eeid}' <{addr}>{me_msg} has {len(pipelines)} pipelines: {names}"

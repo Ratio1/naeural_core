@@ -79,7 +79,7 @@ class BCWrapper:
     """
     return self.__bc.verify(dct_data=dct_data, signature=str_signature, sender_address=sender_address)
 
-  def encrypt_str(self, str_data : str, str_recipient : str, compress: bool = True):
+  def encrypt_str(self, str_data : str, str_recipient : str):
     """
     Encrypts a string using the public key of the recipient using asymmetric encryption
 
@@ -91,8 +91,9 @@ class BCWrapper:
     str_recipient : str
         the recipient's address (string) used as the public key
         
-    compress: bool, optional
-        whether to compress the data before encryption. Default `True`
+    OBSOLETE:
+      compress: bool, optional
+          whether to compress the data before encryption. Default `True`
 
     Returns
     -------
@@ -101,13 +102,13 @@ class BCWrapper:
     """
     encrypted_data = self.__bc.encrypt(
       plaintext=str_data, receiver_address=str_recipient,
-      compressed=compress, embed_compressed=True,
     )
     return encrypted_data
   
-  def decrypt_str(self, str_b64data : str, str_sender : str, embed_compressed: bool = True):
+  def decrypt_str(self, str_b64data : str, str_sender : str):
     """
-    Decrypts a base64 encoded string using the private key of the sender using asymmetric encryption
+    Decrypts a base64 encoded string using the private key of the sender using asymmetric encryption.
+    This method is able to decrypt data that was was encrypted for multiple recipients as well.
 
     Parameters
     ----------
@@ -117,8 +118,9 @@ class BCWrapper:
     str_sender : str
         The sender's address (string) used as the public key for decryption
         
-    embed_compressed: bool, optional
-        whether the compression flag is embedded in the data. Default `True`. Modify this only for special cases.
+    OBSOLETE:
+      embed_compressed: bool, optional
+          whether the compression flag is embedded in the data. Default `True`. Modify this only for special cases.
 
     Returns
     -------
@@ -127,12 +129,34 @@ class BCWrapper:
     """
     decompressed_data = self.__bc.decrypt(
       encrypted_data_b64=str_b64data, sender_address=str_sender,
-      embed_compressed=embed_compressed, 
     )
     return decompressed_data
   
   
-  def get_whitelist(self):
+  def encrypt_multi(self, str_data : str, lst_recipients : list):
+    """
+    Encrypts a string using the public key of the recipient using asymmetric encryption
+
+    Parameters
+    ----------
+    str_data : str
+        the data to be encrypted (string)
+        
+    lst_recipients : list
+        the list of recipient's addresses (string) used as the public keys
+
+    Returns
+    -------
+    str
+       the base64 encoded encrypted data
+    """
+    encrypted_data = self.__bc.encrypt_for_multi(
+      plaintext=str_data, receiver_addresses=lst_recipients,
+    )
+    return encrypted_data
+
+
+  def get_whitelist(self, with_prefix: bool = False):
     """
     Returns the list of nodes that are allowed to connect to the current node
 
@@ -141,10 +165,13 @@ class BCWrapper:
     list
         The list of addresses that are whitelisted
     """
-    return self.__bc.whitelist
-  
-  
-  def get_allowed_nodes(self):
+    lst_allowed = self.__bc.whitelist
+    if with_prefix:
+      lst_allowed = [self.maybe_add_prefix(addr) for addr in lst_allowed]
+    return lst_allowed
+
+
+  def get_allowed_nodes(self, with_prefix: bool = False):
     """
     Returns the list of nodes that are allowed to connect to the current node. Alias of `get_whitelist`
 
@@ -153,9 +180,9 @@ class BCWrapper:
     list
         The list of addresses that are allowed to connect
     """
-    return self.get_whitelist()
-  
-  
+    return self.get_whitelist(with_prefix=with_prefix)
+
+
   def maybe_remove_addr_prefix(self, address: str):
     """
     Removes the address prefix from the current node's address

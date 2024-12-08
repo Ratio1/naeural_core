@@ -169,10 +169,7 @@ class NetConfigMonitorPlugin(BasePlugin):
         self.const.NET_CONFIG.DESTINATION : node_addr,
       },
     }
-    self.send_encrypted_payload(
-      node_addr=node_addr,
-      **payload
-    )
+    self.send_encrypted_payload(node_addr=node_addr, **payload)
     return
   
   
@@ -242,8 +239,10 @@ class NetConfigMonitorPlugin(BasePlugin):
   def on_payload_net_config_monitor(self, payload: dict):
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     receiver = payload.get(self.const.PAYLOAD_DATA.EE_DESTINATION, None)
+    if not isinstance(receiver, list):
+      receiver = [receiver]
     
-    if receiver != self.ee_addr:
+    if self.ee_addr not in receiver:
       if self.cfg_verbose_netconfig_logs:
         payload_path = payload.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
         is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
@@ -260,7 +259,7 @@ class NetConfigMonitorPlugin(BasePlugin):
     is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
 
     if is_encrypted:
-      decrypted_data = self.check_payload_data(payload)
+      decrypted_data = self.receive_and_decrypt_payload(data=payload)
       if decrypted_data is not None:
         net_config_data = decrypted_data.get("NET_CONFIG_DATA", {})
         op = net_config_data.get("OP", "UNKNOWN")

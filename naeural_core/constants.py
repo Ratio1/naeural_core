@@ -17,6 +17,8 @@ from naeural_client.const import (
 
 BLOCKCHAIN_MANAGER = 'BLOCKCHAIN_MANAGER'
 
+ADMIN_PIPELINE_FILTER = ["UPDATE_MONITOR_01", "NET_MON_01", "NET_CONFIG_MONITOR", "CHAIN_STATE_BASE"]
+
 WHITELIST_COMMANDS_FILE = 'whitelist_commands.json'
 TEMPLATE_WHITELIST_COMMANDS = [
   # !! NetMon queries
@@ -110,11 +112,16 @@ ADMIN_PIPELINE = {
   "NET_CONFIG_MONITOR" : {
     "PROCESS_DELAY": 0,
   },
+  
+  "CHAIN_STATE_BASE" : {
+    "PROCESS_DELAY": 0,
+  },
 
   "NET_MON_01": {
     "PROCESS_DELAY": 20,
     "SUPERVISOR": False
   },
+  
 
   "UPDATE_MONITOR_01": {
     "PROCESS_DELAY": 120,

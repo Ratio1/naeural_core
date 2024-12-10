@@ -232,8 +232,8 @@ class _BasePluginAPIMixin:
   
   @property
   def _chainstorage(self): # TODO: hide/move/protect this
-    return self.plugins_shmem['__chain_storage']
-  
+    return self.plugins_shmem.get('__chain_storage')
+
   
   def get_instance_path(self):
     return [self.ee_id, self._stream_id, self._signature, self.cfg_instance_id]  

@@ -182,4 +182,64 @@ class _BasePluginAPIMixin:
     if hasattr(self, 'on_config'):
       self.on_config()
     return
+
+
+  ###
+  ### Chain State
+  ### 
   
+  def chainstore_set(self, key, value, debug=False):
+    result = False
+    try:
+      while self.plugins_shmem.get('__chain_storage_set') is None:
+        self.sleep(0.1)
+        # TODO: raise exception if not found after a while
+      func = self.plugins_shmem.get('__chain_storage_set')
+      if func is not None:
+        if debug:
+          self.P("Setting data: {} -> {}".format(key, value), color="green")
+        self.start_timer("chainstore_set")
+        result = func(key, value, debug=debug)
+        elapsed = self.end_timer("chainstore_set")        
+        if debug:
+          self.P(" ====> `chainstore_set` elapsed time: {:.6f}".format(elapsed), color="green")
+      else:
+        if debug:
+          self.P("No chain storage set function found", color="red")
+    except:
+      pass
+    return result
+  
+  
+  def chainstore_get(self, key, debug=False):
+    value = None
+    try:
+      while self.plugins_shmem.get('__chain_storage_get') is None:
+        self.sleep(0.1)
+        # TODO: raise exception if not found after a while
+      func = self.plugins_shmem.get('__chain_storage_get')
+      if func is not None:
+        value = func(key, debug=debug)
+        if debug:
+          self.P("Getting data: {} -> {}".format(key, value), color="green")
+      else:
+        if debug:
+          self.P("No chain storage get function found", color="red")
+    except:
+      pass
+    return value
+  
+  
+  @property
+  def _chainstorage(self): # TODO: hide/move/protect this
+    return self.plugins_shmem['__chain_storage']
+  
+  
+  def get_instance_path(self):
+    return [self.ee_id, self._stream_id, self._signature, self.cfg_instance_id]  
+  
+  ###
+  ### END Chain State
+  ###
+  
+    

@@ -48,7 +48,7 @@ _CONFIG = {
 
 __VER__ = '0.8.1'
 
-class ChainStateBasePlugin(BaseClass):
+class ChainStoreBasePlugin(BaseClass):
   CONFIG = _CONFIG
   
   CS_STORE = "SSTORE"
@@ -363,7 +363,7 @@ class ChainStateBasePlugin(BaseClass):
     return
 
 
-  def on_payload_chain_store_basic(self, payload):
+  def on_payload_chain_store_base(self, payload):
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     destination = payload.get(self.const.PAYLOAD_DATA.EE_DESTINATION, None)
     is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)

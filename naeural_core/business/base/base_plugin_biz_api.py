@@ -2,6 +2,8 @@
 class _BasePluginAPIMixin:
   def __init__(self) -> None:
     super(_BasePluginAPIMixin, self).__init__()
+    
+    self.__chain_state_initialized = False
     return
   
   # Obsolete
@@ -188,12 +190,21 @@ class _BasePluginAPIMixin:
   ### Chain State
   ### 
   
+  def __maybe_wait_for_chain_state_init(self):
+    # TODO: raise exception if not found after a while
+
+    while not self.plugins_shmem.get('__chain_storage_set'):
+      self.sleep(0.1)
+    
+    if not self.__chain_state_initialized:
+      self.P(" ==== Chain state initialized.")
+    self.__chain_state_initialized = True
+    return
+  
   def chainstore_set(self, key, value, debug=False):
     result = False
     try:
-      while self.plugins_shmem.get('__chain_storage_set') is None:
-        self.sleep(0.1)
-        # TODO: raise exception if not found after a while
+      self.__maybe_wait_for_chain_state_init()
       func = self.plugins_shmem.get('__chain_storage_set')
       if func is not None:
         if debug:
@@ -212,6 +223,7 @@ class _BasePluginAPIMixin:
   
   
   def chainstore_get(self, key, debug=False):
+    self.__maybe_wait_for_chain_state_init()
     value = None
     try:
       while self.plugins_shmem.get('__chain_storage_get') is None:
@@ -232,6 +244,7 @@ class _BasePluginAPIMixin:
   
   @property
   def _chainstorage(self): # TODO: hide/move/protect this
+    self.__maybe_wait_for_chain_state_init()
     return self.plugins_shmem.get('__chain_storage')
 
   

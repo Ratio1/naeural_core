@@ -24,15 +24,34 @@ __VER__ = '1.2.1'
 class NetworkProcessorPlugin(BaseClass):
   CONFIG = _CONFIG
   
+  
+  @staticmethod
+  def payload_handler(signature):
+    def decorator(f):
+      f.__payload_signature__ = signature
+      return f
+    return decorator
+  
 
   def _on_init(self):
     self.__non_dicts = 0
     self.__handlers = {}
     # we get all the functions that start with on_payload_
     for name in dir(self):
-      if name.startswith("on_payload_") and callable(getattr(self, name)):
-        signature = name.replace("on_payload_", "").upper()
-        self.__handlers[signature] = getattr(self, name)
+      if callable(getattr(self, name)):
+        func = getattr(self, name)
+        if name.startswith("on_payload_"):
+          signature = name.replace("on_payload_", "").upper()
+          self.__handlers[signature] = getattr(self, name)
+        # end if we have a on_payload_<signature>
+        if hasattr(func, "__payload_signature__"):
+          signature = func.__payload_signature__.upper()
+          if signature == "DEFAULT":
+            signature = self._signature.upper()
+          self.__handlers[signature] = getattr(self, name)
+        # end if we have a signature
+      # end if callable
+    # end for each name in dir
         
     if len(self.__handlers) == 0:
       self.P("No payload handlers found", color="red")

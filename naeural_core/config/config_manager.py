@@ -427,7 +427,7 @@ class ConfigManager(
             
       ct.CONFIG_STREAM.PIPELINE_OPTIONS.NETWORK_LISTENER_PATH_FILTER : [
         None, None, 
-        ["UPDATE_MONITOR_01", "NET_MON_01", "NET_CONFIG_MONITOR"], # move to consts
+        ct.ADMIN_PIPELINE_FILTER, # TODO: this should be dinaically created based on the plugins that use the DCT
         None
       ],
       ct.CONFIG_STREAM.PIPELINE_OPTIONS.NETWORK_LISTENER_MESSAGE_FILTER : {},

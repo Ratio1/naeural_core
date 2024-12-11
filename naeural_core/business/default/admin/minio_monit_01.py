@@ -28,11 +28,11 @@ _CONFIG = {
 
   'ALLOW_EMPTY_INPUTS'  : True,
   
-  'PROCESS_DELAY'       : 5,
+  'PROCESS_DELAY'       : 30,
   
   'MINIO_IDLE_SECONDS'  : 7200, # total idle time after full inspection of all buckets
   
-  'MAX_FILES_PER_ITER'  : 2_000,
+  'MAX_FILES_PER_ITER'  : 500,
 
   'ALERT_DATA_COUNT'    : 1,
   'ALERT_RAISE_VALUE'   : 0.8,

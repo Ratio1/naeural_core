@@ -362,7 +362,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         self.P(f" === LOCAL: Key {key} confirmed by {confirm_by}")
     return
 
-  @NetworkProcessorPlugin.payload_handler('default')
+  @NetworkProcessorPlugin.payload_handler()
   def default_handler(self, payload):
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     destination = payload.get(self.const.PAYLOAD_DATA.EE_DESTINATION, None)

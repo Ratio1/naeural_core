@@ -76,6 +76,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self.__last_pipelines = None
     self.__allowed_nodes = {} # contains addresses with no prefixes
     self.__debug_netmon_count = self.cfg_debug_netmon_count
+    self._get_active_plugins_instances = self.global_shmem.get("get_active_plugins_instances")
     return
   
   
@@ -202,12 +203,16 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     
     if self.cfg_verbose_netconfig_logs:
       self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{node_ee_id}' <{node_addr}>...")
+      
+    statuses = None
+    if self._get_active_plugins_instances is not None and callable(self._get_active_plugins_instances):
+      statuses = self._get_active_plugins_instances()
     payload = {
       self.const.NET_CONFIG.NET_CONFIG_DATA : {
         self.const.NET_CONFIG.OPERATION : self.const.NET_CONFIG.STORE_COMMAND,
         self.const.NET_CONFIG.DESTINATION : node_addr,
         self.CT_PIPELINE : my_pipelines,
-        self.CT_PLG_STATUSES : None # TODO: implement this
+        self.CT_PLG_STATUSES : statuses,
       }
     }
     self.send_encrypted_payload(

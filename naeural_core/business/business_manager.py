@@ -17,6 +17,7 @@ class BusinessManager(Manager):
 
   def __init__(self, log : Logger, owner, shmem, environment_variables=None, run_on_threads=True, **kwargs):
     self.shmem = shmem
+    self.shmem['get_active_plugins_instances'] = self.get_active_plugins_instances
     self.plugins_shmem = {}
     self.owner = owner
     self.__netmon_instance = None

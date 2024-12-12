@@ -26,7 +26,7 @@ class NetworkProcessorPlugin(BaseClass):
   
   
   @staticmethod
-  def payload_handler(signature):
+  def payload_handler(signature="DEFAULT"):
     def decorator(f):
       f.__payload_signature__ = signature
       return f
@@ -100,6 +100,7 @@ class NetworkProcessorPlugin(BaseClass):
           continue
         signature = payload_path[2]
         sender = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
+        signature = signature.upper()
         if signature in self.__handlers:
           if self.cfg_full_debug_payloads:
             self.P(f"RECV-{signature} <{sender}>: {payload_path}")

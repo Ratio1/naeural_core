@@ -25,10 +25,10 @@ TODO:
 """
 
 
-from naeural_core.business.base.network_processor import NetworkProcessorPlugin as BaseClass
+from naeural_core.business.base.network_processor import NetworkProcessorPlugin 
 
 _CONFIG = {
-  **BaseClass.CONFIG,
+  **NetworkProcessorPlugin.CONFIG,
   
   'ALLOW_EMPTY_INPUTS' : True,  
   "ACCEPT_SELF" : False,
@@ -42,13 +42,13 @@ _CONFIG = {
   "CHAIN_PEERS_REFRESH_INTERVAL" : 60,
 
   'VALIDATION_RULES' : { 
-    **BaseClass.CONFIG['VALIDATION_RULES'],
+    **NetworkProcessorPlugin.CONFIG['VALIDATION_RULES'],
   },  
 }
 
 __VER__ = '0.8.1'
 
-class ChainStoreBasePlugin(BaseClass):
+class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CONFIG = _CONFIG
   
   CS_STORE = "SSTORE"
@@ -362,8 +362,8 @@ class ChainStoreBasePlugin(BaseClass):
         self.P(f" === LOCAL: Key {key} confirmed by {confirm_by}")
     return
 
-
-  def on_payload_chain_store_base(self, payload):
+  @NetworkProcessorPlugin.payload_handler('default')
+  def default_handler(self, payload):
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     destination = payload.get(self.const.PAYLOAD_DATA.EE_DESTINATION, None)
     is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)

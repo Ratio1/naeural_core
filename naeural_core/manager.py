@@ -8,6 +8,7 @@ class Manager(DecentrAIObject, _PluginsManagerMixin):
 
   def __init__(self, log : Logger, **kwargs):
     self._dct_subalterns = {}
+    self.plugin_locations_cache = {}
     super(Manager, self).__init__(log=log, **kwargs)
     return
   
@@ -77,16 +78,22 @@ class Manager(DecentrAIObject, _PluginsManagerMixin):
     self.P("Attempting to load {} plugin '{}'".format(
       self.__class__.__name__, name,
     ))
-    _module_name, _class_name, _cls_def, _config_dict = super()._get_module_name_and_class(
-      locations=locations,
-      name=name,
-      suffix=suffix,
-      verbose=verbose,
-      safety_check=safety_check,
-      safe_locations=safe_locations,
-      search_in_packages=ct.PLUGIN_SEARCH.SEARCH_IN_PACKAGES,
-      safe_imports=safe_imports,
-    )
+    if name.lower() in self.plugin_locations_cache:
+      _module_name, _class_name, _cls_def, _config_dict = self.plugin_locations_cache[name.lower()]
+      self.P(f'Attempting to load plugin {name} from cache.')
+    else:
+      _module_name, _class_name, _cls_def, _config_dict = super()._get_module_name_and_class(
+        locations=locations,
+        name=name,
+        suffix=suffix,
+        verbose=verbose,
+        safety_check=safety_check,
+        safe_locations=safe_locations,
+        search_in_packages=ct.PLUGIN_SEARCH.SEARCH_IN_PACKAGES,
+        safe_imports=safe_imports,
+      )
+      self.plugin_locations_cache[name.lower()] = _module_name, _class_name, _cls_def, _config_dict
+    # endif name in cache
 
     if _cls_def is None and verbose >= 1:
       self._create_notification(

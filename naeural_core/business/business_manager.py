@@ -237,7 +237,7 @@ class BusinessManager(Manager):
           name=signature,
           suffix=ct.PLUGIN_SEARCH.SUFFIX_BIZ_PLUGINS,
           verbose=0,
-          safety_check=True, # perform safety check on custom biz plugins
+          safety_check=True,  # perform safety check on custom biz plugins
           safe_locations=ct.PLUGIN_SEARCH.SAFE_BIZ_PLUGINS,
           safe_imports=ct.PLUGIN_SEARCH.SAFE_BIZ_IMPORTS
         )

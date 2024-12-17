@@ -21,7 +21,7 @@ from naeural_core.config.config_manager_commands import ConfigCommandHandlers
 
 EXTENSION = '.json'
 
-CONST_ADMIN_PIPELINE = 'admin_pipeline'
+
 
 class ConfigManager(
   Manager, 
@@ -39,7 +39,7 @@ class ConfigManager(
     self.config_app = None
     self.owner = owner
     self.dct_config_streams = None
-    self.admin_pipeline_name = CONST_ADMIN_PIPELINE
+    self.admin_pipeline_name = ct.CONST_ADMIN_PIPELINE_NAME
 
     self._dct_retrievers = None
 
@@ -416,7 +416,7 @@ class ConfigManager(
   
   
   def maybe_setup_admin_pipeline(self):
-    ADMIN_PIPELINE_VER = "2.0.0"
+    ADMIN_PIPELINE_VER = "2.1.0"
     INSTANCE_STR = "{}_INST"
     pipeline_name = self.admin_pipeline_name
     self.P("Setting-up admin jobs pipeline...")  

@@ -24,14 +24,14 @@
 
 
 """
-from naeural_core.business.base.network_processor import NetworkProcessorPlugin as BasePlugin
+from naeural_core.business.base.network_processor import NetworkProcessorPlugin 
 
 
 __VER__ = '1.1.0'
 
 _CONFIG = {
   
-  **BasePlugin.CONFIG,
+  **NetworkProcessorPlugin.CONFIG,
   
   'ALLOW_EMPTY_INPUTS' : True,
   
@@ -46,21 +46,30 @@ _CONFIG = {
   
   'PROCESS_DELAY' : 0,
   
-  'SEND_EACH' : 10, # runs the send logc every 10 seconds
+  # each cfg_send_get_config_each seconds we will send requests to the nodes that allow 
+  # us to get their pipelines and that have not been requested in the last 
+  # cfg_node_request_configs_each seconds.
+  'SEND_GET_CONFIG_EACH' : 600, # runs the send request logic every 10 minutes
+  'NODE_REQUEST_CONFIGS_EACH' : 1200, # minimum time between requests to the same node
   
-  'REQUEST_CONFIGS_EACH' : 30, # minimum time between requests to the same node
+  # sent each cfg_send_to_allowed_each seconds the pipeline configuration to the allowed nodes
+  'SEND_TO_ALLOWED_EACH' : 600, # runs the send to allowed nodes logic every 10 minutes
+  
   
   'SHOW_EACH' : 60,
   
   'DEBUG_NETMON_COUNT' : 1,
   
   'VALIDATION_RULES' : {
-    **BasePlugin.CONFIG['VALIDATION_RULES'],
+    **NetworkProcessorPlugin.CONFIG['VALIDATION_RULES'],
   },
 }
 
-class NetConfigMonitorPlugin(BasePlugin):
+class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   CONFIG = _CONFIG
+  
+  CT_PIPELINE = "PIPELINES"
+  CT_PLG_STATUSES = "PLUGIN_STATUSES"
   
   
   def on_init(self):   
@@ -69,12 +78,17 @@ class NetConfigMonitorPlugin(BasePlugin):
     self.__new_nodes_this_iter = 0
     self.__last_shown = 0
     self.__recvs = self.defaultdict(int)
+    self.__initial_send = False
+    self.__last_pipelines = None
     self.__allowed_nodes = {} # contains addresses with no prefixes
+    self.__last_sent_to_allowed = 0
     self.__debug_netmon_count = self.cfg_debug_netmon_count
+    self._get_active_plugins_instances = self.global_shmem.get("get_active_plugins_instances")
     return
   
   
   def __check_dct_metadata(self):
+    """ This is a debug function that checks the metadata of the dataapi stream. """
     stream_metadata = self.dataapi_stream_metadata()
     if stream_metadata is not None:
       if self.cfg_verbose_netconfig_logs:
@@ -136,6 +150,9 @@ class NetConfigMonitorPlugin(BasePlugin):
 
 
   def __maybe_review_known(self):
+    """
+    This function will show the known nodes every `cfg_show_each` seconds.
+    """
     if ((self.time() - self.__last_shown) < self.cfg_show_each):
       return
     self.__last_shown = self.time()
@@ -159,8 +176,16 @@ class NetConfigMonitorPlugin(BasePlugin):
   
   
   def __send_get_cfg(self, node_addr):
-    node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
-    node_ee_id = self.netmon.network_node_eeid(node_addr)
+    """
+    Sends a request to a node or a list of nodes to get their configuration.
+    """
+    if isinstance(node_addr, list):
+      node_addr = [self.bc.maybe_add_prefix(x) for x in node_addr]
+      node_ee_id = [self.netmon.network_node_eeid(x) for x in node_addr]
+    else:
+      node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
+      node_ee_id = self.netmon.network_node_eeid(node_addr)
+
     if self.cfg_verbose_netconfig_logs:
       self.P(f"Sending {self.const.NET_CONFIG.REQUEST_COMMAND} to '{node_ee_id}' <{node_addr}>...")    
     payload = {
@@ -174,16 +199,27 @@ class NetConfigMonitorPlugin(BasePlugin):
   
   
   def __send_set_cfg(self, node_addr):
-    node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
+    if isinstance(node_addr, list):
+      node_addr = [self.bc.maybe_add_prefix(x) for x in node_addr]
+      node_ee_id = [self.netmon.network_node_eeid(x) for x in node_addr]
+    else:
+      node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
+      node_ee_id = self.netmon.network_node_eeid(node_addr)
+
     my_pipelines = self.node_pipelines
-    ee_id = self.netmon.network_node_eeid(node_addr)
+    
     if self.cfg_verbose_netconfig_logs:
-      self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{ee_id}' <{node_addr}>...")
+      self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{node_ee_id}' <{node_addr}>...")
+      
+    statuses = None
+    if self._get_active_plugins_instances is not None and callable(self._get_active_plugins_instances):
+      statuses = self._get_active_plugins_instances()
     payload = {
       self.const.NET_CONFIG.NET_CONFIG_DATA : {
         self.const.NET_CONFIG.OPERATION : self.const.NET_CONFIG.STORE_COMMAND,
         self.const.NET_CONFIG.DESTINATION : node_addr,
-        "DATA" : my_pipelines,
+        self.CT_PIPELINE : my_pipelines,
+        self.CT_PLG_STATUSES : statuses,
       }
     }
     self.send_encrypted_payload(
@@ -193,8 +229,16 @@ class NetConfigMonitorPlugin(BasePlugin):
     return    
 
 
-  def __maybe_send(self):
-    if self.time() - self.__last_data_time > self.cfg_send_each:
+  def __maybe_send_requests(self):
+    """
+    This function will send requests to the nodes that allow us to get their pipelines.
+    
+    This function will run every `cfg_send_get_config_each` seconds and check if there is any node that
+    allow current node to request their pipelines and that node has not been requested 
+    in the last `cfg_node_request_configs_each` seconds.
+    
+    """
+    if self.time() - self.__last_data_time > self.cfg_send_get_config_each:
       self.__last_data_time = self.time()
       if len(self.__allowed_nodes) == 0:
         if self.cfg_verbose_netconfig_logs:
@@ -205,7 +249,7 @@ class NetConfigMonitorPlugin(BasePlugin):
         to_send = []
         for node_addr in self.__allowed_nodes:
           last_request = self.__allowed_nodes[node_addr].get("last_config_get", 0)
-          if (self.time() - last_request) > self.cfg_request_configs_each and self.__allowed_nodes[node_addr]["is_online"]:
+          if (self.time() - last_request) > self.cfg_node_request_configs_each and self.__allowed_nodes[node_addr]["is_online"]:
             to_send.append(node_addr)
           #endif enough time since last request of this node
         #endfor __allowed_nodes
@@ -216,8 +260,8 @@ class NetConfigMonitorPlugin(BasePlugin):
           if self.cfg_verbose_netconfig_logs:
             self.P(f"Local {len(self.local_pipelines)} pipelines. Sending requests to {len(to_send)} nodes...")        
           # now send some requests
+          self.__send_get_cfg(node_addr=to_send)
           for node_addr in to_send:
-            self.__send_get_cfg(node_addr)
             self.__allowed_nodes[node_addr]["last_config_get"] = self.time()
           #endfor to_send
         #endif len(to_send) == 0
@@ -234,9 +278,37 @@ class NetConfigMonitorPlugin(BasePlugin):
       result = False
     return result
   
-
   
-  def on_payload_net_config_monitor(self, payload: dict):
+  def __maybe_send_configuration_to_allowed(self):
+    """
+    This function will send the configuration to all the allowed nodes when the configuration is updated or when the node starts.
+    """
+    allowed_list = self.bc.get_whitelist(with_prefix=True)
+    must_distribute = False    
+    if not self.__initial_send:
+      self.P(f"Sending initial configuration to {len(allowed_list)} allowed nodes.")
+      must_distribute = True
+      self.__initial_send = True
+      
+    if self.__last_pipelines != self.node_pipelines:
+      self.P("Sending updated configuration to all allowed nodes.")
+      must_distribute = True
+      self.__last_pipelines = self.deepcopy(self.node_pipelines)
+    
+    if self.time() - self.__last_sent_to_allowed > self.cfg_send_to_allowed_each:
+      self.P(f"Sending configuration to all allowed nodes at timeout={self.cfg_send_to_allowed_each}.")
+      must_distribute = True      
+      
+    if must_distribute:
+      self.__send_set_cfg(node_addr=allowed_list)
+      self.__last_sent_to_allowed = self.time()      
+      
+    return
+    
+  
+
+  @NetworkProcessorPlugin.payload_handler()
+  def default_handler(self, payload: dict):
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     receiver = payload.get(self.const.PAYLOAD_DATA.EE_DESTINATION, None)
     if not isinstance(receiver, list):
@@ -261,13 +333,13 @@ class NetConfigMonitorPlugin(BasePlugin):
     if is_encrypted:
       decrypted_data = self.receive_and_decrypt_payload(data=payload)
       if decrypted_data is not None:
-        net_config_data = decrypted_data.get("NET_CONFIG_DATA", {})
-        op = net_config_data.get("OP", "UNKNOWN")
+        net_config_data = decrypted_data.get(self.const.NET_CONFIG.NET_CONFIG_DATA, {})
+        op = net_config_data.get(self.const.NET_CONFIG.OPERATION, "UNKNOWN")
         # now we can process the data based on the operation
         if op == self.const.NET_CONFIG.STORE_COMMAND:
           if self.cfg_verbose_netconfig_logs:            
             self.P(f"Received {self.const.NET_CONFIG.STORE_COMMAND} data from '{sender_id}' <{sender}'.")
-          received_pipelines = net_config_data.get("DATA", [])    
+          received_pipelines = net_config_data.get(self.CT_PIPELINE, [])    
           # process in local cache
           self.__allowed_nodes[sender_no_prefix]["pipelines"] = received_pipelines
           # now we can add the pipelines to the netmon cache
@@ -286,7 +358,7 @@ class NetConfigMonitorPlugin(BasePlugin):
             self.__send_set_cfg(sender)
           else:
             if self.cfg_verbose_netconfig_logs:
-              self.P(f"Node '{sender_id}' <{sender}> is not allowed to request my pipelines.")
+              self.P(f"Node '{sender_id}' <{sender}> is not allowed to request my pipelines. This behavior should be recorded!", color='r')
         #finished GET_CONFIG
         #endif ops
     else:
@@ -294,8 +366,12 @@ class NetConfigMonitorPlugin(BasePlugin):
     return  
   
   
-  
-  def on_payload_net_mon_01(self, data : dict):
+  @NetworkProcessorPlugin.payload_handler("NET_MON_01")
+  def netmon_handler(self, data : dict):
+    """
+    This function will process the NET_MON_01 data and update the allowed nodes list.
+    The objective is to keep track of the nodes that we are allowed to send requests to.
+    """
     current_network = data.get("CURRENT_NETWORK", {})
     if len(current_network) == 0:
       self.P("Received NET_MON_01 data without CURRENT_NETWORK data.", color='r ')
@@ -349,7 +425,8 @@ class NetConfigMonitorPlugin(BasePlugin):
 
   def process(self):
     payload = None
-    self.__maybe_send()
+    self.__maybe_send_requests()
+    self.__maybe_send_configuration_to_allowed()
     self.__maybe_review_known()  
     return payload
   

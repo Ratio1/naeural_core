@@ -17,6 +17,7 @@ class BusinessManager(Manager):
 
   def __init__(self, log : Logger, owner, shmem, environment_variables=None, run_on_threads=True, **kwargs):
     self.shmem = shmem
+    self.shmem['get_active_plugins_instances'] = self.get_active_plugins_instances
     self.plugins_shmem = {}
     self.owner = owner
     self.__netmon_instance = None
@@ -186,6 +187,11 @@ class BusinessManager(Manager):
 
   def get_current_jobs(self):
     current_pipeline_names = list(self._dct_config_streams.keys())
+    # now prioritize the "admin_pipeline" (ct.CONST_ADMIN_PIPELINE_NAME) to be the first one
+    if ct.CONST_ADMIN_PIPELINE_NAME in current_pipeline_names:
+      current_pipeline_names.remove(ct.CONST_ADMIN_PIPELINE_NAME)
+      current_pipeline_names.insert(0, ct.CONST_ADMIN_PIPELINE_NAME)   
+    #endif prioritize admin pipeline 
     jobs = []
     for pipeline_name in current_pipeline_names:
       pipeline_config = self._dct_config_streams[pipeline_name]

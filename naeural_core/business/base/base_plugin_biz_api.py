@@ -242,7 +242,8 @@ class _BasePluginAPIMixin:
     return value
   
   
-  @property
+  # @property
+  # This CANNOT be a property, as it can be a blocking operation.
   def _chainstorage(self): # TODO: hide/move/protect this
     self.__maybe_wait_for_chain_state_init()
     return self.plugins_shmem.get('__chain_storage')

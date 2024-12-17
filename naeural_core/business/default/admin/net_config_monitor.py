@@ -46,9 +46,15 @@ _CONFIG = {
   
   'PROCESS_DELAY' : 0,
   
-  'SEND_EACH' : 600, # runs the send logc every 10 minutes
+  # each cfg_send_get_config_each seconds we will send requests to the nodes that allow 
+  # us to get their pipelines and that have not been requested in the last 
+  # cfg_node_request_configs_each seconds.
+  'SEND_GET_CONFIG_EACH' : 600, # runs the send request logic every 10 minutes
+  'NODE_REQUEST_CONFIGS_EACH' : 1200, # minimum time between requests to the same node
   
-  'REQUEST_CONFIGS_EACH' : 1200, # minimum time between requests to the same node
+  # sent each cfg_send_to_allowed_each seconds the pipeline configuration to the allowed nodes
+  'SEND_TO_ALLOWED_EACH' : 600, # runs the send to allowed nodes logic every 10 minutes
+  
   
   'SHOW_EACH' : 60,
   
@@ -75,6 +81,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self.__initial_send = False
     self.__last_pipelines = None
     self.__allowed_nodes = {} # contains addresses with no prefixes
+    self.__last_sent_to_allowed = 0
     self.__debug_netmon_count = self.cfg_debug_netmon_count
     self._get_active_plugins_instances = self.global_shmem.get("get_active_plugins_instances")
     return
@@ -226,10 +233,12 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     """
     This function will send requests to the nodes that allow us to get their pipelines.
     
-    This function will run every `cfg_send_each` seconds but is pretty much redundant since we enable all the nodes 
-    to automatically send to all their allowed peers their pipelines when they are start or are updated.
+    This function will run every `cfg_send_get_config_each` seconds and check if there is any node that
+    allow current node to request their pipelines and that node has not been requested 
+    in the last `cfg_node_request_configs_each` seconds.
+    
     """
-    if self.time() - self.__last_data_time > self.cfg_send_each:
+    if self.time() - self.__last_data_time > self.cfg_send_get_config_each:
       self.__last_data_time = self.time()
       if len(self.__allowed_nodes) == 0:
         if self.cfg_verbose_netconfig_logs:
@@ -240,7 +249,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
         to_send = []
         for node_addr in self.__allowed_nodes:
           last_request = self.__allowed_nodes[node_addr].get("last_config_get", 0)
-          if (self.time() - last_request) > self.cfg_request_configs_each and self.__allowed_nodes[node_addr]["is_online"]:
+          if (self.time() - last_request) > self.cfg_node_request_configs_each and self.__allowed_nodes[node_addr]["is_online"]:
             to_send.append(node_addr)
           #endif enough time since last request of this node
         #endfor __allowed_nodes
@@ -275,18 +284,25 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     This function will send the configuration to all the allowed nodes when the configuration is updated or when the node starts.
     """
     allowed_list = self.bc.get_whitelist(with_prefix=True)
-    must_distribute = False
+    must_distribute = False    
     if not self.__initial_send:
       self.P(f"Sending initial configuration to {len(allowed_list)} allowed nodes.")
       must_distribute = True
       self.__initial_send = True
+      
     if self.__last_pipelines != self.node_pipelines:
       self.P("Sending updated configuration to all allowed nodes.")
       must_distribute = True
       self.__last_pipelines = self.deepcopy(self.node_pipelines)
+    
+    if self.time() - self.__last_sent_to_allowed > self.cfg_send_to_allowed_each:
+      self.P(f"Sending configuration to all allowed nodes at timeout={self.cfg_send_to_allowed_each}.")
+      must_distribute = True      
       
     if must_distribute:
       self.__send_set_cfg(node_addr=allowed_list)
+      self.__last_sent_to_allowed = self.time()      
+      
     return
     
   

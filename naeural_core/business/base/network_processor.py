@@ -27,6 +27,9 @@ class NetworkProcessorPlugin(BaseClass):
   
   @staticmethod
   def payload_handler(signature="DEFAULT"):
+    if not isinstance(signature, str):
+      signature = "DEFAULT"
+    signature = signature.upper()
     def decorator(f):
       f.__payload_signature__ = signature
       return f

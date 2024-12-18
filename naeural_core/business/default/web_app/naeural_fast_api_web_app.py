@@ -8,7 +8,7 @@ _CONFIG = {
 
   'SAVE_PERIOD': 60,
   "ALLOW_EMPTY_INPUTS": True,
-
+  
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES'],
   },
@@ -144,8 +144,10 @@ class NaeuralFastApiWebApp(BasePlugin):
     return
 
   def __maybe_handle_payloads(self):
-    payloads = self.dataapi_struct_datas()
-    for idx, payload in payloads.items():
+    payloads = self.dataapi_struct_datas(as_list=True)
+    if self.cfg_debug_mode and len(payloads) > 0:
+      self.P(f'Received {len(payloads)} payloads.')
+    for payload in payloads:
       preprocessed_payload = self.__preprocess_payload_data(payload)
       if preprocessed_payload is None:
         continue

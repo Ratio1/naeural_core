@@ -220,7 +220,11 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
 
     if processed_message is None:
       return
-
+    
+    if self.cfg_debug_iot_payloads:
+      _path = processed_message.get(self.ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
+      self.P(f"Accepted message of type {message_type} from {_path}")
+    
     if message_type == "struct_data":
       self._add_struct_data_input(processed_message)
     elif message_type == "image":

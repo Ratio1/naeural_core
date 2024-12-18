@@ -28,6 +28,11 @@ class NaeuralFastApiWebApp(BasePlugin):
     super(NaeuralFastApiWebApp, self).__init__(**kwargs)
     return
 
+  def debug_on_payload(self, node_addr, pipeline, signature, instance, payload):
+    if self.cfg_debug_mode and not self.__ignore_signature(signature):
+      self.P(f'[Session]Payload received from {node_addr} on signature {signature}: {payload}')
+    return
+
   def on_init(self):
     # !!!This approach, although works, will not be allowed in the future because it's not safe
     # TODO: maybe refactor after the new requests system is done
@@ -36,6 +41,7 @@ class NaeuralFastApiWebApp(BasePlugin):
       config=self.global_shmem['config_communication']['PARAMS'],
       log=self.log,
       bc_engine=self.global_shmem[self.ct.BLOCKCHAIN_MANAGER],
+      on_payload=self.debug_on_payload
     )
     super(NaeuralFastApiWebApp, self).on_init()
     self.__maybe_load_persistence_data()
@@ -96,6 +102,7 @@ class NaeuralFastApiWebApp(BasePlugin):
     request_id = payload_data.get('request_id', None)
     if request_id is not None and request_id in self.unsolved_requests:
       self.requests_responses[request_id] = self.process_response_payload(self.deepcopy(payload_data))
+      self.unsolved_requests.remove(request_id)
     return
 
   def __preprocess_payload_data(self, payload):

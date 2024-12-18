@@ -29,19 +29,19 @@ class NaeuralFastApiWebApp(BasePlugin):
     return
 
   def debug_on_payload(self, node_addr, pipeline, signature, instance, payload):
-    if self.cfg_debug_mode and not self.__ignore_signature(signature):
-      self.P(f'[Session]Payload received from {node_addr} on signature {signature}: {payload}')
+    self.P(f'[Session]Payload received from {node_addr} on signature {signature}: {payload}')
     return
 
   def on_init(self):
     # !!!This approach, although works, will not be allowed in the future because it's not safe
     # TODO: maybe refactor after the new requests system is done
+    kwargs = {} if not self.cfg_debug_mode else {'on_payload': self.debug_on_payload}
     self.session = Session(
       name=f'{self.str_unique_identification}',
       config=self.global_shmem['config_communication']['PARAMS'],
       log=self.log,
       bc_engine=self.global_shmem[self.ct.BLOCKCHAIN_MANAGER],
-      on_payload=self.debug_on_payload
+      **kwargs
     )
     super(NaeuralFastApiWebApp, self).on_init()
     self.__maybe_load_persistence_data()

@@ -28,7 +28,7 @@ class NaeuralFastApiWebApp(BasePlugin):
     super(NaeuralFastApiWebApp, self).__init__(**kwargs)
     return
 
-  def debug_on_payload(self, node_addr, pipeline, signature, instance, payload):
+  def debug_on_payload(self, sess, node_addr, pipeline, signature, instance, payload):
     self.P(f'[Session]Payload received from {node_addr} on signature {signature}: {payload}')
     return
 

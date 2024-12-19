@@ -1,3 +1,6 @@
+# TODO: review if this is safe
+from os import environ
+
 from naeural_client.const import (
   PAYLOAD_CT,
   COMMANDS,
@@ -123,7 +126,7 @@ ADMIN_PIPELINE = {
 
   "NET_MON_01": {
     "PROCESS_DELAY": 20,
-    "SUPERVISOR": False
+    "SUPERVISOR": environ.get("EE_SUPERVISOR", False)
   },
   
 

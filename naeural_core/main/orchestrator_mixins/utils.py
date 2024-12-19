@@ -20,7 +20,7 @@ class _OrchestratorUtils(object):
         return_tree=True,
       )
     except:
-      mem2, tree2, top2  = 0, 0, 0
+      mem2, tree2, top2  = 0, 0, []
       self.P(" * * * * * * * * * * * * ERROR: get_obj_size FAILED !  * * * * * * * * * * * *\n{}".format(
         traceback.format_exc()
       ))

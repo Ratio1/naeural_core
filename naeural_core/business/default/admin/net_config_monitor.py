@@ -96,6 +96,17 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     return
   
   
+  def __update_allowed_nodes(self, addr, pipelines):
+    sender_no_prefix = self.bc.maybe_remove_prefix(addr)
+    if sender_no_prefix not in self.__allowed_nodes:
+      self.__allowed_nodes[sender_no_prefix] = {}
+    #endif sender_no_prefix not in __allowed_nodes
+    self.__allowed_nodes[sender_no_prefix]["pipelines"] = pipelines
+    self.__allowed_nodes[sender_no_prefix]["last_config_get"] = self.time()
+    self.__allowed_nodes[sender_no_prefix]["is_online"] = True
+    return
+  
+  
   def __get_active_nodes(self, netmon_current_network : dict) -> dict:
     """
     Returns a dictionary with the active nodes in the network.
@@ -168,6 +179,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
         me_msg = ""
         if prefixed_addr == self.ee_addr:
           pipelines = self.node_pipelines
+          names = [p.get("NAME", "NONAME") for p in pipelines]
           me_msg = " (ME)"
         msg += f"\n  - '{eeid}' <{addr}>{me_msg} has {len(pipelines)} pipelines: {names}"
       #endfor __allowed_nodes    
@@ -300,9 +312,12 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       must_distribute = True      
       
     if must_distribute:
-      self.__send_set_cfg(node_addr=allowed_list)
+      if len(allowed_list) > 0:
+        self.__send_set_cfg(node_addr=allowed_list)
+      else:
+        self.P("No allowed nodes to send configuration to although we have updated configuration.")
       self.__last_sent_to_allowed = self.time()      
-      
+    #endif must_distribute
     return
     
   
@@ -341,7 +356,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
             self.P(f"Received {self.const.NET_CONFIG.STORE_COMMAND} data from '{sender_id}' <{sender}'.")
           received_pipelines = net_config_data.get(self.CT_PIPELINE, [])    
           # process in local cache
-          self.__allowed_nodes[sender_no_prefix]["pipelines"] = received_pipelines
+          self.__update_allowed_nodes(sender_no_prefix, received_pipelines)
           # now we can add the pipelines to the netmon cache
           self.netmon.register_node_pipelines(addr=sender_no_prefix, pipelines=received_pipelines)
         #finished SET_CONFIG

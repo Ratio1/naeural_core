@@ -168,7 +168,24 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   def __set_key_value(self, key, value, owner, sync_storage=False):
     """
+    This method is called to set a key-value pair in the chain storage.
     
+    Parameters:
+    ----------
+    
+    key : str
+      The key to set the value for
+    
+    value : any
+      The value to set
+      
+    owner : str
+      The owner of the key-value pair
+      
+    sync_storage : bool
+      If `True` will only set the local kv pair without broadcasting to the network. This operation is used for remote sync when
+      a node receives a set operation from the network and needs to set the value in the local chain storage replica.
+      
     """
     # key should be composed of the chainstore app identity and the actual key
     # so if two chainstore apps are running on the same node, they will not overwrite each other
@@ -181,6 +198,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     }    
     self.__reset_confirmations(key)
     if sync_storage:
+      # set the confirmations to -1 to indicate that the key is remote synced on this node
       self.__set_confirmations(key, -1) # set to -1 to indicate that the key is remote synced on this node
     self.__save_chain_storage()
     return

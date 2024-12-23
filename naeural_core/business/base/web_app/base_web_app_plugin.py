@@ -166,7 +166,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     # add optional keys, found in config
     if self.cfg_env_vars is not None and isinstance(self.cfg_env_vars, dict):
-      prepared_env.update(self.cfg_env_vars)
+      processed_env = {k: str(v) for k, v in self.cfg_env_vars.items()}
+      prepared_env.update(processed_env)
 
     self.prepared_env = prepared_env
 

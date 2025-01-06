@@ -611,9 +611,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         str_data = self.blockchain_manager.decrypt(
           encrypted_data_b64=encrypted_data, 
           sender_address=sender_addr,
-          debug=True, # TODO: put this to False
-          # decompress=False, # we expect the data to be compressed and the compression flag is embedded in the data
-          # embed_compressed=True, # we expect the data to be compressed
+          debug=False, 
         )
         if str_data is None:
           self.P("INCOMING:   Decryption failed with SDKv{}. Message will be probably dropped.".format(

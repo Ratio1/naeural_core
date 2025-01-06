@@ -959,9 +959,9 @@ class NetworkMonitor(DecentrAIObject):
       dct_ret['NAME'] = dct_g.get('NAME')
 
       # these default values for `get`s are meant to generate a 0 score for each monitorized parameter if they are not returned in the dictionary
-      allocated_mem = dct_g.get('ALLOCATED_MEM', 1)
-      total_mem = dct_g.get('TOTAL_MEM', 1)
-      gpu_used = dct_g.get('GPU_USED', 100)
+      allocated_mem = dct_g.get('ALLOCATED_MEM', 1) or 1
+      total_mem = dct_g.get('TOTAL_MEM', 1) or 1
+      gpu_used = dct_g.get('GPU_USED', 100) or 100
       prc_allocated_mem = 100 * allocated_mem / total_mem
 
       capabilities = {
@@ -1459,141 +1459,146 @@ class NetworkMonitor(DecentrAIObject):
   
     
     def network_node_status(self, addr, min_uptime=60, dt_now=None):
-      avail_disk = self.__network_node_last_available_disk(addr=addr, norm=False)
-      avail_disk_prc = round(self.__network_node_last_available_disk(addr=addr, norm=True),3)
+      try:
+        eeid = self.network_node_eeid(addr)
+        avail_disk = self.__network_node_last_available_disk(addr=addr, norm=False)
+        avail_disk_prc = round(self.__network_node_last_available_disk(addr=addr, norm=True),3)
 
-      avail_mem = self.__network_node_last_available_memory(addr=addr, norm=False)
-      avail_mem_prc = round(self.__network_node_last_available_memory(addr=addr, norm=True), 3)
+        avail_mem = self.__network_node_last_available_memory(addr=addr, norm=False)
+        avail_mem_prc = round(self.__network_node_last_available_memory(addr=addr, norm=True), 3)
 
-      is_alert_disk = avail_disk_prc < 0.15
-      is_alert_ram = avail_mem_prc < 0.15
+        is_alert_disk = avail_disk_prc < 0.15
+        is_alert_ram = avail_mem_prc < 0.15
 
-      #comms
-      dct_comms = self.network_node_last_comm_info(addr=addr)
-      #end comms
-
-      dct_gpu_capability = self.network_node_default_gpu_capability(addr=addr)
-      gpu_name = dct_gpu_capability['NAME']
-      
-      score=dct_gpu_capability['WEIGHTED_CAPABILITY']
-      
-      uptime_sec = round(self.__network_node_uptime(addr=addr, as_minutes=False),2)      
-      uptime_min = uptime_sec / 60
-      ok_uptime = uptime_sec >= (min_uptime * 60)
-      
-      working_status = self.network_node_simple_status(addr=addr, dt_now=dt_now)
-      is_online = working_status == ct.DEVICE_STATUS_ONLINE
-      
-      recent = self.network_node_is_recent(addr=addr, dt_now=dt_now)
-
-      trusted = recent and is_online and ok_uptime
-      trust_val = exponential_score(left=0, right=min_uptime * 4, val=uptime_min, normed=True, right_is_better=True)
-      trust = 0 if not is_online else round(trust_val,3)
-      trust = trusted * trust
-      
-      score = round(score * trust_val,2)
-      if trusted and score == 0:
-        score = 10
-        
-      cpu_past1h = round(np.mean(self.__network_node_past_cpu_used_by_interval(addr=addr, minutes=60, dt_now=dt_now)),2)
-      cpu_past1h = cpu_past1h if not np.isnan(cpu_past1h) else None
-      main_loop_time = self.network_node_main_loop(addr) 
-      main_loop_freq = 0 if main_loop_time == 0 else 1 / (main_loop_time + 1e-14)
-      
-      trust_info = 'NORMAL_EVAL'
-
-      # Cpu temperature history analysis
-      temp_hist = self.network_node_past_temperatures_history(
-        addr=addr, minutes=60, dt_now=dt_now,
-        reverse_order=True,
-      )
-
-      max_temperature = temp_hist['max_temp'] # get pre-processed max temperatures
-
-      cpu_temp = max_temperature[-1] if len(max_temperature) > 0 else -1
-      cpu_temp_past1h = np.mean(max_temperature) if len(max_temperature) > 0 else -1
-      
-      # Gpu temperature history analysis
-      gpu_hist = self.network_node_default_gpu_history(
-        addr=addr, minutes=60, dt_now=dt_now, reverse_order=True)
-
-      gpu_temp_hist = [x['GPU_TEMP'] for x in gpu_hist]
-      gpu_temp = gpu_temp_hist[-1] if len(gpu_temp_hist) > 0 else None
-      gpu_temp_past1h = np.mean(gpu_temp_hist) if len(gpu_temp_hist) > 0 else None
-      
-      gpu_fan_hist = [x.get('GPU_FAN_SPEED', None) for x in gpu_hist]
-      if None in gpu_fan_hist:
-        gpu_fan = None
-        gpu_fan_past1h = None
-      elif len(gpu_fan_hist) == 0:
-        gpu_fan = None
-        gpu_fan_past1h = None
-      elif any(isinstance(x, str) for x in gpu_fan_hist):
-        # Handle the case when the fan speed is a string
-        # Meaning errors most of the time ()
-        gpu_fan = None
-        gpu_fan_past1h = None
-      else:
-        gpu_fan = gpu_fan_hist[-1]
-        gpu_fan_past1h = np.mean(gpu_fan_hist)
-
-      is_secured = self.network_node_is_secured(addr)
-      trusted = is_secured and trusted
-      
-      dct_result = dict(
-        address=addr,
-        trusted=trusted,
-        trust=trust,
-        secured=is_secured,
-        whitelist=self.network_node_whitelist(addr),
-        trust_info=trust_info,
-        is_supervisor=self.network_node_is_supervisor(addr),
-        working=working_status,
-        recent=recent,
-        deployment=self.network_node_deploy_type(addr) or "Unknown",
-        version=self.network_node_version(addr),
-        py_ver=self.network_node_py_ver(addr),
-        last_remote_time=self.network_node_remote_time(addr),
-        node_tz=self.network_node_local_tz(addr),
-        node_utc=self.network_node_local_tz(addr, as_zone=False),
-        main_loop_avg_time=main_loop_time,
-        main_loop_freq=round(main_loop_freq, 2),
-        
-        pipelines_count=len(self.network_node_pipelines(addr)) - 1,
-        
-        # main_loop_cap
-        uptime=self.log.elapsed_to_str(uptime_sec),
-        last_seen_sec=round(self.network_node_last_seen(addr, as_sec=True, dt_now=dt_now),2),
-        
-        avail_disk=avail_disk,
-        avail_disk_prc=avail_disk_prc,
-        is_alert_disk=is_alert_disk,
-
-        avail_mem=avail_mem,  
-        avail_mem_prc=avail_mem_prc,  
-        is_alert_ram=is_alert_ram,    
-        
-        cpu_past1h=cpu_past1h,        
-        cpu_temp=cpu_temp,
-        cpu_temp_past1h=cpu_temp_past1h,
-
-        gpu_load_past1h=self.network_node_default_gpu_average_load(addr=addr, minutes=60, dt_now=dt_now),
-        gpu_mem_past1h=self.network_node_default_gpu_average_avail_mem(addr=addr, minutes=60, dt_now=dt_now),
-
-        gpu_temp=gpu_temp,
-        gpu_temp_past1h=gpu_temp_past1h,
-
-        gpu_fan=gpu_fan,
-        gpu_fan_past1h=gpu_fan_past1h,
-
-        gpu_name=gpu_name,
-        SCORE=score,        
-        
-        eeid=self.network_node_eeid(addr),
-        #comms:
-        comms=dct_comms,
+        #comms
+        dct_comms = self.network_node_last_comm_info(addr=addr)
         #end comms
-      )
+
+        dct_gpu_capability = self.network_node_default_gpu_capability(addr=addr)
+        gpu_name = dct_gpu_capability['NAME']
+        
+        score=dct_gpu_capability['WEIGHTED_CAPABILITY']
+        
+        uptime_sec = round(self.__network_node_uptime(addr=addr, as_minutes=False),2)      
+        uptime_min = uptime_sec / 60
+        ok_uptime = uptime_sec >= (min_uptime * 60)
+        
+        working_status = self.network_node_simple_status(addr=addr, dt_now=dt_now)
+        is_online = working_status == ct.DEVICE_STATUS_ONLINE
+        
+        recent = self.network_node_is_recent(addr=addr, dt_now=dt_now)
+
+        trusted = recent and is_online and ok_uptime
+        trust_val = exponential_score(left=0, right=min_uptime * 4, val=uptime_min, normed=True, right_is_better=True)
+        trust = 0 if not is_online else round(trust_val,3)
+        trust = trusted * trust
+        
+        score = round(score * trust_val,2)
+        if trusted and score == 0:
+          score = 10
+          
+        cpu_past1h = round(np.mean(self.__network_node_past_cpu_used_by_interval(addr=addr, minutes=60, dt_now=dt_now)),2)
+        cpu_past1h = cpu_past1h if not np.isnan(cpu_past1h) else None
+        main_loop_time = self.network_node_main_loop(addr) 
+        main_loop_freq = 0 if main_loop_time == 0 else 1 / (main_loop_time + 1e-14)
+        
+        trust_info = 'NORMAL_EVAL'
+
+        # Cpu temperature history analysis
+        temp_hist = self.network_node_past_temperatures_history(
+          addr=addr, minutes=60, dt_now=dt_now,
+          reverse_order=True,
+        )
+
+        max_temperature = temp_hist['max_temp'] # get pre-processed max temperatures
+
+        cpu_temp = max_temperature[-1] if len(max_temperature) > 0 else -1
+        cpu_temp_past1h = np.mean(max_temperature) if len(max_temperature) > 0 else -1
+        
+        # Gpu temperature history analysis
+        gpu_hist = self.network_node_default_gpu_history(
+          addr=addr, minutes=60, dt_now=dt_now, reverse_order=True)
+
+        gpu_temp_hist = [x['GPU_TEMP'] for x in gpu_hist]
+        gpu_temp = gpu_temp_hist[-1] if len(gpu_temp_hist) > 0 else None
+        gpu_temp_past1h = np.mean(gpu_temp_hist) if len(gpu_temp_hist) > 0 else None
+        
+        gpu_fan_hist = [x.get('GPU_FAN_SPEED', None) for x in gpu_hist]
+        if None in gpu_fan_hist:
+          gpu_fan = None
+          gpu_fan_past1h = None
+        elif len(gpu_fan_hist) == 0:
+          gpu_fan = None
+          gpu_fan_past1h = None
+        elif any(isinstance(x, str) for x in gpu_fan_hist):
+          # Handle the case when the fan speed is a string
+          # Meaning errors most of the time ()
+          gpu_fan = None
+          gpu_fan_past1h = None
+        else:
+          gpu_fan = gpu_fan_hist[-1]
+          gpu_fan_past1h = np.mean(gpu_fan_hist)
+
+        is_secured = self.network_node_is_secured(addr)
+        trusted = is_secured and trusted
+        
+        dct_result = dict(
+          address=addr,
+          trusted=trusted,
+          trust=trust,
+          secured=is_secured,
+          whitelist=self.network_node_whitelist(addr),
+          trust_info=trust_info,
+          is_supervisor=self.network_node_is_supervisor(addr),
+          working=working_status,
+          recent=recent,
+          deployment=self.network_node_deploy_type(addr) or "Unknown",
+          version=self.network_node_version(addr),
+          py_ver=self.network_node_py_ver(addr),
+          last_remote_time=self.network_node_remote_time(addr),
+          node_tz=self.network_node_local_tz(addr),
+          node_utc=self.network_node_local_tz(addr, as_zone=False),
+          main_loop_avg_time=main_loop_time,
+          main_loop_freq=round(main_loop_freq, 2),
+          
+          pipelines_count=len(self.network_node_pipelines(addr)) - 1,
+          
+          # main_loop_cap
+          uptime=self.log.elapsed_to_str(uptime_sec),
+          last_seen_sec=round(self.network_node_last_seen(addr, as_sec=True, dt_now=dt_now),2),
+          
+          avail_disk=avail_disk,
+          avail_disk_prc=avail_disk_prc,
+          is_alert_disk=is_alert_disk,
+
+          avail_mem=avail_mem,  
+          avail_mem_prc=avail_mem_prc,  
+          is_alert_ram=is_alert_ram,    
+          
+          cpu_past1h=cpu_past1h,        
+          cpu_temp=cpu_temp,
+          cpu_temp_past1h=cpu_temp_past1h,
+
+          gpu_load_past1h=self.network_node_default_gpu_average_load(addr=addr, minutes=60, dt_now=dt_now),
+          gpu_mem_past1h=self.network_node_default_gpu_average_avail_mem(addr=addr, minutes=60, dt_now=dt_now),
+
+          gpu_temp=gpu_temp,
+          gpu_temp_past1h=gpu_temp_past1h,
+
+          gpu_fan=gpu_fan,
+          gpu_fan_past1h=gpu_fan_past1h,
+
+          gpu_name=gpu_name,
+          SCORE=score,        
+          
+          eeid=eeid,
+          #comms:
+          comms=dct_comms,
+          #end comms
+        )
+      except Exception as e:
+        self.P(f"Error in network_node_status for '{eeid}' <{addr}>: {e}", color='r')
+        raise
       return dct_result    
     
     

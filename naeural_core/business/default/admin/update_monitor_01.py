@@ -278,8 +278,14 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     if self.cfg_force_restart_after is None:
       return False
     elif self.get_node_running_time() > self.cfg_force_restart_after:
+      self.P(
+        f"Forced restart required after {self.cfg_force_restart_after}s on node already running for {self.get_node_running_time()}s. Please check your configuration!", 
+        color='r'
+      )
       return True
     return False
+  
+    
   
 
   def get_int_ver(self, ver):

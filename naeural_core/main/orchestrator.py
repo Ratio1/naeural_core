@@ -285,7 +285,8 @@ class Orchestrator(DecentrAIObject,
     ), color='r')
     self.save_local_address()
     return
-  
+
+
   def save_local_address(self):
     folder = self.log.get_data_folder()
     addr_file = os.path.join(folder, 'local_address.json')
@@ -297,7 +298,8 @@ class Orchestrator(DecentrAIObject,
     with open(addr_file, 'w') as f:
       f.write(json.dumps(data, indent=2))
     return
-  
+
+
   def __get_admin_pipeline_config(self):
     """
     This method retrieves the admin pipeline configuration from the startup config then

@@ -285,14 +285,21 @@ class Orchestrator(DecentrAIObject,
     ), color='r')
     self.save_local_address()
     return
-  
+
+
   def save_local_address(self):
     folder = self.log.get_data_folder()
-    addr_file = os.path.join(folder, 'local_address.txt')
+    addr_file = os.path.join(folder, 'local_address.json')
+    data = {
+      'address' : self.e2_address,
+      'alias'   : self.e2_id,
+      'eth_address' : self.eth_address,
+    }
     with open(addr_file, 'w') as f:
-      f.write("{}  {}".format(self.e2_address, self.e2_id))
+      f.write(json.dumps(data, indent=2))
     return
-  
+
+
   def __get_admin_pipeline_config(self):
     """
     This method retrieves the admin pipeline configuration from the startup config then
@@ -328,6 +335,13 @@ class Orchestrator(DecentrAIObject,
     if self._blockchain_manager is not None:
       addr = self._blockchain_manager.address
     return addr
+  
+  @property
+  def eth_address(self):
+    addr = None
+    if self._blockchain_manager is not None:
+      addr = self._blockchain_manager.eth_address
+    return addr  
   
   @property
   def whitelist(self):

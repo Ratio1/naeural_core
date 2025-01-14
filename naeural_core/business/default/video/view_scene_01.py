@@ -136,6 +136,11 @@ class ViewScene01Plugin(BaseClass):
     can_send_images = self.__witness_count < self.cfg_nr_witnesses
     send_image_now = force_send_needed or can_send_images
     
+    if self.cfg_nr_witnesses >= 60:
+      self.P("WARNING! High number of witnesses requested. Sending  {}/{}".format(
+        self.__witness_count, self.cfg_nr_witnesses), color='r'
+      )
+    
     # Stage 1: if need be we get an old image
     if force_send_needed:
       curr_delay = self.cfg_process_delay          
@@ -195,7 +200,9 @@ class ViewScene01Plugin(BaseClass):
       if send_image_now:
         additional_data = None
         if force_send_needed:
-          self.P("Forced image send. Delay {:.1f} -> {:.1f}".format(curr_delay, new_delay))
+          self.P("Forced image send. Delay {:.1f} -> {:.1f}".format(
+            curr_delay, new_delay), color='r'
+          )
           additional_data = self.__view_scene_command_data
           self.__view_scene_command_data = None
         #endif we need to restore proc delay due to recent incoming command

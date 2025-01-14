@@ -199,11 +199,32 @@ class _WorkingHoursMixin(object):
         for key, value in schedule.items()
       }
     # endif dict
-    res_working_hours = self.working_hours_to_local(schedule, timezone=self.get_timezone())
-
+    try:
+      res_working_hours = self.working_hours_to_local(schedule, timezone=self.get_timezone())
+    except Exception as e:
+      self.P("Exception {} occurent in working_hours_to_local:\ncfg_working_hours:\n{}\n\nschedule:\n{}".format(
+        e, self.json_dumps(self.cfg_working_hours), self.json_dumps(schedule),
+      ))
+      raise
+    #endtry
     return res_working_hours
+  
+  
+  def on_shift_start(self, interval_idx=None, weekday_name=None, **kwargs):
+    """
+    This method should be defined in plugins with specific code that will be
+    run when a new working hours shift starts.
+    """
+    return
 
-  def _on_shift_start(self, interval_idx, weekday_name=None):
+  def on_shift_end(self, **kwargs):
+    """
+    This method should be defined in plugins with specific code that will be
+    run when a working hours shift ends.
+    """
+    return
+
+  def __on_shift_start(self, interval_idx, weekday_name=None):
     # TODO: in future implement dict params for instance config in a specific time interval
     hour_schedule = self.working_hours[weekday_name] if weekday_name is not None else self.working_hours
     hrs = 'NON-STOP' if interval_idx is None else hour_schedule[interval_idx]
@@ -225,9 +246,11 @@ class _WorkingHoursMixin(object):
       ignore_working_hours=self.cfg_ignore_working_hours,
       img=None,
     )
+    self.P("Executing on_shift_start method")
+    self.on_shift_start(interval_idx=interval_idx, weekday_name=weekday_name)
     return
 
-  def _on_shift_end(self):
+  def __on_shift_end(self):
     msg = f"Ended current working hours shift for {self}. The full schedule is: {self.working_hours}[{self.get_timezone()}]"
     info = f"Plugin {self} ended its shift shift. The full schedule is: {self.working_hours}[{self.get_timezone()}]"
     self.P(msg, color='r')
@@ -248,6 +271,8 @@ class _WorkingHoursMixin(object):
       forced_pause=self.cfg_forced_pause,
       img=None,
     )
+    self.P("Executing on_shift_end method")
+    self.on_shift_end()
     return
 
   def __get_outside_working_hours(self):
@@ -298,7 +323,7 @@ class _WorkingHoursMixin(object):
       self.__is_new_shift = False
       if not self.__shift_started:
         self.__is_new_shift = True      
-        self._on_shift_start(
+        self.__on_shift_start(
           weekday_name=weekday_name,
           interval_idx=interval_idx
         )
@@ -307,7 +332,7 @@ class _WorkingHoursMixin(object):
       result = False
     elif self.__shift_started:
       # shift already started so we close it
-      self._on_shift_end()
+      self.__on_shift_end()
       self.__shift_started = False
     # endif current time in valid interval
     return result
@@ -322,6 +347,7 @@ class _WorkingHoursMixin(object):
 
 if __name__ == '__main__':
   from naeural_core import Logger
+  from datetime import datetime
 
   log = Logger(
     'gigi',

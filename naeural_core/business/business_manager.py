@@ -22,7 +22,7 @@ class BusinessManager(Manager):
     self.owner = owner
     self.__netmon_instance = None
     self._dct_config_streams = None
-    self.is_supervisor_node = self._str_to_bool(os.environ.get('EE_SUPERVISOR', False)) 
+    self.is_supervisor_node = self._str_to_bool(os.environ.get('EE_SUPERVISOR', False))
     self.__first_supervisor_check_done = False
     self.comm_shared_memory = {
       'payloads' : {},
@@ -203,6 +203,25 @@ class BusinessManager(Manager):
       modified_by_id = pipeline_config.get(ct.CONFIG_STREAM.K_MODIFIED_BY_ID, None)
 
       lst_config_plugins = pipeline_config[ct.CONFIG_STREAM.K_PLUGINS]
+
+      if pipeline_name == ct.CONST_ADMIN_PIPELINE_NAME:
+        # Netmon plugin should be the first one in the admin pipeline.
+        # This is because the netmon will toggle supervisor node status for every other plugin instance.
+        netmon_config_idx, netmon_config = None, None
+        for idx, config_plugin in enumerate(lst_config_plugins):
+          signature = config_plugin[ct.CONFIG_PLUGIN.K_SIGNATURE]
+          if signature == ct.ADMIN_PIPELINE_NETMON:
+            netmon_config_idx = idx
+            netmon_config = config_plugin
+            break
+        # endfor plugin_configs
+        # Now move the netmon plugin to the first position.
+        if netmon_config is not None:
+          lst_config_plugins.pop(netmon_config_idx)
+          lst_config_plugins.insert(0, netmon_config)
+        # endif netmon_config found
+      # endif admin pipeline
+
       session_id = pipeline_config.get(ct.CONFIG_STREAM.K_SESSION_ID, None)
       
       for config_plugin in lst_config_plugins:

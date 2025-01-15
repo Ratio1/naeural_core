@@ -76,6 +76,7 @@ class Orchestrator(DecentrAIObject,
     self.__main_loop_stop_at_stage = None
     self.__main_loop_last_stage_change = time()
     self.__main_loop_stoplog = []
+    self.__simulated_mlstops = 0
 
 
     self._capture_manager : CaptureManager              = None
@@ -197,9 +198,20 @@ class Orchestrator(DecentrAIObject,
   def docker_source(self):
     docker_source = os.environ.get('AINODE_DOCKER_SOURCE')
     return docker_source
-  
-  
-  
+
+  @property
+  def debug_simulated_mlstop(self):
+    return self.config_data.get('DEBUG_SIMULATED_MLSTOP', 0) or 0
+
+  @property
+  def debug_simulated_mlstop_start(self):
+    # How many iterations to wait before simulating a main loop stop.
+    return self.config_data.get('DEBUG_SIMULATED_MLSTOP_START', 0) or 0
+
+  @property
+  def debug_simulated_mlstop_count(self):
+    return self.config_data.get('DEBUG_SIMULATED_MLSTOP_COUNT', 0) or 0
+
   def _maybe_env_and_docker_setup(self):    
     default_device = os.environ.get('EE_DEVICE')
     if default_device is not None:
@@ -1491,7 +1503,17 @@ class Orchestrator(DecentrAIObject,
     self._maybe_exception_stop()
     self.close_main_loop()
     return code
-  
+
+  def maybe_simulate_mlstop(self):
+    main_loop_iters = self._main_loop_counts['ITER']
+    if main_loop_iters < self.debug_simulated_mlstop_start:
+      return
+    if self.debug_simulated_mlstop > 0 and self.__simulated_mlstops < self.debug_simulated_mlstop_count:
+      self.P(f"Simulated MLSTOP after {main_loop_iters} iterations({self.__simulated_mlstops + 1}/{self.debug_simulated_mlstop_count}).", color='r')
+      sleep(self.debug_simulated_mlstop)
+      self.__simulated_mlstops += 1
+    return
+
 
   def main_loop(self):
     """
@@ -1519,6 +1541,10 @@ class Orchestrator(DecentrAIObject,
         #1. Choose only the streams that should be run this step - copy from ConfigManager
         self.__loop_stage = "1.sel.run.pipe"
         self.choose_current_running_streams()
+
+        # 1.1. Simulate MLSTOP
+        self.__loop_stage = "1.1.sim.mlstop"
+        self.maybe_simulate_mlstop()
 
         #2. Call the BusinessManager to start new business plugins and kill the unused ones
         self.__loop_stage = '2.bm.refresh.main'

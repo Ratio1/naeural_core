@@ -18,7 +18,7 @@ _CONFIG = {
   
   'GIT_REQUEST_DELAY': 60 * 10,  # 10 minutes
 
-  'NGROK_USE_API': False,
+  'NGROK_USE_API': True,
   'NGROK_ENABLED': False,
   'NGROK_DOMAIN': None,
   'NGROK_EDGE_LABEL': None,
@@ -150,19 +150,21 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     self.base_env = prepared_env.copy()
 
-    # add optional keys, found in `.env` file from assets
-    env_file_path = self.os_path.join(assets_path, '.env')
-    if self.os_path.exists(env_file_path):
-      with open(env_file_path, 'r') as f:
-        for line in f:
-          if line.startswith('#') or len(line.strip()) == 0:
-            continue
-          key, value = line.strip().split('=', 1)
-          prepared_env[key] = value
-      # endwith
+    # add optional keys, found in `.env` file from assets folder if provided.
+    if assets_path is not None:
+      env_file_path = self.os_path.join(assets_path, '.env')
+      if self.os_path.exists(env_file_path):
+        with open(env_file_path, 'r') as f:
+          for line in f:
+            if line.startswith('#') or len(line.strip()) == 0:
+              continue
+            key, value = line.strip().split('=', 1)
+            prepared_env[key] = value
+        # endwith
 
-      # TODO: should we remove the .env file?
-    # endif env file
+        # TODO: should we remove the .env file?
+      # endif env file
+    # endif assets path provided
 
     # add optional keys, found in config
     if self.cfg_env_vars is not None and isinstance(self.cfg_env_vars, dict):
@@ -575,7 +577,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       operation = "download"
 
     if assets_path is None:
-      raise ValueError("No assets provided")
+      return None
+      # raise ValueError("No assets provided")
 
     # now download the assets there
     if operation == "clone":
@@ -763,17 +766,18 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
   def initialize_assets(self, src_dir, dst_dir, jinja_args):
     """
     Initialize and copy assets, expanding any jinja templates.
-    All files from the source directory are copied copied to the
+    All files from the source directory are copied to the
     destination directory with the following exceptions:
       - are symbolic links are ignored
       - files named ending with .jinja are expanded as jinja templates,
         .jinja is removed from the filename and the result copied to
         the destination folder.
     This maintains the directory structure of the source folder.
+    In case src_dir is None, only the .env files are written in the destination folder.
 
     Parameters
     ----------
-    src_dir: str, path to the source directory
+    src_dir: str or None, path to the source directory
     dst_dir: str, path to the destination directory
     jinja_args: dict, jinja keys to use while expanding the templates
 
@@ -785,43 +789,45 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     # now copy the assets to the destination
     self.P(f'Copying assets from {src_dir} to {dst_dir} with keys {jinja_args}')
 
-    env = Environment(loader=FileSystemLoader('.'))
-    # Walk through the source directory.
-    for root, _, files in os.walk(src_dir):
-      for file in files:
-        src_file_path = self.os_path.join(root, file)
-        dst_file_path = self.os_path.join(
-          dst_dir,
-          self.os_path.relpath(src_file_path, src_dir)
-        )
+    if src_dir is not None:
+      env = Environment(loader=FileSystemLoader('.'))
+      # Walk through the source directory.
+      for root, _, files in os.walk(src_dir):
+        for file in files:
+          src_file_path = self.os_path.join(root, file)
+          dst_file_path = self.os_path.join(
+            dst_dir,
+            self.os_path.relpath(src_file_path, src_dir)
+          )
 
-        # If we have a symlink don't do anything.
-        if self.os_path.islink(src_file_path):
-          continue
+          # If we have a symlink don't do anything.
+          if self.os_path.islink(src_file_path):
+            continue
 
-        # Make sure the destination directory exists.
-        os.makedirs(self.os_path.dirname(dst_file_path), exist_ok=True)
+          # Make sure the destination directory exists.
+          os.makedirs(self.os_path.dirname(dst_file_path), exist_ok=True)
 
-        is_jinja_template = False
-        if src_file_path.endswith(('.jinja')):
-          dst_file_path = dst_file_path[:-len('.jinja')]
-          is_jinja_template = True
-        if src_file_path.endswith(('.j2')):
-          dst_file_path = dst_file_path[:-len('.j2')]
-          is_jinja_template = True
+          is_jinja_template = False
+          if src_file_path.endswith(('.jinja')):
+            dst_file_path = dst_file_path[:-len('.jinja')]
+            is_jinja_template = True
+          if src_file_path.endswith(('.j2')):
+            dst_file_path = dst_file_path[:-len('.j2')]
+            is_jinja_template = True
 
-        # If this file is a jinja template render it to a file with the .jinja suffix removed.
-        # Otherwise just copy the file to the destination directory.
-        if is_jinja_template:
-          template = env.get_template(src_file_path)
-          rendered_content = template.render(jinja_args)
-          with open(dst_file_path, 'w') as f:
-            f.write(rendered_content)
-        else:
-          shutil.copy2(src_file_path, dst_file_path)
-        # endif is jinja template
-      # endfor all files
-    # endfor os.walk
+          # If this file is a jinja template render it to a file with the .jinja suffix removed.
+          # Otherwise just copy the file to the destination directory.
+          if is_jinja_template:
+            template = env.get_template(src_file_path)
+            rendered_content = template.render(jinja_args)
+            with open(dst_file_path, 'w') as f:
+              f.write(rendered_content)
+          else:
+            shutil.copy2(src_file_path, dst_file_path)
+          # endif is jinja template
+        # endfor all files
+      # endfor os.walk
+    # endif src_dir is not None
 
     # write .env file in the target directory
     # environment variables are passed in subprocess.Popen, so this is not needed
@@ -838,8 +844,10 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       for key, value in self.base_env.items():
         f.write(f"{key}={value}\n")
 
-    # now cleanup the output folder
-    shutil.rmtree(self.os_path.join(self.get_output_folder(), 'downloaded_assets', self.plugin_id))
+    # now cleanup the download folder if it exists
+    downloaded_assets_path = self.os_path.join(self.get_output_folder(), 'downloaded_assets', self.plugin_id)
+    if self.os_path.exists(downloaded_assets_path):
+      shutil.rmtree(downloaded_assets_path)
 
     self.P("Assets copied successfully")
 

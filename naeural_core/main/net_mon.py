@@ -117,10 +117,6 @@ class NetworkMonitor(DecentrAIObject):
 
 
   def startup(self):
-    self.P(f"Initializing Network Monitor on {self.node_addr}", boxed=True)
-    if self.__epoch_manager is None:
-      self.__epoch_manager = EpochsManager(log=self.log, owner=self)
-    
     if self.__blockchain_manager is None:
       self.P("Blockchain manager not available", color='r')
       self.__blockchain_manager = DefaultBlockEngine(
@@ -128,6 +124,11 @@ class NetworkMonitor(DecentrAIObject):
         name=self.node_name,
         config={}, # use default blockchain config
       )
+
+    self.P(f"Initializing Network Monitor on {self.node_addr}", boxed=True)
+    if self.__epoch_manager is None:
+      self.__epoch_manager = EpochsManager(log=self.log, owner=self)
+    
     return
 
   
@@ -173,6 +174,10 @@ class NetworkMonitor(DecentrAIObject):
   def __remove_address_prefix(self, addr):
     """Remove the address prefix if it exists"""
     return self.__blockchain_manager.maybe_remove_prefix(addr)
+  
+  
+  def node_address_to_eth_address(self, addr):
+    return self.__blockchain_manager.node_address_to_eth_address(addr)
 
 
   def __pop_repeating_info_from_heartbeat(self, hb):

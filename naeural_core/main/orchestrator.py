@@ -233,8 +233,12 @@ class Orchestrator(DecentrAIObject,
           result = response.json().get('result', {})
           keys = [k for k in result if k.startswith('EE_')]
           self.P("Found {} keys in dAuth response.".format(len(keys)), color='g')
-          for k, v in result.items():
-            os.environ[k] = v
+          for k in keys:
+            if k not in os.environ:
+              self.P(f"  Adding key '{k}' to environment.", color='y')
+            else:
+              self.P(f"  Overwriting '{k}' already in environment.", color='y')
+            os.environ[k] = result[k]
           done = True
         except Exception as exc:
           self.P(f"Error in dAuth URL request: {exc}:\n{traceback.format_exc()}", color='r')          

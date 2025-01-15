@@ -91,17 +91,18 @@ class FastApiWebAppPlugin(BasePlugin):
   def initialize_assets(self, src_dir, dst_dir, jinja_args):
     """
     Initialize and copy fastapi assets, expanding any jinja templates.
-    All files from the source directory are copied copied to the
+    All files from the source directory are copied to the
     destination directory with the following exceptions:
       - are symbolic links are ignored
       - files named ending with .jinja are expanded as jinja templates,
         .jinja is removed from the filename and the result copied to
         the destination folder.
     This maintains the directory structure of the source folder.
+    In case src_dir is None, only the jinja templates are expanded.
 
     Parameters
     ----------
-    src_dir: str, path to the source directory
+    src_dir: str or None, path to the source directory
     dst_dir: str, path to the destination directory
     jinja_args: dict, jinja keys to use while expanding the templates
 

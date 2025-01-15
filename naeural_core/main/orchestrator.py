@@ -209,6 +209,46 @@ class Orchestrator(DecentrAIObject,
       self.config_data['SERVING_ENVIRONMENT']['DEFAULT_DEVICE'] = default_device
     return
   
+  def _check_and_complete_environment_variables(self):
+    import requests
+    import uuid
+    url = None
+    if isinstance(ct.DAUTH_URL, str) and len(ct.DAUTH_URL) > 0:
+      url = ct.DAUTH_URL
+    else:
+      url = os.environ.get('DAUTH_URL')
+    
+    if isinstance(url, str) and len(url) > 0:
+      self.P("Found dAuth URL in environment: '{}'".format(url), color='g')
+      done = False
+      tries = 0
+      while not done:
+        self.P(f"Trying dAuth `{url}` information... (try {tries})")
+        try:
+          nonce_data = {
+            'data' : str(uuid.uuid4())[:8]
+          }
+          self._blockchain_manager.sign(nonce_data)
+          response = requests.get(url, params=nonce_data)
+          result = response.json().get('result', {})
+          keys = [k for k in result if k.startswith('EE_')]
+          self.P("Found {} keys in dAuth response.".format(len(keys)), color='g')
+          for k in keys:
+            if k not in os.environ:
+              self.P(f"  Adding key '{k}' to environment.", color='y')
+            else:
+              self.P(f"  Overwriting '{k}' already in environment.", color='y')
+            os.environ[k] = result[k]
+          done = True
+        except Exception as exc:
+          self.P(f"Error in dAuth URL request: {exc}:\n{traceback.format_exc()}", color='r')          
+        tries += 1
+        if tries > 5:
+          done = True
+    else:
+      self.P("dAuth URL not found.", color='r')    
+    return
+  
   ####### end pre-init area
   
   def _init_all_processes(self):    
@@ -231,7 +271,16 @@ class Orchestrator(DecentrAIObject,
     self._app_shmem[ct.CALLBACKS.MAIN_LOOP_RESOLUTION_CALLBACK] = self._get_mean_loop_freq
     self._app_shmem[ct.CALLBACKS.INSTANCE_CONFIG_SAVER_CALLBACK] = self.save_config_pipeline_instance
     self._app_shmem[ct.CALLBACKS.PIPELINE_CONFIG_SAVER_CALLBACK] = self.save_config_pipeline
+
+    ### at this point we should check if the authentication information is available in the
+    ### environment and if not we should pool the endpoint for the information
+    
+    self._check_and_complete_environment_variables()
+    
+    ### following the env update we can proceed with the managers initialization
+    
     self._initialize_managers()
+    
     self.log.register_close_callback(self._maybe_gracefull_stop)
 
     self._thread_async_comm = Thread(
@@ -289,11 +338,11 @@ class Orchestrator(DecentrAIObject,
 
   def save_local_address(self):
     folder = self.log.get_data_folder()
-    addr_file = os.path.join(folder, 'local_address.json')
+    addr_file = os.path.join(folder, ct.LocalInfo.LOCAL_INFO_FILE)
     data = {
-      'address' : self.e2_address,
-      'alias'   : self.e2_id,
-      'eth_address' : self.eth_address,
+      ct.LocalInfo.K_ADDRESS : self.e2_address,
+      ct.LocalInfo.K_ALIAS   : self.e2_id,
+      ct.LocalInfo.K_ETH_ADDRESS : self.eth_address,
     }
     with open(addr_file, 'w') as f:
       f.write(json.dumps(data, indent=2))

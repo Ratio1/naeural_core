@@ -111,6 +111,7 @@ class EpochsManager(Singleton):
     self.__current_epoch = None
     self.__data = {}
     self.__full_data = {}
+    self.__eth_to_node = {}
     self.__debug = debug
     self._set_dbg_date(debug_date)
 
@@ -153,6 +154,15 @@ class EpochsManager(Singleton):
   def stop_timer(self, name):
     self.log.stop_timer(name, section='epoch')
     return
+  
+  def __compute_eth_to_internal(self):
+    for node_addr in self.__data:
+      eth_node_addr = self.owner.node_address_to_eth_address(node_addr)
+      self.__eth_to_node[eth_node_addr] = node_addr
+    return
+  
+  def eth_to_internal(self, eth_node_addr):
+    return self.__eth_to_node.get(eth_node_addr, None)
   
   def get_node_name(self, node_addr):
     """ 
@@ -209,10 +219,11 @@ class EpochsManager(Singleton):
         # end if using new format
 
         self.__add_empty_fields()
-        self.P("Epochs status loaded with ....", boxed=True)
+        self.__compute_eth_to_internal()
+        self.P(f"Epochs status loaded with {len(self.__data)} nodes", boxed=True)
       else:
         self.P("Error loading epochs status.", color='r')
-      return
+    return
 
   def __add_empty_fields(self):
     """
@@ -510,7 +521,9 @@ class EpochsManager(Singleton):
     node_name = self.get_node_name(node_addr)
     self.__data[node_addr] = _get_node_template(node_name)
     self.__reset_timestamps(node_addr)
-    self.P("New node {:<8} <{}> added to db".format(name, node_addr))
+    eth_node_addr = self.owner.node_address_to_eth_address(node_addr)
+    self.__eth_to_node[eth_node_addr] = node_addr
+    self.P("New node {:<8} <{}> / <{}> added to db".format(name, node_addr, eth_node_addr))
     return
 
   def register_data(self, node_addr, hb):

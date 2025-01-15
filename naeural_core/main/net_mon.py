@@ -173,6 +173,10 @@ class NetworkMonitor(DecentrAIObject):
   def __remove_address_prefix(self, addr):
     """Remove the address prefix if it exists"""
     return self.__blockchain_manager.maybe_remove_prefix(addr)
+  
+  
+  def node_address_to_eth_address(self, addr):
+    return self.__blockchain_manager.node_address_to_eth_address(addr)
 
 
   def __pop_repeating_info_from_heartbeat(self, hb):

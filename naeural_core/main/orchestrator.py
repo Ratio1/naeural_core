@@ -212,6 +212,7 @@ class Orchestrator(DecentrAIObject,
   def _check_and_complete_environment_variables(self):
     import requests
     import uuid
+    
     url = None
     if isinstance(ct.DAUTH_URL, str) and len(ct.DAUTH_URL) > 0:
       url = ct.DAUTH_URL
@@ -230,15 +231,16 @@ class Orchestrator(DecentrAIObject,
           }
           self._blockchain_manager.sign(nonce_data)
           response = requests.get(url, params=nonce_data)
-          result = response.json().get('result', {})
-          keys = [k for k in result if k.startswith('EE_')]
+          dct_response = response.json()
+          dct_result = dct_response.get('result', {}).get('auth', {})
+          keys = [k for k in dct_result if k.startswith('EE_')]
           self.P("Found {} keys in dAuth response.".format(len(keys)), color='g')
           for k in keys:
             if k not in os.environ:
               self.P(f"  Adding key '{k}' to environment.", color='y')
             else:
               self.P(f"  Overwriting '{k}' already in environment.", color='y')
-            os.environ[k] = result[k]
+            os.environ[k] = dct_result[k]
           done = True
         except Exception as exc:
           self.P(f"Error in dAuth URL request: {exc}:\n{traceback.format_exc()}", color='r')          

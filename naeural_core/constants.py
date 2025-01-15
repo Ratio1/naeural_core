@@ -18,6 +18,9 @@ from naeural_client.const import (
   WEEKDAYS_SHORT,
 )
 
+DAUTH_URL = BASE_CT.DAUTH_URL
+LocalInfo = BASE_CT.LocalInfo
+
 CONST_ADMIN_PIPELINE_NAME = 'admin_pipeline'
 
 BLOCKCHAIN_MANAGER = 'BLOCKCHAIN_MANAGER'

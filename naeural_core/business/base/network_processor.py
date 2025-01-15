@@ -93,7 +93,7 @@ class NetworkProcessorPlugin(BaseClass):
         verify_msg = None
         try:
           verify_results = self.bc.verify(
-            data, 
+            dct_data=data, 
             str_signature=None, sender_address=None,
             return_full_info=True,
           )
@@ -103,7 +103,10 @@ class NetworkProcessorPlugin(BaseClass):
           self.P(f"{e}: {data}", color="red")
           continue
         if not verified:
-          self.P(f"Payload signature verification FAILED with '{verify_msg}': {data}", color="red")
+          self.P(
+            f"Payload signature verification FAILED with '{verify_msg}': {data}", 
+            color="red"
+          )
           continue
         payload_path = data.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])        
         is_self = payload_path == self.get_instance_path()

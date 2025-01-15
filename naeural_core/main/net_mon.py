@@ -117,10 +117,6 @@ class NetworkMonitor(DecentrAIObject):
 
 
   def startup(self):
-    self.P(f"Initializing Network Monitor on {self.node_addr}", boxed=True)
-    if self.__epoch_manager is None:
-      self.__epoch_manager = EpochsManager(log=self.log, owner=self)
-    
     if self.__blockchain_manager is None:
       self.P("Blockchain manager not available", color='r')
       self.__blockchain_manager = DefaultBlockEngine(
@@ -128,6 +124,11 @@ class NetworkMonitor(DecentrAIObject):
         name=self.node_name,
         config={}, # use default blockchain config
       )
+
+    self.P(f"Initializing Network Monitor on {self.node_addr}", boxed=True)
+    if self.__epoch_manager is None:
+      self.__epoch_manager = EpochsManager(log=self.log, owner=self)
+    
     return
 
   

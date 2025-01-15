@@ -156,6 +156,8 @@ class EpochsManager(Singleton):
     return
   
   def __compute_eth_to_internal(self):
+    if not hasattr(self.owner, "node_address_to_eth_address"):
+      return
     for node_addr in self.__data:
       eth_node_addr = self.owner.node_address_to_eth_address(node_addr)
       self.__eth_to_node[eth_node_addr] = node_addr
@@ -823,22 +825,23 @@ if __name__ == '__main__':
   ]
   
   # make sure you have a recent (today) save network status
-  eng = EpochsManager(log=l, owner=1234, debug_date=DATES[0], debug=True)
+  eng1 = EpochsManager(log=l, owner=1234, debug_date=DATES[0], debug=True)
   eng2 = EpochsManager(log=l, owner=None, debug_date=DATES[1])
-  assert id(eng) == id(eng2)
+  assert id(eng1) == id(eng2)
     
   
   if True:
     netmon = NetworkMonitor(
       log=l, node_name='aid_hpc', node_addr='0xai_AgNxIxNN6RsDqBa0d5l2ZQpy7y-5bnbP55xej4OvcitO',
-      epoch_manager=eng
+      # epoch_manager=eng
     )
   else:
     netmon = NetworkMonitor(
       log=l, node_name='aid_hpc', node_addr='0xai_AgNxIxNN6RsDqBa0d5l2ZQpy7y-5bnbP55xej4OvcitO'
     )
     
-  eng.owner = netmon
+  # eng.owner = netmon
+  eng = netmon.epoch_manager
   
   assert id(eng) == id(netmon.epoch_manager)  
 

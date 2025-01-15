@@ -56,7 +56,13 @@ class BCWrapper:
       replace_nan=replace_nan
     )
   
-  def verify(self, dct_data: str, str_signature: str = None, sender_address: str = None) -> bool:
+  def verify(
+    self, 
+    dct_data: str, 
+    str_signature: str = None, 
+    sender_address: str = None,
+    return_full_info : bool = True,
+  ) -> bool:
     """
     Verifies a signature using the public key of the signer
 
@@ -71,13 +77,22 @@ class BCWrapper:
     str_signer : str
         the signer's address (string) used as the public key for verification.
         Default `None` will be taken from the data
+        
+    return_full_info: bool, optional
+        whether to return the full verification info. Default `True`      
+    
 
     Returns
     -------
     bool
         True if the signature is valid, False otherwise
     """
-    return self.__bc.verify(dct_data=dct_data, signature=str_signature, sender_address=sender_address)
+    return self.__bc.verify(
+      dct_data=dct_data, 
+      signature=str_signature, 
+      sender_address=sender_address,
+      return_full_info=return_full_info,
+    )
 
   def encrypt_str(self, str_data : str, str_recipient : str):
     """

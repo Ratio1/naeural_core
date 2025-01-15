@@ -89,13 +89,24 @@ class NetworkProcessorPlugin(BaseClass):
           if self.cfg_full_debug_payloads:
             self.P(f"Received non dict payload: {data} from {datas}", color="red")           
           continue
+        varified = False
+        verify_msg = None
         try:
-          verified = self.bc.verify(data, str_signature=None, sender_address=None)
+          verify_results = self.bc.verify(
+            dct_data=data, 
+            str_signature=None, sender_address=None,
+            return_full_info=True,
+          )
+          verified = verify_results.valid
+          verify_msg = verify_results.message
         except Exception as e:
           self.P(f"{e}: {data}", color="red")
           continue
         if not verified:
-          self.P(f"Payload signature verification FAILED: {data}", color="red")
+          self.P(
+            f"Payload signature verification FAILED with '{verify_msg}': {data}", 
+            color="red"
+          )
           continue
         payload_path = data.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])        
         is_self = payload_path == self.get_instance_path()

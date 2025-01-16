@@ -222,45 +222,12 @@ class Orchestrator(DecentrAIObject,
     return
   
   def _check_and_complete_environment_variables(self):
-    import requests
-    import uuid
-    
-    url = None
-    if isinstance(ct.DAUTH_URL, str) and len(ct.DAUTH_URL) > 0:
-      url = ct.DAUTH_URL
-    else:
-      url = os.environ.get('DAUTH_URL')
-    
-    if isinstance(url, str) and len(url) > 0:
-      self.P("Found dAuth URL in environment: '{}'".format(url), color='g')
-      done = False
-      tries = 0
-      while not done:
-        self.P(f"Trying dAuth `{url}` information... (try {tries})")
-        try:
-          nonce_data = {
-            'data' : str(uuid.uuid4())[:8]
-          }
-          self._blockchain_manager.sign(nonce_data)
-          response = requests.get(url, params=nonce_data)
-          dct_response = response.json()
-          dct_result = dct_response.get('result', {}).get('auth', {})
-          keys = [k for k in dct_result if k.startswith('EE_')]
-          self.P("Found {} keys in dAuth response.".format(len(keys)), color='g')
-          for k in keys:
-            if k not in os.environ:
-              self.P(f"  Adding key '{k}' to environment.", color='y')
-            else:
-              self.P(f"  Overwriting '{k}' already in environment.", color='y')
-            os.environ[k] = dct_result[k]
-          done = True
-        except Exception as exc:
-          self.P(f"Error in dAuth URL request: {exc}:\n{traceback.format_exc()}", color='r')          
-        tries += 1
-        if tries > 5:
-          done = True
-    else:
-      self.P("dAuth URL not found.", color='r')    
+    self.blockchain_manager.dauth_autocomplete(
+      dauth_endp=None, # get automatically
+      add_env=True,
+      debug=False,
+      max_tries=5,
+    )
     return
   
   ####### end pre-init area

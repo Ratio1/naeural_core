@@ -189,7 +189,7 @@ class _ManagersInitMixin(object):
     return self._file_system_manager
   
   @property
-  def blockchain_manager(self):
+  def blockchain_manager(self) -> DefaultBlockEngine:
     return self._blockchain_manager
 
   @property

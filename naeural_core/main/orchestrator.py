@@ -358,6 +358,10 @@ class Orchestrator(DecentrAIObject,
         }
       # endif k not in admin_pipeline
     # endfor each mandatory pipeline
+    results = self.log.replace_secrets(admin_pipeline)
+    if results is not None and len(results) > 0:
+      self.P(f'  Replaced {len(results)} secrets in admin pipeline config: {results}.')
+    # endif results replaced
     self.__admin_pipeline = admin_pipeline
     return
   

@@ -129,7 +129,7 @@ ADMIN_PIPELINE = {
 
   "NET_MON_01": {
     "PROCESS_DELAY": 20,
-    "SUPERVISOR": environ.get("EE_SUPERVISOR", False)
+    "SUPERVISOR": "$EE_SUPERVISOR"
   },
   
 

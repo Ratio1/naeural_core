@@ -222,12 +222,16 @@ class Orchestrator(DecentrAIObject,
     return
   
   def _check_and_complete_environment_variables(self):
-    self.blockchain_manager.dauth_autocomplete(
+    dct_env_output = self.blockchain_manager.dauth_autocomplete(
       dauth_endp=None, # get automatically
       add_env=True,
       debug=False,
       max_tries=5,
     )
+    if dct_env_output is not None and len(dct_env_output) > 0:
+      self.P(f'Reloading config due to dAuth modification of following env vars: {list(dct_env_output.keys())}')
+      self.log.reload_config()
+      self.P("Config reloaded.")
     return
   
   ####### end pre-init area
@@ -346,7 +350,14 @@ class Orchestrator(DecentrAIObject,
       if k not in admin_pipeline:
         self.P("  Mandatory `{}` not found in base admin pipeline TEMPLATE config. Adding...".format(k))
         admin_pipeline[k] = ct.ADMIN_PIPELINE[k]
-    #endfor each mandatory pipeline
+      else:
+        self.P(f'  Found `{k}` in admin pipeline config. Merging...')
+        admin_pipeline[k] = {
+          **ct.ADMIN_PIPELINE[k],
+          **admin_pipeline[k],
+        }
+      # endif k not in admin_pipeline
+    # endfor each mandatory pipeline
     self.__admin_pipeline = admin_pipeline
     return
   

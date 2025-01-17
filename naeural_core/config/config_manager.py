@@ -416,7 +416,14 @@ class ConfigManager(
   
   
   def maybe_setup_admin_pipeline(self):
-    ADMIN_PIPELINE_VER = "2.1.0"
+    """
+    
+    Returns
+    -------
+    
+    list with the names of the available pipelines
+    """
+    ADMIN_PIPELINE_VER = "2.1.1"
     INSTANCE_STR = "{}_INST"
     pipeline_name = self.admin_pipeline_name
     self.P("Setting-up admin jobs pipeline...")  
@@ -500,6 +507,10 @@ class ConfigManager(
         else:
           default_instance_config = dct_std[plg][ct.BIZ_PLUGIN_DATA.INSTANCES][0] # instance 0 is the default instance from the reference pipeline
           curr_instance_id = dct_curr_plugins_instances[plg][ct.BIZ_PLUGIN_DATA.INSTANCE_ID]
+          self.P("    Checking admin plugin instance `{}`: {}, template has {}".format(
+            curr_instance_id, list(dct_curr_plugins_instances[plg].keys()),
+            list(default_instance_config.keys()), 
+          ))
           correct_instance_id = INSTANCE_STR.format(plg)
           # check if the instance id is correct
           if curr_instance_id != correct_instance_id:
@@ -528,8 +539,13 @@ class ConfigManager(
       self.dct_config_streams[pipeline_name] = dct_current_admin # update the admin pipeline in the memory cache      
       self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(dct_current_admin, indent=2)))
       self._save_stream_config(dct_current_admin)
+      # now maybe replace the secrets
+      res = self.log.replace_secrets(dct_current_admin)
+      if res is not None and len(res) > 0:
+        self.P("Admin pipeline secrets replaced post save: {}".format(res), color='m')
     else:
       self.P("  Admin pipeline is already correctly configured - no need to save")
+    #endif needs save
     names_available_pipelines = list(self.dct_config_streams.keys())
     return names_available_pipelines
     
@@ -564,7 +580,6 @@ class ConfigManager(
       #endif .txt file        
     #endfor
     
-    names_available_streams = []
 
     for fn in available_streams:
       crt_config_stream = self.log.load_json(
@@ -579,7 +594,6 @@ class ConfigManager(
 
       if crt_config_stream is not None:
         stream_name = crt_config_stream[ct.CONFIG_STREAM.K_NAME]
-        names_available_streams.append(stream_name)
         dct_config_streams[stream_name] = crt_config_stream
 
         # sometimes the name of the config file may differ from the configured name. 

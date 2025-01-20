@@ -287,13 +287,20 @@ class MinioMonit01Plugin(BasePluginExecutor):
       else:
         return payload
 
-    self.__maybe_create_client_connection()
-    if self.__minio_client is None:
+    try:
+      self.__maybe_create_client_connection()
+      if self.__minio_client is None:
+        return
+
+      self.__maybe_get_new_objects_generator()
+      self.__process_iter_files()
+      
+    except Exception as exc:
+      SLEEP_TIME = 300
+      self.show_minio_config(error=True)
+      self.P(f"Error during MinIO Monitor: {exc}, blocking for {SLEEP_TIME}", color='r')
+      self.sleep(SLEEP_TIME)
       return
-
-    self.__maybe_get_new_objects_generator()
-
-    self.__process_iter_files()
 
     # when the plugin iterated through all buckets send payload
     if self.__current_bucket_objects_generator is None and len(self.__buckets_list) == 0:

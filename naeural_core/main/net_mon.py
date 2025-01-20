@@ -1409,7 +1409,7 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_whitelist(self, addr):
       """Returns the whitelist of a remote node exactly as it was received in the heartbeat - naturally without any prefix."""
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
-      return hb.get(ct.HB.EE_WHITELIST, [])
+      return hb.get(ct.HB.EE_WHITELIST, ['<abnormal list>'])
     
     def network_node_local_tz(self, addr, as_zone=True):
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)

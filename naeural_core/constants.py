@@ -129,6 +129,8 @@ ADMIN_PIPELINE = {
 
   "NET_MON_01": {
     "PROCESS_DELAY": 20,
+    "LOG_INFO"            : False,
+    "LOG_FULL_INFO"       : False,
     "SUPERVISOR": "$EE_SUPERVISOR"
   },
   

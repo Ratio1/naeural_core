@@ -774,6 +774,8 @@ class Orchestrator(DecentrAIObject,
       hb_payload = self._app_monitor.get_status(
         status=status, full=full_info, send_log=send_log,
       )
+      whitelist = hb_payload.get(ct.HB.EE_WHITELIST, [])
+      nr_allowed = len(whitelist)
       # END: internal checks
       
       ## debug
@@ -864,7 +866,7 @@ class Orchestrator(DecentrAIObject,
           extra = "Total {}/{}/{} data/inf/send".format(
             n_upstream, n_inferences, n_comms,
           )
-          hb_msg = "{} hb:{} {}{}{}itr {} ({} void), Hz: {}/{}, {:.1f} hrs, New.pl.: {}, {}".format(
+          hb_msg = "{} hb:{} {}{}{}itr {} ({} void), Hz: {}/{}, {:.1f} hrs, New.pl.: {}, {}, wl:{}".format(
             "'{}' {}".format(self.cfg_eeid, self.__get_system_version()),
             self._heartbeat_counter,
             "with full log " if send_log else "", "status:'{}' ".format(status) if status is not None else '',
@@ -872,6 +874,7 @@ class Orchestrator(DecentrAIObject,
             self.running_time / 3600, self._payloads_count_queue[-1] - self._payloads_count_queue[-2],
             # self._app_monitor.get_basic_perf_info(),
             self._app_monitor.get_summary_perf_info(),
+            nr_allowed,
           )
           if False:
             hb_msg = hb_msg + ', ' + extra

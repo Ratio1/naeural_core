@@ -29,6 +29,12 @@ _CONFIG = {
   'PAGES': [],
   'STATIC_DIRECTORY': 'assets',
 
+  # In case of wrapped response, the response will be wrapped in a json with 2 keys:
+  # 'result' and 'node_addr', where 'result' is the actual response and 'node_addr' is the node address
+  # In case of raw response, the response will be the actual response provided by the endpoint method.
+  # The default is 'WRAPPED'.
+  'RESPONSE_FORMAT': 'WRAPPED',
+
   'PROCESS_DELAY': 0,
 
   'VALIDATION_RULES': {
@@ -243,6 +249,14 @@ class FastApiWebAppPlugin(BasePlugin):
   def parse_postponed_dict(self, request):
     return request['id'], request['value'], request['endpoint_name']
 
+  def __process_response(self, response):
+    if self.cfg_response_format == 'RAW':
+      return response
+    return {
+      'result': response,
+      'node_addr': self.e2_addr
+    }
+
   def _process(self):
     super(FastApiWebAppPlugin, self)._process()
     new_postponed_requests = []
@@ -272,10 +286,7 @@ class FastApiWebAppPlugin(BasePlugin):
       else:
         response = {
           'id': id,
-          'value': {
-            'result': value,
-            'node_addr': self.e2_addr,
-          }
+          'value': self.__process_response(value)
         }
         self._manager.get_client_queue().put(response)
       # endif request is postponed

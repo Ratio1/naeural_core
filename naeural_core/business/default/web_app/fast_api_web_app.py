@@ -320,10 +320,7 @@ class FastApiWebAppPlugin(BasePlugin):
       else:
         response = {
           'id': id,
-          'value': {
-            'result': value,
-            'node_addr': self.e2_addr,
-          }
+          'value': self.__process_response(value)
         }
         self._manager.get_client_queue().put(response)
       # endif request is postponed

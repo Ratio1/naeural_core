@@ -227,6 +227,7 @@ class Orchestrator(DecentrAIObject,
       add_env=True,
       debug=False,
       max_tries=5,
+      sender_alias=self.cfg_eeid,
     )
     if dct_env_output is not None and len(dct_env_output) > 0:
       self.P(f'Reloading config due to dAuth modification of following env vars: {list(dct_env_output.keys())}')

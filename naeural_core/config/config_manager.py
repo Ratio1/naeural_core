@@ -507,8 +507,8 @@ class ConfigManager(
         else:
           default_instance_config = dct_std[plg][ct.BIZ_PLUGIN_DATA.INSTANCES][0] # instance 0 is the default instance from the reference pipeline
           curr_instance_id = dct_curr_plugins_instances[plg][ct.BIZ_PLUGIN_DATA.INSTANCE_ID]
-          self.P("    Checking admin plugin instance `{}`: {}, template has {}".format(
-            curr_instance_id, list(dct_curr_plugins_instances[plg].keys()),
+          self.P("    Checking admin plugin instance `{}`: template has {}".format(
+            curr_instance_id, #list(dct_curr_plugins_instances[plg].keys()),
             list(default_instance_config.keys()), 
           ))
           correct_instance_id = INSTANCE_STR.format(plg)
@@ -522,7 +522,7 @@ class ConfigManager(
           for k in default_instance_config:
             if k not in dct_curr_plugins_instances[plg]:
               dct_curr_plugins_instances[plg][k] = default_instance_config[k]
-              self.P("    Missing {}:{} admin plugin instance key added added".format(plg, k))
+              self.P("      Missing {}:{} admin plugin instance key added added".format(plg, k))
               needs_save = True
             #endif missing key
           #endfor all keys              

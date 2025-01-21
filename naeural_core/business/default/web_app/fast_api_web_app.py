@@ -55,18 +55,28 @@ class FastApiWebAppPlugin(BasePlugin):
   CONFIG = _CONFIG
 
   @staticmethod
-  def endpoint(func=None, *, method="get"):
+  def endpoint(func=None, *, method="get", require_token=False):
     """
-    Decorator, marks the method as being exposed as an endpoint.
+    Decorator that marks a method as an HTTP endpoint. Optionally enforces a Bearer token.
+    
+    Parameters
+    ----------
+    method : str
+        HTTP method (e.g. "get", "post").
+        
+    require_token : bool
+        Whether this endpoint should require a Bearer token.
+        
     """
     if func is None:
       def wrapper(func):
-        return FastApiWebAppPlugin.endpoint(func, method=method)
+        return FastApiWebAppPlugin.endpoint(func, method=method, require_token=require_token)
 
       return wrapper
 
     func.__endpoint__ = True
     func.__http_method__ = method
+    func.__require_token__ = require_token
     return func
 
   def get_web_server_path(self):
@@ -136,7 +146,7 @@ class FastApiWebAppPlugin(BasePlugin):
 
       # Finally render main.py
       template_dir = self.os_path.join('naeural_core', 'business', 'base', 'uvicorn_templates')
-      app_template = self.os_path.join(template_dir, f'{self.cfg_template}.jinja')
+      app_template = self.os_path.join(template_dir, f'{self.cfg_template}.j2')
       # env.get_template expects forward slashes, even on Windows.
       app_template = app_template.replace(os.sep, '/')
       app_template = env.get_template(app_template)
@@ -188,6 +198,7 @@ class FastApiWebAppPlugin(BasePlugin):
         continue
       self._endpoints[name] = method
       http_method = method.__http_method__
+      require_token = getattr(method, '__require_token__', False)
       signature = inspect.signature(method)
       doc = method.__doc__ or ''
       params = [param.name for param in signature.parameters.values()]
@@ -197,7 +208,8 @@ class FastApiWebAppPlugin(BasePlugin):
         'method': http_method,
         'args': args,
         'params': params,
-        'endpoint_doc': doc
+        'endpoint_doc': doc,
+        'require_token': require_token
       })
     # endfor all methods
     self._node_comms_jinja_args = jinja_args

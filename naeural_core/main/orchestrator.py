@@ -324,6 +324,13 @@ class Orchestrator(DecentrAIObject,
 
   def save_local_address(self):
     folder = self.log.get_data_folder()
+    ## cleanup
+    CLEANUP_FILES = ["local_address.txt", "local_address.json"]
+    for fn in CLEANUP_FILES:
+      fpath = os.path.join(folder, fn)
+      if os.path.exists(fpath):
+        os.remove(fpath)
+    ## end cleanup
     addr_file = os.path.join(folder, ct.LocalInfo.LOCAL_INFO_FILE)
     data = {
       ct.LocalInfo.K_ADDRESS : self.e2_address,

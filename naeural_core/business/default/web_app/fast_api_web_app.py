@@ -201,8 +201,18 @@ class FastApiWebAppPlugin(BasePlugin):
       require_token = getattr(method, '__require_token__', False)
       signature = inspect.signature(method)
       doc = method.__doc__ or ''
-      params = [param.name for param in signature.parameters.values()]
-      args = [str(param) for param in signature.parameters.values()]
+      all_params = [param.name for param in signature.parameters.values()]
+      all_args = [str(param) for param in signature.parameters.values()]
+      if not require_token:
+        args = all_args
+        params = all_params
+      else:
+        if all_params[0] != 'token':
+          raise ValueError(f"First parameter of method {name} must be 'token' if require_token is True.")
+        params = [x for x in all_params if x != 'token']
+        args = [x for x in all_args if x != 'token']
+        
+      # endif require_token   
       jinja_args.append({
         'name': name,
         'method': http_method,
@@ -211,6 +221,8 @@ class FastApiWebAppPlugin(BasePlugin):
         'endpoint_doc': doc,
         'require_token': require_token
       })
+      str_function = f"{name}({', '.join(args)})"
+      self.P(f"Registered endpoint {str_function} with method {http_method}. Require token: {require_token}")
     # endfor all methods
     self._node_comms_jinja_args = jinja_args
     return

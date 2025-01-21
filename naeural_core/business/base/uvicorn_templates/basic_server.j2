@@ -11,19 +11,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from os import path as file_path
 
 from naeural_core.utils.uvicorn_fast_api_ipc_manager import UvicornPluginComms
+
 eng = UvicornPluginComms(port={{ manager_port }}, auth={{ manager_auth }})
+
 app = FastAPI(
   title={{ api_title }},
   summary={{ api_summary }},
   description={{ api_description }},
   version={{ api_version }},
 )
+
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
+  CORSMiddleware,
+  allow_origins=["*"],  # Allow all origins
+  allow_credentials=True,
+  allow_methods=["*"],  # Allow all methods
+  allow_headers=["*"],  # Allow all headers
 )
 
 STATIC_DIR = "{{ static_directory }}"

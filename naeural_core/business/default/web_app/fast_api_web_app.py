@@ -8,6 +8,9 @@ from naeural_core.business.base.web_app.base_web_app_plugin import BaseWebAppPlu
 from naeural_core.utils.uvicorn_fast_api_ipc_manager import get_server_manager
 from naeural_core.utils.fastapi_utils import PostponedRequest
 
+#TODO: move __sign and __get_response from dauth_manager to base_web_app_plugin or fastapi_web_app or utils
+#  all responses should contain the data from __get_response
+
 __VER__ = '0.0.0.0'
 
 _CONFIG = {
@@ -34,6 +37,7 @@ _CONFIG = {
   # In case of raw response, the response will be the actual response provided by the endpoint method.
   # The default is 'WRAPPED'.
   'RESPONSE_FORMAT': 'WRAPPED',
+  "DEBUG_WEB_APP": False,
 
   'PROCESS_DELAY': 0,
 
@@ -75,6 +79,8 @@ class FastApiWebAppPlugin(BasePlugin):
       return wrapper
 
     func.__endpoint__ = True
+    if isinstance(method, str):
+      method = method.lower()
     func.__http_method__ = method
     func.__require_token__ = require_token
     return func
@@ -203,15 +209,18 @@ class FastApiWebAppPlugin(BasePlugin):
       doc = method.__doc__ or ''
       all_params = [param.name for param in signature.parameters.values()]
       all_args = [str(param) for param in signature.parameters.values()]
+      if self.cfg_debug_web_app:
+        self.P(f'Endpoint {name}[{require_token=}] with {all_args=} and {all_params=}')
       if not require_token:
         args = all_args
         params = all_params
       else:
         if all_params[0] != 'token':
           raise ValueError(f"First parameter of method {name} must be 'token' if require_token is True.")
-        params = [x for x in all_params if x != 'token']
-        args = [x for x in all_args if x != 'token']
-        
+        params = all_params[1:]
+        args = all_args[1:]
+        if self.cfg_debug_web_app:
+          self.P(f'Endpoint {name}[{require_token=}] left with {args=} and {params=}')
       # endif require_token   
       jinja_args.append({
         'name': name,
@@ -273,13 +282,21 @@ class FastApiWebAppPlugin(BasePlugin):
   def parse_postponed_dict(self, request):
     return request['id'], request['value'], request['endpoint_name']
 
-  def __process_response(self, response):
+  def __fastapi_process_response(self, response):
     if self.cfg_response_format == 'RAW':
       return response
     return {
       'result': response,
       'node_addr': self.e2_addr
     }
+
+  def __fastapi_handle_response(self, id, value):
+    response = {
+      'id': id,
+      'value': self.__fastapi_process_response(value)
+    }
+    self._manager.get_client_queue().put(response)
+    return
 
   def _process(self):
     super(FastApiWebAppPlugin, self)._process()
@@ -308,11 +325,7 @@ class FastApiWebAppPlugin(BasePlugin):
           endpoint_name=endpoint_name
         ))
       else:
-        response = {
-          'id': id,
-          'value': self.__process_response(value)
-        }
-        self._manager.get_client_queue().put(response)
+        self.__fastapi_handle_response(id, value)
       # endif request is postponed
     # end while there are postponed requests
     for request in new_postponed_requests:
@@ -342,11 +355,7 @@ class FastApiWebAppPlugin(BasePlugin):
           endpoint_name=method
         ))
       else:
-        response = {
-          'id': id,
-          'value': self.__process_response(value)
-        }
-        self._manager.get_client_queue().put(response)
+        self.__fastapi_handle_response(id, value)
       # endif request is postponed
     # end while
 
@@ -379,6 +388,7 @@ class FastApiWebAppPlugin(BasePlugin):
       'api_description': repr(self.cfg_api_description or self.__doc__),
       'api_version': repr(self.__version__),
       'node_comm_params': self._node_comms_jinja_args,
+      'debug_web_app': self.cfg_debug_web_app,
       **cfg_jinja_args,
     }
 

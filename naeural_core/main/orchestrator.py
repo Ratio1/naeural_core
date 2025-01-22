@@ -336,6 +336,9 @@ class Orchestrator(DecentrAIObject,
       ct.LocalInfo.K_ADDRESS : self.e2_address,
       ct.LocalInfo.K_ALIAS   : self.e2_id,
       ct.LocalInfo.K_ETH_ADDRESS : self.eth_address,
+      ct.LocalInfo.K_VER_LONG : f"v{self.__version__} | core v{self.core_version} | SDK {self.log.version}",
+      ct.LocalInfo.K_VER_SHORT : f"v{self.__version__}",
+      ct.LocalInfo.K_INFO : {},
     }
     with open(addr_file, 'w') as f:
       f.write(json.dumps(data, indent=2))

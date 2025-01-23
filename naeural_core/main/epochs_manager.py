@@ -118,24 +118,7 @@ class EpochsManager(Singleton):
   
   def build(self, owner, debug_date=None, debug=False):
     """
-    self.__data = {
-      node_addr: {
-        current_epoch: {
-          timestamps: set(datetime),
-          id: int
-        },
-        epochs: defaultdict(int),
-        name: str,
-        first_seen: None | str datetime,
-        last_seen: None | str datetime,
-        signatures: list(list(dict))
-      }
-    }
-    
-    self.__full_data = {
-      'NODES': self.__data,
-      'LAST_SYNC_EPOCH': int,
-    }
+
     """
     self.__genesis_date = self.log.str_to_date(GENESYS_EPOCH_DATE).replace(tzinfo=timezone.utc)
 
@@ -149,7 +132,7 @@ class EpochsManager(Singleton):
 
     self._load_status()
 
-    self.P("Started EpochsManager v{}, epoch #{}, genesis on {} (debug={}, debug_date={})".format(
+    self.P("EpochsManager v{}, epoch #{}, GENESIS=<{}> (debug={}, debug_date={})".format(
       EPOCH_MANAGER_VERSION, 
       self.get_current_epoch(),
       GENESYS_EPOCH_DATE,
@@ -254,15 +237,16 @@ class EpochsManager(Singleton):
     NOTE: 2025-01-23 / AID: 
     ----------------------------
     This method is called only once at the beginning of the class initialization and it will
-    load the data previously saved to disk via `__save_status` method that in turn is called
-    by `maybe_close_epoch` method. Thus the status is saved only when the epoch changes.
+    load the data previously saved to disk (via `__save_status` method) that in turn is called
+    by `maybe_close_epoch` method. Thus the status is saved only when the epoch changes (and the
+    hb timestamps are reset).
     This means that if a restart is done during a epoch, the data will be loaded from the last 
     reset resulting in a loss of data for the current epoch and the invalidation of the node
     capacity to act as a validator for the current epoch. This is a security feature to prevent
     fraud.
     ------------------------------------------------
-    For TRUSTED nodes a procedure of save-reload should be implemented to ensure the
-    data is not lost in case of a restart during an epoch.
+    HOWEVER for TRUSTED nodes a procedure of save-reload should be implemented to ensure the
+    data is not lost in case of a restart during an epoch but rather preserved and reloaded.
         
     """
     exists = self.log.get_data_file(FN_FULL) is not None

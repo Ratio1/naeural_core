@@ -62,6 +62,7 @@ class NetworkMonitor(DecentrAIObject):
     # simple pipeline caching mechanism for live node monitoring
     self.__nodes_pipelines = {} 
     self.__registered_hb_pipelines = 0
+    self.state_already_loaded = False
     self.__registered_direct_pipelines = 0
     # end simple pipeline caching mechanism
     self.__epoch_manager = epoch_manager
@@ -125,10 +126,12 @@ class NetworkMonitor(DecentrAIObject):
         config={}, # use default blockchain config
       )
 
+    self.network_load_status()    
+
     self.P(f"Initializing Network Monitor on {self.node_addr}", boxed=True)
     if self.__epoch_manager is None:
       self.__epoch_manager = EpochsManager(log=self.log, owner=self)
-    
+
     return
 
   
@@ -1223,6 +1226,7 @@ class NetworkMonitor(DecentrAIObject):
       else:
         self.P("No previous network map status found.", color='r')
       #endif db_file is not None
+      self.state_already_loaded = True # register even the try failed
       return result
     
       

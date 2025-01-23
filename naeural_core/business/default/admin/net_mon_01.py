@@ -70,9 +70,8 @@ class NetMon01Plugin(
     return
   
   def _maybe_load_state(self):
-    if self.__state_loaded:
+    if self.netmon.state_already_loaded:
       return
-    self.__state_loaded = True
     self.netmon.network_load_status()
     return
   

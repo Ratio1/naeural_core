@@ -782,6 +782,8 @@ class EpochsManager(Singleton):
     for node_addr in self.data:
       if online_only and not self.owner.network_node_is_online(node_addr):
           continue
+      dt_netmon_last_seen = self.owner.network_node_last_seen(node_addr, as_sec=False)
+      netmon_last_seen = self.date_to_str(dt_netmon_last_seen)
       node_name = self.get_node_name(node_addr)
       dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)      
       epochs_ids = sorted(list(dct_epochs.keys()))
@@ -804,11 +806,12 @@ class EpochsManager(Singleton):
       stats[node_addr] = {
         'eth_addr' : eth_addr,
         'alias' : node_name,
+        'last_state' : netmon_last_seen,
         'non_zero' : non_zero,
         'availability' : avail,
         'score' : score,
-        'first_seen' : first_seen,
-        'last_seen' : last_seen,
+        'epoch_first_check' : first_seen,
+        'epoch_last_check' : last_seen,
         'last_10_epochs' : str_last_10_epochs,
       }
       if node_addr == self.owner.node_addr:

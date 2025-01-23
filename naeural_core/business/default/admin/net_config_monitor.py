@@ -44,7 +44,7 @@ _CONFIG = {
   "VERBOSE_NETCONFIG_LOGS" : False, 
   # END DEBUGGING
   
-  'PROCESS_DELAY' : 0,
+  'PROCESS_DELAY' : 1,
   
   # each cfg_send_get_config_each seconds we will send requests to the nodes that allow 
   # us to get their pipelines and that have not been requested in the last 

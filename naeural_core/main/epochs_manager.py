@@ -18,6 +18,7 @@ TODO:
 """
 import uuid
 import json
+import os
 
 import numpy as np
 
@@ -48,6 +49,8 @@ GENESYS_EPOCH_DATE = '2024-03-10 00:00:00'
 INITIAL_SYNC_EPOCH = 0 # TODO: add initial sync epoch
 
 NODE_ALERT_INTERVAL = EPOCH_INTERVAL_SECONDS
+
+EPOCH_MANAGER_DEBUG = str(os.environ.get(ct.EE_EPOCH_MANAGER_DEBUG, True)).lower() == 'true'
 
 class EPCT:
   NAME = 'name'
@@ -93,7 +96,7 @@ class EpochsManager(Singleton):
           timestamps: set(datetime),
           id: int
         },
-        epochs: list(int),
+        epochs: defaultdict(int),
         name: str,
         first_seen: None | str datetime,
         last_seen: None | str datetime,
@@ -181,13 +184,33 @@ class EpochsManager(Singleton):
       raise ValueError("Heartbeat interval not found for node: {} ({})".format(addr, eeid))
     nr_hb = 24 * 3600 // interval
     return nr_hb
+  
+  
+  def __debug_status(self):
+    if EPOCH_MANAGER_DEBUG:
+      dct_status = {}
+      for node in self.__data:
+        dct_epochs = self.__data[node][EPCT.EPOCHS]
+        epochs = sorted(list(dct_epochs.keys()))
+        last_epochs = {
+          e : self._data[node][EPCT.EPOCHS][e] 
+          for e in epochs[-5:]
+        }
+        dct_status[node] = {
+          'recorded_epochs' : len(len(dct_epochs)),
+          'last_epochs' : last_epochs
+        }
+    return
 
       
-  def _save_status(self):
-    self.P("Saving epochs status...")
+  def __save_status(self):
+    """
+    Saves the epochs status to disk called ONLY by `maybe_close_epoch` method - uses the critical section of the maybe_close_epoch method.
+    If used separately, make sure to use a lock.
+    """
+    self.P(f"Saving epochs status for {len(self.__data)} nodes...")
     
-    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
-      _full_data_copy = deepcopy(self.__full_data)
+    _full_data_copy = deepcopy(self.__full_data)
     # endwith lock
 
     self.log.save_pickle_to_data(
@@ -223,8 +246,11 @@ class EpochsManager(Singleton):
         self.__add_empty_fields()
         self.__compute_eth_to_internal()
         self.P(f"Epochs status loaded with {len(self.__data)} nodes", boxed=True)
+        self.__debug_status()
       else:
         self.P("Error loading epochs status.", color='r')
+    else:
+      self.P("No previous epochs status found in {FN_FULL}.", color='r')
     return
 
   def __add_empty_fields(self):
@@ -457,36 +483,37 @@ class EpochsManager(Singleton):
         self.P(str(e), color='r')
     return prc_available, current_epoch
     
-  def recalculate_current_epoch_for_all(self):
+  def __recalculate_current_epoch_for_all(self):
     """
     This method recalculates the current epoch availability for all nodes using the recorded 
     timestamps.
-    """
-    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
-      self.P("Recalculating epoch {} availability for all nodes during epoch {}...".format(
-        self.__current_epoch, self.get_time_epoch()
-      ))
+    
+    NOTE: this method should be called after the epoch has changed and the timestamps have been reset 
+    within a critical section (mutex) as already done in `maybe_close_epoch`.
+    """    
+    self.P("Recalculating epoch {} availability for all nodes during epoch {}...".format(
+      self.__current_epoch, self.get_time_epoch()
+    ))
 
-      # if current node was not 100% available, do not compute availability for other nodes
-      self.start_timer('recalc_node_epoch')
-      available_prc, current_epoch = self.__recalculate_current_epoch_for_node(self.owner.node_addr)
-      self.stop_timer('recalc_node_epoch')
-      record_value = self.__data[self.owner.node_addr][EPCT.EPOCHS][current_epoch]
-      was_current_node_up_throughout_current_epoch = (int(record_value) == EPOCH_MAX_VALUE)
+    # if current node was not 100% available, do not compute availability for other nodes
+    self.start_timer('recalc_node_epoch')
+    available_prc, current_epoch = self.__recalculate_current_epoch_for_node(self.owner.node_addr)
+    self.stop_timer('recalc_node_epoch')
+    record_value = self.__data[self.owner.node_addr][EPCT.EPOCHS][current_epoch]
+    was_current_node_up_throughout_current_epoch = (int(record_value) == EPOCH_MAX_VALUE)
 
-      if not was_current_node_up_throughout_current_epoch:
-        msg = "Current node was {}%, not 100%, available in epoch {} and so cannot compute " \
-              "availability scores for other nodes".format(available_prc, current_epoch)
-        self.P(msg, color='r')
-      else:
-        self.start_timer('recalc_all_nodes_epoch')
-        for node_addr in self.__data:
-          self.start_timer('recalc_node_epoch')
-          self.__recalculate_current_epoch_for_node(node_addr)
-          self.stop_timer('recalc_node_epoch')
-        self.stop_timer('recalc_all_nodes_epoch')
-      # endif current node was not 100% available
-    # endwith lock
+    if not was_current_node_up_throughout_current_epoch:
+      msg = "Current node was {}%, not 100%, available in epoch {} and so cannot compute " \
+            "availability scores for other nodes".format(available_prc, current_epoch)
+      self.P(msg, color='r')
+    else:
+      self.start_timer('recalc_all_nodes_epoch')
+      for node_addr in self.__data:
+        self.start_timer('recalc_node_epoch')
+        self.__recalculate_current_epoch_for_node(node_addr)
+        self.stop_timer('recalc_node_epoch')
+      self.stop_timer('recalc_all_nodes_epoch')
+    # endif current node was not 100% available
     return
 
 
@@ -497,24 +524,25 @@ class EpochsManager(Singleton):
     for all nodes and then resetting the timestamps.
     """
     result = 0 # assume no epoch change
-    current_epoch = self.get_time_epoch()
-    if self.__current_epoch is None:
-      self.__current_epoch = current_epoch
-      self.P("Starting epoch: {}".format(self.__current_epoch))
-    elif current_epoch != self.__current_epoch:
-      if current_epoch != (self.__current_epoch + 1):
-        self.P("Epoch jump detected. Current epoch {} vs Last epoch {}".format(
-          current_epoch, self.__current_epoch), color='r'
-        )
-      self.P("Closing epoch {} at start of epoch {}".format(self.__current_epoch, current_epoch))
-      result = self.__current_epoch
-      self.recalculate_current_epoch_for_all()
-      self.P("Starting epoch: {}".format(current_epoch))
-      self.__current_epoch = current_epoch      
-      self.__reset_all_timestamps()
-      self._save_status()
-      #endif epoch is not the same as the current one
-    #endif current epoch is not None
+    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+      current_epoch = self.get_time_epoch()
+      if self.__current_epoch is None:
+        self.__current_epoch = current_epoch
+        self.P("Starting epoch: {}".format(self.__current_epoch))
+      elif current_epoch != self.__current_epoch:
+        if current_epoch != (self.__current_epoch + 1):
+          self.P("Epoch jump detected. Current epoch {} vs Last epoch {}".format(
+            current_epoch, self.__current_epoch), color='r'
+          )
+        self.P("Closing epoch {} at start of epoch {}".format(self.__current_epoch, current_epoch))
+        result = self.__current_epoch
+        self.__recalculate_current_epoch_for_all()
+        self.P("Starting epoch: {}".format(current_epoch))
+        self.__current_epoch = current_epoch      
+        self.__reset_all_timestamps()
+        self.__save_status()
+        #endif epoch is not the same as the current one
+      #endif current epoch is not None
     return result
   
   def __initialize_new_node(self, node_addr):
@@ -590,7 +618,7 @@ class EpochsManager(Singleton):
     return self.__data[node_addr]
   
   
-  def get_node_epochs(self, node_addr, autocomplete=False, as_list=False):
+  def get_node_epochs(self, node_addr, autocomplete=True, as_list=False):
     """
     Returns the epochs availability for a node.
 
@@ -600,22 +628,30 @@ class EpochsManager(Singleton):
       The node address.
       
     autocomplete : bool
-      If True, the epochs are completed with 0 for missing epochs.
+      If True, the epochs are completed with 0 for missing epochs. Defaults to True in order to ensure continuity in the epochs data.
       
     as_list : bool
       If True, the epochs are returned as a list.
     """
     if node_addr not in self.__data:
-      return None
+      return None    
     dct_state = self.get_node_state(node_addr)
     dct_epochs = dct_state[EPCT.EPOCHS]
     current_epoch = self.get_time_epoch()
+    epochs = list(range(1, current_epoch))
     if autocomplete or as_list:
-      for epoch in range(1, current_epoch):
+      for epoch in epochs:
         if epoch not in dct_epochs:
-          dct_epochs[epoch] = 0    
+          dct_epochs[epoch] = 0        
+    lst_result = [dct_epochs.get(x, 0) for x in epochs]
+    last_epochs = epochs[-10:]
+    dct_last_epochs = {x : dct_epochs.get(x, 0) for x in last_epochs}
+    non_zero = sum([1 for x in lst_result if x > 0])
+    self.P("Prepared epochs for node <{}>, {} non zero, last epochs: {}".format(
+      node_addr, non_zero, json.dumps(dct_last_epochs, indent=2)
+    ))    
     if as_list:
-      result = [dct_epochs[x] for x in range(1, current_epoch)]
+      result = lst_result
     else:
       result = dct_epochs
     return result

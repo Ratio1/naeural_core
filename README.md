@@ -1,116 +1,68 @@
+# Ratio1 Core Packages (formerly Naeural Edge Protocol Core Modules)
 
-# Naeural Edge Protocol Core Modules
-
-Welcome to the Naeural Edge Protocol Core Modules repository. These modules form the backbone of the Naeural Edge Protocol, enabling the creation of end-to-end AI pipelines for edge computing. This README provides an overview of the core functionality, components, and how to get started with the Naeural Edge Protocol.
+Welcome to the **Ratio1 Core packages** repository, previously known as the **Naeural Edge Protocol Core Modules**. These core packages are the foundational elements of the Ratio1 ecosystem, designed to enhance the protocol and drive the development of the Ratio1 Edge Node through ongoing research and community contributions. This README provides an overview of the core functionalities, components, and guidance on how to integrate the Ratio1 Core Packages into your projects.
 
 ## Overview
 
-The Naeural Edge Protocol is designed to facilitate the rapid development and deployment of AI applications at the edge. These core modules are responsible for the following key functionalities:
+The **Ratio1 Core packages** are engineered to facilitate the rapid advancement and deployment of AI applications at the edge within the Ratio1 ecosystem. These core modules underpin several key functionalities essential for building robust edge computing solutions and enhancing the overall protocol:
 
-- **Data Collection**: Acquire data via multiple methods, including:
-  - Default plugins: MQTT, RTSP, CSV, ODBC
-  - Custom-built plugins for sensors and other data sources
+- **Data Collection**: Acquire data through various methods, including:
+  - **Default Plugins**: MQTT, RTSP, CSV, ODBC
+  - **Custom-Built Plugins**: Integration with sensors and other specialized data sources
 
-- **Data Processing**: Transform and process collected data to prepare it for trustless model training and inference.
+- **Data Processing**: Transform and process collected data to prepare it for trustless model training and inference, ensuring data integrity and reliability.
 
-- **Model Training and Inference**: Use plugins to train AI models and perform trustless inference tasks.
+- **Model Training and Inference**: Utilize plugins to train AI models and perform trustless inference tasks, leveraging decentralized resources for enhanced performance and security.
 
-- **Post-Inference Business Logic**: Run business logic post-inference to derive actionable insights and decisions.
+- **Post-Inference Business Logic**: Execute business logic after inference to derive actionable insights and make informed decisions based on AI outputs.
 
-- **Pipeline Persistence**: Ensure the persistence of pipelines for reliability and reproducibility.
+- **Pipeline Persistence**: Maintain the persistence of pipelines to ensure reliability and reproducibility of AI workflows across deployments.
 
-- **Communication**: Facilitate communication through MQ-based and API-based methods, including routing and load balancing via ngrok.
+- **Communication**: Enable seamless communication through both MQ-based and API-based methods, including advanced routing and load balancing via ngrok for optimized network performance.
 
-These modules can be used as the core for implementing edge nodes within the Naeural Edge Protocol or integrated into third-party Web2 implementations.
+These modules serve as the core for implementing edge nodes within the Ratio1 ecosystem or integrating seamlessly into third-party Web2 applications, providing flexibility and scalability for diverse use cases. The primary objective of the Ratio1 Core Packages is to enhance the protocol and ecosystem, thereby improving the functionality and performance of the Ratio1 Edge Node through dedicated research and community-driven contributions.
 
 ## Features
 
-- **Modular Design**: Easily extend functionality with custom plugins for data collection, processing, and more.
-- **Scalability**: Designed to scale from small edge devices to large-scale deployments.
-- **Interoperability**: Compatible with a variety of data sources and communication protocols.
-- **Ease of Use**: Provides low-code/no-code development capabilities for rapid pipeline creation.
+- **Modular Design**: Easily extend functionality with custom plugins for data collection, processing, and more, allowing for tailored solutions to meet specific application needs.
+- **Scalability**: Designed to scale from small edge devices to large-scale deployments, ensuring consistent performance regardless of deployment size.
+- **Interoperability**: Compatible with a wide range of data sources and communication protocols, facilitating integration with existing systems and technologies.
+- **Ease of Integration**: The core packages are intended to be integrated as components within the Ratio1 Edge Node or third-party edge node execution engines, rather than standalone applications.
 
-### Contributing
+## Contributing
 
-We welcome contributions from the community. Please read our [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to contribute to the project.
+We welcome contributions from the community to help enhance the Ratio1 Core Packages. Your contributions play a vital role in advancing the Ratio1 ecosystem and improving the Ratio1 Edge Node. 
 
-### Installation
+## Installation
 
-To install the naeural_core package on systems without cuda capabilities, run
+The Ratio1 Core Packages are not intended for standalone use. Instead, they are designed to be integrated as components within the Ratio1 Edge Node or utilized by third-party edge node execution engines. For detailed integration instructions, please refer to the documentation provided within the Ratio1 Edge Node repository or contact our support team for assistance.
 
-```bash
-pip install naeural_core
-```
+## License
 
-To install the naeural_core package on systems with cuda capabilities, run
-
-```bash
-pip install naeural_core --extra-index-url https://download.pytorch.org/whl/cu121
-```
-
-You can change the cuda driver with the one you already have. (For cuda 11.7, use cu117)
-
-If the installation fails, try to run it again with the flags `--upgrade` and `--force-reinstall`
-
-```bash
-pip install naeural_core --upgrade --force-reinstall --extra-index-url https://download.pytorch.org/whl/cu121
-```
-
-### License
-
-This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **Apache 2.0 License**. For more details, please refer to the [LICENSE](LICENSE) file.
 
 ## Contact
 
-For more information, visit our website [https://naeural.ai](https://naeural.ai) or reach out to us at support@naeural.ai.
+For more information, visit our website at [https://ratio1.ai](https://ratio1.ai) or reach out to us via email at [support@ratio1.ai](mailto:support@ratio1.ai).
 
+## Project Financing Disclaimer
 
-# Project Financing Disclaimer
+This project incorporates open-source components developed with the support of financing grants **SMIS 143488** and **SMIS 156084**, provided by the Romanian Competitiveness Operational Programme. We extend our sincere gratitude for this support, which has been instrumental in advancing our work and enabling us to share these resources with the community.
 
-This project includes open-source components that have been developed with the support of financing grants SMIS 143488 and SMIS 156084, provided by the Romanian Competitiveness Operational Programme. We are grateful for this support, which has enabled us to advance our work and share these resources with the community.
+The content and information within this repository are solely the responsibility of the authors and do not necessarily reflect the views of the funding agencies. The grants have specifically supported certain aspects of this open-source project, facilitating broader dissemination and collaborative development.
 
-The content and information provided within this repository are solely the responsibility of the authors and do not necessarily reflect the views of the funding agencies. The funding received under these grants has been instrumental in supporting specific parts of this open source project, allowing for broader dissemination and collaborative development.
+For any inquiries regarding the funding and its impact on this project, please contact the authors directly.
 
-For any inquiries related to the funding and its impact on this project, please contact the authors directly.
+## Citation
 
-# Citing
+If you use the Ratio1 Core Packages in your research or projects, please cite them as follows:
 
 ```bibtex
-@misc{project_funding_acknowledgment1,
-  author       = {Damian, Bleotiu, Saraev, Constantinescu},
-  title        = {SOLIS – Sistem Omogen multi-Locație cu funcționalități Inteligente și Sustenabile”
-SMIS 143488},
-  howpublished = {\url{https://github.com/NaeuralEdgeProtocol/}},
-  note         = {This project includes open-source components developed with support from the Romanian Competitiveness Operational Programme under grants SMIS 143488. The content is solely the responsibility of the authors and does not necessarily reflect the views of the funding agencies.},
-  year         = {2021-2022}
+@misc{Ratio1CorePackages,
+  author       = {Ratio1.AI},
+  title        = {Ratio1 Core Packages},
+  year         = {2024-2025},
+  howpublished = {\url{https://github.com/NaeuralEdgeProtocol/naeural_core}},
 }
 ```
 
-```bibtex
-@misc{project_funding_acknowledgment2,
-  author       = {Damian, Bleotiu, Saraev, Constantinescu, Milik, Lupaescu},
-  title        = {ReDeN – Rețea Descentralizată Neurală SMIS 156084},
-  howpublished = {\url{https://github.com/NaeuralEdgeProtocol/}},
-  note         = {This project includes open-source components developed with support from the Romanian Competitiveness Operational Programme under grants SMIS 143488. The content is solely the responsibility of the authors and does not necessarily reflect the views of the funding agencies.},
-  year         = {2023-2024}
-}
-```
-
-
-```bibtex
-@misc{NaeuralAI_edge_node,
-  author = {Naeural.AI},
-  title = {Naeural Edge Protocol: Edge Node},
-  year = {2024},
-  howpublished = {\url{https://github.com/NaeuralEdgeProtocol/edge_node}},
-}
-```
-
-```bibtex
-@misc{naeural_client,
-  author = {Stefan Saraev, Andrei Damian},
-  title = {naeural_client: a Python SDK for Naeural Edge Protocol},
-  year = {2024},
-  howpublished = {\url{https://github.com/NaeuralEdgeProtocol/naeural_client}},
-}
-```

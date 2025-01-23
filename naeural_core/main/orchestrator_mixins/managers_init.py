@@ -157,6 +157,7 @@ class _ManagersInitMixin(object):
         log=self.log,
         name=self.e2_id,
         config=self.cfg_blockchain_config,
+        eth_enabled=ct.ETH_ENABLED,
       )
     except:
       raise ValueError("Failure in private blockchain setup:\n{}".format(traceback.format_exc()))

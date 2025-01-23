@@ -222,6 +222,7 @@ class Orchestrator(DecentrAIObject,
     return
   
   def _check_and_complete_environment_variables(self):
+    self.P("Checking and completing environment variables...")
     dct_env_output = self.blockchain_manager.dauth_autocomplete(
       dauth_endp=None, # get automatically
       add_env=True,
@@ -318,30 +319,42 @@ class Orchestrator(DecentrAIObject,
       "" if self.cfg_hb_contains_pipelines else "NOT ",
       "" if self.cfg_hb_contains_active_plugins else "NOT ",
     ), color='r')
-    self.save_local_address()
+    self.save_local_address()    
+    return
+  
+  
+  def _maybe_save_local_info(self):
+    if (time() - self.__last_local_info_save) >= 2:
+      self.save_local_address()
     return
 
 
   def save_local_address(self):
-    folder = self.log.get_data_folder()
-    ## cleanup
-    CLEANUP_FILES = ["local_address.txt", "local_address.json"]
-    for fn in CLEANUP_FILES:
-      fpath = os.path.join(folder, fn)
-      if os.path.exists(fpath):
-        os.remove(fpath)
-    ## end cleanup
-    addr_file = os.path.join(folder, ct.LocalInfo.LOCAL_INFO_FILE)
-    data = {
-      ct.LocalInfo.K_ADDRESS : self.e2_address,
-      ct.LocalInfo.K_ALIAS   : self.e2_id,
-      ct.LocalInfo.K_ETH_ADDRESS : self.eth_address,
-      ct.LocalInfo.K_VER_LONG : f"v{self.__version__} | core v{self.core_version} | SDK {self.log.version}",
-      ct.LocalInfo.K_VER_SHORT : f"v{self.__version__}",
-      ct.LocalInfo.K_INFO : {},
-    }
-    with open(addr_file, 'w') as f:
-      f.write(json.dumps(data, indent=2))
+    try:
+      folder = self.log.get_data_folder()
+      ## cleanup
+      CLEANUP_FILES = ["local_address.txt", "local_address.json"]
+      for fn in CLEANUP_FILES:
+        fpath = os.path.join(folder, fn)
+        if os.path.exists(fpath):
+          os.remove(fpath)
+      ## end cleanup
+      addr_file = os.path.join(folder, ct.LocalInfo.LOCAL_INFO_FILE)
+      data = {
+        ct.LocalInfo.K_ADDRESS : self.e2_address,
+        ct.LocalInfo.K_ALIAS   : self.e2_id,
+        ct.LocalInfo.K_ETH_ADDRESS : self.eth_address,
+        ct.LocalInfo.K_VER_LONG : f"v{self.__version__} | core v{self.core_version} | SDK {self.log.version}",
+        ct.LocalInfo.K_VER_SHORT : f"v{self.__version__}",
+        ct.LocalInfo.K_INFO : {
+          'whitelist' : self.whitelist_full,
+        },
+      }
+      with open(addr_file, 'w') as f:
+        f.write(json.dumps(data, indent=2))
+      self.__last_local_info_save = time()
+    except Exception as e:
+      self.P(f"Error saving local info: {e}", color='r')
     return
 
 
@@ -401,6 +414,15 @@ class Orchestrator(DecentrAIObject,
     lst_whitelist = []
     if self._blockchain_manager is not None:
       lst_whitelist = self._blockchain_manager.whitelist
+    return lst_whitelist
+  
+  @property
+  def whitelist_full(self):
+    """ Will return the whitelist of the blockchain manager (if it exists) with the addresses of the allowed nodes and prefixes"""
+    lst_whitelist = []
+    if self._blockchain_manager is not None:
+      lst_whitelist = self._blockchain_manager.whitelist
+      lst_whitelist = [self._blockchain_manager._add_prefix(addr) for addr in lst_whitelist]
     return lst_whitelist
   
   
@@ -1528,6 +1550,7 @@ class Orchestrator(DecentrAIObject,
         self.__loop_stage = "0"
         self.log.start_timer(self._main_loop_timer_name)
         self._maybe_delay_main_loop()
+        self._maybe_save_local_info()
         self._main_loop_counts['ITER'] += 1
         
         #1. Choose only the streams that should be run this step - copy from ConfigManager

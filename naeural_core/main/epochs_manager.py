@@ -34,8 +34,9 @@ from naeural_core.utils import Singleton
 
 EPOCH_MANAGER_VERSION = '0.2.2'
 
-EPOCH_INTERVALS = 24
-EPOCH_INTERVAL_SECONDS = 3600
+DEFAULT_EPOCH_INTERVALS = 24
+DEFAULT_EPOCH_INTERVAL_SECONDS = 3600
+DEFAULT_NODE_ALERT_INTERVAL = DEFAULT_EPOCH_INTERVAL_SECONDS
 
 EPOCH_MAX_VALUE = 255
 
@@ -48,7 +49,6 @@ EPOCHMON_MUTEX = 'epochmon_mutex'
 GENESYS_EPOCH_DATE = '2024-03-10 00:00:00'
 INITIAL_SYNC_EPOCH = 0 # TODO: add initial sync epoch
 
-NODE_ALERT_INTERVAL = EPOCH_INTERVAL_SECONDS
 
 EPOCH_MANAGER_DEBUG = str(os.environ.get(ct.EE_EPOCH_MANAGER_DEBUG, True)).lower() == 'true'
 
@@ -83,6 +83,8 @@ class EPCT:
   FIRST_SEEN = 'first_seen'
   LAST_SEEN = 'last_seen'
   LAST_EPOCH = 'last_epoch'
+  
+  LAST_EPOCH_RESTARTS = 'last_epoch_restarts'
 
   SIGNATURES = 'signatures'
   
@@ -97,6 +99,8 @@ _NODE_TEMPLATE = {
 
   EPCT.SIGNATURES     : defaultdict(list),
   
+  EPCT.LAST_EPOCH_RESTARTS : [], # this will not function without a save-reload mechanism
+  
   
   EPCT.CURRENT_EPOCH  : {
     EPCT.ID               : None,
@@ -109,6 +113,9 @@ _NODE_TEMPLATE = {
   }
 }
 
+def str2date(date_str):
+  return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+
 def _get_node_template(name):
   data = deepcopy(_NODE_TEMPLATE)
   data[EPCT.NAME] = name
@@ -120,6 +127,12 @@ class EpochsManager(Singleton):
     """
 
     """
+    self.__epoch_intervals = DEFAULT_EPOCH_INTERVALS
+    self.__epoch_interval_seconds = DEFAULT_EPOCH_INTERVAL_SECONDS
+    self._epoch_interval_setup()
+
+    # for Genesis epoch date is correct to replace in order to have a timezone aware date
+    # and not consider the local timezone
     self.__genesis_date = self.log.str_to_date(GENESYS_EPOCH_DATE).replace(tzinfo=timezone.utc)
 
     self.owner = owner
@@ -143,15 +156,43 @@ class EpochsManager(Singleton):
   @property
   def data(self):
     return self.__data
-  
+
+
   @property
   def genesis_date(self):
     return self.__genesis_date
   
-  
+  @property
+  def epoch_length(self):
+    return self.__epoch_intervals * self.__epoch_interval_seconds
+
+
+  def _epoch_interval_setup(self):    
+    try:
+      self.__epoch_intervals = int(os.environ.get(
+        ct.BASE_CT.EE_EPOCH_INTERVALS_KEY, DEFAULT_EPOCH_INTERVALS
+      ))
+    except Exception as e:
+      self.P("Error setting epoch intervals: {}".format(e), color='r')
+      
+    try:
+      self.__epoch_interval_seconds = int(os.environ.get(
+        ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY, DEFAULT_EPOCH_INTERVAL_SECONDS
+      ))
+    except Exception as e:
+      self.P("Error setting epoch interval seconds: {}".format(e), color='r')
+    
+    self.__node_alert_interval = self.__epoch_interval_seconds    
+    return
+
+
   def _set_dbg_date(self, debug_date):
+    """
+    Is a str is given the date is assumed to be UTC based.
+    """
     if debug_date is not None:
       if isinstance(debug_date, str):
+        # this is correct and you are supposed to use a UTC based date string
         debug_date = self.log.str_to_date(debug_date).replace(tzinfo=timezone.utc)
     self._debug_date = debug_date
     return
@@ -311,9 +352,16 @@ class EpochsManager(Singleton):
       # remove milliseconds from string
       date = date.split('.')[0]
       date = self.log.str_to_date(date)
+      # again this is correct to replace in order to have a timezone aware date
+      # and not consider the local timezone. the `date` string naive should be UTC offsetted
       date = date.replace(tzinfo=timezone.utc) 
-    elapsed = (date - self.__genesis_date).days
-    return elapsed
+    # compute difference between date and self.__genesis_date in seconds
+    elapsed_seconds = (date - self.__genesis_date).total_seconds()
+    
+    # the epoch id starts from 0 - the genesis epoch
+    # the epoch id is the number of days since the genesis epoch
+    epoch_id = int(elapsed_seconds / self.epoch_length) 
+    return epoch_id
   
   def epoch_to_date(self, epoch_id=None):
     """
@@ -330,12 +378,16 @@ class EpochsManager(Singleton):
     str_date = datetime.strftime(date, format="%Y-%m-%d")
     return str_date
   
-  def date_to_str(self, date=None):
+  def date_to_str(self, date : datetime = None, move_to_utc : bool = False):
     """
     Converts a date to string.
     """
     if date is None:
       date = self.get_current_date()
+    if move_to_utc:
+      # as you pass a date with timezone info, the conversion to UTC is done by astimezone
+      # and then the date is converted to string
+      date = date.astimezone(timezone.utc)
     return datetime.strftime(date, format=ct.HB.TIMESTAMP_FORMAT_SHORT)
   
     
@@ -344,6 +396,7 @@ class EpochsManager(Singleton):
     if self._debug_date is not None:
       return self._debug_date
     else:
+      # we convert local time to UTC time
       return datetime.now(timezone.utc)
         
   def get_time_epoch(self):
@@ -362,6 +415,18 @@ class EpochsManager(Singleton):
   def get_hb_utc(self, hb):
     """
     Generates a datetime object from a heartbeat and returns the UTC datetime.
+    
+    The algorithm is as follows:
+    - get the remote timestamp from the heartbeat
+    - get the remote timezone from the heartbeat
+    - convert the remote timestamp to a datetime object
+    - convert the remote datetime to UTC datetime by subtracting the offset hours
+    - return the UTC datetime
+    
+    TODO:
+    - add a check for the timezone format
+    - add a check for the timestamp format    
+    
 
     Parameters
     ----------
@@ -377,7 +442,9 @@ class EpochsManager(Singleton):
     remote_datetime = datetime.strptime(ts, ct.HB.TIMESTAMP_FORMAT)
     offset_hours = int(tz.replace("UTC", ""))
     utc_datetime = remote_datetime - timedelta(hours=offset_hours)
-    return utc_datetime.replace(tzinfo=timezone.utc)
+    # the utc_datetime is naive so we need to add the timezone info
+    utc_datetime = utc_datetime.replace(tzinfo=timezone.utc)
+    return utc_datetime
   
   
   
@@ -429,6 +496,7 @@ class EpochsManager(Singleton):
     start_timestamp = timestamps[0]
     end_timestamp = timestamps[0]
     for i in range(1, nr_timestamps):
+      # timestams should and must be sorted and in the same epoch
       delta = (timestamps[i] - timestamps[i - 1]).seconds
       # the delta between timestamps is bigger than the max heartbeat interval
       # or less than half the heartbeat interval (ignore same heartbeat)
@@ -498,7 +566,7 @@ class EpochsManager(Singleton):
       node_addr, time_between_heartbeats=time_between_heartbeats,
       return_timestamps=True
     )
-    max_possible = EPOCH_INTERVALS * EPOCH_INTERVAL_SECONDS
+    max_possible = self.epoch_length
     prc_available = round(avail_seconds / max_possible, 4)
     record_value = round(prc_available * EPOCH_MAX_VALUE)
     self.__data[node_addr][EPCT.EPOCHS][current_epoch] = record_value
@@ -779,16 +847,42 @@ class EpochsManager(Singleton):
     saves = self.__full_data.get(SYNC_SAVES_TS, 'N/A')
     saves_epoch = self.__full_data.get(SYNC_SAVES_EP, 'N/A')
     restarts = self.__full_data.get(SYNC_RESTARTS, 'N/A')
+    current_epoch = self.get_current_epoch()
     for node_addr in self.data:
-      if online_only and not self.owner.network_node_is_online(node_addr):
+      is_online = self.owner.network_node_is_online(
+        node_addr, dt_now=self.get_current_date()
+      )
+      dt_netmon_last_seen = self.owner.network_node_last_seen(
+        node_addr, 
+        dt_now=self.get_current_date(),
+        as_sec=False
+      )
+      last_seen_ago = self.owner.network_node_last_seen(
+        node_addr, 
+        dt_now=self.get_current_date(),
+        as_sec=True
+      )      
+      if online_only and not is_online:
           continue
-      dt_netmon_last_seen = self.owner.network_node_last_seen(node_addr, as_sec=False)
       netmon_last_seen = self.date_to_str(dt_netmon_last_seen)
       node_name = self.get_node_name(node_addr)
-      dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)      
+      dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)     
+      
+      # process the previous epoch hb data
+      node_last_epoch_data = self.data[node_addr][EPCT.LAST_EPOCH]
+      node_last_epoch_id = node_last_epoch_data[EPCT.ID]
+      node_last_epoch_hb_timestamps = node_last_epoch_data[EPCT.HB_TIMESTAMPS]
+      node_last_epoch_hb_timestamps = sorted(list(node_last_epoch_hb_timestamps))
+      node_last_epoch_1st_hb = node_last_epoch_hb_timestamps[0] if len(node_last_epoch_hb_timestamps) > 0 else None
+      node_last_epoch_1st_hb = self.date_to_str(node_last_epoch_1st_hb)
+      node_last_epoch_last_hb = node_last_epoch_hb_timestamps[-1] if len(node_last_epoch_hb_timestamps) > 0 else None
+      node_last_epoch_last_hb = self.date_to_str(node_last_epoch_last_hb)
+      node_last_epoch_nr_hb = len(node_last_epoch_hb_timestamps)
+      
+      
       epochs_ids = sorted(list(dct_epochs.keys()))
       epochs = [dct_epochs[x] for x in epochs_ids]
-      str_last_10_epochs = str({x : dct_epochs.get(x, 0) for x in epochs_ids[-10:]})
+      str_last_10_epochs = str({x : dct_epochs.get(x, 0) for x in epochs_ids[-10:]})            
       MAX_AVAIL = EPOCH_MAX_VALUE * len(epochs) # max avail possible for this node
       score = sum(epochs)      
       avail = round(score / MAX_AVAIL, 4)
@@ -807,22 +901,32 @@ class EpochsManager(Singleton):
         'eth_addr' : eth_addr,
         'alias' : node_name,
         'last_state' : netmon_last_seen,
+        'last_seen_ago' : self.log.elapsed_to_str(last_seen_ago),
         'non_zero' : non_zero,
         'availability' : avail,
         'score' : score,
-        'epoch_first_check' : first_seen,
-        'epoch_last_check' : last_seen,
-        'last_10_epochs' : str_last_10_epochs,
+        'first_check' : first_seen,
+        'last_check' : last_seen,
+        'recent_history' : {
+          'last_10_ep' : str_last_10_epochs,
+          'last_epoch_id' : node_last_epoch_id,
+          'last_epoch_nr_hb' : node_last_epoch_nr_hb,
+          'last_epoch_1st_hb' : node_last_epoch_1st_hb,
+          'last_epoch_last_hb' : node_last_epoch_last_hb,
+        }
       }
       if node_addr == self.owner.node_addr:
+        stats[node_addr]['current_node_state'] = {
+          'current_epoch' : current_epoch,
+        }
         for k in _FULL_DATA_TEMPLATE_EXTRA:
-          stats[node_addr][k] = self.__full_data.get(k, 'N/A')
+          stats[node_addr]['current_node_state'][k] = self.__full_data.get(k, 'N/A')
       #endif node is current node
     #endfor each node
     if display:
       str_stats = json.dumps(stats, indent=2)
-      self.P("EpochManager status report (max_score: {}, nr_eps: {}):\n  - Recent saves: {}\n  - Recent saves epochs: {}\n  - Recent restars: {}\n\nStatuses:\n{}".format(
-        best_avail, nr_eps,
+      self.P("EpochManager report at ep {} (max_score: {}, nr_eps: {}):\n  - Recent saves: {}\n  - Recent saves epochs: {}\n  - Recent restars: {}\n\nStatuses:\n{}".format(
+        current_epoch, best_avail, nr_eps,
         saves, saves_epoch, restarts, 
         str_stats
       ))
@@ -944,71 +1048,81 @@ if __name__ == '__main__':
   # eng.owner = netmon
   eng = netmon.epoch_manager
   
-  assert id(eng) == id(netmon.epoch_manager)  
-
-  has_data = netmon.network_load_status(FN_NETWORK)
   
-  if has_data:    
-    l.P("Current time epoch is: {} ({})".format(eng.get_time_epoch(), eng.epoch_to_date()))
+  TEST_A = False
+  TEST_B = True
+  
+  if TEST_A:
+    assert id(eng) == id(netmon.epoch_manager)  
+
+    has_data = netmon.network_load_status(FN_NETWORK)
     
-    nodes = netmon.all_nodes
-        
-    dct_hb = {}
-    
-    # now check the nodes for some usable data
-    _current_epoch = eng.get_time_epoch()
-    for node_addr in nodes:
-      hbs = netmon.get_box_heartbeats(node_addr)
-      idx = -1
-      done = False
-      good_hbs = defaultdict(list)
-      for hb in hbs:
-        ep = eng.get_epoch_id(hb[ct.PAYLOAD_DATA.EE_TIMESTAMP])
-        if ep >= _current_epoch:
-          good_hbs[ep].append(hb)
-      if len(good_hbs) > 0:
-        dct_hb[node_addr] = good_hbs
-    
-    l.P("Data available for epochs:\n{}".format(
-      "\n".join(["{}: {}".format(x, list(dct_hb[x].keys())) for x in dct_hb]) 
-    ))
-    
-    
-    for step in range(5):
-      current_date = DATES[step]
-      eng._set_dbg_date(current_date)
-      epoch = eng.get_epoch_id(current_date)
-      l.P("Running step {} - epoch {} / {}".format(
-        step, epoch, current_date), color='b'
-      )
-      epoch_has_data = any([epoch in dct_hb[x] for x in dct_hb])
-      if epoch_has_data:
-        l.P("Starting registering data for epoch {}...".format(eng.get_current_epoch()), color='b')
-      data_counter = 0
-      for node_addr in dct_hb:
-        for hb in dct_hb[node_addr][epoch]:
-          eng.register_data(node_addr, hb)
-          data_counter += 1
-      if data_counter > 0:
-        l.P("Data loaded ({}) for epoch {}.".format(
-          data_counter, eng.get_current_epoch()), color='g'
+    if has_data:    
+      l.P("Current time epoch is: {} ({})".format(eng.get_time_epoch(), eng.epoch_to_date()))
+      
+      nodes = netmon.all_nodes
+          
+      dct_hb = {}
+      
+      # now check the nodes for some usable data
+      _current_epoch = eng.get_time_epoch()
+      for node_addr in nodes:
+        hbs = netmon.get_box_heartbeats(node_addr)
+        idx = -1
+        done = False
+        good_hbs = defaultdict(list)
+        for hb in hbs:
+          ep = eng.get_epoch_id(hb[ct.PAYLOAD_DATA.EE_TIMESTAMP])
+          if ep >= _current_epoch:
+            good_hbs[ep].append(hb)
+        if len(good_hbs) > 0:
+          dct_hb[node_addr] = good_hbs
+      
+      l.P("Data available for epochs:\n{}".format(
+        "\n".join(["{}: {}".format(x, list(dct_hb[x].keys())) for x in dct_hb]) 
+      ))
+      
+      
+      for step in range(5):
+        current_date = DATES[step]
+        eng._set_dbg_date(current_date)
+        epoch = eng.get_epoch_id(current_date)
+        l.P("Running step {} - epoch {} / {}".format(
+          step, epoch, current_date), color='b'
         )
-      else:
-        l.P("No data registered for epoch {}.".format(eng.get_current_epoch()), color='r')
-      #endif had data
-    #endfor each step
-    final_date = DATES[-1]
-    l.P("Done all steps, setting final date: {}".format(final_date), color='b')
-    eng._set_dbg_date(final_date)    
-    eng.maybe_close_epoch()
-    
-    l.P('{}: {}'.format(
-      eng.get_node_name(NODES[-2]), eng.get_node_epochs(NODES[-2], as_list=True))
-    )
-    l.P('{}: {}'.format(
-      eng.get_node_name(NODES[-1]), eng.get_node_epochs(NODES[-1], as_list=True))
-    )    
-    
-  inf = eng.get_stats(display=True)
-    
-    # l.show_timers()
+        epoch_has_data = any([epoch in dct_hb[x] for x in dct_hb])
+        if epoch_has_data:
+          l.P("Starting registering data for epoch {}...".format(eng.get_current_epoch()), color='b')
+        data_counter = 0
+        for node_addr in dct_hb:
+          for hb in dct_hb[node_addr][epoch]:
+            eng.register_data(node_addr, hb)
+            data_counter += 1
+        if data_counter > 0:
+          l.P("Data loaded ({}) for epoch {}.".format(
+            data_counter, eng.get_current_epoch()), color='g'
+          )
+        else:
+          l.P("No data registered for epoch {}.".format(eng.get_current_epoch()), color='r')
+        #endif had data
+      #endfor each step
+      final_date = DATES[-1]
+      l.P("Done all steps, setting final date: {}".format(final_date), color='b')
+      eng._set_dbg_date(final_date)    
+      eng.maybe_close_epoch()
+      
+      l.P('{}: {}'.format(
+        eng.get_node_name(NODES[-2]), eng.get_node_epochs(NODES[-2], as_list=True))
+      )
+      l.P('{}: {}'.format(
+        eng.get_node_name(NODES[-1]), eng.get_node_epochs(NODES[-1], as_list=True))
+      )    
+  #endif TEST_A
+  
+  if TEST_B:
+    str_date = '2025-01-24 09:07:00' # this is local time
+    debug_date = l.str_to_date(str_date) # get date
+    debug_date = debug_date.astimezone(timezone.utc) # convert to UTC
+    eng._set_dbg_date(debug_date)
+    inf = eng.get_stats(display=True, online_only=True)
+  #

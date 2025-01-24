@@ -16,6 +16,12 @@ from naeural_core.bc import DefaultBlockEngine, BCct
 
 from .epochs_manager import EpochsManager
 
+UNUSEFULL_HB_KEYS = [
+  ct.HB.DEVICE_LOG,
+  ct.HB.ERROR_LOG,
+  ct.HB.TIMERS,
+]
+
 def exponential_score(left, right, val, right_is_better=False, normed=False):
   num = 50
   interval = np.linspace(left, right, num=num)
@@ -148,6 +154,8 @@ class NetworkMonitor(DecentrAIObject):
           if __addr_no_prefix not in new_network_heartbeats:
             new_network_heartbeats[__addr_no_prefix] = []
           else:
+            # this can be triggered only if the same edge node has been using multiple prefixes
+            # for the same public key address
             self.P("Found multiple entries for address with no prefix: {}. This entry will require sorting".format(__addr_no_prefix), color='r')
             need_sorting.append(__addr_no_prefix)
           new_network_heartbeats[__addr_no_prefix].extend(network_heartbeats[addr])
@@ -164,6 +172,10 @@ class NetworkMonitor(DecentrAIObject):
         for addr_no_prefix in new_network_heartbeats:
           for hb in new_network_heartbeats[addr_no_prefix][:-1]:
             self.__pop_repeating_info_from_heartbeat(hb)
+          # endfor pop repeating info
+          for key_to_delete in UNUSEFULL_HB_KEYS:
+            new_network_heartbeats[addr_no_prefix][-1].pop(key_to_delete, None)
+            
           new_network_heartbeats[addr_no_prefix] = deque(new_network_heartbeats[addr_no_prefix], maxlen=self.HB_HISTORY)
         # endfor pop repeating info
 
@@ -243,7 +255,7 @@ class NetworkMonitor(DecentrAIObject):
   def __maybe_register_hb_pipelines(self, addr, hb):
     """Register the pipelines if available - will be used for pipeline monitoring"""
     __addr_no_prefix = self.__remove_address_prefix(addr)
-    pipelines = hb.get(ct.HB.PIPELINES, None)
+    pipelines = hb.pop(ct.HB.PIPELINES, None)
     if pipelines is not None:
       self.__register_node_pipelines(addr, pipelines)
       self.__registered_hb_pipelines += 1
@@ -263,6 +275,11 @@ class NetworkMonitor(DecentrAIObject):
 
     __eeid = data.get(ct.EE_ID, MISSING_ID)
     __addr_no_prefix = self.__remove_address_prefix(addr) 
+    
+    # we remove any extra bloaded info from the HB inside the network monitor
+    for key_to_delete in UNUSEFULL_HB_KEYS:
+      data.pop(key_to_delete, None)
+    # end remove
 
     with self.log.managed_lock_resource(NETMON_MUTEX):
       if __addr_no_prefix not in self.__network_heartbeats:
@@ -767,6 +784,9 @@ class NetworkMonitor(DecentrAIObject):
     def register_heartbeat(self, addr, data):
       # save the timestamp when received the heartbeat,
       # helpful to know when computing the availability score
+      # this data is saved using the local time and coult "appear" different
+      # from the timestamp in the heartbeat due to zone differences
+      # when reconstructing RECEIVED_TIME we will use local timezone
       data[ct.HB.RECEIVED_TIME] = dt.now().strftime(ct.HB.TIMESTAMP_FORMAT)
       self.__register_heartbeat(addr, data)
       self.epoch_manager.register_data(addr, data) # TODO: change this?
@@ -1166,7 +1186,10 @@ class NetworkMonitor(DecentrAIObject):
           fn='db.pkl',
           subfolder_path='network_monitor'
         )
-        self.end_timer("network_save_status")
+        # now we add epoch manager save
+        self.epoch_manager.save_status()
+        elapsed = self.end_timer("network_save_status")
+        self.P("Network map status saved in {:.2f} seconds".format(elapsed))
       # endwith lock
       return
     
@@ -1193,7 +1216,7 @@ class NetworkMonitor(DecentrAIObject):
           # this means that all heartbeats received until this point
           # will be appended after the loaded ones 
           current_heartbeats = self.__network_heartbeats # save current heartbeats maybe already received
-          self._set_network_heartbeats(__network_heartbeats)
+          self._set_network_heartbeats(__network_heartbeats) # load the history
           nr_loaded = len(self.__network_heartbeats)
           nr_received = len(current_heartbeats)
           previous_keys = set(self.__network_heartbeats.keys())
@@ -1210,6 +1233,7 @@ class NetworkMonitor(DecentrAIObject):
           )
           self.P("Nodes not present in current network: {}".format(not_present_nodes), color='r')
           # lock the NETMON_MUTEX
+          # now put back the newest heartbeats we received before loading the history
           for addr in current_heartbeats:
             for data in current_heartbeats[addr]:
               # TODO: replace register_heartbeat with something simpler

@@ -1165,4 +1165,6 @@ if __name__ == '__main__':
     debug_date = debug_date.astimezone(timezone.utc) # convert to UTC
     eng._set_dbg_date(debug_date)
     inf = eng.get_stats(display=True, online_only=True)
+    m, t, top = l.get_obj_size(obj=netmon.all_heartbeats, top_consumers=20, return_tree=True)
+    l.P("Heartbeats size: {:,.0f} MB".format(m / 1024 / 1024))
   #

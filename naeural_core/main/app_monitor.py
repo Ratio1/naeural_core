@@ -458,7 +458,7 @@ class ApplicationMonitor(DecentrAIObject):
     dct_to_save['uptime'] = self.log.elapsed_to_str(self.owner.running_time)
     dct_to_save['version'] = self.get_owner_version().split(' ')[0]
 
-    self.log.save_json_to_data(dct_to_save, 'local_history.json')    
+    self.log.save_json_to_data(dct_to_save, 'local_history.json', indent=False)    
     return
   
 

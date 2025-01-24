@@ -65,28 +65,16 @@ def running_with_hostname(config_file):
     result = os.environ.get('HOSTNAME', default_uuid)
   return result
   
-def get_id(log):
+def get_id(log : Logger):
   config_box_id = log.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')
   log.P("Found EE_ID '{}'".format(config_box_id))
-  if config_box_id.upper().replace('X','').upper() in ['', 'HOSTNAME']:
-    config_box_id_env = os.environ.get('EE_ID')
-    log.P("Changing default node id '{}'...".format(config_box_id))  
-    if config_box_id_env is not None and config_box_id != config_box_id_env:
-      log.P("E2 configured from env '{}'".format(config_box_id_env), color='m')
-      if config_box_id_env.upper() in ['E2DKR','HOSTNAME']: # same as in Dockerfile
-        hostname = os.environ.get('HOSTNAME', '') 
-        if hostname:
-          config_box_id = hostname
-        else:
-          config_box_id = config_box_id_env + '-' + log.get_uid(size=4)
-        #endif hostname
-      else:
-        config_box_id = config_box_id_env
-      #endif E2dkr
+  if config_box_id.upper().replace('X','').upper() in [None, '', 'HOSTNAME', 'E2DKR']:
+    config_box_id_env = os.environ.get('EE_ID', '')
+    if isinstance(config_box_id_env, str) and config_box_id_env.upper() not in ['', 'E2DKR','HOSTNAME']:
+      config_box_id = config_box_id_env
     else:
-      config_box_id = 'ee-' + log.get_uid(size=4)
+      config_box_id = log.get_random_name(2)
       log.P("E2 is not manually configured nor from env. Assuming a random id '{}'".format(config_box_id), color='r')
-    #endif no name
     log.config_data[ct.CONFIG_STARTUP_v2.K_EE_ID] = config_box_id
     log.P("  Saving/updating config with new EE_ID '{}'...".format(config_box_id))
     log.update_config_values({ct.CONFIG_STARTUP_v2.K_EE_ID: config_box_id})

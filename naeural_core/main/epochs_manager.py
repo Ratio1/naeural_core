@@ -40,7 +40,8 @@ DEFAULT_NODE_ALERT_INTERVAL = DEFAULT_EPOCH_INTERVAL_SECONDS
 
 EPOCH_MAX_VALUE = 255
 
-SUPERVISOR_MIN_AVAIL = 0.98
+SUPERVISOR_MIN_AVAIL_PRC = 0.98
+SUPERVISOR_MIN_AVAIL_UINT8 = int(SUPERVISOR_MIN_AVAIL_PRC * EPOCH_MAX_VALUE)
 
 FN_NAME = 'epochs_status.pkl'
 FN_SUBFOLDER = 'network_monitor'
@@ -626,12 +627,12 @@ class EpochsManager(Singleton):
     # we can use available_prc or record_value to check if the current node >= SUPERVISOR_MIN_AVAIL
     # prc = available_prc is the same as record_value / EPOCH_MAX_VALUE
     prc = round(record_value / EPOCH_MAX_VALUE, 4) 
-    was_up_throughout_current_epoch = prc >= SUPERVISOR_MIN_AVAIL
+    was_up_throughout_current_epoch = prc >= SUPERVISOR_MIN_AVAIL_PRC
 
     if not was_up_throughout_current_epoch:
       msg = "Current node was {:.2f}% < {:.0f}%, available in epoch {} and so cannot compute " \
             "availability scores for other nodes".format(
-              prc * 100, SUPERVISOR_MIN_AVAIL * 100, current_epoch
+              prc * 100, SUPERVISOR_MIN_AVAIL_PRC * 100, current_epoch
             )
       self.P(msg, color='r')
     else:
@@ -839,8 +840,21 @@ class EpochsManager(Singleton):
     """
     Alias for get_node_previous_epoch.
     """
-    return self.get_node_previous_epoch(node_addr, as_percentage=as_percentage)
+    return self.get_node_previous_epoch(node_addr, as_percentage=as_percentage)  
 
+  def get_self_supervisor_capacity(self, as_float=False):
+    """
+    Returns the supervisor capacity for all the epochs
+    """
+    epochs = self.get_node_epochs(self.owner.node_addr)
+    result = {
+      epoch : 
+        (epochs[epoch] >= SUPERVISOR_MIN_AVAIL_UINT8) if not as_float else
+        (round(epochs[epoch] / EPOCH_MAX_VALUE,2))
+      for epoch in epochs
+    }
+    return result
+    
 
   def get_node_first_epoch(self, node_addr):
     """
@@ -870,6 +884,7 @@ class EpochsManager(Singleton):
     saves_epoch = self.__full_data.get(SYNC_SAVES_EP, 'N/A')
     restarts = self.__full_data.get(SYNC_RESTARTS, 'N/A')
     current_epoch = self.get_current_epoch()
+    certainty = self.get_self_supervisor_capacity(as_float=True)    
     for node_addr in self.data:
       is_online = self.owner.network_node_is_online(
         node_addr, dt_now=self.get_current_date()
@@ -903,13 +918,15 @@ class EpochsManager(Singleton):
       node_last_epoch_avail = round(
         self.__calculate_avail_seconds(node_last_epoch_hb_timestamps) / self.epoch_length, 4
       )
-      node_could_cal_avails = node_last_epoch_avail >= SUPERVISOR_MIN_AVAIL
-      
-      
+            
       
       epochs_ids = sorted(list(dct_epochs.keys()))
       epochs = [dct_epochs[x] for x in epochs_ids]
-      str_last_10_epochs = str({x : dct_epochs.get(x, 0) for x in epochs_ids[-10:]})            
+      NR_HIST = 10
+      str_last_epochs = str({x : dct_epochs.get(x, 0) for x in epochs_ids[-NR_HIST:]})
+      str_certainty =  " ".join([
+        f"{x}={(certainty.get(x, 0) * 100):.0f}%" for x in epochs_ids[-NR_HIST:]
+      ])    
       MAX_AVAIL = EPOCH_MAX_VALUE * len(epochs) # max avail possible for this node
       score = sum(epochs)      
       avail = round(score / MAX_AVAIL, 4)
@@ -935,13 +952,13 @@ class EpochsManager(Singleton):
         'first_check' : first_seen,
         'last_check' : last_seen,
         'recent_history' : {
-          'last_10_ep' : str_last_10_epochs,
+          'last_10_ep' : str_last_epochs,
+          'certainty' : str_certainty,
           'last_epoch_id' : node_last_epoch_id,
           'last_epoch_nr_hb' : node_last_epoch_nr_hb,
           'last_epoch_1st_hb' : node_last_epoch_1st_hb,
           'last_epoch_last_hb' : node_last_epoch_last_hb,
           'last_epoch_avail' : node_last_epoch_avail,
-          'could_supervise' : node_could_cal_avails,
         }
       }
       if node_addr == self.owner.node_addr:

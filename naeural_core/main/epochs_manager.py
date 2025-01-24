@@ -40,6 +40,8 @@ DEFAULT_NODE_ALERT_INTERVAL = DEFAULT_EPOCH_INTERVAL_SECONDS
 
 EPOCH_MAX_VALUE = 255
 
+SUPERVISOR_MIN_AVAIL = 0.98
+
 FN_NAME = 'epochs_status.pkl'
 FN_SUBFOLDER = 'network_monitor'
 FN_FULL = FN_SUBFOLDER + '/' + FN_NAME
@@ -127,6 +129,8 @@ class EpochsManager(Singleton):
     """
 
     """
+    if debug is None:
+      debug = EPOCH_MANAGER_DEBUG
     self.__epoch_intervals = DEFAULT_EPOCH_INTERVALS
     self.__epoch_interval_seconds = DEFAULT_EPOCH_INTERVAL_SECONDS
     self._epoch_interval_setup()
@@ -240,7 +244,7 @@ class EpochsManager(Singleton):
   
   
   def __debug_status(self):
-    if EPOCH_MANAGER_DEBUG:
+    if self.__debug:
       self.get_stats(display=True)
     #endif debug
     return
@@ -250,6 +254,12 @@ class EpochsManager(Singleton):
     for full_data_key in _FULL_DATA_TEMPLATE_EXTRA:
       if len(self.__full_data[full_data_key]) > SYNC_HISTORY_SIZE:
         self.__full_data[full_data_key] = self.__full_data[full_data_key][-SYNC_HISTORY_SIZE:]
+    return
+
+
+  def save_status(self):
+    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+      self.__save_status()
     return
 
       
@@ -471,7 +481,8 @@ class EpochsManager(Singleton):
   # FIXME: this method does not work as expected
   def __calculate_avail_seconds(self, timestamps, time_between_heartbeats=10):
     """
-    This method calculates the availability of a node in the current epoch based on the timestamps.
+    This method calculates the availability of a node in the current epoch 
+    based on the timestamps.
 
     Parameters
     ----------
@@ -502,9 +513,10 @@ class EpochsManager(Singleton):
       # or less than half the heartbeat interval (ignore same heartbeat)
       # TODO(AID): how can a heartbeat be sent more than once?
       # TODO: detect fraud mechanism (someone spams with heartbeats)
-      if delta > (time_between_heartbeats + 5): # or delta < (time_between_heartbeats / 2)
-        # the delta is too big. we compute the current interval length
-        # then reset the interval
+      if delta > (time_between_heartbeats + 5) or delta < (time_between_heartbeats / 2):
+        # this gets triggered when the delta is too big or too small so last interval 
+        # is considered invalid thus we compute up-to-last-valid interval availability
+        # (ended with the last set of end_timestamp as end of interval
         avail_seconds += (end_timestamp - start_timestamp).seconds
         start_timestamp = timestamps[i]
       # endif delta
@@ -604,14 +616,23 @@ class EpochsManager(Singleton):
 
     # if current node was not 100% available, do not compute availability for other nodes
     self.start_timer('recalc_node_epoch')
-    available_prc, current_epoch = self.__recalculate_current_epoch_for_node(self.owner.node_addr)
+    available_prc, current_epoch = self.__recalculate_current_epoch_for_node(
+      self.owner.node_addr
+    )
     self.stop_timer('recalc_node_epoch')
+    # get the record value for the current node is actually redundant
     record_value = self.__data[self.owner.node_addr][EPCT.EPOCHS][current_epoch]
-    was_current_node_up_throughout_current_epoch = (int(record_value) == EPOCH_MAX_VALUE)
+    
+    # we can use available_prc or record_value to check if the current node >= SUPERVISOR_MIN_AVAIL
+    # prc = available_prc # work the same but make sure `available_prc` is not already * 100
+    prc = round(record_value / EPOCH_MAX_VALUE, 4) 
+    was_up_throughout_current_epoch = prc >= SUPERVISOR_MIN_AVAIL
 
-    if not was_current_node_up_throughout_current_epoch:
-      msg = "Current node was {}%, not 100%, available in epoch {} and so cannot compute " \
-            "availability scores for other nodes".format(available_prc, current_epoch)
+    if not was_up_throughout_current_epoch:
+      msg = "Current node was {:.2f}% < {:.0f}%, available in epoch {} and so cannot compute " \
+            "availability scores for other nodes".format(
+              prc * 100, SUPERVISOR_MIN_AVAIL * 100, current_epoch
+            )
       self.P(msg, color='r')
     else:
       self.start_timer('recalc_all_nodes_epoch')
@@ -756,9 +777,10 @@ class EpochsManager(Singleton):
     last_epochs = epochs[-5:]
     dct_last_epochs = {x : dct_epochs.get(x, 0) for x in last_epochs}
     non_zero = sum([1 for x in lst_result if x > 0])
-    self.P("get_node_epochs({}), {} non zero, last epochs: {}".format(
-      node_addr[:10] +'...' + node_addr[-4:], non_zero, str(dct_last_epochs)
-    ))    
+    if self.__debug:
+      self.P("get_node_epochs({}), {} non zero, last epochs: {}".format(
+        node_addr[:10] +'...' + node_addr[-4:], non_zero, str(dct_last_epochs)
+      ))    
     if as_list:
       result = lst_result
     else:
@@ -852,6 +874,8 @@ class EpochsManager(Singleton):
       is_online = self.owner.network_node_is_online(
         node_addr, dt_now=self.get_current_date()
       )
+      if online_only and not is_online:
+          continue
       dt_netmon_last_seen = self.owner.network_node_last_seen(
         node_addr, 
         dt_now=self.get_current_date(),
@@ -862,8 +886,6 @@ class EpochsManager(Singleton):
         dt_now=self.get_current_date(),
         as_sec=True
       )      
-      if online_only and not is_online:
-          continue
       netmon_last_seen = self.date_to_str(dt_netmon_last_seen)
       node_name = self.get_node_name(node_addr)
       dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)     
@@ -946,6 +968,7 @@ class EpochsManager(Singleton):
     """
     return self.__full_data[SYNC_LAST_EPOCH]
 
+
   def get_epoch_availability(self, epoch):
     """
     Returns the availability table for a given epoch.
@@ -1014,6 +1037,8 @@ if __name__ == '__main__':
   
   FN_NETWORK = r"_local_cache\_data\network_monitor\db.pkl"
   
+  EPOCH_MANAGER_DEBUG = False
+  
   l = Logger('EPOCH', base_folder='.', app_folder='_local_cache')
   
   DATES = [
@@ -1033,11 +1058,26 @@ if __name__ == '__main__':
   # eng1 = EpochsManager(log=l, owner=1234, debug_date=DATES[0], debug=True)
   # eng2 = EpochsManager(log=l, owner=None, debug_date=DATES[1])
   # assert id(eng1) == id(eng2)
-    
+  
+  PREDEFINED_TESTS = {
+    'aid_01' : {
+      'date' :'2025-01-24 09:07:00',
+      'addr' : '0xai_AleLPKqUHV-iPc-76-rUvDkRWW4dFMIGKW1xFVcy65nH'
+    },
+    'nen-2' : {
+      'date' :'2025-01-24 11:26:00',
+      'addr' : '0xai_Amfnbt3N-qg2-qGtywZIPQBTVlAnoADVRmSAsdDhlQ-6'      
+    }
+  }
+  
+  CHOSEN_TEST = 'nen-2'
+  
+  CURRENT_DATE = PREDEFINED_TESTS[CHOSEN_TEST]['date']
+  NODE_ADDR = PREDEFINED_TESTS[CHOSEN_TEST]['addr']
   
   if True:
     netmon = NetworkMonitor(
-      log=l, node_name='naeural_01', node_addr='0xai_AleLPKqUHV-iPc-76-rUvDkRWW4dFMIGKW1xFVcy65nH',
+      log=l, node_name=CHOSEN_TEST, node_addr=NODE_ADDR,
       # epoch_manager=eng
     )
   else:
@@ -1120,7 +1160,7 @@ if __name__ == '__main__':
   #endif TEST_A
   
   if TEST_B:
-    str_date = '2025-01-24 09:07:00' # this is local time
+    str_date = CURRENT_DATE
     debug_date = l.str_to_date(str_date) # get date
     debug_date = debug_date.astimezone(timezone.utc) # convert to UTC
     eng._set_dbg_date(debug_date)

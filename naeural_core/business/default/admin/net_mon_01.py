@@ -34,7 +34,7 @@ _CONFIG = {
   "LOG_INFO"            : False,
   "LOG_FULL_INFO"       : False,
   "EXCLUDE_SELF"        : False,
-  "SAVE_NMON_EACH"      : 5, # this saves each SAVE_NMON_EACH * PROCESS_DELAY seconds
+  "SAVE_NMON_EACH"      : 12, # this saves each SAVE_NMON_EACH * PROCESS_DELAY seconds
 
   'VALIDATION_RULES': {
     **BasePluginExecutor.CONFIG['VALIDATION_RULES'],
@@ -68,8 +68,13 @@ class NetMon01Plugin(
       self.config_data['SUPERVISOR'] = is_supervisor.lower() == 'true'
     #endif is string
     return
-  
+
+
   def _maybe_load_state(self):
+    """
+    This is partially redundant due to the fact that netmon already loads state
+    in its bootup. However, this is a safety measure to ensure that the state is loaded.
+    """
     if self.netmon.state_already_loaded:
       return
     self.netmon.network_load_status()
@@ -159,7 +164,7 @@ class NetMon01Plugin(
 
     if self.cfg_supervisor:
       # save status
-      save_nmon_each = int(min(self.cfg_save_nmon_each, 300))
+      save_nmon_each = int(min(self.cfg_save_nmon_each, 20)) # default no more than 30 iterations
       if (self._nmon_counter % save_nmon_each) == 0: 
         self.P("Saving netmon status for {} nodes".format(len(current_nodes)))
         self.netmon.network_save_status()

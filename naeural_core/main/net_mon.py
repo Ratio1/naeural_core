@@ -1169,7 +1169,10 @@ class NetworkMonitor(DecentrAIObject):
           fn='db.pkl',
           subfolder_path='network_monitor'
         )
-        self.end_timer("network_save_status")
+        # now we add epoch manager save
+        self.epoch_manager.save_status()
+        elapsed = self.end_timer("network_save_status")
+        self.P("Network map status saved in {:.2f} seconds".format(elapsed))
       # endwith lock
       return
     

@@ -579,7 +579,7 @@ class EpochsManager(Singleton):
       return_timestamps=True
     )
     max_possible = self.epoch_length
-    prc_available = round(avail_seconds / max_possible, 4)
+    prc_available = round(avail_seconds / max_possible, 4) # DO NOT USE 100% but 1.0 
     record_value = round(prc_available * EPOCH_MAX_VALUE)
     self.__data[node_addr][EPCT.EPOCHS][current_epoch] = record_value
     
@@ -624,7 +624,7 @@ class EpochsManager(Singleton):
     record_value = self.__data[self.owner.node_addr][EPCT.EPOCHS][current_epoch]
     
     # we can use available_prc or record_value to check if the current node >= SUPERVISOR_MIN_AVAIL
-    # prc = available_prc # work the same but make sure `available_prc` is not already * 100
+    # prc = available_prc is the same as record_value / EPOCH_MAX_VALUE
     prc = round(record_value / EPOCH_MAX_VALUE, 4) 
     was_up_throughout_current_epoch = prc >= SUPERVISOR_MIN_AVAIL
 
@@ -900,6 +900,11 @@ class EpochsManager(Singleton):
       node_last_epoch_last_hb = node_last_epoch_hb_timestamps[-1] if len(node_last_epoch_hb_timestamps) > 0 else None
       node_last_epoch_last_hb = self.date_to_str(node_last_epoch_last_hb)
       node_last_epoch_nr_hb = len(node_last_epoch_hb_timestamps)
+      node_last_epoch_avail = round(
+        self.__calculate_avail_seconds(node_last_epoch_hb_timestamps) / self.epoch_length, 4
+      )
+      node_could_cal_avails = node_last_epoch_avail >= SUPERVISOR_MIN_AVAIL
+      
       
       
       epochs_ids = sorted(list(dct_epochs.keys()))
@@ -925,7 +930,7 @@ class EpochsManager(Singleton):
         'last_state' : netmon_last_seen,
         'last_seen_ago' : self.log.elapsed_to_str(last_seen_ago),
         'non_zero' : non_zero,
-        'availability' : avail,
+        'overall_availability' : avail,
         'score' : score,
         'first_check' : first_seen,
         'last_check' : last_seen,
@@ -935,6 +940,8 @@ class EpochsManager(Singleton):
           'last_epoch_nr_hb' : node_last_epoch_nr_hb,
           'last_epoch_1st_hb' : node_last_epoch_1st_hb,
           'last_epoch_last_hb' : node_last_epoch_last_hb,
+          'last_epoch_avail' : node_last_epoch_avail,
+          'could_supervise' : node_could_cal_avails,
         }
       }
       if node_addr == self.owner.node_addr:

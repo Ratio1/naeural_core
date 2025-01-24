@@ -1,19 +1,19 @@
 """
-
 TODO:
+ This data MUST be delivered via dAuth to all nodes in the network.
 
-  - add a method for overall statistics:
-    - for each node get from db the availability for each epoch
-      - display overall availability prc
-      - display number of epochs with non-zero availability
+# Mainnet & Testnet
 
-  - add a method for backlog recalculation:
-    - given a database of hbs get all the timestamps for all nodes
-    - for all dates in the timestamps see if the epoch is already registered in EM db
-      - if not, update(FLAG) the epoch with all its and generate warning for missing epoch
-      - if yes, check if the timestamps defined duration matches the expected db recorded duration
-        - if not, generate warning for mismatched duration and update(FLAG)
-  
+EE_GENESIS_EPOCH_DATE="2025-02-03 17:00:00"
+EE_EPOCH_INTERVALS=24
+EE_EPOCH_INTERVAL_SECONDS=3600
+
+# Devnet
+EE_GENESIS_EPOCH_DATE="2025-01-24 00:00:00"
+EE_EPOCH_INTERVALS=1
+EE_EPOCH_INTERVAL_SECONDS=3600
+
+
   
 """
 import uuid
@@ -34,9 +34,16 @@ from naeural_core.utils import Singleton
 
 EPOCH_MANAGER_VERSION = '0.2.2'
 
-DEFAULT_EPOCH_INTERVALS = 24
-DEFAULT_EPOCH_INTERVAL_SECONDS = 3600
+#############################################
+#############################################
+GENESYS_EPOCH_DATE = "2025-01-24 00:00:00"      # "2025-02-03 17:00:00"  # OLD: "2024-03-10 00:00:00"
+DEFAULT_EPOCH_INTERVALS = 1                     # 24
+DEFAULT_EPOCH_INTERVAL_SECONDS = 3600           # 3600
+#############################################
+#############################################
+
 DEFAULT_NODE_ALERT_INTERVAL = DEFAULT_EPOCH_INTERVAL_SECONDS
+
 
 EPOCH_MAX_VALUE = 255
 
@@ -49,7 +56,7 @@ FN_FULL = FN_SUBFOLDER + '/' + FN_NAME
 
 EPOCHMON_MUTEX = 'epochmon_mutex'
 
-GENESYS_EPOCH_DATE = '2024-03-10 00:00:00'
+
 INITIAL_SYNC_EPOCH = 0 # TODO: add initial sync epoch
 
 
@@ -70,7 +77,18 @@ _FULL_DATA_TEMPLATE_EXTRA = {
   SYNC_SAVES_EP : [],
   SYNC_RESTARTS : [],
   SYNC_RELOADS : [],
+  
+  ct.EE_GENESIS_EPOCH_DATE_KEY : None,
+  ct.BASE_CT.EE_EPOCH_INTERVALS_KEY : None,
+  ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY : None,
 }
+
+_FULL_DATA_MANDATORY_FIELDS = [
+  SYNC_NODES,
+  ct.EE_GENESIS_EPOCH_DATE_KEY ,
+  ct.BASE_CT.EE_EPOCH_INTERVALS_KEY,
+  ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY ,
+]
 
 SYNC_HISTORY_SIZE = 10
 
@@ -138,7 +156,15 @@ class EpochsManager(Singleton):
 
     # for Genesis epoch date is correct to replace in order to have a timezone aware date
     # and not consider the local timezone
-    self.__genesis_date = self.log.str_to_date(GENESYS_EPOCH_DATE).replace(tzinfo=timezone.utc)
+    genesis_epoch_date_env = str(os.environ.get(ct.EE_GENESIS_EPOCH_DATE_KEY, GENESYS_EPOCH_DATE))
+    if len(genesis_epoch_date_env) != len(GENESYS_EPOCH_DATE):
+      genesis_epoch_date_env = GENESYS_EPOCH_DATE
+    self.__genesis_date_str = genesis_epoch_date_env
+    self.__genesis_date = self.log.str_to_date(self.__genesis_date_str).replace(tzinfo=timezone.utc)
+    
+    _FULL_DATA_TEMPLATE_EXTRA[ct.EE_GENESIS_EPOCH_DATE_KEY] = self.__genesis_date_str
+    _FULL_DATA_TEMPLATE_EXTRA[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = self.__epoch_intervals
+    _FULL_DATA_TEMPLATE_EXTRA[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = self.__epoch_interval_seconds
 
     self.owner = owner
     self.__current_epoch = None
@@ -148,14 +174,17 @@ class EpochsManager(Singleton):
     self.__debug = debug
     self._set_dbg_date(debug_date)
 
-    self._load_status()
+    loaded = self._load_status()
 
-    self.P("EpochsManager v{}, epoch #{}, GENESIS=<{}> (debug={}, debug_date={})".format(
-      EPOCH_MANAGER_VERSION, 
-      self.get_current_epoch(),
-      GENESYS_EPOCH_DATE,
-      debug, debug_date
-    ))
+    self.P(
+      "EpochsMgr v{}, epoch #{}, GENESIS=[{}] Int/Ep: {}, Sec/Int: {} ".format(
+        EPOCH_MANAGER_VERSION, 
+        self.get_current_epoch(), self.__genesis_date_str,
+        self.__epoch_intervals, self.__epoch_interval_seconds,
+      ),
+      color='m',
+      boxed=True
+    )
     return
 
   @property
@@ -301,6 +330,7 @@ class EpochsManager(Singleton):
     data is not lost in case of a restart during an epoch but rather preserved and reloaded.
         
     """
+    result = False
     exists = self.log.get_data_file(FN_FULL) is not None
     if exists:
       self.P("Previous epochs state found. Loading epochs status...")
@@ -309,39 +339,66 @@ class EpochsManager(Singleton):
         subfolder_path=FN_SUBFOLDER
       )
       if epochs_status is not None:
-        if SYNC_NODES not in epochs_status:
+        missing_fields = False
+        for field in _FULL_DATA_MANDATORY_FIELDS:
+          if field not in epochs_status:
+            missing_fields = True
+            self.P(f"Missing mandatory field: {field}", color='r')
+        if missing_fields:
           # old format
-          self.__data = epochs_status
+          self.P("Attempting to load old epochs status format. Dropping data", color='r')
           self.__full_data = {
             SYNC_NODES : self.__data,
             SYNC_LAST_EPOCH : INITIAL_SYNC_EPOCH,
           }
         else:
           # new format
-          self.__full_data = epochs_status
-          self.__data = epochs_status[SYNC_NODES]
+          loaded_genesis_date = epochs_status.get(ct.EE_GENESIS_EPOCH_DATE_KEY, self.__genesis_date_str)
+          loaded_intervals = epochs_status.get(ct.BASE_CT.EE_EPOCH_INTERVALS_KEY, self.__epoch_intervals)
+          loaded_interval_seconds = epochs_status.get(ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY, self.__epoch_interval_seconds)
+          if (
+            loaded_genesis_date != self.__genesis_date_str or
+            loaded_intervals != self.__epoch_intervals or
+            loaded_interval_seconds != self.__epoch_interval_seconds
+          ):
+            self.P(
+              f"Wrong epoch conf: {loaded_genesis_date}, {loaded_intervals}, {loaded_interval_seconds} vs {self.__genesis_date_str}, {self.__epoch_intervals}, {self.__epoch_interval_seconds}", 
+              color='r', boxed=True,
+            )
+          else:
+            # loaded data is full data 
+            self.__full_data = epochs_status
+            self.__data = epochs_status[SYNC_NODES]
         # end if using new format
-        self.__add_empty_fields()
-        self.__full_data[SYNC_RELOADS].append(self.date_to_str())
-        self.__compute_eth_to_internal()
-        self.P(f"Epochs status loaded with {len(self.__data)} nodes", boxed=True)
-        self.__debug_status()
+        result = True
       else:
         self.P("Error loading epochs status.", color='r')
     else:
       self.P("No previous epochs status found in {FN_FULL}.", color='r')
-    return
+
+    self.__add_empty_fields()
+    self.__compute_eth_to_internal()
+    if result:
+      self.__full_data[SYNC_RELOADS].append(self.date_to_str())
+      self.P(f"Epochs status loaded with {len(self.__data)} nodes", boxed=True)
+      self.__debug_status()
+    #endif exists
+    return result
 
   def __add_empty_fields(self):
     """
     Use this method to add missing fields to the loaded data structure.
 
     """
+      
     template = deepcopy(_NODE_TEMPLATE)
     for node_addr in self.__data:
       for key in template:
         if key not in self.__data[node_addr]:
           self.__data[node_addr][key] = template[key]
+
+    if SYNC_NODES not in self.__full_data:
+      self.__full_data[SYNC_NODES] = self.__data
           
     template2 = deepcopy(_FULL_DATA_TEMPLATE_EXTRA)
     for full_date_key in template2:
@@ -385,7 +442,7 @@ class EpochsManager(Singleton):
     """
     if epoch_id is None:
       epoch_id = self.get_time_epoch()
-    date = self.__genesis_date + timedelta(days=epoch_id)
+    date = self.__genesis_date + timedelta(seconds=epoch_id * self.epoch_length)
     str_date = datetime.strftime(date, format="%Y-%m-%d")
     return str_date
   
@@ -846,7 +903,8 @@ class EpochsManager(Singleton):
     """
     Returns the supervisor capacity for all the epochs
     """
-    epochs = self.get_node_epochs(self.owner.node_addr)
+    epochs = self.get_node_epochs(self.owner.node_addr) or {}
+    
     result = {
       epoch : 
         (epochs[epoch] >= SUPERVISOR_MIN_AVAIL_UINT8) if not as_float else
@@ -900,8 +958,8 @@ class EpochsManager(Singleton):
         node_addr, 
         dt_now=self.get_current_date(),
         as_sec=True
-      )      
-      netmon_last_seen = self.date_to_str(dt_netmon_last_seen)
+      )
+      netmon_last_seen = self.date_to_str(dt_netmon_last_seen) if dt_netmon_last_seen is not None else 'N/A'
       node_name = self.get_node_name(node_addr)
       dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)     
       

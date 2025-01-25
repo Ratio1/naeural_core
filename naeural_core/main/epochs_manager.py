@@ -985,20 +985,29 @@ class EpochsManager(Singleton):
     }
     return dct_result
 
-  def get_oracle_state(self, display=False):
+  def get_oracle_state(
+    self, display=False, 
+    start_epoch=None, end_epoch=None,
+  ):
     """
     Returns the server/oracle state.
     """
     dct_result = self.get_era_specs()
-    start_epoch = max(1, self.get_current_epoch() - 10)
-    certainty = self.get_self_supervisor_capacity(as_float=False, start_epoch=start_epoch)
-    str_certainty = ", ".join([
-        f"{x}={'Y' if certainty.get(x, 0) >= SUPERVISOR_MIN_AVAIL_PRC else 'N'}" 
-        for x in certainty
-      ])
+    if start_epoch is None:
+      start_epoch = max(1, self.get_current_epoch() - 10)
+    certainty = self.get_self_supervisor_capacity(
+      as_float=False, start_epoch=start_epoch, end_epoch=end_epoch,
+    )
+    epochs = sorted(list(certainty.keys()))
+    certainty = {x : int(certainty[x]) for x in epochs}
+    # str_certainty = ", ".join([
+    #     f"{x}={'Y' if certainty.get(x, False) else 'N'}" 
+    #     for x in epochs
+    #   ])
     dct_result['manager'] = {
-      'recent_certainty' :  str_certainty 
+      'certainty' : certainty, 
     }
+    dct_result['manager']['valid'] = sum(certainty.values()) == len(certainty)
     for extra_key in _FULL_DATA_INFO_KEYS:
       dct_result['manager'][extra_key.lower()] = self.__full_data.get(extra_key, 'N/A')
     if (time() - self.__last_state_log) > 600:

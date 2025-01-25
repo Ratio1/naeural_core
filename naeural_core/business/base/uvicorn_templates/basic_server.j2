@@ -75,8 +75,8 @@ class {{ item['name'] }}Model(BaseModel):
 
 @app.post("/{{ item['name'] }}")
 async def {{ item['name'] }}(
-  {% if item['require_token'] %}token: str = Depends(get_bearer_token),{% endif %}
   request: {{ item['name'] }}Model
+  {% if item['require_token'] %}, token: str = Depends(get_bearer_token){% endif %}
 ):
   """{{ item['endpoint_doc'] }}"""
   {% for param in item['params'] %}
@@ -96,8 +96,8 @@ async def {{ item['name'] }}(
 
 {% if item['method'] is not none %}@app.{{ item['method'] }}("/{{ item['name'] }}"){% endif %}
 async def {{ item['name'] }}(
-  {% if item['require_token'] %}token: str = Depends(get_bearer_token),{% endif %}
   {% for arg in item['args'] %}{{ arg }}{% if not loop.last %}, {% endif %}{% endfor %}
+  {% if item['require_token'] %}token: str = Depends(get_bearer_token){% endif %}
 ):
   """{{ item['endpoint_doc'] }}"""
   {% if item['require_token'] %}

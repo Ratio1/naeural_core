@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from copy import deepcopy
 from threading import Lock
+from time import time
 
 
 from naeural_core import constants as ct
@@ -161,6 +162,8 @@ class EpochsManager(Singleton):
     self.__epoch_intervals = DEFAULT_EPOCH_INTERVALS
     self.__epoch_interval_seconds = DEFAULT_EPOCH_INTERVAL_SECONDS
     self._epoch_interval_setup()
+    
+    self.__last_state_log = 0
 
     # for Genesis epoch date is correct to replace in order to have a timezone aware date
     # and not consider the local timezone
@@ -982,7 +985,7 @@ class EpochsManager(Singleton):
     }
     return dct_result
 
-  def get_oracle_state(self):
+  def get_oracle_state(self, display=False):
     """
     Returns the server/oracle state.
     """
@@ -998,6 +1001,11 @@ class EpochsManager(Singleton):
     }
     for extra_key in _FULL_DATA_INFO_KEYS:
       dct_result['manager'][extra_key.lower()] = self.__full_data.get(extra_key, 'N/A')
+    if (time() - self.__last_state_log) > 600:
+      display = True
+    if display:
+      self.P("Oracle state:\n{}".format(json.dumps(dct_result, indent=2)))
+      self.__last_state_log = time()
     return dct_result
 
 

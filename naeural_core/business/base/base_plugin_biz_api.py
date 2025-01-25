@@ -217,8 +217,8 @@ class _BasePluginAPIMixin:
       else:
         if debug:
           self.P("No chain storage set function found", color="red")
-    except:
-      pass
+    except Exception as ex:
+      self.P("Error in chainstore_set: {}".format(ex), color="red")
     return result
   
   
@@ -237,8 +237,8 @@ class _BasePluginAPIMixin:
       else:
         if debug:
           self.P("No chain storage get function found", color="red")
-    except:
-      pass
+    except Exception as ex:
+      self.P("Error in chainstore_get: {}".format(ex), color="red")
     return value
   
   

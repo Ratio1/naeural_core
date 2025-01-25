@@ -23,7 +23,7 @@ import os
 import numpy as np
 
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict
+from collections import defaultdict, deque
 from copy import deepcopy
 from threading import Lock
 
@@ -36,7 +36,7 @@ EPOCH_MANAGER_VERSION = '0.2.2'
 
 #############################################
 #############################################
-GENESYS_EPOCH_DATE = "2025-01-24 00:00:00"      # "2025-02-03 17:00:00"  # OLD: "2024-03-10 00:00:00"
+DEFAULT_GENESYS_EPOCH_DATE = "2025-01-24 00:00:00"      # "2025-02-03 17:00:00"  # OLD: "2024-03-10 00:00:00"
 DEFAULT_EPOCH_INTERVALS = 1                     # 24
 DEFAULT_EPOCH_INTERVAL_SECONDS = 3600           # 3600
 #############################################
@@ -156,9 +156,9 @@ class EpochsManager(Singleton):
 
     # for Genesis epoch date is correct to replace in order to have a timezone aware date
     # and not consider the local timezone
-    genesis_epoch_date_env = str(os.environ.get(ct.EE_GENESIS_EPOCH_DATE_KEY, GENESYS_EPOCH_DATE))
-    if len(genesis_epoch_date_env) != len(GENESYS_EPOCH_DATE):
-      genesis_epoch_date_env = GENESYS_EPOCH_DATE
+    genesis_epoch_date_env = str(os.environ.get(ct.EE_GENESIS_EPOCH_DATE_KEY, DEFAULT_GENESYS_EPOCH_DATE))
+    if len(genesis_epoch_date_env) != len(DEFAULT_GENESYS_EPOCH_DATE):
+      genesis_epoch_date_env = DEFAULT_GENESYS_EPOCH_DATE
     self.__genesis_date_str = genesis_epoch_date_env
     self.__genesis_date = self.log.str_to_date(self.__genesis_date_str).replace(tzinfo=timezone.utc)
     
@@ -280,10 +280,14 @@ class EpochsManager(Singleton):
     return
   
   
-  def __trim_history(self):
+  def __trim_history(self, trimmable_type=(list, tuple, deque)):
     for full_data_key in _FULL_DATA_TEMPLATE_EXTRA:
-      if len(self.__full_data[full_data_key]) > SYNC_HISTORY_SIZE:
-        self.__full_data[full_data_key] = self.__full_data[full_data_key][-SYNC_HISTORY_SIZE:]
+      data = self.__full_data[full_data_key]
+      is_trimable = isinstance(data, trimmable_type)
+      if is_trimable:
+        data_len = len(data)
+        if data_len > SYNC_HISTORY_SIZE:
+          self.__full_data[full_data_key] = self.__full_data[full_data_key][-SYNC_HISTORY_SIZE:]
     return
 
 
@@ -298,7 +302,7 @@ class EpochsManager(Singleton):
     Saves the epochs status to disk called ONLY by `maybe_close_epoch` method - uses the critical section of the maybe_close_epoch method.
     If used separately, make sure to use a lock.
     """
-    self.P(f"Saving epochs status for {len(self.__data)} nodes...")
+    self.P(f"{self.__class__.__name__} saving epochs status for {len(self.__data)} nodes...")
     
     self.__full_data[SYNC_SAVES_TS].append(self.date_to_str())
     self.__full_data[SYNC_SAVES_EP].append(self.__current_epoch)

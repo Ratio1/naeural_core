@@ -1,5 +1,10 @@
 """
-TODO: pipelines examples
+
+
+This is a vital component of the Ratio1 ecosystem (Naeural Edge Protocol). It is a network monitor plugin
+that is responsible for monitoring the network status of the nodes in the network as well as persisting
+the network status to the database and triggering the epoch serialization
+
 
 """
 from naeural_core.business.base import BasePluginExecutor
@@ -34,6 +39,11 @@ _CONFIG = {
   "LOG_INFO"            : False,
   "LOG_FULL_INFO"       : False,
   "EXCLUDE_SELF"        : False,
+  #
+  # The SAVE_NMON_EACH is used to save the network status to the database and should trigger
+  # enough so that the network status "often enough" meaning if there are 5-6 restarts per day
+  # each summing up 1 minute (total 5-6 minutes) is way below 1% of the day. 
+  # The default value is 12 which means that the network status is saved every 2 minutes
   "SAVE_NMON_EACH"      : 12, # this saves each SAVE_NMON_EACH * PROCESS_DELAY seconds
 
   'VALIDATION_RULES': {

@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from copy import deepcopy
 from threading import Lock
+from time import time
 
 
 from naeural_core import constants as ct
@@ -161,6 +162,8 @@ class EpochsManager(Singleton):
     self.__epoch_intervals = DEFAULT_EPOCH_INTERVALS
     self.__epoch_interval_seconds = DEFAULT_EPOCH_INTERVAL_SECONDS
     self._epoch_interval_setup()
+    
+    self.__last_state_log = 0
 
     # for Genesis epoch date is correct to replace in order to have a timezone aware date
     # and not consider the local timezone
@@ -982,17 +985,36 @@ class EpochsManager(Singleton):
     }
     return dct_result
 
-  def get_oracle_state(self):
+  def get_oracle_state(
+    self, display=False, 
+    start_epoch=None, end_epoch=None,
+  ):
     """
     Returns the server/oracle state.
     """
     dct_result = self.get_era_specs()
-    start_epoch = max(1, self.get_current_epoch() - 10)
+    if start_epoch is None:
+      start_epoch = max(1, self.get_current_epoch() - 10)
+    certainty = self.get_self_supervisor_capacity(
+      as_float=False, start_epoch=start_epoch, end_epoch=end_epoch,
+    )
+    epochs = sorted(list(certainty.keys()))
+    certainty = {x : int(certainty[x]) for x in epochs}
+    # str_certainty = ", ".join([
+    #     f"{x}={'Y' if certainty.get(x, False) else 'N'}" 
+    #     for x in epochs
+    #   ])
     dct_result['manager'] = {
-      'certainty' : self.get_self_supervisor_capacity(as_float=False, start_epoch=start_epoch)   
+      'certainty' : certainty, 
     }
+    dct_result['manager']['valid'] = sum(certainty.values()) == len(certainty)
     for extra_key in _FULL_DATA_INFO_KEYS:
       dct_result['manager'][extra_key.lower()] = self.__full_data.get(extra_key, 'N/A')
+    if (time() - self.__last_state_log) > 600:
+      display = True
+    if display:
+      self.P("Oracle state:\n{}".format(json.dumps(dct_result, indent=2)))
+      self.__last_state_log = time()
     return dct_result
 
 
@@ -1048,9 +1070,11 @@ class EpochsManager(Singleton):
       
       epochs_ids = sorted(list(dct_epochs.keys()))
       epochs = [dct_epochs[x] for x in epochs_ids]
-      str_last_epochs = str({x : dct_epochs.get(x, 0) for x in epochs_ids[-NR_HIST:]})
-      str_certainty =  " ".join([
-        f"{x}={(certainty.get(x, 0) * 100):.0f}%" for x in epochs_ids[-NR_HIST:]
+      selection = epochs_ids[-NR_HIST:]
+      str_last_epochs = str({x : dct_epochs.get(x, 0) for x in selection})
+      str_certainty =  ", ".join([
+        f"{x}={'Y' if certainty.get(x, 0) >= SUPERVISOR_MIN_AVAIL_PRC else 'N'}" 
+        for x in selection
       ])    
       MAX_AVAIL = EPOCH_MAX_VALUE * len(epochs) # max avail possible for this node
       score = sum(epochs)      

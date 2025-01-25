@@ -988,8 +988,13 @@ class EpochsManager(Singleton):
     """
     dct_result = self.get_era_specs()
     start_epoch = max(1, self.get_current_epoch() - 10)
+    certainty = self.get_self_supervisor_capacity(as_float=False, start_epoch=start_epoch)
+    str_certainty = ", ".join([
+        f"{x}={'Y' if certainty.get(x, 0) >= SUPERVISOR_MIN_AVAIL_PRC else 'N'}" 
+        for x in certainty
+      ])
     dct_result['manager'] = {
-      'certainty' : self.get_self_supervisor_capacity(as_float=False, start_epoch=start_epoch)   
+      'recent_certainty' :  str_certainty 
     }
     for extra_key in _FULL_DATA_INFO_KEYS:
       dct_result['manager'][extra_key.lower()] = self.__full_data.get(extra_key, 'N/A')
@@ -1048,9 +1053,11 @@ class EpochsManager(Singleton):
       
       epochs_ids = sorted(list(dct_epochs.keys()))
       epochs = [dct_epochs[x] for x in epochs_ids]
-      str_last_epochs = str({x : dct_epochs.get(x, 0) for x in epochs_ids[-NR_HIST:]})
-      str_certainty =  " ".join([
-        f"{x}={(certainty.get(x, 0) * 100):.0f}%" for x in epochs_ids[-NR_HIST:]
+      selection = epochs_ids[-NR_HIST:]
+      str_last_epochs = str({x : dct_epochs.get(x, 0) for x in selection})
+      str_certainty =  ", ".join([
+        f"{x}={'Y' if certainty.get(x, 0) >= SUPERVISOR_MIN_AVAIL_PRC else 'N'}" 
+        for x in selection
       ])    
       MAX_AVAIL = EPOCH_MAX_VALUE * len(epochs) # max avail possible for this node
       score = sum(epochs)      

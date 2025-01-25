@@ -90,6 +90,13 @@ _FULL_DATA_MANDATORY_FIELDS = [
   ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY ,
 ]
 
+_FULL_DATA_INFO_KEYS = [
+  SYNC_SAVES_TS,
+  SYNC_SAVES_EP,
+  SYNC_RESTARTS,
+  SYNC_RELOADS,
+]
+
 SYNC_HISTORY_SIZE = 10
 
 class EPCT:
@@ -347,7 +354,7 @@ class EpochsManager(Singleton):
     result = False
     exists = self.log.get_data_file(FN_FULL) is not None
     if exists:
-      self.P("Previous epochs state found. Loading epochs status in current era with specs:\n{}".format(
+      self.P("Previous epochs state found. Current oracle era specs:\n{}".format(
         json.dumps(self.get_era_specs(), indent=2)
       ))
       _full_data = self.log.load_pickle_from_data(
@@ -919,17 +926,22 @@ class EpochsManager(Singleton):
     """
     return self.get_node_previous_epoch(node_addr, as_percentage=as_percentage)  
 
-  def get_self_supervisor_capacity(self, as_float=False):
+  def get_self_supervisor_capacity(self, as_float=False, start_epoch=None, end_epoch=None):
     """
     Returns the supervisor capacity for all the epochs
     """
-    epochs = self.get_node_epochs(self.owner.node_addr) or {}
+    epochs = self.get_node_epochs(self.owner.node_addr) or defaultdict(int)
+    
+    start_epoch = start_epoch if isinstance(start_epoch, int) else 1
+    end_epoch = end_epoch if isinstance(end_epoch, int) else self.get_time_epoch() - 1
+    
+    lst_epochs = list(range(start_epoch, end_epoch + 1))
     
     result = {
       epoch : 
         (epochs[epoch] >= SUPERVISOR_MIN_AVAIL_UINT8) if not as_float else
         (round(epochs[epoch] / EPOCH_MAX_VALUE,2))
-      for epoch in epochs
+      for epoch in lst_epochs
     }
     return result
     
@@ -962,14 +974,26 @@ class EpochsManager(Singleton):
     """
     dct_result = {
       'current_epoch' : self.get_current_epoch(),
-      'current_date' : self.get_current_date(),
-      'genesis_date' : self.__genesis_date,
+      'current_date' : self.date_to_str(self.get_current_date()),
+      'genesis_date' : self.__genesis_date_str,
       'epoch_intervals' : self.__epoch_intervals,
       'epoch_interval_seconds' :  self.__epoch_interval_seconds,
       'epoch_length' : self.epoch_length,
     }
     return dct_result
 
+  def get_oracle_state(self):
+    """
+    Returns the server/oracle state.
+    """
+    dct_result = self.get_era_specs()
+    start_epoch = max(1, self.get_current_epoch() - 10)
+    dct_result['manager'] = {
+      'certainty' : self.get_self_supervisor_capacity(as_float=False, start_epoch=start_epoch)   
+    }
+    for extra_key in _FULL_DATA_INFO_KEYS:
+      dct_result['manager'][extra_key.lower()] = self.__full_data.get(extra_key, 'N/A')
+    return dct_result
 
 
   def get_stats(self, display=True, online_only=False):
@@ -979,12 +1003,15 @@ class EpochsManager(Singleton):
     
     stats = {}
     best_avail = 0
+    NR_HIST = 10
     nr_eps = 0   
     saves = self.__full_data.get(SYNC_SAVES_TS, 'N/A')
     saves_epoch = self.__full_data.get(SYNC_SAVES_EP, 'N/A')
     restarts = self.__full_data.get(SYNC_RESTARTS, 'N/A')
     current_epoch = self.get_current_epoch()
-    certainty = self.get_self_supervisor_capacity(as_float=True)   
+    start_epoch = max(1, current_epoch - NR_HIST)
+    certainty = self.get_self_supervisor_capacity(as_float=True, start_epoch=start_epoch)
+    oracle_state = self.get_oracle_state()      
     for node_addr in self.data:
       is_online = self.owner.network_node_is_online(
         node_addr, dt_now=self.get_current_date()
@@ -1018,11 +1045,9 @@ class EpochsManager(Singleton):
       node_last_epoch_avail = round(
         self.__calculate_avail_seconds(node_last_epoch_hb_timestamps) / self.epoch_length, 4
       )
-            
       
       epochs_ids = sorted(list(dct_epochs.keys()))
       epochs = [dct_epochs[x] for x in epochs_ids]
-      NR_HIST = 10
       str_last_epochs = str({x : dct_epochs.get(x, 0) for x in epochs_ids[-NR_HIST:]})
       str_certainty =  " ".join([
         f"{x}={(certainty.get(x, 0) * 100):.0f}%" for x in epochs_ids[-NR_HIST:]
@@ -1062,15 +1087,15 @@ class EpochsManager(Singleton):
         }
       }
       if node_addr == self.owner.node_addr:
-        stats[node_addr]['current_node_state'] = self.get_era_specs()
+        stats[node_addr]['oracle'] = oracle_state
       #endif node is current node
     #endfor each node
     if display:
       str_stats = json.dumps(stats, indent=2)
-      self.P("EpochManager report at ep {} (max_score: {}, nr_eps: {}):\n  - Recent saves: {}\n  - Recent saves epochs: {}\n  - Recent restars: {}\nEpoch info:\n{}\n\nStatuses:\n{}".format(
+      self.P("EpochManager report at ep {} (max_score: {}, nr_eps: {}):\nRecent saves: {}\nRecent saves epochs: {}\nRecent restars: {}\nOracle info:\n{}\n\nStatuses:\n{}".format(
         current_epoch, best_avail, nr_eps,
         saves, saves_epoch, restarts, 
-        self.get_era_specs(),
+        json.dumps(oracle_state, indent=2),
         str_stats
       ))
     return stats

@@ -105,16 +105,25 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self.__allowed_nodes[sender_no_prefix]["last_config_get"] = self.time()
     self.__allowed_nodes[sender_no_prefix]["is_online"] = True
     return
-  
-  
+
+
+  def __preprocess_current_network_data(self, current_network):
+    for _, v in current_network.items():
+      addr = v.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS)
+      if addr is None:
+        continue
+      v[self.const.PAYLOAD_DATA.NETMON_ADDRESS] = self.bc.maybe_remove_addr_prefix(addr)
+    return current_network
+
+
   def __get_active_nodes(self, netmon_current_network : dict) -> dict:
     """
     Returns a dictionary with the active nodes in the network.
     """
     active_network = {
-      v['address']: v 
+      v[self.const.PAYLOAD_DATA.NETMON_ADDRESS] : v 
       for k, v in netmon_current_network.items() 
-      if v.get("working", False) == self.const.DEVICE_STATUS_ONLINE
+      if v.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) == self.const.DEVICE_STATUS_ONLINE
     }    
     return active_network
 
@@ -172,11 +181,11 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       msg += "\n=== No allowed nodes to show ==="
     else:
       for addr in self.__allowed_nodes:
-        prefixed_addr = self.bc.maybe_add_prefix(addr)
         eeid = self.netmon.network_node_eeid(addr)
         pipelines = self.__allowed_nodes[addr].get("pipelines", [])
         names = [p.get("NAME", "NONAME") for p in pipelines]
         me_msg = ""
+        prefixed_addr = self.bc.maybe_add_prefix(addr)
         if prefixed_addr == self.ee_addr:
           pipelines = self.node_pipelines
           names = [p.get("NAME", "NONAME") for p in pipelines]
@@ -387,17 +396,20 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     This function will process the NET_MON_01 data and update the allowed nodes list.
     The objective is to keep track of the nodes that we are allowed to send requests to.
     """
-    current_network = data.get("CURRENT_NETWORK", {})
+    current_network = data.get(self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK, {})
     if len(current_network) == 0:
-      self.P("Received NET_MON_01 data without CURRENT_NETWORK data.", color='r ')
+      self.P(f"Received NET_MON_01 data without {self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK} data.", color='r ')
     else:
+      # here we will remove the prefix from each "address" within the nodes info
+      current_network = self.__preprocess_current_network_data(current_network)
+      # from this point on we will work with the no-prefix addresses      
       self.__new_nodes_this_iter = 0
       peers_status = self.__get_active_nodes_summary_with_peers(current_network)
       
       # mark all nodes that are not online
       non_online = {
-        x.get("address"):x.get("eeid") for x in current_network.values() 
-        if x.get("working", False) != self.const.DEVICE_STATUS_ONLINE
+        x.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS) : x.get(self.const.PAYLOAD_DATA.NETMON_EEID) for x in current_network.values() 
+        if x.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) != self.const.DEVICE_STATUS_ONLINE
       }
       
       # mark all nodes that are not online
@@ -415,7 +427,8 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       #endif debug initial iterations
       
       for addr in peers_status:
-        if addr == self.ee_addr:
+        prefixed_addr = self.bc.maybe_add_prefix(addr)
+        if prefixed_addr == self.ee_addr:
           # its us, no need to check whitelist
           continue
         if peers_status[addr]["allows_me"]:

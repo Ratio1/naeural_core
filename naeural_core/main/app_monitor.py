@@ -43,6 +43,8 @@ class ApplicationMonitor(DecentrAIObject):
     self.__first_payload_prepared = False
     self.__first_ram_alert_raised = False
     self.__first_ram_alert_raised_time = 0
+    self.__logged_hb_with_pipelines_status = False
+    self.__logged_hb_with_active_plugins_status = False
     self._done_first_smi_error = False
     self.dct_curr_nr = defaultdict(lambda:0)
     self.__last_temperature_info = None
@@ -447,16 +449,31 @@ class ApplicationMonitor(DecentrAIObject):
   
   
   def add_local_history_and_save(self, **kwargs):
-    dct_to_save = {}
+    # TODO: refactor this code to use constants
+    dct_to_save = {
+      'address' : self.owner.e2_addr,
+      'eth_address' : self.owner.eth_address,
+      'alias' : self.owner.cfg_eeid,
+    }    
+    current_epoch = self.owner._network_monitor.epoch_manager.get_current_epoch()
+    dct_to_save['current_epoch'] = current_epoch
+    dct_to_save['current_epoch_avail'] = self.owner._network_monitor.epoch_manager.get_current_epoch_availability()
+    dct_to_save['uptime'] = self.log.elapsed_to_str(self.owner.running_time)
+    dct_to_save['version'] = self.get_owner_version().split(' ')[0]
+    epochs = self.owner._network_monitor.epoch_manager.get_node_epochs(
+      node_addr=self.owner.e2_addr, autocomplete=True, as_list=True
+    )
+    if isinstance(epochs, list):
+      dct_to_save['last_epochs'] = epochs[-10:]
+    else:
+      dct_to_save['last_epochs'] = []
+    #endif epochs
+    dct_to_save['last_save_time'] = self.log.now_str(nice_print=True, short=True)
+
     for k,v in kwargs.items():
       if k in self.__local_data_history:
         self.__local_data_history[k].append(v)
         dct_to_save[k] = list(self.__local_data_history[k])
-    
-    dct_to_save['epoch'] = self.owner._network_monitor.epoch_manager.get_current_epoch()
-    dct_to_save['epoch_avail'] = self.owner._network_monitor.epoch_manager.get_current_epoch_availability()
-    dct_to_save['uptime'] = self.log.elapsed_to_str(self.owner.running_time)
-    dct_to_save['version'] = self.get_owner_version().split(' ')[0]
 
     self.log.save_json_to_data(dct_to_save, 'local_history.json', indent=False)    
     return
@@ -619,8 +636,25 @@ class ApplicationMonitor(DecentrAIObject):
     _ver = '{} {}'.format(self.get_owner_version(), s_os)
         
     lst_config_streams = []    
-    if self.owner.config_manager is not None and hb_contains_pipelines:
+    if self.owner.config_manager is not None and hb_contains_pipelines:      
       lst_config_streams = self.owner.get_pipelines_view()
+      
+    if (not self.__logged_hb_with_pipelines_status) and (self.owner.config_manager is not None):
+      if hb_contains_pipelines:
+        self.P(f"INFO: Heartbeat with pipelines status. Current: {len(lst_config_streams)}", boxed=True)
+      else:
+        self.P("INFO: Heartbeat WITHOUT pipelines status", boxed=True)
+      self.__logged_hb_with_pipelines_status = True
+      
+      
+    if (not self.__logged_hb_with_active_plugins_status) and (self.owner.business_manager is not None):
+      if hb_contains_active_plugins:
+        self.P(f"INFO: Heartbeat with active plugins status. Current: {len(active_business_plugins)}", boxed=True)
+      else:
+        self.P("INFO: Heartbeat WITHOUT active plugins status", boxed=True)
+      self.__logged_hb_with_active_plugins_status = True
+    
+    
 
     address = self.owner.e2_addr      
     is_supervisor = self.owner.is_supervisor_node

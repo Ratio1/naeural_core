@@ -40,6 +40,7 @@ EPOCH_MANAGER_VERSION = '0.2.2'
 DEFAULT_GENESYS_EPOCH_DATE = "2025-01-24 00:00:00"      # "2025-02-03 17:00:00"  # OLD: "2024-03-10 00:00:00"
 DEFAULT_EPOCH_INTERVALS = 1                     # 24
 DEFAULT_EPOCH_INTERVAL_SECONDS = 3600           # 3600
+SUPERVISOR_MIN_AVAIL_PRC = 0.60                 # 0.98 for mainnet, 60% for testnet
 #############################################
 #############################################
 
@@ -48,7 +49,6 @@ DEFAULT_NODE_ALERT_INTERVAL = DEFAULT_EPOCH_INTERVAL_SECONDS
 
 EPOCH_MAX_VALUE = 255
 
-SUPERVISOR_MIN_AVAIL_PRC = 0.98
 SUPERVISOR_MIN_AVAIL_UINT8 = int(SUPERVISOR_MIN_AVAIL_PRC * EPOCH_MAX_VALUE)
 
 FN_NAME = 'epochs_status.pkl'
@@ -367,8 +367,8 @@ class EpochsManager(Singleton):
       if _full_data is not None:
         missing_fields = False
         dct_to_display = {k:v for k,v in _full_data.items() if k != SYNC_NODES}
-        self.P("Loaded epochs status with {} nodes and specs:\n{}".format(
-          len(self.__data), json.dumps(dct_to_display, indent=2)
+        self.P("Loaded epochs status with {} (current={}) nodes and specs:\n{}".format(
+          len(_full_data[SYNC_NODES]),len(self.__data), json.dumps(dct_to_display, indent=2)
         ))
         for field in _FULL_DATA_MANDATORY_FIELDS:
           if field not in _full_data:
@@ -458,6 +458,8 @@ class EpochsManager(Singleton):
     
     # the epoch id starts from 0 - the genesis epoch
     # the epoch id is the number of days since the genesis epoch
+    # # TODO: change this if we move to start-from-one offset by adding +1
+    # OBS: epoch always ends at AB:CD:59 no matter what 
     epoch_id = int(elapsed_seconds / self.epoch_length) 
     return epoch_id
   
@@ -472,8 +474,9 @@ class EpochsManager(Singleton):
     """
     if epoch_id is None:
       epoch_id = self.get_time_epoch()
-    date = self.__genesis_date + timedelta(seconds=epoch_id * self.epoch_length)
-    str_date = datetime.strftime(date, format="%Y-%m-%d")
+    # TODO: change this if we move to start-from-one offset with (epoch_id - 1)
+    date = self.__genesis_date + timedelta(seconds=(epoch_id * self.epoch_length))
+    str_date = datetime.strftime(date, format="%Y-%m-%d %H:%M:%S")
     return str_date
   
   def date_to_str(self, date : datetime = None, move_to_utc : bool = False):
@@ -634,21 +637,28 @@ class EpochsManager(Singleton):
     if return_timestamps:
       return avail_seconds, lst_timestamps, current_epoch
     return avail_seconds
-  
-  
+    
   def get_current_epoch_availability(self, node_addr=None, time_between_heartbeats=10):
+    # TODO: change this if we move to start-from-one offset
+    epoch_start = self.__genesis_date + timedelta(
+      seconds=(self.epoch_length * self.get_time_epoch()) # -1 if 1st epoch is genesis + length
+    )
+    max_possible_from_epoch_start = (self.get_current_date() - epoch_start).seconds
+
     if node_addr is None:
       node_addr = self.owner.node_addr
     # if node not seen yet, return None
     if node_addr not in self.__data:
       return None
-    avail_seconds = self.__calc_node_avail_seconds(node_addr, time_between_heartbeats=time_between_heartbeats)
-    # max is number of seconds from midnight to now    
-    max_possible_from_midnight = (self.get_current_date() - self.get_current_date().replace(hour=0, minute=0, second=0)).seconds
-    if max_possible_from_midnight == 0:
+    
+    avail_seconds = self.__calc_node_avail_seconds(
+      node_addr, 
+      time_between_heartbeats=time_between_heartbeats
+    )
+    if max_possible_from_epoch_start == 0:
       prc_available = 0
     else:
-      prc_available = round(avail_seconds / max_possible_from_midnight, 4)
+      prc_available = round(avail_seconds / max_possible_from_epoch_start, 4)
     return prc_available
 
 
@@ -922,6 +932,7 @@ class EpochsManager(Singleton):
       return 0
     last_epoch = self.get_time_epoch() - 1
     return self.get_node_epoch(node_addr, epoch_id=last_epoch, as_percentage=as_percentage)
+
   
   def get_node_last_epoch(self, node_addr, as_percentage=False):
     """
@@ -929,9 +940,25 @@ class EpochsManager(Singleton):
     """
     return self.get_node_previous_epoch(node_addr, as_percentage=as_percentage)  
 
+
   def get_self_supervisor_capacity(self, as_float=False, start_epoch=None, end_epoch=None):
     """
     Returns the supervisor capacity for all the epochs
+    
+    Parameters
+    ----------
+    
+    as_float : bool
+      If True, the values are returned as floats. If False, the values are returned as bools
+      based on (epochs[epoch] >= SUPERVISOR_MIN_AVAIL_UINT8).
+      
+    start_epoch : int
+      The start epoch. Defaults to 1.
+      
+    end_epoch : int
+      The end epoch. Defaults to the current epoch - 1.
+      
+    
     """
     epochs = self.get_node_epochs(self.owner.node_addr) or defaultdict(int)
     
@@ -985,9 +1012,11 @@ class EpochsManager(Singleton):
     }
     return dct_result
 
+
   def get_oracle_state(
     self, display=False, 
     start_epoch=None, end_epoch=None,
+    as_int=False,
   ):
     """
     Returns the server/oracle state.
@@ -996,18 +1025,19 @@ class EpochsManager(Singleton):
     if start_epoch is None:
       start_epoch = max(1, self.get_current_epoch() - 10)
     certainty = self.get_self_supervisor_capacity(
-      as_float=False, start_epoch=start_epoch, end_epoch=end_epoch,
+      as_float=True, start_epoch=start_epoch, end_epoch=end_epoch,
     )
     epochs = sorted(list(certainty.keys()))
-    certainty = {x : int(certainty[x]) for x in epochs}
-    # str_certainty = ", ".join([
-    #     f"{x}={'Y' if certainty.get(x, False) else 'N'}" 
-    #     for x in epochs
-    #   ])
+    certainty_int = {
+      x : int(certainty[x] >= SUPERVISOR_MIN_AVAIL_PRC) for x in epochs
+    }
+    if as_int:
+      certainty = certainty_int
     dct_result['manager'] = {
       'certainty' : certainty, 
     }
-    dct_result['manager']['valid'] = sum(certainty.values()) == len(certainty)
+    dct_result['manager']['valid'] = sum(certainty_int.values()) == len(certainty)
+    dct_result['manager']['supervisor_min_avail_prc'] = SUPERVISOR_MIN_AVAIL_PRC
     for extra_key in _FULL_DATA_INFO_KEYS:
       dct_result['manager'][extra_key.lower()] = self.__full_data.get(extra_key, 'N/A')
     if (time() - self.__last_state_log) > 600:
@@ -1336,5 +1366,6 @@ if __name__ == '__main__':
     eng._set_dbg_date(debug_date)
     inf = eng.get_stats(display=True, online_only=True)
     m, t, top = l.get_obj_size(obj=netmon.all_heartbeats, top_consumers=20, return_tree=True)
-    l.P("Heartbeats size: {:,.0f} MB".format(m / 1024 / 1024))
-  #
+    # l.P("Heartbeats size: {:,.0f} MB".format(m / 1024 / 1024))
+    eng.get_current_epoch_availability(NODE_ADDR)
+  

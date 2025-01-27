@@ -191,6 +191,11 @@ class NetworkMonitor(DecentrAIObject):
     return self.__blockchain_manager.maybe_remove_prefix(addr)
   
   
+  def _add_address_prefix(self, addr):
+    """Add the address prefix if it doesn't exist"""
+    return self.__blockchain_manager._add_prefix(addr)
+  
+  
   def node_address_to_eth_address(self, addr):
     return self.__blockchain_manager.node_address_to_eth_address(addr)
 
@@ -1576,7 +1581,7 @@ class NetworkMonitor(DecentrAIObject):
         trusted = is_secured and trusted
         
         dct_result = dict(
-          address=addr,
+          address=self._add_address_prefix(addr),
           trusted=trusted,
           trust=trust,
           secured=is_secured,

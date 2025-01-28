@@ -60,8 +60,10 @@ EPOCHMON_MUTEX = 'epochmon_mutex'
 
 INITIAL_SYNC_EPOCH = 0 # TODO: add initial sync epoch
 
-
-EPOCH_MANAGER_DEBUG = str(os.environ.get(ct.EE_EPOCH_MANAGER_DEBUG, True)).lower() == 'true'
+try:
+  EPOCH_MANAGER_DEBUG = int(os.environ.get(ct.EE_EPOCH_MANAGER_DEBUG, 1))
+except Exception as e:
+  EPOCH_MANAGER_DEBUG = 1
 
 SYNC_SIGNATURES = 'SIGNATURES'
 SYNC_VALUE = 'VALUE'
@@ -182,14 +184,19 @@ class EpochsManager(Singleton):
     self.__data = {}
     self.__full_data = {}
     self.__eth_to_node = {}
+    try:
+      debug = int(debug)
+    except Exception as e:
+      self.P("Error setting debug: {}".format(e), color='r')
+      debug = 1
     self.__debug = debug
     self._set_dbg_date(debug_date)
 
     loaded = self._load_status()
 
     self.P(
-      "EpochsMgr v{}, epoch #{}, GENESIS=[{}] Int/Ep: {}, Sec/Int: {} ".format(
-        EPOCH_MANAGER_VERSION, 
+      "EpochsMgr v{}, dbg:{}, epoch #{}, GENESIS=[{}] Int/Ep: {}, Sec/Int: {} ".format(
+        EPOCH_MANAGER_VERSION, self.__debug, 
         self.get_current_epoch(), self.__genesis_date_str,
         self.__epoch_intervals, self.__epoch_interval_seconds,
       ),
@@ -875,7 +882,7 @@ class EpochsManager(Singleton):
     last_epochs = epochs[-5:]
     dct_last_epochs = {x : dct_epochs.get(x, 0) for x in last_epochs}
     non_zero = sum([1 for x in lst_result if x > 0])
-    if self.__debug:
+    if self.__debug > 1:
       self.P("get_node_epochs({}), {} non zero, last epochs: {}".format(
         node_addr[:10] +'...' + node_addr[-4:], non_zero, str(dct_last_epochs)
       ))    

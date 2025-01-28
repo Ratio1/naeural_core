@@ -96,7 +96,7 @@ async def {{ item['name'] }}(
 
 {% if item['method'] is not none %}@app.{{ item['method'] }}("/{{ item['name'] }}"){% endif %}
 async def {{ item['name'] }}(
-  {% for arg in item['args'] %}{{ arg, }}{% if not loop.last %} {% endif %}{% endfor %}
+  {% for arg in item['args'] %}{{ arg }}, {% if not loop.last %} {% endif %}{% endfor %}
   {% if item['require_token'] %}token: str = Depends(get_bearer_token){% endif %}
 ):
   """{{ item['endpoint_doc'] }}"""

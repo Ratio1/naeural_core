@@ -77,6 +77,7 @@ class Orchestrator(DecentrAIObject,
     self.__main_loop_last_stage_change = time()
     self.__main_loop_stoplog = []
     self.__simulated_mlstops = 0
+    self.__last_local_info_save = time()    
 
 
     self._capture_manager : CaptureManager              = None

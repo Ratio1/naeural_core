@@ -342,7 +342,7 @@ class Orchestrator(DecentrAIObject,
       addr_file = os.path.join(folder, ct.LocalInfo.LOCAL_INFO_FILE)
       current_epoch = self.owner._network_monitor.epoch_manager.get_current_epoch()
       current_epoch_avail = self.owner._network_monitor.epoch_manager.get_current_epoch_availability()
-      last_5_epochs = self.owner._network_monitor.epoch_manager.get_last_n_epochs(
+      last_5_epochs = self.owner._network_monitor.epoch_manager.get_node_last_n_epochs(
         node_addr=self.e2_addr, n=5, autocomplete=True, as_list=False,
       )
       data = {

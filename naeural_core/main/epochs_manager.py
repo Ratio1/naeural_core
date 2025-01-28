@@ -886,7 +886,7 @@ class EpochsManager(Singleton):
     return result
   
   
-  def get_last_n_epochs(self, node_addr, n=5, autocomplete=True, as_list=False):
+  def get_node_last_n_epochs(self, node_addr, n=5, autocomplete=True, as_list=False):
     last_epoch = self.get_time_epoch() - 1
     dct_epochs = self.get_node_epochs(node_addr, autocomplete=autocomplete, as_list=False)
     start = max(1, last_epoch - n + 1)

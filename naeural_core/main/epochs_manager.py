@@ -375,7 +375,7 @@ class EpochsManager(Singleton):
         missing_fields = False
         dct_to_display = {k:v for k,v in _full_data.items() if k != SYNC_NODES}
         self.P("Loaded epochs status with {} (current={}) nodes and specs:\n{}".format(
-          len(_full_data[SYNC_NODES]),len(self.__data), json.dumps(dct_to_display, indent=2)
+          len(_full_data.get(SYNC_NODES, [])),len(self.__data), json.dumps(dct_to_display, indent=2)
         ))
         for field in _FULL_DATA_MANDATORY_FIELDS:
           if field not in _full_data:

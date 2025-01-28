@@ -373,14 +373,21 @@ class EpochsManager(Singleton):
       )
       if _full_data is not None:
         missing_fields = False
-        dct_to_display = {k:v for k,v in _full_data.items() if k != SYNC_NODES}
-        self.P("Loaded epochs status with {} (current={}) nodes and specs:\n{}".format(
-          len(_full_data.get(SYNC_NODES, [])),len(self.__data), json.dumps(dct_to_display, indent=2)
-        ))
-        for field in _FULL_DATA_MANDATORY_FIELDS:
-          if field not in _full_data:
-            missing_fields = True
-            self.P(f"Missing mandatory field: {field}", color='r')
+        try:
+          dct_to_display = {k:v for k,v in _full_data.items() if k != SYNC_NODES}
+          self.P("Loaded epochs status with {} (current={}) nodes and specs:\n{}".format(
+            len(_full_data.get(SYNC_NODES, [])),len(self.__data), json.dumps(dct_to_display, indent=2)
+          ))
+          for field in _FULL_DATA_MANDATORY_FIELDS:
+            if field not in _full_data:
+              missing_fields = True
+              self.P(f"Missing mandatory field: {field}", color='r')
+            # endif field not present
+          # endfor mandatory fields
+        except Exception as e:
+          self.P(f"Error loading epochs status: {e}\n", color='r')
+          missing_fields = True
+        # end try-except
         if missing_fields:
           # old format
           self.P("Attempting to load old epochs status format. Dropping data", color='r')

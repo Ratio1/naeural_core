@@ -227,6 +227,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       
     sync_storage : bool
       If True will only set the local kv pair without broadcasting to the network
+      
+      
+    Returns:
+    --------
+    
+    
     
     """
     where = "LOCAL: " if not sync_storage else "REMOTE: "

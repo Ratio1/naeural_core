@@ -886,6 +886,18 @@ class EpochsManager(Singleton):
     return result
   
   
+  def get_node_last_n_epochs(self, node_addr, n=5, autocomplete=True, as_list=False):
+    last_epoch = self.get_time_epoch() - 1
+    dct_epochs = self.get_node_epochs(node_addr, autocomplete=autocomplete, as_list=False)
+    start = max(1, last_epoch - n + 1)
+    lst_epochs = list(range(start, last_epoch + 1))
+    result = {x : dct_epochs.get(x, 0) for x in lst_epochs}
+    if as_list:
+      result = [result[x] for x in lst_epochs]
+    return result
+  
+  
+  
   def get_node_epoch(self, node_addr, epoch_id=None, as_percentage=False):
     """
     This method returns the percentage a node was alive in a given epoch.

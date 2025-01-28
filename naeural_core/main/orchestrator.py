@@ -340,6 +340,11 @@ class Orchestrator(DecentrAIObject,
           os.remove(fpath)
       ## end cleanup
       addr_file = os.path.join(folder, ct.LocalInfo.LOCAL_INFO_FILE)
+      current_epoch = self.owner._network_monitor.epoch_manager.get_current_epoch()
+      current_epoch_avail = self.owner._network_monitor.epoch_manager.get_current_epoch_availability()
+      last_5_epochs = self.owner._network_monitor.epoch_manager.get_last_n_epochs(
+        node_addr=self.e2_addr, n=5, autocomplete=True, as_list=False,
+      )
       data = {
         ct.LocalInfo.K_ADDRESS : self.e2_address,
         ct.LocalInfo.K_ALIAS   : self.e2_id,
@@ -348,6 +353,9 @@ class Orchestrator(DecentrAIObject,
         ct.LocalInfo.K_VER_SHORT : f"v{self.__version__}",
         ct.LocalInfo.K_INFO : {
           'whitelist' : self.whitelist_full,
+          'current_epoch' : current_epoch,
+          'current_epoch_avail' : current_epoch_avail,
+          'last_epochs' : last_5_epochs,
         },
       }
       with open(addr_file, 'w') as f:

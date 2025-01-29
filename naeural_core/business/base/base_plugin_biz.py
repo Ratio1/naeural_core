@@ -116,6 +116,8 @@ _CONFIG = {
   "AUTO_FORCE_LOWER": 0,
   # end alerter zone
 
+  # If RUNS_ONLY_ON_SUPERVISOR_NODE is set to true, the plugin will only work on the supervisor nodes.
+  "RUNS_ONLY_ON_SUPERVISOR_NODE": False,
 
   # if ALLOW_EMPTY_INPUTS is set to true the on-idle will trigger continously the process
   # default is False, set to True if we want to process empty inputs

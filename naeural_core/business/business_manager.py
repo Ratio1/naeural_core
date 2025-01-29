@@ -320,6 +320,14 @@ class BusinessManager(Manager):
             pipeline_use_local_comms_only=self._dct_config_streams[stream_name].get(ct.CONFIG_STREAM.K_USE_LOCAL_COMMS_ONLY, False),
           )
           self.maybe_toggle_supervisor_node(plugin)
+          if plugin.cfg_runs_only_on_supervisor_node:
+            if not self.is_supervisor_node:
+              self.P("Plugin {}:{} runs only on supervisor node. Skipping.".format(signature, instance_id), color='r')
+              plugin = None
+              # continue
+            else:
+              self.P("Plugin {}:{} runs only on supervisor node. Running.".format(signature, instance_id), color='g')
+          # endif runs only on supervisor node
           self.set_loop_stage('2.bm.refresh.new_instance_done: {}:{}:{}'.format(stream_name, signature, instance_id))
         except Exception as exc:
           plugin = None

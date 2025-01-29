@@ -78,6 +78,7 @@ class Orchestrator(DecentrAIObject,
     self.__main_loop_stoplog = []
     self.__simulated_mlstops = 0
     self.__last_local_info_save = time()    
+    self.__save_local_address_error_logged = False
 
 
     self._capture_manager : CaptureManager              = None
@@ -367,7 +368,9 @@ class Orchestrator(DecentrAIObject,
         f.write(json.dumps(data, indent=2))
       self.__last_local_info_save = time()
     except Exception as e:
-      self.P(f"Error saving local info: {e}", color='r')
+      if not self.__save_local_address_error_logged:
+        self.P(f"Error saving local info: {e}\n{traceback.format_exc()}", color='r')
+        self.__save_local_address_error_logged = True
     return
 
 

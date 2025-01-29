@@ -50,7 +50,7 @@ FN_FULL = FN_SUBFOLDER + '/' + FN_NAME
 EPOCHMON_MUTEX = 'epochmon_mutex'
 
 
-INITIAL_SYNC_EPOCH = 0 # TODO: add initial sync epoch
+INITIAL_SYNC_EPOCH = 0  # TODO: add initial sync epoch
 
 try:
   EPOCH_MANAGER_DEBUG = int(os.environ.get(ct.EE_EPOCH_MANAGER_DEBUG, 1))
@@ -68,6 +68,7 @@ SYNC_RESTARTS = 'EM_RESTARTS_UTC'
 SYNC_RELOADS = 'EM_RELOADS_UTC'
 
 _FULL_DATA_TEMPLATE_EXTRA = {
+  SYNC_LAST_EPOCH : INITIAL_SYNC_EPOCH,
   SYNC_SAVES_TS : [],
   SYNC_SAVES_EP : [],
   SYNC_RESTARTS : [],
@@ -1212,7 +1213,7 @@ class EpochsManager(Singleton):
     int
       The last sync epoch.
     """
-    return self.__full_data[SYNC_LAST_EPOCH]
+    return self.__full_data.get(SYNC_LAST_EPOCH, INITIAL_SYNC_EPOCH)
 
 
   def get_epoch_availability(self, epoch):

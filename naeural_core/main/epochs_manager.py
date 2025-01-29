@@ -1089,112 +1089,115 @@ class EpochsManager(Singleton):
     """
     Returns the overall statistics for all nodes.
     """
-    
-    stats = {}
+    stats = {'error' : None}
     best_avail = 0
     NR_HIST = 10
     nr_eps = 0   
-    saves = self.__full_data.get(SYNC_SAVES_TS, 'N/A')
-    saves_epoch = self.__full_data.get(SYNC_SAVES_EP, 'N/A')
-    restarts = self.__full_data.get(SYNC_RESTARTS, 'N/A')
-    current_epoch = self.get_current_epoch()
-    start_epoch = max(1, current_epoch - NR_HIST)
-    certainty = self.get_self_supervisor_capacity(as_float=True, start_epoch=start_epoch)
-    oracle_state = self.get_oracle_state()      
-    for node_addr in self.data:
-      is_online = self.owner.network_node_is_online(
-        node_addr, dt_now=self.get_current_date()
-      )
-      if online_only and not is_online:
-          continue
-      dt_netmon_last_seen = self.owner.network_node_last_seen(
-        node_addr, 
-        dt_now=self.get_current_date(),
-        as_sec=False
-      )
-      last_seen_ago = self.owner.network_node_last_seen(
-        node_addr, 
-        dt_now=self.get_current_date(),
-        as_sec=True
-      )
-      netmon_last_seen = self.date_to_str(dt_netmon_last_seen) if dt_netmon_last_seen is not None else 'N/A'
-      node_name = self.get_node_name(node_addr)
-      dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)     
-      
-      # process the previous epoch hb data
-      node_last_epoch_data = self.data[node_addr][EPCT.LAST_EPOCH]
-      node_last_epoch_id = node_last_epoch_data[EPCT.ID]
-      node_last_epoch_hb_timestamps = node_last_epoch_data[EPCT.HB_TIMESTAMPS]
-      node_last_epoch_hb_timestamps = sorted(list(node_last_epoch_hb_timestamps))
-      node_last_epoch_1st_hb = node_last_epoch_hb_timestamps[0] if len(node_last_epoch_hb_timestamps) > 0 else None
-      node_last_epoch_1st_hb = self.date_to_str(node_last_epoch_1st_hb)
-      node_last_epoch_last_hb = node_last_epoch_hb_timestamps[-1] if len(node_last_epoch_hb_timestamps) > 0 else None
-      node_last_epoch_last_hb = self.date_to_str(node_last_epoch_last_hb)
-      node_last_epoch_nr_hb = len(node_last_epoch_hb_timestamps)
-      node_last_epoch_avail = round(
-        self.__calculate_avail_seconds(node_last_epoch_hb_timestamps) / self.epoch_length, 4
-      )
-      
-      epochs_ids = sorted(list(dct_epochs.keys()))
-      epochs = [dct_epochs[x] for x in epochs_ids]
-      selection = epochs_ids[-NR_HIST:]
-      str_last_epochs = str({x : dct_epochs.get(x, 0) for x in selection})
-      str_certainty =  ", ".join([
-        f"{x}={'Y' if certainty.get(x, 0) >= ct.SUPERVISOR_MIN_AVAIL_PRC else 'N'}" 
-        for x in selection
-      ])    
-      MAX_AVAIL = EPOCH_MAX_VALUE * len(epochs) # max avail possible for this node
-      score = sum(epochs)      
-      avail = round(score / MAX_AVAIL, 4)
-      best_avail = max(best_avail, avail)
-      non_zero = len([x for x in epochs if x > 0])
-      nr_eps = len(epochs)
-      prev_epoch = self.get_time_epoch() - 1
-      first_seen = self.data[node_addr][EPCT.FIRST_SEEN]
-      last_seen = self.data[node_addr][EPCT.LAST_SEEN]
-      eth_addr = self.owner.node_address_to_eth_address(node_addr)
-      if nr_eps != prev_epoch:
-        msg = "Epochs mismatch for node: {} - total {} vs prev {}".format(
-          node_addr, nr_eps, prev_epoch
+    try:
+      saves = self.__full_data.get(SYNC_SAVES_TS, 'N/A')
+      saves_epoch = self.__full_data.get(SYNC_SAVES_EP, 'N/A')
+      restarts = self.__full_data.get(SYNC_RESTARTS, 'N/A')
+      current_epoch = self.get_current_epoch()
+      start_epoch = max(1, current_epoch - NR_HIST)
+      certainty = self.get_self_supervisor_capacity(as_float=True, start_epoch=start_epoch)
+      oracle_state = self.get_oracle_state()      
+      for node_addr in self.data:
+        is_online = self.owner.network_node_is_online(
+          node_addr, dt_now=self.get_current_date()
         )
-        msg += "\nEpochs: {}".format(dct_epochs)
-        msg += "\nCurrent epoch: {}".format(current_epoch)
-        msg += "\nPrevious epoch: {}".format(self.get_time_epoch() - 1)
-        self.P(msg, color='r')
-        if abs(nr_eps - prev_epoch) > 1:
-          raise ValueError(msg)
-      stats[node_addr] = {
-        'eth_addr' : eth_addr,
-        'alias' : node_name,
-        'last_state' : netmon_last_seen,
-        'last_seen_ago' : self.log.elapsed_to_str(last_seen_ago),
-        'non_zero' : non_zero,
-        'overall_availability' : avail,
-        'score' : score,
-        'first_check' : first_seen,
-        'last_check' : last_seen,
-        'recent_history' : {
-          'last_10_ep' : str_last_epochs,
-          'certainty' : str_certainty,
-          'last_epoch_id' : node_last_epoch_id,
-          'last_epoch_nr_hb' : node_last_epoch_nr_hb,
-          'last_epoch_1st_hb' : node_last_epoch_1st_hb,
-          'last_epoch_last_hb' : node_last_epoch_last_hb,
-          'last_epoch_avail' : node_last_epoch_avail,
+        if online_only and not is_online:
+            continue
+        dt_netmon_last_seen = self.owner.network_node_last_seen(
+          node_addr, 
+          dt_now=self.get_current_date(),
+          as_sec=False
+        )
+        last_seen_ago = self.owner.network_node_last_seen(
+          node_addr, 
+          dt_now=self.get_current_date(),
+          as_sec=True
+        )
+        netmon_last_seen = self.date_to_str(dt_netmon_last_seen) if dt_netmon_last_seen is not None else 'N/A'
+        node_name = self.get_node_name(node_addr)
+        dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)     
+        
+        # process the previous epoch hb data
+        node_last_epoch_data = self.data[node_addr][EPCT.LAST_EPOCH]
+        node_last_epoch_id = node_last_epoch_data[EPCT.ID]
+        node_last_epoch_hb_timestamps = node_last_epoch_data[EPCT.HB_TIMESTAMPS]
+        node_last_epoch_hb_timestamps = sorted(list(node_last_epoch_hb_timestamps))
+        node_last_epoch_1st_hb = node_last_epoch_hb_timestamps[0] if len(node_last_epoch_hb_timestamps) > 0 else None
+        node_last_epoch_1st_hb = self.date_to_str(node_last_epoch_1st_hb)
+        node_last_epoch_last_hb = node_last_epoch_hb_timestamps[-1] if len(node_last_epoch_hb_timestamps) > 0 else None
+        node_last_epoch_last_hb = self.date_to_str(node_last_epoch_last_hb)
+        node_last_epoch_nr_hb = len(node_last_epoch_hb_timestamps)
+        node_last_epoch_avail = round(
+          self.__calculate_avail_seconds(node_last_epoch_hb_timestamps) / self.epoch_length, 4
+        )
+        
+        epochs_ids = sorted(list(dct_epochs.keys()))
+        epochs = [dct_epochs[x] for x in epochs_ids]
+        selection = epochs_ids[-NR_HIST:]
+        str_last_epochs = str({x : dct_epochs.get(x, 0) for x in selection})
+        str_certainty =  ", ".join([
+          f"{x}={'Y' if certainty.get(x, 0) >= ct.SUPERVISOR_MIN_AVAIL_PRC else 'N'}" 
+          for x in selection
+        ])    
+        MAX_AVAIL = EPOCH_MAX_VALUE * len(epochs) # max avail possible for this node
+        score = sum(epochs)      
+        avail = round(score / (MAX_AVAIL + 1e7), 4)
+        best_avail = max(best_avail, avail)
+        non_zero = len([x for x in epochs if x > 0])
+        nr_eps = len(epochs)
+        prev_epoch = self.get_time_epoch() - 1
+        first_seen = self.data[node_addr][EPCT.FIRST_SEEN]
+        last_seen = self.data[node_addr][EPCT.LAST_SEEN]
+        eth_addr = self.owner.node_address_to_eth_address(node_addr)
+        if nr_eps != prev_epoch:
+          msg = "Epochs mismatch for node: {} - total {} vs prev {}".format(
+            node_addr, nr_eps, prev_epoch
+          )
+          msg += "\nEpochs: {}".format(dct_epochs)
+          msg += "\nCurrent epoch: {}".format(current_epoch)
+          msg += "\nPrevious epoch: {}".format(self.get_time_epoch() - 1)
+          self.P(msg, color='r')
+          if abs(nr_eps - prev_epoch) > 1:
+            raise ValueError(msg)
+        stats[node_addr] = {
+          'eth_addr' : eth_addr,
+          'alias' : node_name,
+          'last_state' : netmon_last_seen,
+          'last_seen_ago' : self.log.elapsed_to_str(last_seen_ago),
+          'non_zero' : non_zero,
+          'overall_availability' : avail,
+          'score' : score,
+          'first_check' : first_seen,
+          'last_check' : last_seen,
+          'recent_history' : {
+            'last_10_ep' : str_last_epochs,
+            'certainty' : str_certainty,
+            'last_epoch_id' : node_last_epoch_id,
+            'last_epoch_nr_hb' : node_last_epoch_nr_hb,
+            'last_epoch_1st_hb' : node_last_epoch_1st_hb,
+            'last_epoch_last_hb' : node_last_epoch_last_hb,
+            'last_epoch_avail' : node_last_epoch_avail,
+          }
         }
-      }
-      if node_addr == self.owner.node_addr:
-        stats[node_addr]['oracle'] = oracle_state
-      #endif node is current node
-    #endfor each node
-    if display:
-      str_stats = json.dumps(stats, indent=2)
-      self.P("EpochManager report at ep {} (max_score: {}, nr_eps: {}):\nRecent saves: {}\nRecent saves epochs: {}\nRecent restars: {}\nOracle info:\n{}\n\nStatuses:\n{}".format(
-        current_epoch, best_avail, nr_eps,
-        saves, saves_epoch, restarts, 
-        json.dumps(oracle_state, indent=2),
-        str_stats
-      ))
+        if node_addr == self.owner.node_addr:
+          stats[node_addr]['oracle'] = oracle_state
+        #endif node is current node
+      #endfor each node
+      if display:
+        str_stats = json.dumps(stats, indent=2)
+        self.P("EpochManager report at ep {} (max_score: {}, nr_eps: {}):\nRecent saves: {}\nRecent saves epochs: {}\nRecent restars: {}\nOracle info:\n{}\n\nStatuses:\n{}".format(
+          current_epoch, best_avail, nr_eps,
+          saves, saves_epoch, restarts, 
+          json.dumps(oracle_state, indent=2),
+          str_stats
+        ))
+    except Exception as e:
+      msg = "Error getting EpochManager stats: {}".format(str(e))
+      stats['error'] = msg
     return stats
   
 

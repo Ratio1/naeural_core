@@ -1145,7 +1145,7 @@ class EpochsManager(Singleton):
       ])    
       MAX_AVAIL = EPOCH_MAX_VALUE * len(epochs) # max avail possible for this node
       score = sum(epochs)      
-      avail = round(score / MAX_AVAIL, 4)
+      avail = round(score / (MAX_AVAIL + 1e7), 4)
       best_avail = max(best_avail, avail)
       non_zero = len([x for x in epochs if x > 0])
       nr_eps = len(epochs)

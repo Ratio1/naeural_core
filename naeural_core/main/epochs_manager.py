@@ -33,23 +33,15 @@ from naeural_core import constants as ct
 from naeural_core.utils import Singleton
 
 
-EPOCH_MANAGER_VERSION = '0.2.2'
+EPOCH_MANAGER_VERSION = '0.3.1'
 
-#############################################
-#############################################
-DEFAULT_GENESYS_EPOCH_DATE = "2025-01-24 00:00:00"      # "2025-02-03 17:00:00"  # OLD: "2024-03-10 00:00:00"
-DEFAULT_EPOCH_INTERVALS = 1                     # 24
-DEFAULT_EPOCH_INTERVAL_SECONDS = 3600           # 3600
-SUPERVISOR_MIN_AVAIL_PRC = 0.60                 # 0.98 for mainnet, 60% for testnet
-#############################################
-#############################################
 
-DEFAULT_NODE_ALERT_INTERVAL = DEFAULT_EPOCH_INTERVAL_SECONDS
+DEFAULT_NODE_ALERT_INTERVAL = ct.DEFAULT_EPOCH_INTERVAL_SECONDS
 
 
 EPOCH_MAX_VALUE = 255
 
-SUPERVISOR_MIN_AVAIL_UINT8 = int(SUPERVISOR_MIN_AVAIL_PRC * EPOCH_MAX_VALUE)
+SUPERVISOR_MIN_AVAIL_UINT8 = int(ct.SUPERVISOR_MIN_AVAIL_PRC * EPOCH_MAX_VALUE)
 
 FN_NAME = 'epochs_status.pkl'
 FN_SUBFOLDER = 'network_monitor'
@@ -161,24 +153,11 @@ class EpochsManager(Singleton):
     """
     if debug is None:
       debug = EPOCH_MANAGER_DEBUG
-    self.__epoch_intervals = DEFAULT_EPOCH_INTERVALS
-    self.__epoch_interval_seconds = DEFAULT_EPOCH_INTERVAL_SECONDS
-    self._epoch_interval_setup()
-    
+
     self.__last_state_log = 0
 
-    # for Genesis epoch date is correct to replace in order to have a timezone aware date
-    # and not consider the local timezone
-    genesis_epoch_date_env = str(os.environ.get(ct.EE_GENESIS_EPOCH_DATE_KEY, DEFAULT_GENESYS_EPOCH_DATE))
-    if len(genesis_epoch_date_env) != len(DEFAULT_GENESYS_EPOCH_DATE):
-      genesis_epoch_date_env = DEFAULT_GENESYS_EPOCH_DATE
-    self.__genesis_date_str = genesis_epoch_date_env
-    self.__genesis_date = self.log.str_to_date(self.__genesis_date_str).replace(tzinfo=timezone.utc)
+    self._epoch_era_setup()
     
-    _FULL_DATA_TEMPLATE_EXTRA[ct.EE_GENESIS_EPOCH_DATE_KEY] = self.__genesis_date_str
-    _FULL_DATA_TEMPLATE_EXTRA[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = self.__epoch_intervals
-    _FULL_DATA_TEMPLATE_EXTRA[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = self.__epoch_interval_seconds
-
     self.owner = owner
     self.__current_epoch = None
     self.__data = {}
@@ -221,26 +200,55 @@ class EpochsManager(Singleton):
   @property
   def epoch_length(self):
     return self.__epoch_intervals * self.__epoch_interval_seconds
-  
-  
-  
 
-  def _epoch_interval_setup(self):    
+
+  def _epoch_era_setup(self):    
     try:
       self.__epoch_intervals = int(os.environ.get(
-        ct.BASE_CT.EE_EPOCH_INTERVALS_KEY, DEFAULT_EPOCH_INTERVALS
+        ct.BASE_CT.EE_EPOCH_INTERVALS_KEY, ct.DEFAULT_EPOCH_INTERVALS
       ))
+      if ct.BASE_CT.EE_EPOCH_INTERVALS_KEY in os.environ:
+        self.P("Epoch intervals set from ENV: {}".format(self.__epoch_intervals), color='m')
+      else:
+        self.P("Epoch intervals set from default: {}".format(self.__epoch_intervals), color='m')   
     except Exception as e:
-      self.P("Error setting epoch intervals: {}".format(e), color='r')
+      self.P("Error setting epoch intervals: {}. Defaulting.".format(e), color='r')
+      self.__epoch_intervals = ct.DEFAULT_EPOCH_INTERVALS
       
     try:
       self.__epoch_interval_seconds = int(os.environ.get(
-        ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY, DEFAULT_EPOCH_INTERVAL_SECONDS
+        ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY, ct.DEFAULT_EPOCH_INTERVAL_SECONDS
       ))
+      if ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY in os.environ:
+        self.P("Epoch interval seconds set from ENV: {}".format(self.__epoch_interval_seconds), color='m')
+      else:
+        self.P("Epoch interval seconds set from default: {}".format(self.__epoch_interval_seconds), color='m')
     except Exception as e:
-      self.P("Error setting epoch interval seconds: {}".format(e), color='r')
+      self.P("Error setting epoch interval seconds: {}. Defaulting.".format(e), color='r')
+      self.__epoch_interval_seconds = ct.DEFAULT_EPOCH_INTERVAL_SECONDS
+    
+    # for Genesis epoch date is fair to use .replace(utc) in order to have a timezone aware date
+    # and not consider the local timezone
+    try:
+      genesis_epoch_date_env = str(os.environ.get(ct.EE_GENESIS_EPOCH_DATE_KEY, ct.DEFAULT_GENESYS_EPOCH_DATE))
+      if len(genesis_epoch_date_env) != len(ct.DEFAULT_GENESYS_EPOCH_DATE):
+        genesis_epoch_date_env = ct.DEFAULT_GENESYS_EPOCH_DATE
+      if ct.EE_GENESIS_EPOCH_DATE_KEY in os.environ:
+        self.P("Genesis epoch date read from ENV: {}".format(genesis_epoch_date_env), color='m')
+      else:
+        self.P("Genesis epoch date set from default: {}".format(genesis_epoch_date_env), color='m')
+    except Exception as e:
+      self.P("Error setting genesis epoch date: {}. Defaulting to {}".format(e, ct.DEFAULT_GENESYS_EPOCH_DATE), color='r')
+      genesis_epoch_date_env = ct.DEFAULT_GENESYS_EPOCH_DATE
+    self.__genesis_date_str = genesis_epoch_date_env
+    self.__genesis_date = self.log.str_to_date(self.__genesis_date_str).replace(tzinfo=timezone.utc)
     
     self.__node_alert_interval = self.__epoch_interval_seconds    
+    
+    _FULL_DATA_TEMPLATE_EXTRA[ct.EE_GENESIS_EPOCH_DATE_KEY] = self.__genesis_date_str
+    _FULL_DATA_TEMPLATE_EXTRA[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = self.__epoch_intervals
+    _FULL_DATA_TEMPLATE_EXTRA[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = self.__epoch_interval_seconds
+    
     return
 
 
@@ -418,7 +426,7 @@ class EpochsManager(Singleton):
       else:
         self.P("Error loading epochs status.", color='r')
     else:
-      self.P("No previous epochs status found in {FN_FULL}.", color='r')
+      self.P(f"No previous epochs status found in {FN_FULL}.", color='r')
 
     self.__add_empty_fields()
     self.__compute_eth_to_internal()
@@ -738,12 +746,12 @@ class EpochsManager(Singleton):
     # we can use available_prc or record_value to check if the current node >= SUPERVISOR_MIN_AVAIL
     # prc = available_prc is the same as record_value / EPOCH_MAX_VALUE
     prc = round(record_value / EPOCH_MAX_VALUE, 4) 
-    was_up_throughout_current_epoch = prc >= SUPERVISOR_MIN_AVAIL_PRC
+    was_up_throughout_current_epoch = prc >= ct.SUPERVISOR_MIN_AVAIL_PRC
 
     if not was_up_throughout_current_epoch:
       msg = "Current node was {:.2f}% < {:.0f}%, available in epoch {} and so cannot compute " \
             "availability scores for other nodes".format(
-              prc * 100, SUPERVISOR_MIN_AVAIL_PRC * 100, current_epoch
+              prc * 100, ct.SUPERVISOR_MIN_AVAIL_PRC * 100, current_epoch
             )
       self.P(msg, color='r')
     else:
@@ -1055,7 +1063,7 @@ class EpochsManager(Singleton):
     )
     epochs = sorted(list(certainty.keys()))
     certainty_int = {
-      x : int(certainty[x] >= SUPERVISOR_MIN_AVAIL_PRC) for x in epochs
+      x : int(certainty[x] >= ct.SUPERVISOR_MIN_AVAIL_PRC) for x in epochs
     }
     if as_int:
       certainty = certainty_int
@@ -1063,7 +1071,10 @@ class EpochsManager(Singleton):
       'certainty' : certainty, 
     }
     dct_result['manager']['valid'] = sum(certainty_int.values()) == len(certainty)
-    dct_result['manager']['supervisor_min_avail_prc'] = SUPERVISOR_MIN_AVAIL_PRC
+    dct_result['manager']['supervisor_min_avail_prc'] = ct.SUPERVISOR_MIN_AVAIL_PRC
+    if self.get_current_epoch() < 20:
+      # at the beginning we dump the epochs
+      dct_result['manager']['epochs'] = self.get_node_epochs(self.owner.node_addr)
     for extra_key in _FULL_DATA_INFO_KEYS:
       dct_result['manager'][extra_key.lower()] = self.__full_data.get(extra_key, 'N/A')
     if (time() - self.__last_state_log) > 600:
@@ -1129,7 +1140,7 @@ class EpochsManager(Singleton):
       selection = epochs_ids[-NR_HIST:]
       str_last_epochs = str({x : dct_epochs.get(x, 0) for x in selection})
       str_certainty =  ", ".join([
-        f"{x}={'Y' if certainty.get(x, 0) >= SUPERVISOR_MIN_AVAIL_PRC else 'N'}" 
+        f"{x}={'Y' if certainty.get(x, 0) >= ct.SUPERVISOR_MIN_AVAIL_PRC else 'N'}" 
         for x in selection
       ])    
       MAX_AVAIL = EPOCH_MAX_VALUE * len(epochs) # max avail possible for this node
@@ -1143,9 +1154,15 @@ class EpochsManager(Singleton):
       last_seen = self.data[node_addr][EPCT.LAST_SEEN]
       eth_addr = self.owner.node_address_to_eth_address(node_addr)
       if nr_eps != prev_epoch:
-        raise ValueError("Epochs mismatch for node: {} - total {} vs prev {}".format(
+        msg = "Epochs mismatch for node: {} - total {} vs prev {}".format(
           node_addr, nr_eps, prev_epoch
-        ))
+        )
+        msg += "\nEpochs: {}".format(dct_epochs)
+        msg += "\nCurrent epoch: {}".format(current_epoch)
+        msg += "\nPrevious epoch: {}".format(self.get_time_epoch() - 1)
+        self.P(msg, color='r')
+        if abs(nr_eps - prev_epoch) > 1:
+          raise ValueError(msg)
       stats[node_addr] = {
         'eth_addr' : eth_addr,
         'alias' : node_name,

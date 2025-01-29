@@ -136,7 +136,7 @@ class ViewScene01Plugin(BaseClass):
     can_send_images = self.__witness_count < self.cfg_nr_witnesses
     send_image_now = force_send_needed or can_send_images
     
-    if self.cfg_nr_witnesses >= 60:
+    if self.cfg_nr_witnesses >= 60 and self.__witness_count < self.cfg_nr_witnesses:
       self.P("WARNING! High number of witnesses requested. Sending  {}/{}".format(
         self.__witness_count, self.cfg_nr_witnesses), color='r'
       )

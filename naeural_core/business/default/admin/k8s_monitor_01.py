@@ -151,6 +151,7 @@ class K8sMonitor01Plugin(BasePluginExecutor):
   
    
   def on_init(self):
+    is_ok = None
     self.__km = None
     self.__last_node_status = None
     if not K8S_PACKAGE_AVAIL:
@@ -165,13 +166,18 @@ class K8sMonitor01Plugin(BasePluginExecutor):
         kmonitor.__version__,
         len(self.__last_node_status)
       )
+      is_ok = True
     except Exception as exc:
       self.__km = None
       if self.cfg_artificial:
         s1 = f"Failed to initialize KubeMonitor: {exc}. Using artificial data for testing."
       else:
         s1 = f"Failed to initialize KubeMonitor: {exc}"
-    self.P(s1, color='r')
+    #end try
+    if is_ok:
+      self.P(s1, boxed=True)
+    else:
+      self.P(s1, color='r')
     self.__status = s1
     return
   

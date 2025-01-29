@@ -247,6 +247,16 @@ class Orchestrator(DecentrAIObject,
     if self.e2_address is None:
       raise ValueError("Node address is `None`. Check your node configuration and network settings.")
 
+    ### at this point we should check if the authentication information is available in the
+    ### environment and if not we should pool the endpoint for the information    
+    self._check_and_complete_environment_variables()    
+    ### following the env update we can proceed with the managers initialization
+    ### at this point the env can be considered complete and can have updates such as:
+    ### - era information
+    ### - external storages
+    ### - list of whitelisted nodes <=== extremely important for new nodes that must accept supervisor based 
+    ###   distributions of jobs
+
     self._network_monitor = NetworkMonitor(
       node_name=self.cfg_eeid, node_addr=self.e2_address,
       log=self.log, DEBUG=self.DEBUG,
@@ -260,12 +270,6 @@ class Orchestrator(DecentrAIObject,
     self._app_shmem[ct.CALLBACKS.INSTANCE_CONFIG_SAVER_CALLBACK] = self.save_config_pipeline_instance
     self._app_shmem[ct.CALLBACKS.PIPELINE_CONFIG_SAVER_CALLBACK] = self.save_config_pipeline
 
-    ### at this point we should check if the authentication information is available in the
-    ### environment and if not we should pool the endpoint for the information
-    
-    self._check_and_complete_environment_variables()
-    
-    ### following the env update we can proceed with the managers initialization
     
     self._initialize_managers()
     

@@ -20,8 +20,22 @@ from naeural_client.const import (
 
 EE_EPOCH_MANAGER_DEBUG = 'EE_EPOCH_MANAGER_DEBUG'
 EE_GENESIS_EPOCH_DATE_KEY = 'EE_GENESIS_EPOCH_DATE'
+EE_EPOCH_INTERVALS_KEY = 'EE_EPOCH_INTERVALS'
+EE_EPOCH_INTERVAL_SECONDS_KEY = 'EE_EPOCH_INTERVAL_SECONDS'
 
-ETH_ENABLED_ENV_KEY = BASE_CT.ETH_ENABLED_ENV_KEY
+###################################################
+#############    Era information    ###############
+###################################################
+DEFAULT_GENESYS_EPOCH_DATE = "2025-02-03 17:00:00"      # "2025-02-03 17:00:00" for mainnet
+DEFAULT_EPOCH_INTERVALS = 24                            # 24 mainnet, 1 for devnet
+DEFAULT_EPOCH_INTERVAL_SECONDS = 3600                   # 3600
+SUPERVISOR_MIN_AVAIL_PRC = 0.98                         # 0.98 for mainnet, 60% for testnet
+###################################################
+###################################################
+###################################################
+
+
+ETH_ENABLED_ENV_KEY = BASE_CT.ETH_ENABLED_ENV_KEY # this env var tells if the system should use or not EVM compatibility in payloads
 ETH_ENABLED = str(environ.get(ETH_ENABLED_ENV_KEY, 'False')).lower() == 'true'
 
 DAUTH_URL = BASE_CT.DAUTH_URL

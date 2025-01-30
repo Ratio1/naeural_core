@@ -363,6 +363,7 @@ class FastApiWebAppPlugin(BasePlugin):
 
   def on_close(self):
     self._manager.shutdown()
+    super(FastApiWebAppPlugin, self).on_close()
     return
 
   def __get_uvicorn_process_args(self):

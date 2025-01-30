@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import asyncio
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -30,6 +31,7 @@ _CONFIG = {
   'START_COMMANDS': [],
   'ENV_VARS': {},
   'AUTO_START': True,
+  'FORCED_RELOAD_INTERVAL': None,
 
   'PORT': None,
 
@@ -76,6 +78,16 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.__commands_ready = False
 
     self.can_run_start_commands = self.cfg_auto_start
+    self.setup_commands_started = []
+    self.setup_commands_finished = []
+    self.setup_commands_processes = []
+    self.setup_commands_start_time = []
+
+    self.start_commands_started = []
+    self.start_commands_finished = []
+    self.start_commands_processes = []
+    self.start_commands_start_time = []
+    self.webapp_reload_last_timestamp = 0
 
     super(BaseWebAppPlugin, self)._on_init()
     return
@@ -207,22 +219,26 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     return process_finished, failed
 
-  def __maybe_kill_process(self, process, key):
+  def __maybe_kill_process(self, process, key, max_tries=5):
     if process is None:
       return
-
-    try:
-      self.P(f"Forcefully killing process {key}")
-      process.kill()
-      self.__wait_for_command(
-        process=process,
-        timeout=3,
-      )
-      self.__maybe_print_key_logs(key)
-      self.P(f"Killed process {key}")
-    except Exception as exc:
-      self.P(f'Could not kill process {key}. Reason: {exc}')
-
+    tries = 0
+    success = False
+    while tries < max_tries and not success:
+      tries += 1
+      try:
+        self.P(f"Forcefully killing process {key}(try {tries}/{max_tries})")
+        process.kill()
+        success, failed = self.__wait_for_command(
+          process=process,
+          timeout=3,
+        )
+        self.__maybe_print_key_logs(key)
+        if success:
+          self.P(f"Killed process {key} from {tries} tries.")
+      except Exception as exc:
+        self.P(f'Could not kill process {key} (try {tries}/{max_tries}). Reason: {exc}')
+    # endwhile
     return
   
 
@@ -495,7 +511,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.start_commands_processes = [None] * len(self.get_start_commands())
     self.start_commands_start_time = [None] * len(self.get_start_commands())
 
-    self.P("Reloading server at next _maybe_init ...")  
+    self.P('Attempting to init assets due to reload...')
+    self.__maybe_init_assets()
     return  
   
   
@@ -639,9 +656,16 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     assets_path = self.os_path.join(self.get_output_folder(), relative_assets_path)
     return assets_path
 
+  def __maybe_forced_reload(self):
+    reload_interval = self.cfg_forced_reload_interval or 0
+    if reload_interval > 0 and self.time() - self.webapp_reload_last_timestamp > reload_interval:
+      self.P(f"Forced restart initiated due to `FORCED_RELOAD_INTERVAL` ({reload_interval} seconds)")
+      self.__reload_server()
+    return
 
   def __maybe_init_assets(self):
     if self.assets_initialized:
+      self.__maybe_forced_reload()
       # check if new git assets are available
       new_repo_version = self.__check_new_repo_version()
       if new_repo_version:
@@ -664,6 +688,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       jinja_args=self.jinja_args
     )
 
+    self.webapp_reload_last_timestamp = self.time()
     self.assets_initialized = True
     return
 
@@ -709,6 +734,23 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.__deallocate_port()
 
     super(BaseWebAppPlugin, self)._on_close()
+    return
+
+  async def close_ngrok_listener(self):
+    try:
+      await self.ngrok_listener.close()
+      self.P(f'Ngrok listener successfully closed.')
+    except Exception as exc:
+      self.P(f'Could not close Ngrok listener. Reason: {exc}')
+    return
+
+  def on_close(self):
+    # This method is called by super(BaseWebAppPlugin, self)._on_close()
+    super(BaseWebAppPlugin, self).on_close()
+    if self.ngrok_listener is not None:
+      self.P(f"Closing Ngrok listener...")
+      asyncio.run(self.close_ngrok_listener())
+    # endif ngrok listener opened
     return
 
   def _on_command(self, data, delta_logs=None, full_logs=None, start=None, reload=None, **kwargs):
@@ -851,14 +893,6 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     self.P("Assets copied successfully")
 
-    return
-
-  def on_close(self):
-    super(BaseWebAppPlugin, self).on_close()
-    if self.ngrok_listener is not None:
-      self.P(f"Closing Ngrok listener...")
-      self.ngrok_listener.close()
-    # endif ngrok listener opened
     return
 
   def __maybe_ngrok_ping(self):

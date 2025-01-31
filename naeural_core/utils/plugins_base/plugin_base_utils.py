@@ -47,6 +47,10 @@ from naeural_core.serving.ai_engines.utils import (
 from naeural_core.utils.plugins_base.persistence_serialization_mixin import _PersistenceSerializationMixin
 from naeural_core.utils.system_shared_memory import NumpySharedMemory
 
+from naeural_core.main.ver import __VER__ as core_version    
+from naeural_client._ver import __VER__ as sdk_version   
+
+
 GIT_IGNORE_AUTH = ["-c","http.https://github.com/.extraheader="]
 
 class NestedDotDict(dict):
@@ -287,6 +291,15 @@ class _UtilsBaseMixin(
   def __init__(self):
     super(_UtilsBaseMixin, self).__init__()
     return
+  
+  
+  @property
+  def ee_core_ver(self):
+    return core_version
+  
+  @property
+  def ee_sdk_ver(self):
+    return sdk_version
 
   
   def trace_info(self):

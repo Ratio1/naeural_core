@@ -89,7 +89,7 @@ class _NgrokMixinPlugin(object):
       self.P(f"Ngrok starting for {self.unique_identification}...")
       tunnel_kwargs, valid = self.get_ngrok_tunnel_kwargs()
       if valid:
-        self.ngrok_listener = ngrok.forward(**self.get_ngrok_tunnel_kwargs())
+        self.ngrok_listener = ngrok.forward(**tunnel_kwargs)
         self.P(f"Ngrok started at {self.app_url} for {self.unique_identification}.")
       # endif valid tunnel kwargs
     # endif ngrok api used and not started

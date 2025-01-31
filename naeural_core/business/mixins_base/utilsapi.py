@@ -457,7 +457,32 @@ class _GenericUtilsApiMixin(_UtilsBaseMixin):
   
   ## MLAPI
   
-  def mlapi_ts_fit_predict(self, data, steps, **kwargs):
+  def mlapi_timeseries_fit_predict(self, data, steps, **kwargs):
+    """
+    Takes a list of values and directly returns predictions using a basic AR model
+
+
+    Parameters
+    ----------
+    data : list
+      list of float values.
+    steps : int
+      number of prediction steps.
+
+    Returns
+    -------
+    yh : list
+      the `steps` predicted values.
+
+
+    Example
+    -------
+      ```
+      yh = self.basic_ts_fit_predict(data=[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89], steps=3)
+      result = {'preds' : yh}
+      ```
+
+    """
     result = self.basic_ts_fit_predict(data, steps)
     return result
   

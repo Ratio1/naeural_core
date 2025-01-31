@@ -4,6 +4,8 @@ __VER__ = '0.1.0.0'
 
 _CONFIG = {
   **BasePlugin.CONFIG,
+  
+  "RUNS_ONLY_ON_SUPERVISOR_NODE" : True,
 
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES'],

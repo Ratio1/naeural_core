@@ -322,7 +322,10 @@ class BusinessManager(Manager):
           self.maybe_toggle_supervisor_node(plugin)
           if plugin.cfg_runs_only_on_supervisor_node:
             if not self.is_supervisor_node:
-              self.P("Plugin {}:{} runs only on supervisor node. Skipping.".format(signature, instance_id), color='r')
+              self.P(
+                "Plugin {}:{} runs ONLY on supervisor node. Skipping.".format(signature, instance_id), 
+                color='r', boxed=True,
+              )
               plugin = None
               # continue
             else:

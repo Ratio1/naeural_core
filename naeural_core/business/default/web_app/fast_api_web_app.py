@@ -287,7 +287,7 @@ class FastApiWebAppPlugin(BasePlugin):
       return response
     return {
       'result': response,
-      'node_addr': self.e2_addr
+      'server_node_addr': self.e2_addr
     }
 
   def __fastapi_handle_response(self, id, value):

@@ -38,17 +38,32 @@ class _NgrokMixinPlugin(object):
     else:
       return super_setup_commands
 
+  def report_missing_authtoken(self):
+    msg = "Ngrok token not found. Please set the environment variable `EE_NGROK_AUTH_TOKEN`"
+    # Maybe have notif_code in the future
+    self.P(msg, color='r')
+    self._create_notification(
+      msg=msg,
+    )
+    return
+
   def maybe_init_ngrok(self):
     if self.cfg_ngrok_use_api and not self.ngrok_initiated:
       self.ngrok_initiated = True
-      ngrok.set_auth_token(self.__get_ng_token())
-      self.P(f"Ngrok initiated for {self.unique_identification}.")
+      ng_token = self.__get_ng_token()
+      if ng_token is None:
+        self.report_missing_authtoken()
+      else:
+        ngrok.set_auth_token(self.__get_ng_token())
+        self.P(f"Ngrok initiated for {self.unique_identification}.")
+      # endif ng_token present
     # endif ngrok api used
     return
 
   def get_ngrok_tunnel_kwargs(self):
     # Make the ngrok tunnel kwargs
     tunnel_kwargs = {}
+    valid = True
     if self.cfg_ngrok_edge_label is not None:
       # In case of using edge label, the domain is not needed and the protocol is "labeled".
       tunnel_kwargs['labels'] = f'edge:{self.cfg_ngrok_edge_label}'
@@ -60,16 +75,23 @@ class _NgrokMixinPlugin(object):
     # endif domain
     # Specify the address and the authtoken
     tunnel_kwargs['addr'] = self.port
-    tunnel_kwargs['authtoken'] = self._NgrokMixinPlugin__get_ng_token()
-    return tunnel_kwargs
+    ng_token = self._NgrokMixinPlugin__get_ng_token()
+    if ng_token is None:
+      valid = False
+      self.report_missing_authtoken()
+    tunnel_kwargs['authtoken'] = ng_token
+    return tunnel_kwargs, valid
 
   def maybe_start_ngrok(self):
     # Maybe make this asynchronous?
     if self.cfg_ngrok_use_api and not self.ngrok_started:
       self.ngrok_started = True
       self.P(f"Ngrok starting for {self.unique_identification}...")
-      self.ngrok_listener = ngrok.forward(**self.get_ngrok_tunnel_kwargs())
-      self.P(f"Ngrok started at {self.app_url} for {self.unique_identification}.")
+      tunnel_kwargs, valid = self.get_ngrok_tunnel_kwargs()
+      if valid:
+        self.ngrok_listener = ngrok.forward(**self.get_ngrok_tunnel_kwargs())
+        self.P(f"Ngrok started at {self.app_url} for {self.unique_identification}.")
+      # endif valid tunnel kwargs
     # endif ngrok api used and not started
     return
 

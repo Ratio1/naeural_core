@@ -17,7 +17,7 @@ class BasicSeriesModel:
   
   def reset_params(self, series_min=50, train_hist=None, train_periods=None):
     MIN_STEPS = 8
-    assert series_min > MIN_STEPS, f"Minimal series config must be {MIN_STEPS} steps. Config set to {series_min}"
+    assert series_min > MIN_STEPS, f"Minimal series config must be {MIN_STEPS + 1} steps. Config set to {series_min}"
     if train_hist is None:
       train_hist = int(series_min / (MIN_STEPS / 2))
     if train_periods is None:

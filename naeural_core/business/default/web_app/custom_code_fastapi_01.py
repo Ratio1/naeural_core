@@ -60,7 +60,6 @@ _CONFIG = {
   'PORT': None,
 
   'ENDPOINTS': [],
-  'API_DESCRIPTION': TEMPLATE_API_DESCRIPTION,
 
   'ASSETS': '_custom_code',
   'JINJA_ARGS': {},
@@ -90,6 +89,12 @@ class CustomCodeFastapi01Plugin(FastApiWebAppPlugin):
 
   """
   CONFIG = _CONFIG
+
+  def get_default_description(self):
+    # This description could also be put in this class __doc__ attribute, but
+    # was put here in order for the documentation to this actual plugin to be
+    # available for the user in case it's needed.
+    return TEMPLATE_API_DESCRIPTION
 
   def __register_custom_code_endpoint(self, endpoint_name, endpoint_method, endpoint_base64_code, endpoint_arguments):
     # First check that i do not have any attribute with the same name

@@ -291,6 +291,7 @@ class FastApiWebAppPlugin(BasePlugin):
     }
 
   def __fastapi_handle_response(self, id, value):
+    # TODO: add here message signing
     response = {
       'id': id,
       'value': self.__fastapi_process_response(value)
@@ -310,13 +311,15 @@ class FastApiWebAppPlugin(BasePlugin):
 
       try:
         value = method(**kwargs)
-      except Exception as _:
+      except Exception as exc:
         self.P(
           f'Exception occurred while processing postponed request for {endpoint_name} with method {method.__name__} '
           f'and args:\n{kwargs}\nException:\n{self.get_exception()}',
           color='r'
         )
-        value = None
+        value = {
+          'error': str(exc)
+        }
 
       if isinstance(value, PostponedRequest):
         new_postponed_requests.append(self.get_postponed_dict(
@@ -341,11 +344,13 @@ class FastApiWebAppPlugin(BasePlugin):
 
       try:
         value = self._endpoints.get(method)(*args)
-      except Exception as _:
+      except Exception as exc:
         self.P("Exception occured while processing\n"
                "Request: {}\nArgs: {}\nException:\n{}".format(
                    method, args, self.get_exception()), color='r')
-        value = None
+        value = {
+          'error': str(exc)
+        }
 
       if isinstance(value, PostponedRequest):
         self.P(f"Postponing request {id} for {method}.")
@@ -385,7 +390,7 @@ class FastApiWebAppPlugin(BasePlugin):
       'manager_port': self.manager_port,
       'manager_auth': self.manager_auth,
       'api_title': repr(self.cfg_api_title or self.get_signature()),
-      'api_summary': repr(self.cfg_api_summary or f"FastAPI created by {self.get_signature()} plugin"),
+      'api_summary': repr(self.cfg_api_summary or f"Ratio1 WebApp created with {self.get_signature()} plugin"),
       'api_description': repr(self.cfg_api_description or self.__doc__),
       'api_version': repr(self.__version__),
       'node_comm_params': self._node_comms_jinja_args,

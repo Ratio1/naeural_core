@@ -374,6 +374,9 @@ class FastApiWebAppPlugin(BasePlugin):
   def __get_uvicorn_process_args(self):
     return f"uvicorn --app-dir {self.script_temp_dir} main:app --host 0.0.0.0 --port {self.port}"
 
+  def get_default_description(self):
+    return self.__doc__
+
   @property
   def jinja_args(self):
     cfg_jinja_args = self.deepcopy(self.cfg_jinja_args)
@@ -391,7 +394,7 @@ class FastApiWebAppPlugin(BasePlugin):
       'manager_auth': self.manager_auth,
       'api_title': repr(self.cfg_api_title or self.get_signature()),
       'api_summary': repr(self.cfg_api_summary or f"Ratio1 WebApp created with {self.get_signature()} plugin"),
-      'api_description': repr(self.cfg_api_description or self.__doc__),
+      'api_description': repr(self.cfg_api_description or self.get_default_description()),
       'api_version': repr(self.__version__),
       'node_comm_params': self._node_comms_jinja_args,
       'debug_web_app': self.cfg_debug_web_app,

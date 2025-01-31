@@ -454,6 +454,40 @@ class _GenericUtilsApiMixin(_UtilsBaseMixin):
     model.fit(data)
     yh = model.predict(steps)
     return yh
+  
+  ## MLAPI
+  
+  def mlapi_timeseries_fit_predict(self, data, steps, **kwargs):
+    """
+    Takes a list of values and directly returns predictions using a basic AR model
+
+
+    Parameters
+    ----------
+    data : list
+      list of float values.
+    steps : int
+      number of prediction steps.
+
+    Returns
+    -------
+    yh : list
+      the `steps` predicted values.
+
+
+    Example
+    -------
+      ```
+      yh = self.basic_ts_fit_predict(data=[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89], steps=3)
+      result = {'preds' : yh}
+      ```
+
+    """
+    result = self.basic_ts_fit_predict(data, steps)
+    return result
+  
+  
+  ## END MLAPI
 
   def create_sre(self, **kwargs):
     """

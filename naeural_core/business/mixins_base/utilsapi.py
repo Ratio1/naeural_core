@@ -454,6 +454,15 @@ class _GenericUtilsApiMixin(_UtilsBaseMixin):
     model.fit(data)
     yh = model.predict(steps)
     return yh
+  
+  ## MLAPI
+  
+  def mlapi_ts_fit_predict(self, data, steps, **kwargs):
+    result = self.basic_ts_fit_predict(data, steps)
+    return result
+  
+  
+  ## END MLAPI
 
   def create_sre(self, **kwargs):
     """

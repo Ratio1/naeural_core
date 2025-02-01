@@ -1261,10 +1261,15 @@ class EpochsManager(Singleton):
     availability_table : dict
       The availability table.
     """
+    success = True
     last_sync_epoch = self.get_last_sync_epoch()
 
-    assert epoch > last_sync_epoch, \
-      f"Epoch {epoch} is not greater than last sync epoch {last_sync_epoch}"
+    # assert epoch > last_sync_epoch, \
+    #   f"Epoch {epoch} is not greater than last sync epoch {last_sync_epoch}"
+    if epoch <= last_sync_epoch:
+      self.P(f"Epoch {epoch} is not greater than last sync epoch {last_sync_epoch}. Skipping update.", color='r')
+      success = False
+      return success
 
     for node_addr in availability_table:
       if node_addr not in self.__data:
@@ -1273,7 +1278,9 @@ class EpochsManager(Singleton):
       self.__data[node_addr][EPCT.SIGNATURES][epoch] = availability_table[node_addr][SYNC_SIGNATURES]
     self.__full_data[SYNC_LAST_EPOCH] = epoch
 
-    return
+    self.P(f"Epoch {epoch} availability updated successfully.")
+
+    return success
 
 
 

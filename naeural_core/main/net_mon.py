@@ -789,7 +789,7 @@ class NetworkMonitor(DecentrAIObject):
     def register_heartbeat(self, addr, data):
       # save the timestamp when received the heartbeat,
       # helpful to know when computing the availability score
-      # this data is saved using the local time and coult "appear" different
+      # this data is saved using the local time and could "appear" different
       # from the timestamp in the heartbeat due to zone differences
       # when reconstructing RECEIVED_TIME we will use local timezone
       data[ct.HB.RECEIVED_TIME] = dt.now().strftime(ct.HB.TIMESTAMP_FORMAT)

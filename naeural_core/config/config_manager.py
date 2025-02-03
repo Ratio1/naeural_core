@@ -626,6 +626,7 @@ class ConfigManager(
       fname=self._fn_app_config, 
       numeric_keys=False,
       replace_environment_secrets='$EE_',
+      allow_missing_secrets=False,
     )
     if self.config_app is None:
       msg = "CRITICAL ERROR! The device cannot start - there is no app configuration"

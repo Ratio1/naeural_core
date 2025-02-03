@@ -79,6 +79,8 @@ class Orchestrator(DecentrAIObject,
     self.__simulated_mlstops = 0
     self.__last_local_info_save = time()    
     self.__save_local_address_error_logged = False
+    
+    self.__is_supervisor_node = None
 
 
     self._capture_manager : CaptureManager              = None
@@ -251,6 +253,8 @@ class Orchestrator(DecentrAIObject,
     ### at this point we should check if the authentication information is available in the
     ### environment and if not we should pool the endpoint for the information    
     self._check_and_complete_environment_variables()    
+    # just after completed the dAuth we can check the supervisor status 
+    self.__is_supervisor_node = self.log.str_to_bool(os.environ("EE_SUPERVISOR", False))
     ### following the env update we can proceed with the managers initialization
     ### at this point the env can be considered complete and can have updates such as:
     ### - era information
@@ -449,10 +453,7 @@ class Orchestrator(DecentrAIObject,
   
   @property
   def is_supervisor_node(self):
-    result = False
-    if self._business_manager is not None:
-      result = self._business_manager.is_supervisor_node
-    return result
+    return self.__is_supervisor_node
   
   @property
   def is_secured(self):

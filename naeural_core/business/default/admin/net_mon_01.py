@@ -19,7 +19,7 @@ _CONFIG = {
   
   "PROCESS_DELAY"                 : 10,
   
-  "SUPERVISOR"                    : False, 
+  "SUPERVISOR"                    : False, # obsolete as of 2025-02-03
   "SUPERVISOR_ALERT_TIME"         : 30,
   "SUPERVISOR_LOG_TIME"           : 60,
   "SEND_IF_NOT_SUPERVISOR"        : False,
@@ -71,12 +71,20 @@ class NetMon01Plugin(
     return
   
   def on_init(self):
+    # the following code was left here for historical reasons only
     # convert supervisor to bool if needed
     is_supervisor = self.cfg_supervisor
     if isinstance(is_supervisor, str):
       self.P("Found string value for SUPERVISOR: {}. Converting to bool".format(is_supervisor))
       self.config_data['SUPERVISOR'] = is_supervisor.lower() == 'true'
     #endif is string
+    
+    if self.is_supervisor_node != self.cfg_supervisor:
+      self.P("Warning: Detected admin pipeline config SUPERVISOR={} on node with is_supervisor_node={}".format(
+        self.cfg_supervisor, self.is_supervisor_node), color='r'
+      )
+      self.config_data['SUPERVISOR'] = self.is_supervisor_node
+      self.P("Running with SUPERVISOR={}".format(self.cfg_supervisor))
     return
 
 

@@ -160,7 +160,7 @@ ADMIN_PIPELINE = {
     "PROCESS_DELAY": 20,
     "LOG_INFO"            : False,
     "LOG_FULL_INFO"       : False,
-    "SUPERVISOR": "$EE_SUPERVISOR"
+    "SUPERVISOR": "$EE_SUPERVISOR" # obsolete/redundant as of 2025-03-03
   },
   
 

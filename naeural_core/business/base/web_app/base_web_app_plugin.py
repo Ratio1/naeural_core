@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import asyncio
+import psutil
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -109,12 +110,21 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       raise ValueError("Invalid port value {}".format(self.cfg_port))
     return
 
+  def __get_all_used_ports(self):
+    res = set()
+    for conn in psutil.net_connections(kind='all'):
+      # Local address is not always a tuple.
+      if not isinstance(conn.laddr, str):
+        res.add(conn.laddr.port)  # Local port
+    # endfor
+    return sorted(res)
+
   def __allocate_port(self):
     with self.managed_lock_resource('USED_PORTS'):
       if 'USED_PORTS' not in self.plugins_shmem:
         self.plugins_shmem['USED_PORTS'] = {}
       dct_shmem_ports = self.plugins_shmem['USED_PORTS']
-      used_ports = dct_shmem_ports.values()
+      used_ports = self.__get_all_used_ports()
 
       if self.cfg_port is not None:
         self.__check_port_valid()
@@ -125,9 +135,15 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
           dct_shmem_ports[self.str_unique_identification] = self.cfg_port
       else:
         port = self.np.random.randint(49152, 65535)
-        while port in used_ports:
+        total_tries = 1000
+        tries = 0
+        while port in used_ports and tries < total_tries:
+          tries += 1
           port = self.np.random.randint(49152, 65535)
         # endwhile
+        if tries >= total_tries:
+          raise Exception("Could not find an available port after {} tries.".format(total_tries))
+        # endif tries
         dct_shmem_ports[self.str_unique_identification] = port
       # endif port
     # endwith lock

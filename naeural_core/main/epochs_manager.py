@@ -1154,7 +1154,6 @@ class EpochsManager(Singleton):
         first_seen = self.data[node_addr][EPCT.FIRST_SEEN]
         last_seen = self.data[node_addr][EPCT.LAST_SEEN]
         eth_addr = self.owner.node_address_to_eth_address(node_addr)
-        # Should this be nr_eps - 1, since there is also epoch 0 in the stats?
         if nr_eps != prev_epoch:
           msg = "Epochs mismatch for node: {} - total {} vs prev {}".format(
             node_addr, nr_eps, prev_epoch

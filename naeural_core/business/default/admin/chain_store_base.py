@@ -166,7 +166,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
 
 
-  def __set_key_value(self, key, value, owner, sync_storage=False):
+  def __set_key_value(self, key, value, owner, local_sync_storage_op=False):
     """
     This method is called to set a key-value pair in the chain storage.
     
@@ -182,9 +182,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     owner : str
       The owner of the key-value pair
       
-    sync_storage : bool
-      If `True` will only set the local kv pair without broadcasting to the network. This operation is used for remote sync when
-      a node receives a set operation from the network and needs to set the value in the local chain storage replica.
+    local_sync_storage_op : bool
+      If `True` will only set the local kv pair without broadcasting to the network. 
+      This operation is used for remote sync when a node receives a set operation from 
+      the network and needs to set the value in the local chain storage replica.
       
     """
     # key should be composed of the chainstore app identity and the actual key
@@ -197,14 +198,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.CS_OWNER : owner,
     }    
     self.__reset_confirmations(key)
-    if sync_storage:
+    if local_sync_storage_op:
       # set the confirmations to -1 to indicate that the key is remote synced on this node
       self.__set_confirmations(key, -1) # set to -1 to indicate that the key is remote synced on this node
     self.__save_chain_storage()
     return
 
 
-  def _set_value(self, key, value, owner=None, debug=False, sync_storage=False):
+  def _set_value(self, key, value, owner=None, debug=False, local_sync_storage_op=False):
     """ 
     This method is called to set a value in the chain storage.
     If called locally will push a broadcast request to the network, 
@@ -225,7 +226,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     debug : bool
       If True will print debug messages
       
-    sync_storage : bool
+    local_sync_storage_op : bool
       If True will only set the local kv pair without broadcasting to the network
       
       
@@ -235,7 +236,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     
     """
-    where = "LOCAL: " if not sync_storage else "REMOTE: "
+    where = "LOCAL: " if not local_sync_storage_op else "REMOTE: "
     debug = debug or self.cfg_chain_store_debug
     if owner is None:
       owner = self.get_instance_path()
@@ -249,9 +250,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         need_store = False
     if need_store:
       if debug:
-        self.P(f" === {where}Setting value for key {key}={value} by {owner}, remote={sync_storage}")
-      self.__set_key_value(key, value, owner, sync_storage=sync_storage)
-      if not sync_storage:      
+        self.P(f" === {where}Setting value for key {key}={value} by {owner}, is_remote={local_sync_storage_op}")
+      self.__set_key_value(key, value, owner, local_sync_storage_op=local_sync_storage_op)
+      if not local_sync_storage_op:      
         # now send set-value confirmation to all
         op = {      
             self.CS_OP : self.CS_STORE,
@@ -345,8 +346,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     value = data.get(self.CS_VALUE , None)
     owner = data.get(self.CS_OWNER, None)
     if self.cfg_chain_store_debug:
-      self.P(f" === REMOTE: Executing remote-sync store for {key}={value} by {owner}")
-    result = self._set_value(key, value, owner=owner, sync_storage=True)
+      self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
+    result = self._set_value(key, value, owner=owner, local_sync_storage_op=True)
     if result:
       # now send confirmation of the storage execution
       if self.cfg_chain_store_debug:

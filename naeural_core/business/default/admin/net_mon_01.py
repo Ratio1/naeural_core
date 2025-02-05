@@ -179,10 +179,14 @@ class NetMon01Plugin(
     is_supervisor = False
     current_ranking = ranking
     current_new = new_nodes
-
-    if self.cfg_supervisor:
+    if not self.cfg_supervisor:
+      if (self._nmon_counter % 30) == 0: 
+        self.P("Saving local epoch manager status ...")
+        self.netmon.epoch_manager.save_status()
+      #endif save status if not supervisor
+    else: # supervisor
       # save status
-      save_nmon_each = int(min(self.cfg_save_nmon_each, 20)) # default no more than 30 iterations
+      save_nmon_each = int(min(self.cfg_save_nmon_each, 20)) # default no more than 20 iterations
       if (self._nmon_counter % save_nmon_each) == 0: 
         self.P("Saving netmon status for {} nodes".format(len(current_nodes)))
         self.netmon.network_save_status()

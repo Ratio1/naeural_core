@@ -72,7 +72,7 @@ _CONFIG = {
   "FORCE_RESTART_AFTER" : 3600 * 24 * 2,  # days restart time
   "REBOOT_ON_RESTART"   : False,
   
-  "BUILD_DELAY"         : 30 * 60,
+  "BUILD_DELAY"         : 5 * 60,
 
   'ALLOW_EMPTY_INPUTS'  : True,
   

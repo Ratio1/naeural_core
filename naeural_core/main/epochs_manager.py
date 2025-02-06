@@ -1244,7 +1244,7 @@ class EpochsManager(Singleton):
     return availability_table
 
 
-  def update_epoch_availability(self, epoch, availability_table):
+  def update_epoch_availability(self, epoch, availability_table, debug=False):
     """
     Updates the epoch availability for a given epoch.
 
@@ -1274,8 +1274,12 @@ class EpochsManager(Singleton):
     for node_addr in availability_table:
       if node_addr not in self.__data:
         self.__initialize_new_node(node_addr)
+      if debug:
+        self.P(f'DEBUG self.__data before update: {self.__data[node_addr]}')
       self.__data[node_addr][EPCT.EPOCHS][epoch] = availability_table[node_addr][SYNC_VALUE]
       self.__data[node_addr][EPCT.SIGNATURES][epoch] = availability_table[node_addr][SYNC_SIGNATURES]
+      if debug:
+        self.P(f'DEBUG self.__data after update: {self.__data[node_addr]}')
     self.__full_data[SYNC_LAST_EPOCH] = epoch
 
     self.P(f"Epoch {epoch} availability updated successfully.")

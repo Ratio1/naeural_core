@@ -52,7 +52,7 @@ except:
 
 SHUTDOWN_DELAY = 5
 
-SHUTDOWN_RESET_FILE = "shutdown_reset"
+SHUTDOWN_RESET_FILE = "/shutdown_reset"
 
 class Orchestrator(DecentrAIObject, 
                    ExecutionEngineCommandHandlers,
@@ -1549,9 +1549,8 @@ class Orchestrator(DecentrAIObject,
   
   
   def check_shutdown_reset_by_file(self) -> bool:
-    fn = self.log.get_data_file(SHUTDOWN_RESET_FILE)
-    if fn:
-      os.unlink(fn)
+    if os.path.exists(SHUTDOWN_RESET_FILE)
+      os.unlink(SHUTDOWN_RESET_FILE)
       result = True
     else:
       result = False

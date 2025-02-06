@@ -1549,7 +1549,7 @@ class Orchestrator(DecentrAIObject,
   
   
   def check_shutdown_reset_by_file(self) -> bool:
-    if os.path.exists(SHUTDOWN_RESET_FILE)
+    if os.path.exists(SHUTDOWN_RESET_FILE):
       os.unlink(SHUTDOWN_RESET_FILE)
       result = True
     else:

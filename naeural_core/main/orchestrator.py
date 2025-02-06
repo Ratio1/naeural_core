@@ -52,6 +52,8 @@ except:
 
 SHUTDOWN_DELAY = 5
 
+SHUTDOWN_RESET_FILE = "/shutdown_reset"
+
 class Orchestrator(DecentrAIObject, 
                    ExecutionEngineCommandHandlers,
                    _ValidateConfigStartupMixin,
@@ -1544,6 +1546,35 @@ class Orchestrator(DecentrAIObject,
       sleep(self.debug_simulated_mlstop)
       self.__simulated_mlstops += 1
     return
+  
+  
+  def check_shutdown_reset_by_file(self) -> bool:
+    if os.path.exists(SHUTDOWN_RESET_FILE)
+      os.unlink(SHUTDOWN_RESET_FILE)
+      result = True
+    else:
+      result = False
+    return result
+  
+  def shutdown_reset_erase(self):
+    import shutil
+    FOLDERS = [
+      'network_monitor/'
+    ]
+    FILES = [
+    ]
+    # delete all FOLDERS folders and all files in FILES
+    for folder in FOLDERS:
+      full_path = self.log.get_data_subfolder(folder)
+      self.P("Deleting folder '{}'".format(full_path), color='r')
+      shutil.rmtree(full_path, ignore_errors=True)
+    #endfor
+    for file in FILES:
+      fn = self.log.get_data_file(file)
+      self.P("Deleting file '{}'".format(fn), color='r')
+      os.unlink(fn)
+    #endfor
+    return
 
 
   def main_loop(self):
@@ -1557,6 +1588,7 @@ class Orchestrator(DecentrAIObject,
     """
     captures_data_metadata, dct_servers_inputs, dct_servers_outputs, dct_business_inputs, payloads = None, None, None, None, None
     check_ram_on_shutdown = self.check_ram_on_shutdown
+    shutdown_reset_required = False
     try:
       return_code = None
       
@@ -1564,6 +1596,13 @@ class Orchestrator(DecentrAIObject,
       self._init_main_loop()
       
       while not self.__done:
+        
+        shutdown_reset_required = self.check_shutdown_reset_by_file()
+        if shutdown_reset_required:
+          self.__done = True
+          self.P("SHUTDOWN-RESET REQUEST BY FLAG-FILE", color='r', boxed=True)
+          continue
+        
         self.__loop_stage = "0"
         self.log.start_timer(self._main_loop_timer_name)
         self._maybe_delay_main_loop()
@@ -1694,10 +1733,18 @@ class Orchestrator(DecentrAIObject,
       self.close_main_loop()
     #end try-except-finally
 
-    self.P('Returning from main loop with return code: {}'.format(return_code), color='r')
-    self.log.stop_timer(ct.TIMER_APP, skip_first_timing=False)
-    self.log.show_timers()
-    self._app_monitor.shutdown()
+    try:
+      self.P('Returning from main loop with return code: {}'.format(return_code), color='r')
+      self.log.stop_timer(ct.TIMER_APP, skip_first_timing=False)
+      self.log.show_timers()
+      self._app_monitor.shutdown()
+    except Exception as e:
+      self.P('Exception in finalization of main loop: {}'.format(e), color='r')
+    
+    if shutdown_reset_required:
+      self.P("Initiating SHUTDOWN-RESET data erase", color='r')
+      self.shutdown_reset_erase()
+
     return return_code
   
     

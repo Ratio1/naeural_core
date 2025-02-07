@@ -23,7 +23,9 @@ class BusinessManager(Manager):
     self.__netmon_instance = None
     self._dct_config_streams = None
     self.is_supervisor_node = self.owner.is_supervisor_node
+    self.__evm_network = self.owner.evm_network
     self.shmem['is_supervisor_node'] = self.is_supervisor_node
+    self.shmem['__evm_network'] = self.__evm_network
     self.comm_shared_memory = {
       'payloads' : {},
       'commands' : {},
@@ -33,7 +35,8 @@ class BusinessManager(Manager):
 
     self.dct_serving_processes_startup_params = None
     self.dct_serving_processes_details = None
-
+    
+    
     ### each business plugin will be kept having key a hash created based on (stream_name, signature, config_instance)
     ### so whenever a param changes from config_instance we know to deallocate the old business plugin and initialize a new one
     self._dct_current_instances = {}

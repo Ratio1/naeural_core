@@ -523,6 +523,10 @@ class BasePluginExecutor(
     fact that the supervisor node may not be set yet within the NET_MON plugin.
     """
     return self.global_shmem.get('is_supervisor_node', False)
+  
+  @property
+  def evm_network(self):
+    return self.global_shmem.get('__evm_network', None)
 
   def __repr__(self):
     s = "<stream='{}' sign='{}' inst='{}'>".format(self._stream_id, self._signature, self.cfg_instance_id)

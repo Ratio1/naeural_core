@@ -86,6 +86,7 @@ class Orchestrator(DecentrAIObject,
     self.__save_local_address_error_logged = False
     
     self.__is_supervisor_node = None
+    self.__evm_network = None
 
 
     self._capture_manager : CaptureManager              = None
@@ -186,6 +187,10 @@ class Orchestrator(DecentrAIObject,
   
   ####### pre-init area
   
+  @property
+  def evm_network(self):
+    return self.__evm_network
+  
   
   @property
   def cfg_system_temperature_check(self):
@@ -232,7 +237,7 @@ class Orchestrator(DecentrAIObject,
   
   def _check_and_complete_environment_variables(self):
     
-    self.P(f"Node <{self.eth_address}> checking and completing environment variables...")
+    self.P(f"Node <{self.eth_address}> completing setup for network <{self.evm_network}>...")
     start_ts = time()
     done = False
     tries = 0
@@ -273,6 +278,11 @@ class Orchestrator(DecentrAIObject,
     self._initialize_private_blockchain()
     if self.e2_address is None:
       raise ValueError("Node address is `None`. Check your node configuration and network settings.")
+
+    # set the EVM network
+    self.__evm_network = self.blockchain_manager.evm_network
+    # end set EVM network
+
     self.save_local_address()
 
     ### at this point we should check if the authentication information is available in the
@@ -286,7 +296,8 @@ class Orchestrator(DecentrAIObject,
     ### - external storages
     ### - list of whitelisted nodes <=== extremely important for new nodes that must accept supervisor based 
     ###   distributions of jobs
-
+    
+    
     self._network_monitor = NetworkMonitor(
       node_name=self.cfg_eeid, node_addr=self.e2_address,
       log=self.log, DEBUG=self.DEBUG,
@@ -397,6 +408,7 @@ class Orchestrator(DecentrAIObject,
           'current_epoch' : current_epoch,
           'current_epoch_avail' : current_epoch_avail,
           'last_epochs' : last_5_epochs,
+          'evm_network' : self.evm_network,
         },
       }
       with open(addr_file, 'w') as f:

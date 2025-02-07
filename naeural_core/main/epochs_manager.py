@@ -32,6 +32,13 @@ from time import time
 from naeural_core import constants as ct
 from naeural_core.utils import Singleton
 
+from naeural_core.main.ver import __VER__ as CORE_VERSION
+from naeural_client._ver import __VER__ as SDK_VERSION
+
+try:
+  from ver import __VER__ as NODE_VERSION
+except Exception as e:
+  NODE_VERSION = 'CORE'
 
 EPOCH_MANAGER_VERSION = '0.3.1'
 
@@ -1069,6 +1076,7 @@ class EpochsManager(Singleton):
     if as_int:
       certainty = certainty_int
     dct_result['manager'] = {
+      'ver' : f"{NODE_VERSION} / {CORE_VERSION} / {SDK_VERSION}",
       'certainty' : certainty, 
     }
     dct_result['manager']['valid'] = sum(certainty_int.values()) == len(certainty)

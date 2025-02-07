@@ -1110,23 +1110,27 @@ class EpochsManager(Singleton):
       start_epoch = max(1, current_epoch - NR_HIST)
       certainty = self.get_self_supervisor_capacity(as_float=True, start_epoch=start_epoch)
       oracle_state = self.get_oracle_state()      
-      for node_addr in self.data:
-        is_online = self.owner.network_node_is_online(
-          node_addr, dt_now=self.get_current_date()
-        )
-        node_version = self.owner.network_node_version(node_addr)
-        if online_only and not is_online:
-            continue
-        dt_netmon_last_seen = self.owner.network_node_last_seen(
-          node_addr, 
-          dt_now=self.get_current_date(),
-          as_sec=False
-        )
-        last_seen_ago = self.owner.network_node_last_seen(
-          node_addr, 
-          dt_now=self.get_current_date(),
-          as_sec=True
-        )
+      for node_addr in self.data:        
+        try:
+          is_online = self.owner.network_node_is_online(
+            node_addr, dt_now=self.get_current_date()
+          )
+          node_version = self.owner.network_node_version(node_addr)
+          if online_only and not is_online:
+              continue
+          dt_netmon_last_seen = self.owner.network_node_last_seen(
+            node_addr, 
+            dt_now=self.get_current_date(),
+            as_sec=False
+          )
+          last_seen_ago = self.owner.network_node_last_seen(
+            node_addr, 
+            dt_now=self.get_current_date(),
+            as_sec=True
+          )
+        except:
+          continue
+        
         netmon_last_seen = self.date_to_str(dt_netmon_last_seen) if dt_netmon_last_seen is not None else 'N/A'
         node_name = self.get_node_name(node_addr)
         dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)     

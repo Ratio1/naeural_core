@@ -237,7 +237,7 @@ class Orchestrator(DecentrAIObject,
   
   def _check_and_complete_environment_variables(self):
     
-    self.P(f"Node <{self.eth_address}> checking and completing environment variables...")
+    self.P(f"Node <{self.eth_address}> completing setup for network <{self.evm_network}>...")
     start_ts = time()
     done = False
     tries = 0

@@ -1106,6 +1106,7 @@ class EpochsManager(Singleton):
         is_online = self.owner.network_node_is_online(
           node_addr, dt_now=self.get_current_date()
         )
+        node_version = self.owner.network_node_version(node_addr)
         if online_only and not is_online:
             continue
         dt_netmon_last_seen = self.owner.network_node_last_seen(
@@ -1121,6 +1122,23 @@ class EpochsManager(Singleton):
         netmon_last_seen = self.date_to_str(dt_netmon_last_seen) if dt_netmon_last_seen is not None else 'N/A'
         node_name = self.get_node_name(node_addr)
         dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)     
+        
+        # current epoch hb data
+        node_current_epoch_nr_hb = None
+        node_current_epoch_1st_hb = None
+        node_current_epoch_last_hb = None
+        node_current_epoch_id = None
+        try: 
+          node_current_epoch_data = self.data[node_addr][EPCT.CURRENT_EPOCH]
+          node_current_epoch_id = node_current_epoch_data[EPCT.ID]
+          node_current_epoch_hb_timestamps = node_current_epoch_data[EPCT.HB_TIMESTAMPS]
+          node_current_epoch_hb_timestamps = sorted(list(node_current_epoch_hb_timestamps))
+          node_current_epoch_1st_hb = node_current_epoch_hb_timestamps[0] if len(node_current_epoch_hb_timestamps) > 0 else None
+          node_current_epoch_last_hb = node_current_epoch_hb_timestamps[-1] if len(node_current_epoch_hb_timestamps) > 0 else None
+          node_current_epoch_nr_hb = len(node_current_epoch_hb_timestamps)
+        except:
+          pass
+        
         
         # process the previous epoch hb data
         node_last_epoch_data = self.data[node_addr][EPCT.LAST_EPOCH]
@@ -1167,6 +1185,7 @@ class EpochsManager(Singleton):
         stats[node_addr] = {
           'eth_addr' : eth_addr,
           'alias' : node_name,
+          'ver' : node_version,
           'last_state' : netmon_last_seen,
           'last_seen_ago' : self.log.elapsed_to_str(last_seen_ago),
           'non_zero' : non_zero,
@@ -1174,6 +1193,14 @@ class EpochsManager(Singleton):
           'score' : score,
           'first_check' : first_seen,
           'last_check' : last_seen,
+          
+          'current_epoch' : {
+            'id' : node_current_epoch_id,
+            'nr_hb' : node_current_epoch_nr_hb,
+            '1st_hb' : str(node_current_epoch_1st_hb),
+            'last_hb' : str(node_current_epoch_last_hb),
+          },
+                  
           'recent_history' : {
             'last_10_ep' : str_last_epochs,
             'certainty' : str_certainty,

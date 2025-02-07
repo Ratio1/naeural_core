@@ -231,7 +231,8 @@ class Orchestrator(DecentrAIObject,
     return
   
   def _check_and_complete_environment_variables(self):
-    self.P("Checking and completing environment variables...")
+    
+    self.P(f"Node <{self.eth_address}> checking and completing environment variables...")
     start_ts = time()
     done = False
     tries = 0
@@ -248,12 +249,13 @@ class Orchestrator(DecentrAIObject,
       done = (dct_env_output is None) or (isinstance(dct_env_output, dict) and len(dct_env_output) > 0)
 
       if not done:
-        self.P(f'Retrying dAuth completion({tries} tries so far in {time() - start_ts}s)...')
+        elapsed = time() - start_ts
+        self.P(f'Retrying dAuth completion({tries} tries so far in {elapsed:.1f}s)...')
         sleep(CHECK_AND_COMPLETE_SLEEP_PERIOD)
     # endwhile not done
 
     if not done:
-      self.P(f'WARNING: Could not retrieve dAuth additional environment variables in {CHECK_AND_COMPLETE_TIMEOUT}s. '
+      self.P(f'WARNING: <{self.eth_address}> could not retrieve dAuth in {CHECK_AND_COMPLETE_TIMEOUT}s. '
              f'Continuing with local environment...')
 
     if dct_env_output is not None and len(dct_env_output) > 0:

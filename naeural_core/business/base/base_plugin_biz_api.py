@@ -225,10 +225,17 @@ class _BasePluginAPIMixin:
   def chainstore_get(self, key, debug=False):
     self.__maybe_wait_for_chain_state_init()
     value = None
+    msg = ""
     try:
+      start_search = self.time()
+      found = True
       while self.plugins_shmem.get('__chain_storage_get') is None:
         self.sleep(0.1)
-        # TODO: raise exception if not found after a while
+        if self.time() - start_search > 10:
+          msg = "Error: chain storage get function not found after 10 seconds"
+          self.P(msg, color="red")
+          found = False
+          break
       func = self.plugins_shmem.get('__chain_storage_get')
       if func is not None:
         value = func(key, debug=debug)
@@ -238,6 +245,7 @@ class _BasePluginAPIMixin:
         if debug:
           self.P("No chain storage get function found", color="red")
     except Exception as ex:
+      msg = "Error in chainstore_get: {}".format(ex)
       self.P("Error in chainstore_get: {}".format(ex), color="red")
     return value
   

@@ -52,6 +52,9 @@ except:
 
 SHUTDOWN_DELAY = 5
 
+CHECK_AND_COMPLETE_TIMEOUT = 15 * 60
+CHECK_AND_COMPLETE_SLEEP_PERIOD = 2
+
 SHUTDOWN_RESET_FILE = "/shutdown_reset"
 
 class Orchestrator(DecentrAIObject, 
@@ -229,13 +232,30 @@ class Orchestrator(DecentrAIObject,
   
   def _check_and_complete_environment_variables(self):
     self.P("Checking and completing environment variables...")
-    dct_env_output = self.blockchain_manager.dauth_autocomplete(
-      dauth_endp=None, # get automatically
-      add_env=True,
-      debug=False,
-      max_tries=5,
-      sender_alias=self.cfg_eeid,
-    )
+    start_ts = time()
+    done = False
+    tries = 0
+    while not done and (time() - start_ts) < CHECK_AND_COMPLETE_TIMEOUT:
+      tries += 1
+      dct_env_output = self.blockchain_manager.dauth_autocomplete(
+        dauth_endp=None,  # get automatically
+        add_env=True,
+        debug=False,
+        max_tries=5,
+        sender_alias=self.cfg_eeid,
+      )
+      # Will be None in case of bad URL. In that case there is no need to reattempt it.
+      done = (dct_env_output is None) or (isinstance(dct_env_output, dict) and len(dct_env_output) > 0)
+
+      if not done:
+        self.P(f'Retrying dAuth completion({tries} tries so far in {time() - start_ts}s)...')
+        sleep(CHECK_AND_COMPLETE_SLEEP_PERIOD)
+    # endwhile not done
+
+    if not done:
+      self.P(f'WARNING: Could not retrieve dAuth additional environment variables in {CHECK_AND_COMPLETE_TIMEOUT}s. '
+             f'Continuing with local environment...')
+
     if dct_env_output is not None and len(dct_env_output) > 0:
       self.P(f'Reloading config due to dAuth modification of following env vars: {list(dct_env_output.keys())}')
       self.log.reload_config()
@@ -244,17 +264,18 @@ class Orchestrator(DecentrAIObject,
   
   ####### end pre-init area
   
-  def _init_all_processes(self):    
+  def _init_all_processes(self):
     self._data_handler = MainLoopDataHandler(log=self.log, owner=self, DEBUG=self.DEBUG)
     self._app_monitor = ApplicationMonitor(log=self.log, owner=self)
 
     self._initialize_private_blockchain()
     if self.e2_address is None:
       raise ValueError("Node address is `None`. Check your node configuration and network settings.")
+    self.save_local_address()
 
     ### at this point we should check if the authentication information is available in the
     ### environment and if not we should pool the endpoint for the information    
-    self._check_and_complete_environment_variables()    
+    self._check_and_complete_environment_variables()
     # just after completed the dAuth we can check the supervisor status 
     self.__is_supervisor_node = self.log.str_to_bool(os.environ.get("EE_SUPERVISOR", False))
     ### following the env update we can proceed with the managers initialization
@@ -263,14 +284,13 @@ class Orchestrator(DecentrAIObject,
     ### - external storages
     ### - list of whitelisted nodes <=== extremely important for new nodes that must accept supervisor based 
     ###   distributions of jobs
-    self.save_local_address()
 
     self._network_monitor = NetworkMonitor(
       node_name=self.cfg_eeid, node_addr=self.e2_address,
       log=self.log, DEBUG=self.DEBUG,
       blockchain_manager=self._blockchain_manager,
     )
-    
+
     self._app_shmem['network_monitor'] = self._network_monitor
     self._app_shmem['config_startup'] = self.config_data
     self._app_shmem['get_node_running_time'] = self.get_node_running_time
@@ -278,9 +298,9 @@ class Orchestrator(DecentrAIObject,
     self._app_shmem[ct.CALLBACKS.INSTANCE_CONFIG_SAVER_CALLBACK] = self.save_config_pipeline_instance
     self._app_shmem[ct.CALLBACKS.PIPELINE_CONFIG_SAVER_CALLBACK] = self.save_config_pipeline
 
-    
+
     self._initialize_managers()
-    
+
     self.log.register_close_callback(self._maybe_gracefull_stop)
 
     self._thread_async_comm = Thread(
@@ -289,7 +309,7 @@ class Orchestrator(DecentrAIObject,
       name=ct.THREADS_PREFIX + 'async_comm',
       daemon=True,
     )
-        
+
     self._thread_async_comm.start()
     return
     
@@ -332,7 +352,7 @@ class Orchestrator(DecentrAIObject,
       "" if self.cfg_hb_contains_pipelines else "NOT ",
       "" if self.cfg_hb_contains_active_plugins else "NOT ",
     ), color='r')
-    self.save_local_address()    
+    self.save_local_address()
     return
   
   

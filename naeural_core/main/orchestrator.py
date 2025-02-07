@@ -263,6 +263,7 @@ class Orchestrator(DecentrAIObject,
     ### - external storages
     ### - list of whitelisted nodes <=== extremely important for new nodes that must accept supervisor based 
     ###   distributions of jobs
+    self.save_local_address()
 
     self._network_monitor = NetworkMonitor(
       node_name=self.cfg_eeid, node_addr=self.e2_address,
@@ -351,12 +352,18 @@ class Orchestrator(DecentrAIObject,
         if os.path.exists(fpath):
           os.remove(fpath)
       ## end cleanup
-      addr_file = os.path.join(folder, ct.LocalInfo.LOCAL_INFO_FILE)
-      current_epoch = self._network_monitor.epoch_manager.get_current_epoch()
-      current_epoch_avail = self._network_monitor.epoch_manager.get_current_epoch_availability()
-      last_5_epochs = self._network_monitor.epoch_manager.get_node_last_n_epochs(
-        node_addr=self.e2_addr, n=5, autocomplete=True, as_list=False,
-      )
+      try:
+        addr_file = os.path.join(folder, ct.LocalInfo.LOCAL_INFO_FILE)
+        current_epoch = self._network_monitor.epoch_manager.get_current_epoch()
+        current_epoch_avail = self._network_monitor.epoch_manager.get_current_epoch_availability()
+        last_5_epochs = self._network_monitor.epoch_manager.get_node_last_n_epochs(
+          node_addr=self.e2_addr, n=5, autocomplete=True, as_list=False,
+        )
+      except:
+        current_epoch = None
+        current_epoch_avail = None
+        last_5_epochs = None
+      #endif
       data = {
         ct.LocalInfo.K_ADDRESS : self.e2_address,
         ct.LocalInfo.K_ALIAS   : self.e2_id,

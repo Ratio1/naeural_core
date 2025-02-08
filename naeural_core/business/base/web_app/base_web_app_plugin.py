@@ -25,6 +25,8 @@ _CONFIG = {
   'NGROK_DOMAIN': None,
   'NGROK_EDGE_LABEL': None,
   'NGROK_URL_PING_INTERVAL': 30,
+  
+  'SUPRESS_LOGS_AFTER_INTERVAL' : 0,
 
   'ASSETS': None,
 
@@ -61,6 +63,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     self.__git_commit_hash = None
     self.__git_request_time = 0
+    self.__first_log_displayed = None
     self.ngrok_initiated = False
     self.ngrok_started = False
     self.ngrok_listener = None
@@ -263,10 +266,19 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     for key, logs_reader in self.dct_logs_reader.items():
       if logs_reader is not None:
         logs = logs_reader.get_next_characters()
-        if len(logs) > 0:
-          indented_logs = self.indent_strings(logs, indent=indent)
-          self.P(f"Showing stdout logs [{key}]:\n{indented_logs}")
-          self.logs.append(f"[{key}]: {logs}")
+        if isinstance(self.cfg_supress_logs_after_interval, int) and self.cfg_supress_logs_after_interval > 0:
+          time_since_first_log = 0 if self.__first_log_displayed is None else (self.time() - self.__first_log_displayed)
+          if time_since_first_log > self.cfg_supress_logs_after_interval and len(logs) > 0:
+            # only print logs if the first log was displayed less than `supress_logs_after_interval` seconds ago
+            indented_logs = self.indent_strings(logs, indent=indent)
+            self.P(f"Showing stdout logs [{key}]:\n{indented_logs}")
+            self.logs.append(f"[{key}]: {logs}")
+            if self.__first_log_displayed is None:
+              self.__first_log_displayed = self.time()
+          #end if time_since_first_log
+        #end if supress_logs_after_interval
+      #end if logs_reader
+    #endfor all logs readers
 
     for key, err_logs_reader in self.dct_err_logs_reader.items():
       if err_logs_reader is not None:

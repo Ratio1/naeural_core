@@ -526,11 +526,16 @@ class Orchestrator(DecentrAIObject,
   
   @property
   def cfg_hb_contains_pipelines(self):
-    return self.config_data.get(ct.HB_CONTAINS_PIPELINES, ct.DEFAULT_HB_CONTAINS_PIPELINES)
+    # HB_CONTAINS_PIPELINES is now obsolete
+    val = os.environ.get(ct.HB_CONTAINS_PIPELINES_ENV_KEY, True)
+    return str(val).lower() in ['true', 'yes', '1']
 
   @property
   def cfg_hb_contains_active_plugins(self):
-    return self.config_data.get(ct.HB_CONTAINS_ACTIVE_PLUGINS, ct.DEFAULT_HB_CONTAINS_ACTIVE_PLUGINS)
+    # HB_CONTAINS_ACTIVE_PLUGINS is now obsolete
+    val = os.environ.get(ct.HB_CONTAINS_ACTIVE_PLUGINS_ENV_KEY, True)
+    return str(val).lower() in ['true', 'yes', '1']
+    
   
   @property
   def cfg_critical_restart_low_mem(self):

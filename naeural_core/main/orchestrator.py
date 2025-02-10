@@ -52,8 +52,10 @@ except:
 
 SHUTDOWN_DELAY = 5
 
-CHECK_AND_COMPLETE_TIMEOUT = 15 * 60
-CHECK_AND_COMPLETE_SLEEP_PERIOD = 15
+CHECK_AND_COMPLETE_ITERATIONS = 30 # how many iterations to wait for the dAuth completion
+CHECK_AND_COMPLETE_SLEEP_PERIOD = 30 # how many seconds to wait between iterations
+CHECK_AND_COMPLETE_TIMEOUT = CHECK_AND_COMPLETE_ITERATIONS * CHECK_AND_COMPLETE_SLEEP_PERIOD
+
 
 SHUTDOWN_RESET_FILE = "/shutdown_reset"
 
@@ -256,7 +258,10 @@ class Orchestrator(DecentrAIObject,
       if not done:
         elapsed = time() - start_ts
         self.P(f'Retrying dAuth completion({tries} tries so far in {elapsed:.1f}s)...')
-        sleep(CHECK_AND_COMPLETE_SLEEP_PERIOD)
+        sleep(
+          CHECK_AND_COMPLETE_SLEEP_PERIOD / 2 + 
+          np.random.randint(1, CHECK_AND_COMPLETE_SLEEP_PERIOD // 2)
+        )
     # endwhile not done
 
     if not done:

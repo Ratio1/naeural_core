@@ -1582,6 +1582,7 @@ class NetworkMonitor(DecentrAIObject):
         
         dct_result = dict(
           address=self._add_address_prefix(addr),
+          eth_address=self.node_address_to_eth_address(addr),
           trusted=trusted,
           trust=trust,
           secured=is_secured,

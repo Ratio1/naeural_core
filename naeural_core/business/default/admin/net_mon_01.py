@@ -85,6 +85,34 @@ class NetMon01Plugin(
       )
       self.config_data['SUPERVISOR'] = self.is_supervisor_node
       self.P("Running with SUPERVISOR={}".format(self.cfg_supervisor))
+    
+    # NOTE: SET THE ENVIRONMENT VARIABLES in Dockerfile for Ratio1 implementations
+    
+    # variable to check if only online nodes should be sent in CURRENT_NETWORK
+    
+    _send_only_online = self.os_environ.get(self.const.EE_NETMON_SEND_ONLY_ONLINE_ENV_KEY, False)
+    self.__send_only_online = str(_send_only_online).lower() in ['true', '1', 'yes']
+    
+    # index CURRENT_NETWORK by address or by eeid
+    _address_as_index = self.os_environ.get(self.const.EE_NETMON_ADDRESS_INDEX_ENV_KEY, False)
+    self.__address_as_index = str(_address_as_index).lower() in ['true', '1', 'yes']
+    
+    # send current network each random seconds (0 means no random delay and execute each send 
+    # of CURRENT_NETWORK at each PROCESS_DELAY)
+    # R1: EE_NETMON_SEND_CURRENT_NETWORK_EACH  = 50-70
+    # other: 0
+    try:
+      _default_minimum_delay = 50
+      _send_current_network_each = int(self.os.environ.get(
+        self.const.EE_NETMON_SEND_CURRENT_NETWORK_EACH_ENV_KEY, _default_minimum_delay
+      ))
+      _send_current_network_each = (
+        _send_current_network_each // 2 + self.np.random.randint(1, _send_current_network_each // 2)
+      )
+    except:
+      _random_delay = 0
+    self.__send_current_network_each = _send_current_network_each        
+    self.__last_current_network_time = 0
     return
 
 
@@ -206,7 +234,9 @@ class NetMon01Plugin(
           str_eeid = "'{}'".format(eeid[:10])
           str_eeid = "{:<13}".format(str_eeid)
           node_info = known_nodes[addr]
-          working_status = current_network.get(eeid, {}).get('working', False)
+          working_status = current_network.get(eeid, {}).get(
+            self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False
+          )
           pipelines = node_info['pipelines']
           last_received = node_info['timestamp']
           ago = "{:5.1f}".format(round(self.time() - last_received, 2))

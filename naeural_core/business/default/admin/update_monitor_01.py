@@ -492,8 +492,9 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
         # now we need to wait as this instance is configured to restart at first sign!
         # we dont wait if the instance is configured to restart at certain uptime and is outside working hours
         t_start = self.time()
-        sleep_time = max(self.cfg_build_delay // 30, 10)
-        while (self.time() - t_start) <= self.cfg_build_delay:                
+        build_delay = int(self.cfg_build_delay // 2 + self.np.random.randint(1, self.cfg_build_delay // 2))
+        sleep_time = max(build_delay // 30, 10)
+        while (self.time() - t_start) <= build_delay:                
           shown = False
           if skip:
             break
@@ -504,7 +505,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
               skip = True
               break
             elapsed = self.time() - t_start
-            remaining = self.cfg_build_delay - elapsed                  
+            remaining = build_delay - elapsed                  
             self.sleep(0.1)
             if not shown:
               self.P("Delayed RESTART in {:.1f}s ...".format(remaining), color='r', boxed=True, box_char='*')                

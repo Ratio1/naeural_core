@@ -798,6 +798,9 @@ class NetworkMonitor(DecentrAIObject):
       return
         
     def network_nodes_status(self):
+      """
+      Return a dict with the status of all the nodes. Each key is the address without the prefix
+      """
       dct_results = {}
       nodes = self.__network_nodes_list()
       for addr in nodes:

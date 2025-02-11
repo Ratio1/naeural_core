@@ -55,21 +55,30 @@ class _NetworkMonitorMixin:
     new_nodes_addr = []
     self.__history.append(nodes) 
 
-    eeid_nodes = self._convert_dct_from_addr_to_eeid_index(nodes)
-    current_nodes = list(eeid_nodes.keys())
 
-    for eeid in current_nodes:
-      addr = eeid_nodes[eeid]['address']
+    if self.address_as_index:
+      processed_nodes = nodes
+    else:
+      processed_nodes = self._convert_dct_from_addr_to_eeid_index(nodes)
+    
+    current_nodes = list(processed_nodes.keys())
+
+    for node in current_nodes:
+      # node is either the eeid or the addr depending on the index setting
+      addr = processed_nodes[node]['address']
       if addr not in self.__active_nodes:
-        if eeid_nodes[eeid]['last_seen_sec'] < self.cfg_supervisor_alert_time:
+        if processed_nodes[node]['last_seen_sec'] < self.cfg_supervisor_alert_time:
+          eeid = self.netmon.network_node_eeid(addr=addr)
           if self.cfg_log_info:
-            eeid = self.netmon.network_node_eeid(addr=eeid)
-            self.P("New node {} ({}):\n{}".format(eeid, eeid, self.json.dumps(nodes[eeid], indent=4)))
+            self.P("New node {} ({}):\n{}".format(addr, eeid, self.json.dumps(nodes[addr], indent=4)))
           new_nodes.append(eeid)
           new_nodes_addr.append(addr)
+        #endif
+      #endif
+    #endfor
     self.__active_nodes.update(new_nodes_addr)
 
-    return eeid_nodes, new_nodes
+    return processed_nodes, new_nodes
   
   
   def _supervisor_check(self):

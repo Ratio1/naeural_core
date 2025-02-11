@@ -102,19 +102,30 @@ class NetMon01Plugin(
     # R1: EE_NETMON_SEND_CURRENT_NETWORK_EACH  = 50-70
     # other: 0
     try:
-      _default_minimum_delay = 50
       _send_current_network_each = int(self.os.environ.get(
-        self.const.EE_NETMON_SEND_CURRENT_NETWORK_EACH_ENV_KEY, _default_minimum_delay
+        self.const.EE_NETMON_SEND_CURRENT_NETWORK_EACH_ENV_KEY, 0
       ))
       _send_current_network_each = (
         _send_current_network_each // 2 + self.np.random.randint(1, _send_current_network_each // 2)
       )
     except:
-      _random_delay = 0
+      _send_current_network_each = 0
     self.__send_current_network_each = _send_current_network_each        
     self.__last_current_network_time = 0
     return
-
+  
+  @property
+  def address_as_index(self):
+    return self.__address_as_index
+  
+  @property
+  def send_only_online(self):
+    return self.__send_only_online
+  
+  @property 
+  def send_current_network_each(self):
+    return self.__send_current_network_each
+  
 
   def _maybe_load_state(self):
     """
@@ -253,7 +264,14 @@ class NetMon01Plugin(
     
     self._maybe_save_debug_epoch()
 
-    if self.cfg_supervisor or self.cfg_send_if_not_supervisor:
+    should_send = (self.time() - self.__last_current_network_time) > self.send_current_network_each
+    if (self.cfg_supervisor or self.cfg_send_if_not_supervisor) and should_send:
+      if self.send_only_online:
+        # we only send online nodes
+        current_network = {
+          k:v for k,v in current_network.items() 
+          if v.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, "") == self.const.PAYLOAD_DATA.NETMON_STATUS_ONLINE
+        }    
       message="" if len(current_alerted) == 0 else "Missing/lost processing nodes: {}".format(list(current_alerted.keys()))
       # for this plugin only ALERTS should be used in UI/BE
       payload = self._create_payload(
@@ -265,7 +283,10 @@ class NetMon01Plugin(
         current_ranking=current_ranking,
         current_new=current_new,
         is_supervisor=is_supervisor,
-      )        
+        send_current_network_each=self.send_current_network_each,
+      )  
+      self.__last_current_network_time = self.time()
+    #endif should send 
 
     if self.cfg_log_full_info:
       self.P("Full info:\n{}".format(self.json.dumps(current_nodes, indent=4)))

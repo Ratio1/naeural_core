@@ -28,15 +28,16 @@ EE_GENESIS_EPOCH_DATE_KEY = 'EE_GENESIS_EPOCH_DATE'
 EE_EPOCH_INTERVALS_KEY = 'EE_EPOCH_INTERVALS'
 EE_EPOCH_INTERVAL_SECONDS_KEY = 'EE_EPOCH_INTERVAL_SECONDS'
 
-# !!! WARNING !!! This information is just for reference
-# The actual used values may be in the forked repository!
 ###################################################
 #############    Era information    ###############
 ###################################################
-DEFAULT_GENESYS_EPOCH_DATE = "2025-02-03 17:00:00"      # "2025-02-03 17:00:00" for mainnet
-DEFAULT_EPOCH_INTERVALS = 24                            # 24 mainnet, 1 for devnet
-DEFAULT_EPOCH_INTERVAL_SECONDS = 3600                   # 3600
-SUPERVISOR_MIN_AVAIL_PRC = 0.98                       # 0.98 for mainnet, 60% for testnet
+
+CURRENT_NETWORK = environ.get(BASE_CT.dAuth.DAUTH_NET_ENV_KEY, "devnet")
+CURRENT_EVM_NET_DATA = BASE_CT.EVM_NET_DATA[CURRENT_NETWORK]
+DEFAULT_GENESYS_EPOCH_DATE = CURRENT_EVM_NET_DATA[BASE_CT.EvmNetData.EE_GENESIS_EPOCH_DATE_KEY]
+DEFAULT_EPOCH_INTERVALS = CURRENT_EVM_NET_DATA[BASE_CT.EvmNetData.EE_EPOCH_INTERVALS_KEY]
+DEFAULT_EPOCH_INTERVAL_SECONDS = CURRENT_EVM_NET_DATA[BASE_CT.EvmNetData.EE_EPOCH_INTERVAL_SECONDS_KEY]
+SUPERVISOR_MIN_AVAIL_PRC = CURRENT_EVM_NET_DATA[BASE_CT.EvmNetData.EE_SUPERVISOR_MIN_AVAIL_PRC_KEY]
 ###################################################
 ###################################################
 ###################################################

@@ -155,6 +155,7 @@ ADMIN_PIPELINE = {
   
   "NET_CONFIG_MONITOR" : {
     "PROCESS_DELAY": 0,
+    "VERBOSE_NETCONFIG_LOGS" : False,
   },
   
   "CHAIN_STORE_BASE" : {

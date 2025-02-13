@@ -1,0 +1,65 @@
+{
+  "1": {
+   "node1_address": {
+    "VALUE": "int_agreed_median_value11",
+    "SIGNERS" : [
+      "signer1",
+      "signer2"
+      ]
+    },
+   "node2_address": {
+    "VALUE": "int_agreed_median_value12",
+    "SIGNERS" : [
+      "signer1",
+      "signer2"
+      ],
+
+    "epoch_hash": "str_hash_of_all_the_signatures"
+   }
+  },
+  "2": {
+   "node1_address": {
+    "VALUE": "int_agreed_median_value21",
+    "SIGNATURES": [
+     {
+      "VALUE": "int_agreed_median_value21",
+      "EE_SIGN": "signature1",
+      "EE_ETH_SENDER": "sender1",
+      "EE_ETH_SIGN": "str",
+      "EE_HASH": "str",
+      "EE_SENDER": "str"
+     },
+     {
+      "VALUE": "int_agreed_median_value21",
+      "EE_SIGN": "signature2",
+      "EE_ETH_SENDER": "sender2",
+      "EE_ETH_SIGN": "str",
+      "EE_HASH": "str",
+      "EE_SENDER": "str"
+     }
+    ]
+   },
+   "node2_address": {
+    "VALUE": "int_agreed_median_value22",
+    "SIGNATURES": [
+     {
+      "VALUE": "int_agreed_median_value22",
+      "EE_SIGN": "signature1",
+      "EE_ETH_SENDER": "sender1",
+      "EE_ETH_SIGN": "str",
+      "EE_HASH": "str",
+      "EE_SENDER": "str"
+     },
+     {
+      "VALUE": "int_agreed_median_value22",
+      "EE_SIGN": "signature2",
+      "EE_ETH_SENDER": "sender2",
+      "EE_ETH_SIGN": "str",
+      "EE_HASH": "str",
+      "EE_SENDER": "str"
+     }
+    ]
+   }
+  }
+ }
+ 

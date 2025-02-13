@@ -217,7 +217,8 @@ class LogReader():
 
     return
 
-  def get_next_characters(self, max_characters=-1, decode='utf-8'):
+  # TODO: maybe change decode_errors to 'replace' to have something appear in the logs.
+  def get_next_characters(self, max_characters=-1, decode='utf-8', decode_errors='ignore'):
     result = []
     
     if max_characters == -1:
@@ -253,9 +254,9 @@ class LogReader():
     if decode == False:
       return result
     if decode == True:
-      return result.decode('utf-8')
+      return result.decode('utf-8', errors=decode_errors)
     if len(decode) > 0:
-      return result.decode(decode)
+      return result.decode(decode, errors=decode_errors)
     return result
 
   def get_next_line(self):

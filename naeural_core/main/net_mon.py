@@ -1191,7 +1191,7 @@ class NetworkMonitor(DecentrAIObject):
         self.start_timer("network_save_status")
         self.log.save_pickle_to_data(
           data=self.__network_heartbeats, 
-          fn='db.pkl',
+          fn=NETMON_DB,
           subfolder_path='network_monitor'
         )
         # now we add epoch manager save

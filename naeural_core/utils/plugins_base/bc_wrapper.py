@@ -348,4 +348,39 @@ class BCWrapper:
         The EVM address of the node
     """
     return self.__bc.node_address_to_eth_address(node_address)
+
+
+  def eth_addr_to_internal_addr(self, eth_node_address):
+    return self.netmon.epoch_manager.eth_to_internal(eth_node_address)
   
+
+  def node_addr_to_eth_addr(self, internal_node_address):
+    return self.__bc.node_address_to_eth_address(internal_node_address)
+
+
+  def eth_addr_list_to_internal_addr_list(self, lst_eth):
+    return [self.eth_addr_to_internal_addr(eth) for eth in lst_eth]
+  
+  
+  def get_oracles(self, include_eth_addrs: bool = False):
+    """
+    Get the default (oracles) whitelist data for the current node.
+    
+    Returns
+    -------    
+    list, list : oracles, oracles_names
+    
+    """
+    wl, names, eth_oracles = [], [], []
+    try:
+      eth_oracles = self.__bc.web3_get_oracles()
+      for eth_addr in eth_oracles:
+        internal_addr = self.eth_addr_to_internal_addr(eth_addr)
+        wl.append(internal_addr)
+        alias = self.netmon.network_node_eeid(internal_addr)
+        names.append(alias)
+    except Exception as e:
+      self.P("Error getting whitelist data: {}".format(e), color='r')    
+    if include_eth_addrs:
+      return wl, names, eth_oracles  
+    return wl, names  

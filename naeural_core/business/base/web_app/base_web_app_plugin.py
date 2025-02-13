@@ -153,6 +153,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     return
 
   def __deallocate_port(self):
+    # TODO: both this and __allocate_port don t actually allocate/deallocate ports
+    #  They just mark them as so.
     port = self.port
 
     with self.managed_lock_resource('USED_PORTS'):

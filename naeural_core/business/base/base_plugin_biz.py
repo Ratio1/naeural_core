@@ -357,7 +357,7 @@ class BasePluginExecutor(
 
     self.__blockchain_manager = global_shmem[ct.BLOCKCHAIN_MANAGER]  # blockchain manager
 
-    self.__bc = BCWrapper(self.__blockchain_manager)  # blockchain wrapper (for encryption/decryption
+    self.__bc = BCWrapper(self.__blockchain_manager, owner=self)  # blockchain wrapper (for encryption/decryption
 
     self.__plugins_shmem = plugins_shmem  # plugins shared memory
 

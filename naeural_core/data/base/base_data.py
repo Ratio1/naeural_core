@@ -50,7 +50,7 @@ class BaseDataCapture(DecentrAIObject, _ConfigHandlerMixin):
     self.shmem = shmem
     self.__blockchain_manager = shmem[ct.BLOCKCHAIN_MANAGER]
     
-    self.bc = BCWrapper(self.__blockchain_manager) # blockchain wrapper (for encryption/decryption
+    self.bc = BCWrapper(self.__blockchain_manager, owner=self) # blockchain wrapper (for encryption/decryption
     
     self.shm_manager = None
     self.nr_connection_issues = 0

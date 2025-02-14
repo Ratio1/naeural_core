@@ -1,8 +1,15 @@
 from naeural_core.bc import DefaultBlockEngine
 class BCWrapper:
-  def __init__(self, blockchain_manager : DefaultBlockEngine):
+  def __init__(self, blockchain_manager : DefaultBlockEngine, owner):
     self.__bc : DefaultBlockEngine = blockchain_manager
+    self.__owner = owner
     return
+  
+  
+  def P(self, *args, **kwargs):
+    if self.__owner is None:
+      print(*args, **kwargs)
+    return self.__owner.P(*args, **kwargs)
   
   @property
   def address(self):
@@ -351,7 +358,7 @@ class BCWrapper:
 
 
   def eth_addr_to_internal_addr(self, eth_node_address):
-    return self.netmon.epoch_manager.eth_to_internal(eth_node_address)
+    return self.__owner.netmon.epoch_manager.eth_to_internal(eth_node_address)
   
 
   def node_addr_to_eth_addr(self, internal_node_address):
@@ -377,10 +384,35 @@ class BCWrapper:
       for eth_addr in eth_oracles:
         internal_addr = self.eth_addr_to_internal_addr(eth_addr)
         wl.append(internal_addr)
-        alias = self.netmon.network_node_eeid(internal_addr)
+        alias = self.__owner.netmon.network_node_eeid(internal_addr)
         names.append(alias)
     except Exception as e:
       self.P("Error getting whitelist data: {}".format(e), color='r')    
     if include_eth_addrs:
       return wl, names, eth_oracles  
     return wl, names  
+  
+  def is_node_licensed(self, node_address: str = None, node_address_eth: str = None):
+    """
+    Checks if a node is licensed
+
+    Parameters
+    ----------
+    node_address : str, optional
+        The address of the node, if not provided, the current node's address will be used
+        
+    node_address_eth : str, optional
+        The EVM address of the node to be used instead of node_address
+
+    Returns
+    -------
+    bool
+        True if the node is licensed, False otherwise
+    """
+    if node_address is None and node_address_eth is None:
+      # using the current node's eth address
+      node_address_eth = self.__bc.eth_address
+    elif node_address_eth is None and node_address is not None:
+      node_address_eth = self.node_address_to_eth_address(node_address)
+    is_licensed = self.__bc.web3_is_node_licensed(address=node_address_eth)
+    return is_licensed

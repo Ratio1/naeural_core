@@ -61,6 +61,11 @@ class _NgrokMixinPlugin(object):
     return
 
   def get_ngrok_tunnel_kwargs(self):
+    """
+    TODO:
+      - in the case of container in container we will need to add `addr` parameter to the
+        tunnel_kwargs as we might have a local network within the Edge Node.
+    """
     # Make the ngrok tunnel kwargs
     tunnel_kwargs = {}
     valid = True
@@ -81,16 +86,43 @@ class _NgrokMixinPlugin(object):
       self.report_missing_authtoken()
     tunnel_kwargs['authtoken'] = ng_token
     return tunnel_kwargs, valid
+  
+  
+  async def maybe_stop_ngrok(self):
+    try:
+      if self.ngrok_started:
+        self.P(f"Ngrok stopping...")
+        self.ngrok_listener.close()
+        self.ngrok_started = False
+        self.P(f"Ngrok stopped.")
+      # endif ngrok started
+    except Exception as exc:
+      self.P(f"Error stopping ngrok: {exc}", color='r')
+    return
 
   def maybe_start_ngrok(self):
+    """
+    
+    TODO: 
+      - if no edge/domain is specified, the api should generate a url and return it while
+        persisting the url in the instance local cache for future use. When the instance is 
+        restarted, the same url should be used.
+    """
     # Maybe make this asynchronous?
     if self.cfg_ngrok_use_api and not self.ngrok_started:
-      self.ngrok_started = True
       self.P(f"Ngrok starting for {self.unique_identification}...")
       tunnel_kwargs, valid = self.get_ngrok_tunnel_kwargs()
       if valid:
         self.ngrok_listener = ngrok.forward(**tunnel_kwargs)
-        self.P(f"Ngrok started at {self.app_url} for {self.unique_identification}.")
+        if self.app_url is not None:
+          self.P(f"Ngrok started on URL `{self.app_url}` ({self._signature}).")
+        else:
+          edge = tunnel_kwargs.get('labels')
+          domain = tunnel_kwargs.get('domain')
+          str_tunnel = f"edge `{edge}`" if edge is not None else f"domain `{domain}`"
+          self.P(f"Ngrok started on {str_tunnel} ({self._signature}).")
+        # endif app_url
+        self.ngrok_started = True
       # endif valid tunnel kwargs
     # endif ngrok api used and not started
     return

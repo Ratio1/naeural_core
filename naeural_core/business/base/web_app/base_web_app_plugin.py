@@ -779,6 +779,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     super(BaseWebAppPlugin, self).on_close()
     if self.ngrok_listener is not None:
       self.P(f"Closing Ngrok listener...")
+      # we do not need a new event loop as this is direcly handled by the
+      # asyncio.run() method
       asyncio.run(self.close_ngrok_listener())
     # endif ngrok listener opened
     return

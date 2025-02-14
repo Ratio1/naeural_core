@@ -766,20 +766,15 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     super(BaseWebAppPlugin, self)._on_close()
     return
 
-  async def close_ngrok_listener(self):
-    try:
-      await self.ngrok_listener.close()
-      self.P(f'Ngrok listener successfully closed.')
-    except Exception as exc:
-      self.P(f'Could not close Ngrok listener. Reason: {exc}')
-    return
 
   def on_close(self):
     # This method is called by super(BaseWebAppPlugin, self)._on_close()
     super(BaseWebAppPlugin, self).on_close()
     if self.ngrok_listener is not None:
       self.P(f"Closing Ngrok listener...")
-      asyncio.run(self.close_ngrok_listener())
+      # we do not need a new event loop as this is direcly handled by the
+      # asyncio.run() method
+      asyncio.run(self.maybe_stop_ngrok())
     # endif ngrok listener opened
     return
 

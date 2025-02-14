@@ -416,3 +416,14 @@ class BCWrapper:
       node_address_eth = self.node_address_to_eth_address(node_address)
     is_licensed = self.__bc.web3_is_node_licensed(address=node_address_eth)
     return is_licensed
+  
+  def get_evm_network(self):
+    """
+    Get the EVM network
+
+    Returns
+    -------
+    str
+        The EVM network
+    """
+    return self.__bc.evm_network

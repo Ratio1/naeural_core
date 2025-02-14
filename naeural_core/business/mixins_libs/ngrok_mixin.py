@@ -90,7 +90,7 @@ class _NgrokMixinPlugin(object):
   
   async def maybe_stop_ngrok(self):
     try:
-      if self.ngrok_started:
+      if self.ngrok_started and self.ngrok_listener is not None:
         self.P(f"Ngrok stopping...")
         self.ngrok_listener.close()
         self.ngrok_started = False
@@ -99,6 +99,7 @@ class _NgrokMixinPlugin(object):
     except Exception as exc:
       self.P(f"Error stopping ngrok: {exc}", color='r')
     return
+
 
   def maybe_start_ngrok(self):
     """

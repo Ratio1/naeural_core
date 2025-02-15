@@ -3,6 +3,8 @@ import platform
 import numpy as np
 import gc
 
+from time import time
+
 from naeural_core import constants as ct
 
 from collections import deque, defaultdict
@@ -45,6 +47,7 @@ class ApplicationMonitor(DecentrAIObject):
     self.__first_ram_alert_raised_time = 0
     self.__logged_hb_with_pipelines_status = False
     self.__logged_hb_with_active_plugins_status = False
+    self.__last_delivered_error_notifs = defaultdict(int)
     self._done_first_smi_error = False
     self.dct_curr_nr = defaultdict(lambda:0)
     self.__last_temperature_info = None
@@ -446,7 +449,20 @@ class ApplicationMonitor(DecentrAIObject):
     if isinstance(info, list):
       self._add_gpu_data(info)
     return info
-  
+
+  def maybe_send_error_notification(
+    self, error_type, msg, info, displayed=True, time_threshold=300
+  ):
+    last_send = self.__last_delivered_error_notifs[error_type]
+    if (time() - last_send) > time_threshold:
+      self.__last_delivered_error_notifs[error_type] = time()
+      self._create_notification(
+        notif=ct.STATUS_TYPE.STATUS_ABNORMAL_FUNCTIONING, 
+        msg=msg, 
+        info=info,
+        displayed=displayed,
+      )
+    return
   
   def add_local_history_and_save(self, **kwargs):
     # TODO: refactor this code to use constants
@@ -512,11 +528,12 @@ class ApplicationMonitor(DecentrAIObject):
       )
       if display:
         self.P(info, color='error')
-      self._create_notification(
-        notif=ct.STATUS_TYPE.STATUS_ABNORMAL_FUNCTIONING, 
-        msg="LOW DISK SPACE ON '{}'".format(self.owner.cfg_eeid), 
+        
+      self.maybe_send_error_notification(
+        error_type="disk",
+        msg="LOW DISK SPACE ON '{}'".format(self.owner.cfg_eeid),
         info=info,
-        displayed=display,
+        displayed=display,          
       )
     
     if avail_memory < self.owner.cfg_min_avail_mem_thr * self.log.total_memory:
@@ -527,9 +544,10 @@ class ApplicationMonitor(DecentrAIObject):
       )
       if display:
         self.P(info, color='error')
-      self._create_notification(
-        notif=ct.STATUS_TYPE.STATUS_ABNORMAL_FUNCTIONING, 
-        msg="LOW MEMORY ON '{}'".format(self.owner.cfg_eeid), 
+
+      self.maybe_send_error_notification(
+        error_type="memory",
+        msg="LOW MEMORY ON '{}'".format(self.owner.cfg_eeid),
         info=info,
         displayed=display,
       )

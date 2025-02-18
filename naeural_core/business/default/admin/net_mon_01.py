@@ -110,8 +110,11 @@ class NetMon01Plugin(
       )
     except:
       _send_current_network_each = 0
-    self.__send_current_network_each = _send_current_network_each        
+    self.__send_current_network_each = _send_current_network_each
     self.__last_current_network_time = 0
+    msg = f'Netmon initialised:'
+    msg += f'\n  {self.send_current_network_each=}'
+    msg += f'\n  {self.send_only_online=}'
     return
   
   @property
@@ -286,6 +289,7 @@ class NetMon01Plugin(
         send_current_network_each=self.send_current_network_each,
       )  
       self.__last_current_network_time = self.time()
+      self.P(f'Sent payload at {self.now_str()}. New last_current_network_time={self.time_to_str(self.__last_current_network_time)}')
     #endif should send 
 
     if self.cfg_log_full_info:

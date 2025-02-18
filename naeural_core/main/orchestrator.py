@@ -31,7 +31,7 @@ from naeural_core.main.main_loop_data_handler import MainLoopDataHandler
 from naeural_core.remote_file_system import FileSystemManager
 from naeural_core.bc import DefaultBlockEngine
 
-from naeural_client.ipfs import R1FSEngine
+from naeural_core.ipfs import R1FSEngine
 
 import json
 

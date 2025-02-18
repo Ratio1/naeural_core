@@ -201,7 +201,7 @@ class _BasePluginAPIMixin:
     self.__chain_state_initialized = True
     return
   
-  def chainstore_set(self, key, value, debug=False):
+  def chainstore_set(self, key, value, debug=False, readonly=False):
     result = False
     try:
       self.__maybe_wait_for_chain_state_init()
@@ -210,7 +210,7 @@ class _BasePluginAPIMixin:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")
         self.start_timer("chainstore_set")
-        result = func(key, value, debug=debug)
+        result = func(key, value, debug=debug, readonly=readonly)
         elapsed = self.end_timer("chainstore_set")        
         if debug:
           self.P(" ====> `chainstore_set` elapsed time: {:.6f}".format(elapsed), color="green")

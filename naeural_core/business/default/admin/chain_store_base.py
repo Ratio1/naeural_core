@@ -241,6 +241,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if owner is None:
       owner = self.get_instance_path()
     need_store = True
+    existing_owner = None
+    existing_value = None
     if key in self.__chain_storage:
       existing_value = self.__get_key_value(key)
       existing_owner = self.__get_key_owner(key)
@@ -250,7 +252,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         need_store = False
     if need_store:
       if debug:
-        self.P(f" === {where}Setting value for key {key}={value} by {owner}, is_remote={local_sync_storage_op}")
+        set_or_overwrite = "overwriting" if existing_owner not in [None, owner] else "setting"
+        self.P(f" === {where}{set_or_overwrite} {key}={value} by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
       self.__set_key_value(key, value, owner, local_sync_storage_op=local_sync_storage_op)
       if not local_sync_storage_op:      
         # now send set-value confirmation to all

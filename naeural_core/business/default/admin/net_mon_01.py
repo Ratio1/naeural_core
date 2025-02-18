@@ -115,6 +115,7 @@ class NetMon01Plugin(
     msg = f'Netmon initialised:'
     msg += f'\n  {self.send_current_network_each=}'
     msg += f'\n  {self.send_only_online=}'
+    self.P(msg)
     return
   
   @property

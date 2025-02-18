@@ -53,6 +53,8 @@ CONST_ADMIN_PIPELINE_NAME = 'admin_pipeline'
 
 BLOCKCHAIN_MANAGER = 'BLOCKCHAIN_MANAGER'
 
+R1FS_ENGINE = 'R1FS_ENGINE'
+
 ### IMPORTANT:
 ###  These are the plugin signatures that are not filtered by the admin-pipeline
 ###  payload filter. Only these payloads will be sent to the plugins

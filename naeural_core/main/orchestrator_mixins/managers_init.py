@@ -12,6 +12,8 @@ from naeural_core.heavy_ops import HeavyOpsManager
 from naeural_core.remote_file_system import FileSystemManager
 from naeural_core.bc import DefaultBlockEngine
 
+from naeural_core.ipfs import R1FSEngine
+
 class _ManagersInitMixin(object):
   def __init__(self):
     super(_ManagersInitMixin, self).__init__()
@@ -164,6 +166,19 @@ class _ManagersInitMixin(object):
 
     self._app_shmem[ct.BLOCKCHAIN_MANAGER] = self._blockchain_manager
     return
+  
+  
+  def _initialize_r1fs(self):
+    try:
+      self._r1fs_engine = R1FSEngine(
+        logger=self.log,
+      )
+    except:
+      raise ValueError("Failure in r1fs setup:\n{}".format(traceback.format_exc()))
+    # end try to initialize R1FS
+    self._app_shmem[ct.R1FS_ENGINE] = self._r1fs_engine
+    return
+  
 
   @property
   def config_manager(self):

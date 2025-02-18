@@ -47,6 +47,8 @@ from naeural_core.business.test_framework.scoring_manager import ScoringManager
 
 from naeural_core.utils.plugins_base.bc_wrapper import BCWrapper
 
+from naeural_core.ipfs import R1FSEngine
+
 _CONFIG = {
 
   'INSTANCE_COMMAND': {},  # one time command-trigger
@@ -356,6 +358,8 @@ class BasePluginExecutor(
     self.__global_shmem = global_shmem  # global access to various engines - not allowed in plugin code
 
     self.__blockchain_manager = global_shmem[ct.BLOCKCHAIN_MANAGER]  # blockchain manager
+    
+    self.__r1fs : R1FSEngine = global_shmem[ct.R1FS_ENGINE]  # R1FS (Private IPFS)
 
     self.__bc = BCWrapper(self.__blockchain_manager, owner=self)  # blockchain wrapper (for encryption/decryption
 
@@ -474,6 +478,10 @@ class BasePluginExecutor(
       
     """
     return self.__bc
+  
+  @property
+  def r1fs(self) -> R1FSEngine:
+    return self.__r1fs
 
   @property
   def ee_ver(self):

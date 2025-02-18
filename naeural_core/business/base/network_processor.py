@@ -76,7 +76,7 @@ class NetworkProcessorPlugin(BaseClass):
 
 
   def get_instance_path(self):
-    return [self.ee_id, self._stream_id, self._signature, self.cfg_instance_id]
+    return [self.ee_addr, self._stream_id, self._signature, self.cfg_instance_id]
   
   
   def __maybe_process_received(self):

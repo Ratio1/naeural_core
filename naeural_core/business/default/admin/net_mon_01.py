@@ -102,7 +102,7 @@ class NetMon01Plugin(
     # R1: EE_NETMON_SEND_CURRENT_NETWORK_EACH  = 50-70
     # other: 0
     try:
-      _send_current_network_each = int(self.os.environ.get(
+      _send_current_network_each = int(self.os_environ.get(
         self.const.EE_NETMON_SEND_CURRENT_NETWORK_EACH_ENV_KEY, 0
       ))
       _send_current_network_each = (
@@ -290,7 +290,6 @@ class NetMon01Plugin(
         send_current_network_each=self.send_current_network_each,
       )  
       self.__last_current_network_time = self.time()
-      self.P(f'Sent payload at {self.now_str()}. New last_current_network_time={self.time_to_str(self.__last_current_network_time)}')
     #endif should send 
 
     if self.cfg_log_full_info:

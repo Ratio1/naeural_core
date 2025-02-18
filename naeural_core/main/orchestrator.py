@@ -31,6 +31,8 @@ from naeural_core.main.main_loop_data_handler import MainLoopDataHandler
 from naeural_core.remote_file_system import FileSystemManager
 from naeural_core.bc import DefaultBlockEngine
 
+from naeural_client.ipfs import R1FSEngine
+
 import json
 
 
@@ -100,6 +102,8 @@ class Orchestrator(DecentrAIObject,
     self._heavy_ops_manager : HeavyOpsManager           = None
     self._file_system_manager : FileSystemManager       = None
     self._blockchain_manager : DefaultBlockEngine       = None
+    
+    self._r1fs_engine : R1FSEngine                      = None
 
     self._data_handler : MainLoopDataHandler = None
 
@@ -338,12 +342,14 @@ class Orchestrator(DecentrAIObject,
     self._initialize_config_manager()
 
     # the other managers can be initialized in any order
+    self._initialize_r1fs()
     self._initialize_file_system_manager()
     self._initialize_heavy_ops_manager()
     self._initialize_comm_manager()
     self._initialize_capture_manager()
     self._initialize_serving_manager()
     self._initialize_business_manager()
+    
     
     ## DEBUG SECTION BELOW
     # self._app_monitor.get_gpu_info()
@@ -492,6 +498,10 @@ class Orchestrator(DecentrAIObject,
       lst_whitelist = self._blockchain_manager.whitelist
       lst_whitelist = [self._blockchain_manager._add_prefix(addr) for addr in lst_whitelist]
     return lst_whitelist
+  
+  @property
+  def r1fs(self):
+    return self._r1fs_engine
   
   
   @property

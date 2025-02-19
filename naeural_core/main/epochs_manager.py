@@ -80,6 +80,8 @@ _FULL_DATA_TEMPLATE_EXTRA = {
   SYNC_SAVES_EP : [],
   SYNC_RESTARTS : [],
   SYNC_RELOADS : [],
+  # TODO: should this be in FULL_DATA_MANDATORY_FIELDS?
+  SYNC_SIGNATURES : defaultdict(dict),
   
   ct.EE_GENESIS_EPOCH_DATE_KEY : None,
   ct.BASE_CT.EE_EPOCH_INTERVALS_KEY : None,
@@ -126,12 +128,9 @@ _NODE_TEMPLATE = {
   EPCT.ALERTS         : 0,
   EPCT.LAST_ALERT_TS  : 0,
   EPCT.FIRST_SEEN     : None,    
-  EPCT.LAST_SEEN      : None,  
-
-  EPCT.SIGNATURES     : defaultdict(list),
+  EPCT.LAST_SEEN      : None,
   
   EPCT.LAST_EPOCH_RESTARTS : [], # this will not function without a save-reload mechanism
-  
   
   EPCT.CURRENT_EPOCH  : {
     EPCT.ID               : None,
@@ -426,10 +425,23 @@ class EpochsManager(Singleton):
               color='r', boxed=True,
             )
           else:
-            # loaded data is full data 
+            # loaded data is full data
             self.__full_data = _full_data
             self.__data = _full_data[SYNC_NODES]
         # end if using new format
+
+        # This is for the third version of the format and is done in this way
+        # for maintaining backward compatibility
+        # The only difference between second and third format is the following:
+        # - the second format had a list of signatures for each availability value from every epoch of every node
+        # - the third format has a dictionary of signatures for each epoch aggregated availabilities, thus the data
+        # is no longer in the individual node data but in the full data
+        self.__full_data[SYNC_SIGNATURES] = self.__full_data.get(SYNC_SIGNATURES, defaultdict(dict))
+        for node_address, node_data in self.__data:
+          if EPCT.SIGNATURES in node_data:
+            node_data.pop(EPCT.SIGNATURES)
+          # endif node_data contains key from old format
+        # endfor node data
         result = True
       else:
         self.P("Error loading epochs status.", color='r')
@@ -460,10 +472,10 @@ class EpochsManager(Singleton):
     if SYNC_NODES not in self.__full_data:
       self.__full_data[SYNC_NODES] = self.__data
           
-    template2 = deepcopy(_FULL_DATA_TEMPLATE_EXTRA) # here we load the epoch specs
-    for full_date_key in template2:
-      if full_date_key not in self.__full_data:
-        self.__full_data[full_date_key] = template2[full_date_key]
+    template2 = deepcopy(_FULL_DATA_TEMPLATE_EXTRA)  # here we load the epoch specs
+    for full_data_key in template2:
+      if full_data_key not in self.__full_data:
+        self.__full_data[full_data_key] = template2[full_data_key]
     return
 
   def get_epoch_id(self, date : any):
@@ -1086,8 +1098,6 @@ class EpochsManager(Singleton):
       dct_result['manager']['epochs'] = self.get_node_epochs(self.owner.node_addr)
     for extra_key in _FULL_DATA_INFO_KEYS:
       dct_result['manager'][extra_key.lower()] = self.__full_data.get(extra_key, 'N/A')
-    if (time() - self.__last_state_log) > 600:
-      display = True
     if display:
       self.P("Oracle state:\n{}".format(json.dumps(dct_result, indent=2)))
       self.__last_state_log = time()
@@ -1255,7 +1265,7 @@ class EpochsManager(Singleton):
     return self.__full_data.get(SYNC_LAST_EPOCH, INITIAL_SYNC_EPOCH)
 
 
-  def get_epoch_availability(self, epoch):
+  def get_epoch_availability(self, epoch, return_signatures=False):
     """
     Returns the availability table for a given epoch.
 
@@ -1264,10 +1274,16 @@ class EpochsManager(Singleton):
     epoch : int
       The epoch id.
 
+    return_signatures: bool
+      Whether to return the signatures alongside the availability table or not
+
     Returns
     -------
-    dict
+    (availability_table, signatures) if return_signatures else availability_table, where
+    availability_table: dict
       The availability table for the specified epoch.
+    signatures: dict
+      The signatures recorded for the current epoch
     """
 
     availability_table = {}
@@ -1275,15 +1291,16 @@ class EpochsManager(Singleton):
     for node_addr in self.__data:
       epochs: defaultdict = self.get_node_epochs(node_addr, as_list=False)
       availability_table[node_addr] = {
-        SYNC_VALUE : epochs.get(epoch, 0),
-        SYNC_SIGNATURES : self.__data[node_addr][EPCT.SIGNATURES].get(epoch, [])
+        SYNC_VALUE: epochs.get(epoch, 0),
       }
     # end for each node
+    # self.__data[EPCT.SIGNATURES] is a defaultdict(dict), thus there is no need for .get() here
+    epoch_signatures = self.__full_data[SYNC_SIGNATURES][epoch]
 
-    return availability_table
+    return (availability_table, epoch_signatures) if return_signatures else availability_table
 
 
-  def update_epoch_availability(self, epoch, availability_table, debug=False):
+  def update_epoch_availability(self, epoch, availability_table, agreement_signatures, debug=False):
     """
     Updates the epoch availability for a given epoch.
 
@@ -1299,6 +1316,12 @@ class EpochsManager(Singleton):
 
     availability_table : dict
       The availability table.
+
+    agreement_signatures : dict
+      The agreement signatures.
+
+    debug : bool
+      If True, the debug messages are displayed.
     """
     success = True
     last_sync_epoch = self.get_last_sync_epoch()
@@ -1316,9 +1339,9 @@ class EpochsManager(Singleton):
       if debug:
         self.P(f'DEBUG self.__data before update: {self.__data[node_addr]}')
       self.__data[node_addr][EPCT.EPOCHS][epoch] = availability_table[node_addr][SYNC_VALUE]
-      self.__data[node_addr][EPCT.SIGNATURES][epoch] = availability_table[node_addr][SYNC_SIGNATURES]
       if debug:
         self.P(f'DEBUG self.__data after update: {self.__data[node_addr]}')
+    self.__full_data[SYNC_SIGNATURES][epoch] = agreement_signatures
     self.__full_data[SYNC_LAST_EPOCH] = epoch
 
     self.P(f"Epoch {epoch} availability updated successfully.")

@@ -110,6 +110,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   
   def __maybe_refresh_chain_peers(self):
+    """
+    This method refreshes the chain peers list from the network using the whitelist generated
+    by the blockchain engine. This means it will allow broadcasting the local keys to all the
+    oracle nodes in the network as well as the manually added nodes. This pretty much covers 
+    the "private" part of the ChainStore.
+    
+    However the chain storage should be also accessible to all the nodes in the network so that 
+    they can ALL the values stored in the chain storage publicly
+    
+    """
     if (self.time() - self.__last_chain_peers_refresh) > self.cfg_chain_peers_refresh_interval:
       _chain_peers = self.bc.get_whitelist(with_prefix=True)
       # now check and preserve only online peers

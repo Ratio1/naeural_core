@@ -279,6 +279,17 @@ class _BasePluginAPIMixin:
     return value
   
   
+  def chainstore_hget(self, hkey, key, token=None, debug=False):
+    """    
+    This is a naive implementation of a hash get operation in the chain storage.
+    It uses a simple string composition to create a composed key.
+
+    """
+    composed_key = "{}##_##{}".format(hkey, key)
+    return self.chainstore_get(composed_key, token=token, debug=debug)
+
+  
+  
   # # @property
   # # This CANNOT be a property, as it can be a blocking operation.
   # def _chainstorage(self): # TODO: hide/move/protect this

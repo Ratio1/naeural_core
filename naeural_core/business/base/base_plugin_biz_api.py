@@ -190,6 +190,9 @@ class _BasePluginAPIMixin:
   ### Chain State
   ### 
   
+  def __chainstorage_memory(self):
+    return self.plugins_shmem
+  
   def __maybe_wait_for_chain_state_init(self):
     # TODO: raise exception if not found after a while
 
@@ -220,10 +223,11 @@ class _BasePluginAPIMixin:
       Token, by default None
       
     """
+    memory = self.__chainstorage_memory()
     result = False
     try:
       self.__maybe_wait_for_chain_state_init()
-      func = self.plugins_shmem.get('__chain_storage_set')
+      func = memory.get('__chain_storage_set')
       if func is not None:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")
@@ -252,20 +256,21 @@ class _BasePluginAPIMixin:
     token : any, optional
       Token, by default None
     """
+    memory = self.__chainstorage_memory()
     self.__maybe_wait_for_chain_state_init()
     value = None
     msg = ""
     try:
       start_search = self.time()
       found = True
-      while self.plugins_shmem.get('__chain_storage_get') is None:
+      while memory.get('__chain_storage_get') is None:
         self.sleep(0.1)
         if self.time() - start_search > 10:
           msg = "Error: chain storage get function not found after 10 seconds"
           self.P(msg, color="red")
           found = False
           break
-      func = self.plugins_shmem.get('__chain_storage_get')
+      func = memory.get('__chain_storage_get')
       if func is not None:
         value = func(key, token=token, debug=debug)
         if debug:
@@ -277,18 +282,64 @@ class _BasePluginAPIMixin:
       msg = "Error in chainstore_get: {}".format(ex)
       self.P("Error in chainstore_get: {}".format(ex), color="red")
     return value
+
   
+  def __hset_index(self, hkey):
+    hkey_hash = self.get_hash(hkey, algorithm='sha256', length=10)
+    return f"hs:{hkey_hash}:"
+
+  
+  def __hset_key(self, hkey, key):
+    b64key = self.str_to_b64(key, url_safe=True)
+    return self.__hset_index(hkey) + b64key
+
   
   def chainstore_hget(self, hkey, key, token=None, debug=False):
     """    
-    This is a naive implementation of a hash get operation in the chain storage.
-    It uses a simple string composition to create a composed key.
-
+    This is a basic implementation of a hash get operation in the chain storage.
+    It uses a hash-based string composition to create a composed key.
     """
-    composed_key = "{}##_##{}".format(hkey, key)
+    composed_key = self.__hset_key(hkey, key)
     return self.chainstore_get(composed_key, token=token, debug=debug)
+  
+
+  def chainstore_hset(self, hkey, key, value, readonly=False, token=None, debug=False):
+    """
+    This is a basic implementation of a hash set operation in the chain storage.
+    It uses a hash-based string composition to create a composed key.
+    """
+    composed_key = self.__hset_key(hkey, key)
+    return self.chainstore_set(composed_key, value, readonly=readonly, token=token, debug=debug)
 
   
+  def chainstore_hlist(self, hkey : str, token=None, debug=False):
+    index = self.__hset_index(hkey)
+    memory = self.__chainstorage_memory()
+    self.__maybe_wait_for_chain_state_init()
+    chain_storage = memory.get('__chain_storage')
+    result = []
+    for key in chain_storage:
+      if key.startswith(index):
+        b64field = key[len(index):]
+        field = self.base64_to_str(b64field, url_safe=True)
+        result.append(field)
+      #end if 
+    #end for
+    return result
+
+  
+  def chainstore_hkeys(self, hkey : str, token=None, debug=False):
+    return self.chainstore_hlist(hkey, token=token, debug=debug)
+
+
+  def chainstore_hgetall(self, hkey : str, token=None, debug=False):
+    keys = self.chainstore_hlist(hkey, token=token, debug=debug)
+    result = {}
+    for key in keys:
+      value = self.chainstore_hget(hkey, key, token=token, debug=debug)
+      result[key] = value
+    return result
+    
   
   # # @property
   # # This CANNOT be a property, as it can be a blocking operation.

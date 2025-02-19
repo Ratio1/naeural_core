@@ -86,16 +86,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.P(f" === Chain storage could not be loaded: {e}")
       self.__chain_storage = {}
       
+    memory = self.plugins_shmem
+      
 
     ## DEBUG ONLY:
-    if self.CS_STORAGE_MEM in self.plugins_shmem:
+    if self.CS_STORAGE_MEM in memory:
       self.P(" === Chain storage already exists", color="r")
-      self.__chain_storage = self.plugins_shmem[self.CS_STORAGE_MEM]
+      self.__chain_storage = memory[self.CS_STORAGE_MEM]
     ## END DEBUG ONLY
     
-    self.plugins_shmem[self.CS_STORAGE_MEM] = self.__chain_storage
-    self.plugins_shmem[self.CS_GETTER] = self._get_value
-    self.plugins_shmem[self.CS_SETTER] = self._set_value
+    memory[self.CS_STORAGE_MEM] = self.__chain_storage
+    memory[self.CS_GETTER] = self._get_value
+    memory[self.CS_SETTER] = self._set_value
     
     self.__last_chain_peers_refresh = 0
     self.__chain_peers = []

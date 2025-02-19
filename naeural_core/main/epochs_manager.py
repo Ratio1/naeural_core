@@ -437,7 +437,7 @@ class EpochsManager(Singleton):
         # - the third format has a dictionary of signatures for each epoch aggregated availabilities, thus the data
         # is no longer in the individual node data but in the full data
         self.__full_data[SYNC_SIGNATURES] = self.__full_data.get(SYNC_SIGNATURES, defaultdict(dict))
-        for node_address, node_data in self.__data:
+        for node_address, node_data in self.__data.items():
           if EPCT.SIGNATURES in node_data:
             node_data.pop(EPCT.SIGNATURES)
           # endif node_data contains key from old format

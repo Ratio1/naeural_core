@@ -1788,7 +1788,7 @@ class Orchestrator(DecentrAIObject,
         dct_servers_outputs=dct_servers_outputs,
         dct_business_inputs=dct_business_inputs,
         payloads=payloads,
-        dct_config_streams=self._config_manager.dct_config_streams
+        dct_config_streams=self._config_manager.dct_config_streams if self._config_manager is not None else None,
       )      
     finally:
       self.close_main_loop()

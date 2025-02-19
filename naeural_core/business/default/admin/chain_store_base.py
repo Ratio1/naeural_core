@@ -63,6 +63,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_VALUE = "value"
   CS_OWNER = "owner"
   CS_READONLY = "readonly"
+  CS_TOKEN = "token"
   CS_STORAGE_MEM = "__chain_storage" # shared memory key
   CS_GETTER = "__chain_storage_get"
   CS_SETTER = "__chain_storage_set"
@@ -149,8 +150,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return self.__chain_storage.get(key, {}).get(self.CS_READONLY, False)
 
 
+  def __get_key_token(self, key):
+    return self.__chain_storage.get(key, {}).get(self.CS_TOKEN, None)
+
+
   def __get_key_confirmations(self, key):
     return self.__chain_storage.get(key, {}).get(self.CS_CONFIRMATIONS, 0)
+
   
   def __get_key_min_confirmations(self, key):
     return self.__chain_storage.get(key, {}).get(self.CS_MIN_CONFIRMATIONS, 0)
@@ -171,7 +177,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
 
 
-  def __set_key_value(self, key, value, owner, local_sync_storage_op=False, readonly=False):
+  def __set_key_value(self, key, value, owner,  readonly=False, token=None, local_sync_storage_op=False):
     """
     This method is called to set a key-value pair in the chain storage.
     
@@ -186,6 +192,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       
     owner : str
       The owner of the key-value pair
+      
+    readonly : bool
+      If True the key-value pair will be readonly and cannot be overwritten by other owners
+      
+    token: any
+      A token to be used for the set operation. If the token is not None, any read/write operations
+      will have to have the same token.
       
     local_sync_storage_op : bool
       If `True` will only set the local kv pair without broadcasting to the network. 
@@ -202,6 +215,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.CS_VALUE     : value,
       self.CS_OWNER     : owner,
       self.CS_READONLY  : readonly,
+      self.CS_TOKEN     : token,
     }    
     self.__reset_confirmations(key)
     if local_sync_storage_op:
@@ -211,7 +225,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
 
 
-  def _set_value(self, key, value, owner=None, debug=False, local_sync_storage_op=False, readonly=False):
+  def _set_value(
+    self, 
+    key, 
+    value, 
+    owner=None, 
+    readonly=False,
+    token=None,
+    local_sync_storage_op=False, 
+    debug=False, 
+  ):
     """ 
     This method is called to set a value in the chain storage.
     If called locally will push a broadcast request to the network, 
@@ -229,11 +252,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     owner : str 
       The owner of the key-value pair
       
-    debug : bool
-      If True will print debug messages
+    readonly : bool
+      If True the key-value pair will be readonly and cannot be overwritten by other owners
       
+    token: any
+      A token to be used for the set operation. If the token is not None, any read/write operations 
+      will have to have the same token.
+            
     local_sync_storage_op : bool
       If True will only set the local kv pair without broadcasting to the network
+
+    debug : bool
+      If True will print debug messages
       
       
     Returns:
@@ -254,13 +284,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       existing_value = self.__get_key_value(key)
       existing_owner = self.__get_key_owner(key)
       is_readonly = self.__get_key_readonly(key)
-      if existing_value == value:
+      existing_token = self.__get_key_token(key)
+      if token != existing_token:
         if debug:
-          self.P(f" === Key {key} already stored by {existing_owner} has the same value")
+          self.P(f" === Key {key} has a different token {existing_token} from {existing_owner} than the one provided {token} from {owner}", color='r')
+        need_store = False
+      elif existing_value == value:
+        if debug:
+          self.P(f" === Key {key} stored by {existing_owner} has the same value")
         need_store = False
       elif is_readonly and existing_owner != owner:
         if debug:
-          self.P(f" === Key {key} is readonly by {existing_owner} and cannot be set by {owner}")
+          self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')
         need_store = False
     # end if key in chain storage
     if need_store:
@@ -270,7 +305,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.__set_key_value(
         key=key, value=value, owner=owner, 
         local_sync_storage_op=local_sync_storage_op, 
-        readonly=readonly
+        readonly=readonly, token=token,
       )
       if not local_sync_storage_op:      
         # now send set-value confirmation to all
@@ -279,6 +314,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             self.CS_KEY       : key,        
             self.CS_VALUE     : value,   
             self.CS_OWNER     : owner,
+            self.CS_TOKEN     : token,
             self.CS_READONLY  : readonly, # if the key is readonly, it will not be overwritten by other owners
         }
         self.__ops.append(op)
@@ -328,16 +364,25 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return need_store
 
 
-  def _get_value(self, key, get_owner=False, debug=False):
+  def _get_value(self, key, token=None, get_owner=False, debug=False):
     """ This method is called to get a value from the chain storage """
     debug = debug or self.cfg_chain_store_debug
     if debug:
       self.P(f" === Getting value for key {key}")
-    value = self.__get_key_value(key)
+
+    existing_token = self.__get_key_token(key)
+    result_value, result_owner = None, None
+    if token != existing_token:
+      if debug:
+        self.P(f" === Key {key} has a different token {existing_token} than the one provided {token}", color='r')
+    else:
+      result_value = self.__get_key_value(key)
+      if get_owner:
+        result_owner = self.__get_key_owner(key)
+    # end if token
     if get_owner:
-      owner = self.__get_key_owner(key)
-      return value, owner
-    return value
+      return result_value, result_owner
+    return result_value
   
   ### END setter-getter methods
 
@@ -367,10 +412,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     value = data.get(self.CS_VALUE , None)
     owner = data.get(self.CS_OWNER, None)
     readonly = data.get(self.CS_READONLY, False) # if the key is readonly local node consumers cannot overwrite it
+    token = data.get(self.CS_TOKEN, None)
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
     result = self._set_value(
-      key, value, owner=owner, local_sync_storage_op=True, readonly=readonly
+      key, value, owner=owner, 
+      token=token, readonly=readonly,
+      local_sync_storage_op=True,
     )
     if result:
       # now send confirmation of the storage execution

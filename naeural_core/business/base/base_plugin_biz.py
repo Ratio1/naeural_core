@@ -504,7 +504,7 @@ class BasePluginExecutor(
     return self.__signature
 
   @property
-  def global_shmem(self):
+  def global_shmem(self): #TODO: maybe remove this property
     return self.__global_shmem
   
   @property
@@ -850,6 +850,15 @@ class BasePluginExecutor(
 
   @property
   def unique_identification(self):
+    """
+    This property returns a tuple with the following elements:
+      - stream_id
+      - signature
+      - cfg
+    
+    This tuple is used to uniquely identify the plugin instance in the current node however will
+    not be unique in the network as other nodes may have the same plugin instance.
+    """
     return self._stream_id, self._signature, self.cfg_instance_id
 
   @property
@@ -862,6 +871,18 @@ class BasePluginExecutor(
   @property
   def str_unique_identification(self):
     return str(self.unique_identification)
+  
+  
+  @property 
+  def full_id(self):
+    """
+    This property returns the full id of the plugin instance in the following format:
+      <node_id>__<stream_id>__<signature>__<instance_id>
+    
+    This literaly allows the plugin to be uniquely identified in the network.
+    """
+    str_id = f"{self.e2_addr}__{self._stream_id}__{self._signature}__{self.cfg_instance_id}"
+    return str_id
 
   # set and get inputs
   @property

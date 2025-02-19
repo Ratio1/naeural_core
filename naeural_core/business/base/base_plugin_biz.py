@@ -852,12 +852,13 @@ class BasePluginExecutor(
   def unique_identification(self):
     """
     This property returns a tuple with the following elements:
-      - stream_id
-      - signature
-      - cfg
+      - stream_id (id of the pipeline)
+      - signature (signature of the plugin)
+      - instance_id ()
     
     This tuple is used to uniquely identify the plugin instance in the current node however will
-    not be unique in the network as other nodes may have the same plugin instance.
+    not be unique in the network as other nodes may have the same plugin instance on a identical 
+    pipeline
     """
     return self._stream_id, self._signature, self.cfg_instance_id
 

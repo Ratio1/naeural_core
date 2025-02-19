@@ -15,6 +15,8 @@ import re
 import base64
 import yaml
 import zlib
+import hashlib
+
 from subprocess import Popen
 
 from naeural_core.utils.thread_raise import ctype_async_raise
@@ -1438,7 +1440,7 @@ class _UtilsBaseMixin(
     return self.log.base64_to_np_image(b64)
 
   
-  def base64_to_str(self, b64, decompress=False):
+  def base64_to_str(self, b64, decompress=False, url_safe=False):
     """Transforms a base64 encoded string into a normal string
 
     Parameters
@@ -1454,7 +1456,11 @@ class _UtilsBaseMixin(
     str: the decoded string
     """
     b_encoded = b64.encode('utf-8')
-    b_text = base64.b64decode(b_encoded)
+    if url_safe:
+      b_encoded = base64.urlsafe_b64decode(b_encoded)
+    else:
+      b_text = base64.b64decode(b_encoded)
+      
     if decompress:
       b_text = zlib.decompress(b_text)
     str_text = b_text.decode('utf-8')
@@ -1785,7 +1791,7 @@ class _UtilsBaseMixin(
   
   
 
-  def string_to_base64(self, txt, compress=False):
+  def string_to_base64(self, txt, compress=False, url_safe=False):
     """Transforms a string into a base64 encoded string
 
     Parameters
@@ -1805,9 +1811,19 @@ class _UtilsBaseMixin(
       b_code = zlib.compress(b_text, level=9)
     else:
       b_code = b_text
-    b_encoded = base64.b64encode(b_code)
+    if url_safe:
+      b_encoded = base64.urlsafe_b64encode(b_code)
+    else:
+      b_encoded = base64.b64encode(b_code)
     str_encoded = b_encoded.decode('utf-8')
     return str_encoded
+  
+  
+  def str_to_base64(self, txt, compress=False, url_safe=False):
+    """
+    Alias for `string_to_base64`
+    """
+    return self.string_to_base64(txt, compress=compress, url_safe=url_safe)
   
   
   def dict_in_dict(self, dct1 : dict, dct2 : dict):
@@ -1925,6 +1941,46 @@ class _UtilsBaseMixin(
         None if the payload was encrypted but not addressed to us.
     """
     return self.receive_and_decrypt_payload(data=data, verbose=verbose)
+  
+  
+  def get_hash(self, str_data: str, length=None, algorithm='md5'):
+    """
+    This method returns the hash of a given string.
+    
+    Parameters
+    ----------
+    str_data : str
+        The string to be hashed.
+    
+    length : int, optional
+        The length of the hash. The default is None.
+        
+    algorithm : str, optional
+        The algorithm to be used. The default is 'md5'.
+        
+    Returns
+    -------
+    
+    str
+        The hash of the string.
+        
+    Example
+    -------
+    
+    ```
+    hash = plugin.get_hash('test', length=8, algorithm='md5')
+    ```
+    
+    
+    """
+    assert algorithm in ['md5', 'sha256'], f"Invalid algorithm: {algorithm}"
+    bdata = bytes(str_data, 'utf-8')
+    if algorithm == 'md5':
+      h = hashlib.md5(bdata)
+    elif algorithm == 'sha256':
+      h = hashlib.sha256(bdata)
+    result = h.hexdigest()[:length] if length is not None else h.hexdigest()
+    return result
 
 
 # endclass _UtilsBaseMixin

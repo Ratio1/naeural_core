@@ -86,16 +86,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.P(f" === Chain storage could not be loaded: {e}")
       self.__chain_storage = {}
       
+    memory = self.plugins_shmem
+      
 
     ## DEBUG ONLY:
-    if self.CS_STORAGE_MEM in self.plugins_shmem:
+    if self.CS_STORAGE_MEM in memory:
       self.P(" === Chain storage already exists", color="r")
-      self.__chain_storage = self.plugins_shmem[self.CS_STORAGE_MEM]
+      self.__chain_storage = memory[self.CS_STORAGE_MEM]
     ## END DEBUG ONLY
     
-    self.plugins_shmem[self.CS_STORAGE_MEM] = self.__chain_storage
-    self.plugins_shmem[self.CS_GETTER] = self._get_value
-    self.plugins_shmem[self.CS_SETTER] = self._set_value
+    memory[self.CS_STORAGE_MEM] = self.__chain_storage
+    memory[self.CS_GETTER] = self._get_value
+    memory[self.CS_SETTER] = self._set_value
     
     self.__last_chain_peers_refresh = 0
     self.__chain_peers = []
@@ -110,6 +112,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   
   def __maybe_refresh_chain_peers(self):
+    """
+    This method refreshes the chain peers list from the network using the whitelist generated
+    by the blockchain engine. This means it will allow broadcasting the local keys to all the
+    oracle nodes in the network as well as the manually added nodes. This pretty much covers 
+    the "private" part of the ChainStore.
+    
+    However the chain storage should be also accessible to all the nodes in the network so that 
+    they can ALL the values stored in the chain storage publicly
+    
+    """
     if (self.time() - self.__last_chain_peers_refresh) > self.cfg_chain_peers_refresh_interval:
       _chain_peers = self.bc.get_whitelist(with_prefix=True)
       # now check and preserve only online peers

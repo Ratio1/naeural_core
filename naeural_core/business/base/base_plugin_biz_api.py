@@ -201,7 +201,25 @@ class _BasePluginAPIMixin:
     self.__chain_state_initialized = True
     return
   
-  def chainstore_set(self, key, value, debug=False):
+  def chainstore_set(self, key, value, readonly=False, token=None, debug=False):
+    """
+    Set data in the R1 Chain Storage
+    
+    Parameters
+    ----------
+    key : str
+      Key
+      
+    value : any
+      Value
+      
+    readonly : bool, optional
+      Read-only flag, by default False
+      
+    token : any, optional
+      Token, by default None
+      
+    """
     result = False
     try:
       self.__maybe_wait_for_chain_state_init()
@@ -210,7 +228,7 @@ class _BasePluginAPIMixin:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")
         self.start_timer("chainstore_set")
-        result = func(key, value, debug=debug)
+        result = func(key, value, readonly=readonly, token=token, debug=debug)
         elapsed = self.end_timer("chainstore_set")        
         if debug:
           self.P(" ====> `chainstore_set` elapsed time: {:.6f}".format(elapsed), color="green")
@@ -222,7 +240,18 @@ class _BasePluginAPIMixin:
     return result
   
   
-  def chainstore_get(self, key, debug=False):
+  def chainstore_get(self, key, token=None, debug=False):
+    """
+    Get data from the R1 Chain Storage
+    
+    Parameters
+    ----------
+    key : str
+      Key
+      
+    token : any, optional
+      Token, by default None
+    """
     self.__maybe_wait_for_chain_state_init()
     value = None
     msg = ""
@@ -238,7 +267,7 @@ class _BasePluginAPIMixin:
           break
       func = self.plugins_shmem.get('__chain_storage_get')
       if func is not None:
-        value = func(key, debug=debug)
+        value = func(key, token=token, debug=debug)
         if debug:
           self.P("Getting data: {} -> {}".format(key, value), color="green")
       else:

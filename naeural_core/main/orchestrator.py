@@ -298,7 +298,9 @@ class Orchestrator(DecentrAIObject,
     ### environment and if not we should pool the endpoint for the information    
     self._check_and_complete_environment_variables()
     # just after completed the dAuth we can check the supervisor status 
-    self.__is_supervisor_node = self.log.str_to_bool(os.environ.get("EE_SUPERVISOR", False))
+    _is_super = os.environ.get("EE_SUPERVISOR", False)
+    self.__is_supervisor_node = self.log.str_to_bool(_is_super)
+    self.P(f"SUPERVISOR = {self.is_supervisor_node} ({_is_super})", boxed=True)
     ### following the env update we can proceed with the managers initialization
     ### at this point the env can be considered complete and can have updates such as:
     ### - era information

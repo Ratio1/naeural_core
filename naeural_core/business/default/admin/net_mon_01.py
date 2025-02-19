@@ -86,6 +86,7 @@ class NetMon01Plugin(
       self.config_data['SUPERVISOR'] = self.is_supervisor_node
       self.P("Running with SUPERVISOR={}".format(self.cfg_supervisor))
     
+    
     # NOTE: SET THE ENVIRONMENT VARIABLES in Dockerfile for Ratio1 implementations
     
     # variable to check if only online nodes should be sent in CURRENT_NETWORK
@@ -113,8 +114,10 @@ class NetMon01Plugin(
     self.__send_current_network_each = _send_current_network_each
     self.__last_current_network_time = 0
     msg = f'Netmon initialised:'
-    msg += f'\n  {self.send_current_network_each=}'
-    msg += f'\n  {self.send_only_online=}'
+    msg += f'\n  - {self.send_current_network_each=}'
+    msg += f'\n  - {self.send_only_online=}'
+    msg += f'\n  - {self.cfg_supervisor=}'
+    msg += f'\n  - {self.is_supervisor_node=}'
     self.P(msg)
     return
   

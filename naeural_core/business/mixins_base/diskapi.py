@@ -11,6 +11,7 @@ import pandas as pd
 import cv2
 import os
 import zipfile
+import yaml
 from naeural_core import constants as ct
 from typing import List, Union, Tuple
 from naeural_core.local_libraries.vision.ffmpeg_writer import FFmpegWriter
@@ -425,7 +426,13 @@ class _DiskAPIMixin(object):
       """
       return self._diskapi_save_json(dct=dct, filename=filename, folder='output', indent=indent)
 
-    def _diskapi_load_json(self, filename : str, folder : str, verbose : bool = True):
+    def _diskapi_load_json(
+      self, 
+      filename : str, 
+      folder : str, 
+      subfolder : str = None,
+      verbose : bool = True
+    ):
       """
       Parameters:
       -----------
@@ -447,11 +454,85 @@ class _DiskAPIMixin(object):
       assert_folder(folder)
 
       dct = self.log.load_json(
-        fname=filename, folder=folder, numeric_keys=True,
+        fname=filename, folder=folder, subfolder=subfolder, numeric_keys=True,
         locking=True, verbose=verbose
       )
 
       return dct
+    
+    
+    def diskapi_load_json(self, fn, verbose : bool = True):
+      """
+      Loads a json file from the local cache in one of the three folders: data, models, output.
+      
+      Parameters
+      -----------
+      
+      fn: str, mandatory
+        The filename of the json file to be loaded. The file should include the extension '.json'
+        as well as the path to one of the three folders: data, models, output.
+      """
+      
+      is_ext =  isinstance(fn, str) and fn.endswith('.json')
+      if not is_ext:
+        self.P(f"JSON load: Invalid filename: {fn}", color='r')
+        return None
+      output_folder = self.log.get_output_folder()
+      models_folder = self.log.get_models_folder()
+      data_folder = self.log.get_data_folder()
+      found = False      
+      for folder in [output_folder, models_folder, data_folder]:
+        if folder in fn:
+          found = True
+      if not found:
+        self.P(f"JSON load: Invalid filename location for {fn}", color='r')
+        return None
+      
+      dct = self.log.load_json(
+        fname=fn, folder=None, subfolder=None, numeric_keys=True,
+        locking=True, verbose=verbose
+      )
+      return dct
+    
+    def diskapi_load_yaml(self, fn, verbose : bool = True):
+      """
+      Loads a yaml file from the local cache in one of the three folders: data, models, output.
+      
+      Parameters
+      -----------
+      
+      fn: str, mandatory
+        The filename of the yaml file to be loaded. The file should include the extension '.yaml'
+        as well as the path to one of the three folders: data, models, output.
+      """
+      is_ext = isinstance(fn, str) and (fn.endswith('.yaml') or fn.endswith('.yml'))
+      if not is_ext: 
+        self.P(f"Invalid filename: {fn}", color='r')
+        return None      
+      
+      output_folder = self.log.get_output_folder()
+      models_folder = self.log.get_models_folder()
+      data_folder = self.log.get_data_folder()
+      found = False      
+      for folder in [output_folder, models_folder, data_folder]:
+        if folder in fn:
+          found = True
+      if not found:
+        self.P(f"Invalid filename location for {fn}", color='r')
+        return None
+      if not os.path.isfile(fn):
+        self.P(f"File not found: {fn}", color='r')
+        return None
+      try:
+        dct = None
+        with open(fn, 'rt') as fd:
+          if verbose:
+            self.P("Loading yaml file: {}".format(fn))
+          dct = yaml.load(fd, Loader=yaml.FullLoader)
+      except Exception as e:
+        self.P(f"Failed to load yaml file: {fn}: {e}", color='r')
+      return dct
+    
 
     def diskapi_load_json_from_data(self, filename : str, verbose : bool = True):
       """
@@ -897,4 +978,3 @@ class _DiskAPIMixin(object):
       # endif paths are safe
       return
   # endif
-

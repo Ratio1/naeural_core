@@ -65,7 +65,6 @@ except Exception as e:
   EPOCH_MANAGER_DEBUG = 1
 
 SYNC_SIGNATURES = 'SIGNATURES'
-SYNC_VALUE = 'VALUE'
 SYNC_LAST_EPOCH = 'LAST_SYNC_EPOCH'
 SYNC_NODES = 'NODES'
 
@@ -885,7 +884,7 @@ class EpochsManager(Singleton):
     """
     if node_addr not in self.__data:
       return None
-    return self.__data[node_addr]
+    return deepcopy(self.__data[node_addr])
   
   
   def get_node_epochs(self, node_addr, autocomplete=True, as_list=False):
@@ -1290,9 +1289,7 @@ class EpochsManager(Singleton):
 
     for node_addr in self.__data:
       epochs: defaultdict = self.get_node_epochs(node_addr, as_list=False)
-      availability_table[node_addr] = {
-        SYNC_VALUE: epochs.get(epoch, 0),
-      }
+      availability_table[node_addr] = epochs.get(epoch, 0)
     # end for each node
     # self.__data[EPCT.SIGNATURES] is a defaultdict(dict), thus there is no need for .get() here
     epoch_signatures = self.__full_data[SYNC_SIGNATURES][epoch]
@@ -1338,7 +1335,7 @@ class EpochsManager(Singleton):
         self.__initialize_new_node(node_addr)
       if debug:
         self.P(f'DEBUG self.__data before update: {self.__data[node_addr]}')
-      self.__data[node_addr][EPCT.EPOCHS][epoch] = availability_table[node_addr][SYNC_VALUE]
+      self.__data[node_addr][EPCT.EPOCHS][epoch] = availability_table[node_addr]
       if debug:
         self.P(f'DEBUG self.__data after update: {self.__data[node_addr]}')
     self.__full_data[SYNC_SIGNATURES][epoch] = agreement_signatures

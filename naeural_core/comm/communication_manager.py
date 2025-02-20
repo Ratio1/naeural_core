@@ -36,6 +36,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     self._command_queues = None
     self.__lst_commands_from_self = []
     self._predefined_commands = avail_commands
+    self.default_comm_last_active = None
 
     self.avg_comm_loop_timings = 0
 
@@ -417,6 +418,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     now = time()
     if (now - self._last_print_info) >= ct.COMMS.COMM_SECS_SHOW_INFO:
       communicator = self._dct_comm_plugins[ct.COMMS.COMMUNICATION_DEFAULT]
+      self.default_comm_last_active = self.log.time_to_str(communicator.last_activity_time)
       dct_stats = self.get_comms_status()
       keys = list(dct_stats.keys())
       ml = max([len(k) for k in keys])

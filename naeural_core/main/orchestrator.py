@@ -420,10 +420,16 @@ class Orchestrator(DecentrAIObject,
           'whitelist' : self.whitelist_full,
           'current_epoch' : current_epoch,
           'current_epoch_avail' : current_epoch_avail,
-          'last_epochs' : last_5_epochs,
-          'evm_network' : self.evm_network,
+          'last_epochs'       : last_5_epochs,
+          'evm_network'       : self.evm_network,
         },
       }
+      try:
+        data[ct.LocalInfo.K_INFO]['r1fs_id'] = self.r1fs.ipfs_id
+        data[ct.LocalInfo.K_INFO]['r1fs_online'] = self.r1fs.ipfs_started
+        data[ct.LocalInfo.K_INFO]['comm_last_active'] = self._comm_manager.default_comm_last_active
+      except Exception as exc:
+        self.P(f"Failed to get local info: {exc}", color='r')
       with open(addr_file, 'w') as f:
         f.write(json.dumps(data, indent=2))
       self.__last_local_info_save = time()
@@ -1508,7 +1514,7 @@ class Orchestrator(DecentrAIObject,
     return
 
   def comm_manager_show_info(self):
-    self._comm_manager.maybe_show_info()
+    self._comm_manager.maybe_show_info()    
     return
 
   def _save_exception_main_loop_state(self, txt, **save_kwargs):

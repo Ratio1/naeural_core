@@ -513,6 +513,17 @@ class Orchestrator(DecentrAIObject,
   
   
   @property
+  def debug_r1fs(self):
+    debug_r1fs = self.log.str_to_bool(
+      self.config_data.get(
+        'DEBUG_R1FS', 
+        os.environ.get('EE_DEBUG_R1FS', False)
+      )
+    )
+    return debug_r1fs
+  
+  
+  @property
   def e2_addr(self):
     return self.e2_address
   

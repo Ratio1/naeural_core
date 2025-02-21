@@ -172,6 +172,7 @@ class _ManagersInitMixin(object):
     try:
       self._r1fs_engine = R1FSEngine(
         logger=self.log,
+        debug=self.debug_r1fs,
       )
     except:
       raise ValueError("Failure in r1fs setup:\n{}".format(traceback.format_exc()))

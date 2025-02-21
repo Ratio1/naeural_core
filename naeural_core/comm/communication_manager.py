@@ -395,6 +395,14 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
 
   def get_comms_status(self):
     dct_stats = {}
+    try:
+      self.default_comm_last_active = self.log.time_to_str(
+          self._dct_comm_plugins[ct.COMMS.COMMUNICATION_DEFAULT].last_activity_time
+      )
+    except Exception as exc:
+      self.default_comm_last_active = f"ERROR: {exc}"
+    # endtry get last activity time
+    
     keys = list(self._dct_comm_plugins.keys())
     for name in keys:
       comm = self._dct_comm_plugins.get(name)
@@ -418,7 +426,6 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     now = time()
     if (now - self._last_print_info) >= ct.COMMS.COMM_SECS_SHOW_INFO:
       communicator = self._dct_comm_plugins[ct.COMMS.COMMUNICATION_DEFAULT]
-      self.default_comm_last_active = self.log.time_to_str(communicator.last_activity_time)
       dct_stats = self.get_comms_status()
       keys = list(dct_stats.keys())
       ml = max([len(k) for k in keys])

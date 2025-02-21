@@ -298,7 +298,7 @@ class _ConfigManagerCheckMixin(object):
     # direct connect to config startup
     dct_capture_env = self.owner.cfg_capture_environment
     # get default
-    default = dct_capture_env.get(ct.CONFIG_STREAM.DEFAULT_PLUGIN, True)
+    default = dct_capture_env.get(ct.CONFIG_STREAM.DEFAULT_PLUGIN, False)
     # det and overwrite from given stream
     def_sig = dct_config_stream.get(ct.CONFIG_STREAM.DEFAULT_PLUGIN, default)
     # below check code is written in "explicit" mode

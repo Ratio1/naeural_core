@@ -290,7 +290,7 @@ class _BasePluginAPIMixin:
 
   
   def __hset_key(self, hkey, key):
-    b64key = self.str_to_b64(key, url_safe=True)
+    b64key = self.str_to_base64(key, url_safe=True)
     return self.__hset_index(hkey) + b64key
 
   

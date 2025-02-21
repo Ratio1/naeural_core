@@ -313,7 +313,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if need_store:
       if debug:
         set_or_overwrite = "overwriting" if existing_owner not in [None, owner] else "setting"        
-        self.P(f" === {where}{set_or_overwrite} {key}={debug_val} by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
+        self.P(f" === {where}{set_or_overwrite} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
       self.__set_key_value(
         key=key, value=value, owner=owner, 
         local_sync_storage_op=local_sync_storage_op, 
@@ -435,7 +435,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if result:
       # now send confirmation of the storage execution
       if self.cfg_chain_store_debug:
-        self.P(f" === REMOTE: Sending storage confirm of {key} by {owner} to {self.__chain_peers}")
+        self.P(f" === REMOTE: {self.CS_CONFIRM} for {key} of {owner} to {self.__chain_peers}")
       data = {
         self.CS_DATA : {
           self.CS_OP : self.CS_CONFIRM,
@@ -474,34 +474,38 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   @NetworkProcessorPlugin.payload_handler()
   def default_handler(self, payload):
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
+    alias = payload.get(self.const.PAYLOAD_DATA.EE_ID, None)
     destination = payload.get(self.const.PAYLOAD_DATA.EE_DESTINATION, None)
     is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
     destination = destination if isinstance(destination, list) else [destination]
     decrypted_data = self.receive_and_decrypt_payload(data=payload)    
     # DEBUG AREA
-    if self.cfg_full_debug_payloads:
-      self.P(f" === on_payload_chain_store_basic from {sender} (enc={is_encrypted})")
+    if self.cfg_chain_store_debug:
+      from_myself = sender == self.ee_addr
+      str_sender = sender if not from_myself else f"{sender} (myself)"
+      self.P(f" === PAYLOAD_CSTORE: from {str_sender} (enc={is_encrypted})")
       if self.ee_addr in destination:
-        self.P(f" === on_payload_chain_store_basic received for me")
+        self.P(f" === PAYLOAD_CSTORE: received for me")
       else:
-        self.P(f" === on_payload_chain_store_basic to {destination} (not for me)", color='r')
+        if not from_myself:
+          self.P(f" === PAYLOAD_CSTORE: to {destination} (not for me {self.ee_addr})", color='r')
         return
     # try to decrypt the payload
-    if self.cfg_full_debug_payloads:
+    if self.cfg_chain_store_debug:
       if decrypted_data is None or len(decrypted_data) == 0:
-        self.P(f" === on_payload_chain_store_basic FAILED decrypting payload", color='r')
+        self.P(f" === PAYLOAD_CSTORE: FAILED decrypting payload", color='r')
       else:
-        self.P(f" === on_payload_chain_store_basic decrypted payload OK")
+        self.P(f" === PAYLOAD_CSTORE: decrypted payload OK")
     # END DEBUG AREA    
     # get the data and call the appropriate operation method
     data = decrypted_data.get(self.CS_DATA, {})
     operation = data.get(self.CS_OP, None)
     owner = data.get(self.CS_OWNER, None)
-    if self.cfg_full_debug_payloads:
+    if self.cfg_chain_store_debug:
       if operation is None:
-        self.P(f" === on_payload_chain_store_basic NO OPERATION from data: {data}", color='r')
+        self.P(f" === PAYLOAD_CSTORE: NO OPERATION from data: {data}", color='r')
       else:
-        self.P(f" === on_payload_chain_store_basic operation={operation} from owner={owner}")
+        self.P(f" === PAYLOAD_CSTORE: {operation=} from {alias=} {owner=}")
     if operation == self.CS_STORE:
       self.__exec_store(data)      
     elif operation == self.CS_CONFIRM:

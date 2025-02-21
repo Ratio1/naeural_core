@@ -387,6 +387,8 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
       except Exception as exc:
         self.P("Exception while retrieving version with url:{} , headers:{}. Response was: {}, exception: {}".format(
           url0, headers, resp, exc), color='r')
+    else:
+      self.P(f"Skipping version check: {url0=}, {token=}", color='r')
     return ver  
   
   

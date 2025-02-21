@@ -1457,7 +1457,7 @@ class _UtilsBaseMixin(
     """
     b_encoded = b64.encode('utf-8')
     if url_safe:
-      b_encoded = base64.urlsafe_b64decode(b_encoded)
+      b_text = base64.urlsafe_b64decode(b_encoded)
     else:
       b_text = base64.b64decode(b_encoded)
       

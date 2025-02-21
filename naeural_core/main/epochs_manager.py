@@ -178,6 +178,7 @@ class EpochsManager(Singleton):
     self._set_dbg_date(debug_date)
 
     loaded = self._load_status()
+    self.maybe_close_epoch()
 
     self.P(
       "EpochsMgr v{}, dbg:{}, epoch #{}, GENESIS=[{}] Int/Ep: {}, Sec/Int: {} ".format(
@@ -388,7 +389,7 @@ class EpochsManager(Singleton):
       if _full_data is not None:
         missing_fields = False
         try:
-          dct_to_display = {k:v for k,v in _full_data.items() if k != SYNC_NODES}
+          dct_to_display = {k: v for k, v in _full_data.items() if k not in [SYNC_NODES, SYNC_SIGNATURES]}
           self.P("Loaded epochs status with {} (current={}) nodes and specs:\n{}".format(
             len(_full_data.get(SYNC_NODES, [])),len(self.__data), json.dumps(dct_to_display, indent=2)
           ))

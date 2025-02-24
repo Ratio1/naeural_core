@@ -75,8 +75,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.prepared_env = None
     self.base_env = None
 
-    self.script_temp_dir = tempfile.mkdtemp()
-
+    self.__init_temp_dir()
+        
     self.assets_initialized = False
     self.failed = False
     self.__commands_ready = False
@@ -94,6 +94,15 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.webapp_reload_last_timestamp = 0
 
     super(BaseWebAppPlugin, self)._on_init()
+    return
+  
+  
+  def __init_temp_dir(self):
+    if getattr(self, "script_temp_dir", None) is not None:
+      self.P(f"Deleting {self.script_temp_dir} ...")
+      shutil.rmtree(self.script_temp_dir)
+    self.script_temp_dir = tempfile.mkdtemp()
+    self.P(f"Created {self.script_temp_dir}")
     return
   
   
@@ -524,6 +533,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
   
   def __reload_server(self):
     self.P("Initiating server reload...")
+    
     self.__maybe_close_setup_commands()
     self.__maybe_close_start_commands()
     self.__maybe_read_and_stop_all_log_readers()
@@ -541,7 +551,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.start_commands_processes = [None] * len(self.get_start_commands())
     self.start_commands_start_time = [None] * len(self.get_start_commands())
 
-    self.P('Attempting to init assets due to reload...')
+    self.__init_temp_dir()
+    self.__deallocate_port()
+    self.P('Attempting to init assets due to reload...')    
     self.__maybe_init_assets()
     return  
   
@@ -699,7 +711,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       # check if new git assets are available
       new_repo_version = self.__check_new_repo_version()
       if new_repo_version:
-        self.P("New git assets available. Reloading server...")
+        self.P("New git assets available. Reloading server...")        
         self.__reload_server()
       return
     

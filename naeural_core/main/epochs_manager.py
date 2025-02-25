@@ -1020,12 +1020,19 @@ class EpochsManager(Singleton):
     end_epoch = end_epoch if isinstance(end_epoch, int) else self.get_time_epoch() - 1
     
     lst_epochs = list(range(start_epoch, end_epoch + 1))
-    
-    result = {
-      epoch : 
-        (epochs[epoch] >= SUPERVISOR_MIN_AVAIL_UINT8) if not as_float else
-        (round(epochs[epoch] / EPOCH_MAX_VALUE,2))
+
+    epoch_certainty_scores = {
+      # If the epoch availability was obtained through the consensus mechanism, we
+      # consider full certainty, otherwise we consider the value obtained from the node.
+      epoch: epochs[epoch] if epoch > self.get_last_sync_epoch() else EPOCH_MAX_VALUE
       for epoch in lst_epochs
+    }
+
+    result = {
+      epoch:
+        (certainty_score >= SUPERVISOR_MIN_AVAIL_UINT8) if not as_float else
+        (round(certainty_score / EPOCH_MAX_VALUE, 2))
+      for epoch, certainty_score in epoch_certainty_scores.items()
     }
     return result
     

@@ -65,6 +65,26 @@ class BasicThAnchor(BaseServingProcess):
     model = self._prepare_ts_model(fn_model=config, post_process_classes=False)
     return model
 
+  def model_call(self, th_inputs, model):
+    """
+    This method will perform a model inference on the given input and is used only during warmup.
+    Assume the input is random.
+
+    Parameters
+    ----------
+    th_inputs : torch.Tensor
+        Input of the model. It will come as a single input, in this case as an image
+    model : torch.nn.Module
+        The model for which we perform the warmup
+
+    Returns
+    -------
+    torch.Tensor
+        The output of the model
+    """
+    th_anchor_embedding = model.get_embedding(th_inputs)
+    return model(th_anchor_embedding, th_inputs)
+
   def _get_anchor_embedding(self, th_anchor_image):
     """
     Wrapper for the model's get_embedding method.

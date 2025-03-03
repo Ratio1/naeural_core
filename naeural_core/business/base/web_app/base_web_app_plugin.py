@@ -25,6 +25,8 @@ _CONFIG = {
   'NGROK_DOMAIN': None,
   'NGROK_EDGE_LABEL': None,
   'NGROK_URL_PING_INTERVAL': 30,
+
+  'NGROK_AUTH_TOKEN': None,
   
   'SUPRESS_LOGS_AFTER_INTERVAL' : 0,
 
@@ -133,15 +135,12 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
   def __allocate_port(self):
     """
-    while not done:
-      whith ...
-        done = port is ok
-      if not done
-        log error 
-        sleep
-    
-    """    
-    cnt_retry = 0
+    In case the port is not provided, a random unused one will be allocated.
+    In case the port is provided, it will be checked for availability.
+    If the provided port is not available, the allocation will be retried
+    until a port is found.
+    """
+    cnt_tries = 0
     done = False
     while not done:
       with self.managed_lock_resource('USED_PORTS'):
@@ -157,7 +156,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
             dct_shmem_ports[self.str_unique_identification] = self.cfg_port
             done = True
           else:
-            cnt_retry += 1
+            cnt_tries += 1
         else:
           port = self.np.random.randint(30000, 32500)
           total_tries = 1000
@@ -167,14 +166,18 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
             port = self.np.random.randint(30000, 32500)
           # endwhile
           if tries >= total_tries:
-            raise Exception("Could not find an available port after {} tries.".format(total_tries))
+            raise Exception(f"Could not find an available port after {total_tries} tries.")
           # endif tries
           dct_shmem_ports[self.str_unique_identification] = port
         # endif port
       # endwith lock
       if not done:
-        self.P(f"Preconfigured port {self.cfg_port} is already in use at retry {cnt_retry}. ", color='r')
-        self.sleep(5)
+        sleep_seconds = 5
+        self.P(
+          f"Preconfigured port {self.cfg_port} is already in use at try {cnt_tries}. Retrying in {sleep_seconds}...",
+          color='r'
+        )
+        self.sleep(sleep_seconds)
     return
 
   def __deallocate_port(self):

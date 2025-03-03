@@ -512,6 +512,9 @@ class BasePluginExecutor(
     return self.__plugins_shmem
   
   
+  ### Edge Node Pipelines
+  
+  #TODO: this functions should not be accesible by user-level plugins
   @property
   def node_pipelines(self):
     if self.__pipelines_view_function is not None:
@@ -521,6 +524,8 @@ class BasePluginExecutor(
   @property
   def local_pipelines(self):
     return self.node_pipelines
+  
+  ## End Edge Node Pipelines
   
 
   @property

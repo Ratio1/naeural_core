@@ -392,7 +392,15 @@ class _BasePluginLoopMixin(object):
       return
     if self.cfg_dataset_builder:
       self.P(f"WARNING: Dataset builder active for `{self.__class__.__name__}`", boxed=True, color='r')      
-    self._on_init()
+    try:
+      self._on_init()
+    except Exception as e:
+      self.P(f"START FAILURE: {e}", boxed=True, color='r')
+      self._create_error_notification(
+        msg=f"Custom on_init event failed: {e}",
+        displayed=True,
+      )
+      raise e
     self._init_process_finalized = True
     return
   

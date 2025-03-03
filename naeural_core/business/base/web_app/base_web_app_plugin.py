@@ -25,6 +25,8 @@ _CONFIG = {
   'NGROK_DOMAIN': None,
   'NGROK_EDGE_LABEL': None,
   'NGROK_URL_PING_INTERVAL': 30,
+
+  'NGROK_AUTH_TOKEN': None,
   
   'SUPRESS_LOGS_AFTER_INTERVAL' : 0,
 
@@ -132,33 +134,50 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     return sorted(res)
 
   def __allocate_port(self):
-    with self.managed_lock_resource('USED_PORTS'):
-      if 'USED_PORTS' not in self.plugins_shmem:
-        self.plugins_shmem['USED_PORTS'] = {}
-      dct_shmem_ports = self.plugins_shmem['USED_PORTS']
-      used_ports = self.__get_all_used_ports()
+    """
+    In case the port is not provided, a random unused one will be allocated.
+    In case the port is provided, it will be checked for availability.
+    If the provided port is not available, the allocation will be retried
+    until a port is found.
+    """
+    cnt_tries = 0
+    done = False
+    while not done:
+      with self.managed_lock_resource('USED_PORTS'):
+        if 'USED_PORTS' not in self.plugins_shmem:
+          self.plugins_shmem['USED_PORTS'] = {}
+        dct_shmem_ports = self.plugins_shmem['USED_PORTS']
+        used_ports = self.__get_all_used_ports()
 
-      if self.cfg_port is not None:
-        self.__check_port_valid()
+        if self.cfg_port is not None:
+          self.__check_port_valid()
 
-        if self.cfg_port in used_ports:
-          raise Exception("Port {} is already in use.".format(self.cfg_port))
+          if self.cfg_port not in used_ports:
+            dct_shmem_ports[self.str_unique_identification] = self.cfg_port
+            done = True
+          else:
+            cnt_tries += 1
         else:
-          dct_shmem_ports[self.str_unique_identification] = self.cfg_port
-      else:
-        port = self.np.random.randint(49152, 65535)
-        total_tries = 1000
-        tries = 0
-        while port in used_ports and tries < total_tries:
-          tries += 1
-          port = self.np.random.randint(49152, 65535)
-        # endwhile
-        if tries >= total_tries:
-          raise Exception("Could not find an available port after {} tries.".format(total_tries))
-        # endif tries
-        dct_shmem_ports[self.str_unique_identification] = port
-      # endif port
-    # endwith lock
+          port = self.np.random.randint(30000, 32500)
+          total_tries = 1000
+          tries = 0
+          while port in used_ports and tries < total_tries:
+            tries += 1
+            port = self.np.random.randint(30000, 32500)
+          # endwhile
+          if tries >= total_tries:
+            raise Exception(f"Could not find an available port after {total_tries} tries.")
+          # endif tries
+          dct_shmem_ports[self.str_unique_identification] = port
+        # endif port
+      # endwith lock
+      if not done:
+        sleep_seconds = 5
+        self.P(
+          f"Preconfigured port {self.cfg_port} is already in use at try {cnt_tries}. Retrying in {sleep_seconds}...",
+          color='r'
+        )
+        self.sleep(sleep_seconds)
     return
 
   def __deallocate_port(self):

@@ -54,7 +54,7 @@ class _NgrokMixinPlugin(object):
       if ng_token is None:
         self.report_missing_authtoken()
       else:
-        ngrok.set_auth_token(self.__get_ng_token())
+        ngrok.set_auth_token(ng_token)
         self.P(f"Ngrok initiated for {self.unique_identification}.")
       # endif ng_token present
     # endif ngrok api used
@@ -80,7 +80,7 @@ class _NgrokMixinPlugin(object):
     # endif domain
     # Specify the address and the authtoken
     tunnel_kwargs['addr'] = self.port
-    ng_token = self._NgrokMixinPlugin__get_ng_token()
+    ng_token = self.__get_ng_token()
     if ng_token is None:
       valid = False
       self.report_missing_authtoken()
@@ -114,6 +114,8 @@ class _NgrokMixinPlugin(object):
       self.P(f"Ngrok starting for {self.unique_identification}...")
       tunnel_kwargs, valid = self.get_ngrok_tunnel_kwargs()
       if valid:
+        if self.cfg_debug_web_app:
+          self.P(f'Ngrok tunnel kwargs: {tunnel_kwargs}')
         self.ngrok_listener = ngrok.forward(**tunnel_kwargs)
         if self.app_url is not None:
           self.P(f"Ngrok started on URL `{self.app_url}` ({self._signature}).")
@@ -144,7 +146,16 @@ class _NgrokMixinPlugin(object):
       return super_start_commands
 
   def __get_ng_token(self):
-    return self.os_environ.get(_NgrokMixinPlugin.NgrokCT.NG_TOKEN, None)
+    # TODO: At the moment multiple user auth tokens will not work on the same node
+    #  if `NGROK_USE_API` is set to False.
+    #  For the same node to use more than one auth token it needs to do so in separated
+    #  processes. For the moment this is done only if the ngrok is started through
+    #  CLI commands.
+    configured_ng_token = self.cfg_ngrok_auth_token
+    environment_ng_token = self.os_environ.get(_NgrokMixinPlugin.NgrokCT.NG_TOKEN, None)
+    if self.cfg_debug_web_app:
+      self.P(f"Configured token: {configured_ng_token}, Environment token: {environment_ng_token}")
+    return configured_ng_token if configured_ng_token is not None else environment_ng_token
 
   def __get_ngrok_auth_command(self):
     return f"ngrok authtoken {self.__get_ng_token()}"

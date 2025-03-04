@@ -39,6 +39,7 @@ _CONFIG = {
   'FORCED_RELOAD_INTERVAL': None,
 
   'PORT': None,
+  "DEBUG_WEB_APP": False,
 
   'VALIDATION_RULES': {
     **BasePluginExecutor.CONFIG['VALIDATION_RULES']
@@ -169,6 +170,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
             raise Exception(f"Could not find an available port after {total_tries} tries.")
           # endif tries
           dct_shmem_ports[self.str_unique_identification] = port
+          done = True
         # endif port
       # endwith lock
       if not done:

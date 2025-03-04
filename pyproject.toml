@@ -10,7 +10,7 @@ authors = [
   { name="Stefan Saraev", email="saraevstefan@gmail.com" },
   { name="Cristan Bleotiu", email="cristibleotiu@gmail.com" },
 ]
-description = "Naeural Core is the backbone of the Naeural Edge Protocol."
+description = "Ratio1 Core is the backbone of the Ratio1 Edge Protocol."
 readme = "README.md"
 requires-python = ">=3.10,<3.12"
 classifiers = [
@@ -27,7 +27,7 @@ dependencies = [
   "pynvml>=11.4",
   "pyyaml>=6.0",
   "pyarrow>=15",
-  "naeural_client>=1.0.0",
+  "ratio1>=1.0.0",
   "minio",
   "gql",
   "opencv-python-headless",
@@ -61,5 +61,5 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/NaeuralEdgeProtocol/naeural_core"
-"Bug Tracker" = "https://github.com/NaeuralEdgeProtocol/naeural_core/issues"
+"Homepage" = "https://github.com/Ratio1/naeural_core"
+"Bug Tracker" = "https://github.com/Ratio1/naeural_core/issues"

@@ -33,7 +33,7 @@ from naeural_core import constants as ct
 from naeural_core.utils import Singleton
 
 from naeural_core.main.ver import __VER__ as CORE_VERSION
-from naeural_client._ver import __VER__ as SDK_VERSION
+from ratio1._ver import __VER__ as SDK_VERSION
 
 try:
   from ver import __VER__ as NODE_VERSION

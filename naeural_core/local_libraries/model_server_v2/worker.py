@@ -6,7 +6,7 @@ import json
 import traceback
 
 from naeural_core import Logger
-from naeural_client import BaseDecentrAIObject
+from ratio1 import BaseDecentrAIObject
 from naeural_core.local_libraries import _ConfigHandlerMixin
 
 class FlaskWorker(BaseDecentrAIObject, _ConfigHandlerMixin):

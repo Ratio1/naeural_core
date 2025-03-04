@@ -1,6 +1,6 @@
-# Ratio1 Core Packages (formerly Naeural Edge Protocol Core Modules)
+# Ratio1 Core Packages (formerly Ratio1 Edge Protocol Core Modules)
 
-Welcome to the **Ratio1 Core packages** repository, previously known as the **Naeural Edge Protocol Core Modules**. These core packages are the foundational elements of the Ratio1 ecosystem, designed to enhance the protocol and drive the development of the Ratio1 Edge Node through ongoing research and community contributions. This README provides an overview of the core functionalities, components, and guidance on how to integrate the Ratio1 Core Packages into your projects.
+Welcome to the **Ratio1 Core packages** repository, previously known as the **Ratio1 Edge Protocol Core Modules**. These core packages are the foundational elements of the Ratio1 ecosystem, designed to enhance the protocol and drive the development of the Ratio1 Edge Node through ongoing research and community contributions. This README provides an overview of the core functionalities, components, and guidance on how to integrate the Ratio1 Core Packages into your projects.
 
 ## Overview
 
@@ -62,7 +62,7 @@ If you use the Ratio1 Core Packages in your research or projects, please cite th
   author       = {Ratio1.AI},
   title        = {Ratio1 Core Packages},
   year         = {2024-2025},
-  howpublished = {\url{https://github.com/NaeuralEdgeProtocol/naeural_core}},
+  howpublished = {\url{https://github.com/Ratio1/naeural_core}},
 }
 ```
 

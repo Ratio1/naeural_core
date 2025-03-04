@@ -1,5 +1,5 @@
 {
-  "name" : "Naeural Core Development Container",
+  "name" : "Ratio1 Core Development Container",
   "dockerFile" : "Dockerfile",
   // "image": "aidamian/ds101_2024",
 

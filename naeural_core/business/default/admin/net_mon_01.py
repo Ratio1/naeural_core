@@ -1,7 +1,7 @@
 """
 
 
-This is a vital component of the Ratio1 ecosystem (Naeural Edge Protocol). It is a network monitor plugin
+This is a vital component of the Ratio1 ecosystem (Ratio1 Edge Protocol). It is a network monitor plugin
 that is responsible for monitoring the network status of the nodes in the network as well as persisting
 the network status to the database and triggering the epoch serialization
 

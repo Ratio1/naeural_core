@@ -1,6 +1,6 @@
 from functools import partial
 
-from naeural_client import Logger as BaseLogger
+from ratio1 import Logger as BaseLogger
 from .logger_mixins import (
   _AdvancedTFKerasMixin,
   _BasicPyTorchMixin,

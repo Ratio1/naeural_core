@@ -1,4 +1,4 @@
-from naeural_client import BaseDecentrAIObject
+from ratio1 import BaseDecentrAIObject
 from naeural_core.core_logging import Logger
 from collections import deque
 import traceback

@@ -18,8 +18,8 @@ from naeural_core import Logger
 
 from naeural_core.main.ver import __VER__
 
-# TODO: change to `from naeural_client import`
-from naeural_client.utils import load_dotenv
+# TODO: change to `from ratio1 import`
+from ratio1.utils import load_dotenv
 
 MANDATORY_PACKAGES = {
   'torch'           : '2.0',

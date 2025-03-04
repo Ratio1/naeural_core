@@ -10,7 +10,7 @@ import textwrap
 
 
 
-from naeural_client import BaseDecentrAIObject
+from ratio1 import BaseDecentrAIObject
 from .baselines import _AVAIL_baselines, get_avail_baselines, _cleanup
 from . import metrics
 

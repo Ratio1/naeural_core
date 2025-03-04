@@ -5,7 +5,7 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 
 from functools import partial
-from naeural_client import BaseDecentrAIObject
+from ratio1 import BaseDecentrAIObject
 
 __VER__ = '0.2.0.0'
 

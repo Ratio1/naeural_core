@@ -1,7 +1,7 @@
 import numpy as np
 import os
 
-from naeural_client import BaseDecentrAIObject
+from ratio1 import BaseDecentrAIObject
 
 from transformers import TFBertModel, BertTokenizer
 

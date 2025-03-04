@@ -28,7 +28,7 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 ENV EE_CONFIG .config_startup.json
 
 ## The following line should NOT be moved to based as it should always be updated
-RUN pip install --no-cache-dir kmonitor naeural_client decentra-vision python-telegram-bot
+RUN pip install --no-cache-dir kmonitor ratio1 decentra-vision python-telegram-bot
 ## END do not move
 
 RUN pip install --no-cache-dir --no-deps naeural-core

@@ -50,7 +50,7 @@ from naeural_core.utils.plugins_base.persistence_serialization_mixin import _Per
 from naeural_core.utils.system_shared_memory import NumpySharedMemory
 
 from naeural_core.main.ver import __VER__ as core_version    
-from naeural_client._ver import __VER__ as sdk_version   
+from ratio1._ver import __VER__ as sdk_version   
 
 
 GIT_IGNORE_AUTH = ["-c","http.https://github.com/.extraheader="]
@@ -2091,7 +2091,7 @@ if __name__ == '__main__':
     print("All tests passed.")
   
   if TEST_GIT:
-    repo = 'https://github.com/NaeuralEdgeProtocol/edge_node_launcher'
+    repo = 'https://github.com/Ratio1/edge_node_launcher'
     sub_folder = "test_repo"
     full_path = os.path.join(log.get_output_folder(), sub_folder)
     

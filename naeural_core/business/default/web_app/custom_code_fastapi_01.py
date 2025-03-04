@@ -6,7 +6,7 @@ __VER__ = '0.1.0.0'
 TEMPLATE_API_DESCRIPTION = """
 **Custom code WebAPI deployment: Deploy Your Own FastAPI Endpoint on Ratio1 Edge Nodes**
 
-This is the Ratio1 plugin system that empowers developers to define custom FastAPI endpoints and remotely deploy them to one or more Ratio1 Edge Nodes, all through the Ratio1 Python SDK (currently listed on PyPI as `naeural_client`, soon to be renamed `ratio1`). By leveraging this plugin system, you can convert virtually any Python function into a scalable RESTful endpoint—no dedicated server required. Simply write your custom code, point the SDK to the Edge Node, and watch as `CUSTOM_CODE_FASTAPI_01` seamlessly builds and deploys a FastAPI application behind the scenes.
+This is the Ratio1 plugin system that empowers developers to define custom FastAPI endpoints and remotely deploy them to one or more Ratio1 Edge Nodes, all through the Ratio1 Python SDK (currently listed on PyPI as `ratio1`, soon to be renamed `ratio1`). By leveraging this plugin system, you can convert virtually any Python function into a scalable RESTful endpoint—no dedicated server required. Simply write your custom code, point the SDK to the Edge Node, and watch as `CUSTOM_CODE_FASTAPI_01` seamlessly builds and deploys a FastAPI application behind the scenes.
 
 ### Key Benefits
 - **Custom Functionality**: Turn your Python functions into POST, GET, or other HTTP endpoints in just a few lines of code.  
@@ -18,7 +18,7 @@ This is the Ratio1 plugin system that empowers developers to define custom FastA
 ### SDK Code Example
 
 ```python
-from naeural_client import Session, CustomPluginTemplate, PLUGIN_TYPES
+from ratio1 import Session, CustomPluginTemplate, PLUGIN_TYPES
 
 def some_endpoint(plugin: CustomPluginTemplate, message: str) -> list:
   result = [message] * 5   

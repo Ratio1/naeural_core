@@ -1,7 +1,7 @@
 # TODO: review if this is safe
 from os import environ
 
-from naeural_client.const import (
+from ratio1.const import (
   PAYLOAD_CT,
   COMMANDS,
   STATUS_TYPE,
@@ -180,7 +180,7 @@ ADMIN_PIPELINE = {
     "WORKING_HOURS": [["08:30", "09:30"]],
     "VERSION_TOKEN": None,
     "RESTART_ON_BEHIND": True,
-    "VERSION_URL": "https://raw.githubusercontent.com/NaeuralEdgeProtocol/edge_node/ver.py"
+    "VERSION_URL": "https://raw.githubusercontent.com/Ratio1/edge_node/ver.py"
   },
   
   # "K8S_MONITOR_01": {
@@ -286,7 +286,7 @@ class CONFIG_STARTUP_v2:
 
 class PLUGIN_SEARCH:
   # SEARCH_PACKAGES
-  SEARCH_IN_PACKAGES = ["naeural_client", "naeural_core"]
+  SEARCH_IN_PACKAGES = ["ratio1", "naeural_core"]
 
   # CONFIG
   LOC_CONFIG_RETRIEVE_PLUGINS = 'plugins.config'

@@ -2,7 +2,7 @@ import json
 import traceback
 
 from datetime import datetime
-from naeural_client.logging.logger_mixins.datetime_mixin import _DateTimeMixin as dt_utils
+from ratio1.logging.logger_mixins.datetime_mixin import _DateTimeMixin as dt_utils
 
 
 def get_config_from_code(fn, log=None):

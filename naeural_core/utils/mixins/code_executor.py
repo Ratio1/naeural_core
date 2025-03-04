@@ -1,4 +1,4 @@
-from naeural_client import BaseCodeChecker
+from ratio1 import BaseCodeChecker
 
 class _CodeExecutorMixin(BaseCodeChecker):
   """

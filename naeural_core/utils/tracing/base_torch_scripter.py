@@ -3,7 +3,7 @@ import json
 import os
 
 from naeural_core.utils.tracing.base_scripter import BaseScripter
-from naeural_client import load_dotenv
+from ratio1 import load_dotenv
 
 
 load_dotenv()

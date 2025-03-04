@@ -26,7 +26,7 @@ class _BetaInferenceMixin(object):
       raise ModuleNotFoundError("Cannot use _BetaInferenceMixin without having _BasicPyTorchMixin")
 
     try:
-      from naeural_client.logging.logger_mixins.json_serialization_mixin import _JSONSerializationMixin
+      from ratio1.logging.logger_mixins.json_serialization_mixin import _JSONSerializationMixin
     except ModuleNotFoundError:
       raise ModuleNotFoundError("Cannot use _BetaInferenceMixin without having _JSONSerializationMixin")
 

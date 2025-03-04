@@ -1,4 +1,4 @@
-from naeural_client import BaseDecentrAIObject
+from ratio1 import BaseDecentrAIObject
 
 import numpy as np
 import matplotlib.pyplot as plt

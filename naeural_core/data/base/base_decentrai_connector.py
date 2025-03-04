@@ -3,7 +3,7 @@ import json
 from collections import deque
 
 from naeural_core.data.base.base_plugin_dct import DataCaptureThread
-from naeural_client import Session
+from ratio1 import Session
 
 _CONFIG = {
   **DataCaptureThread.CONFIG,

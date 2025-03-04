@@ -19,7 +19,7 @@ class _FitDebugTFKerasMixin(object):
     super(_FitDebugTFKerasMixin, self).__init__()
 
     try:
-      from naeural_client.logging.logger_mixins.timers_mixin import _TimersMixin
+      from ratio1.logging.logger_mixins.timers_mixin import _TimersMixin
     except ModuleNotFoundError:
       raise ModuleNotFoundError("Cannot use _FitDebugTFKerasMixin without having _TimersMixin")
 

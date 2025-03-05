@@ -293,7 +293,12 @@ class EpochsManager(Singleton):
     return
   
   def eth_to_internal(self, eth_node_addr):
-    return self.__eth_to_node.get(eth_node_addr, None)
+    result = self.__eth_to_node.get(eth_node_addr, None)
+    if result is None:
+      # attempt to recompute
+      self.__compute_eth_to_internal()
+      result = self.__eth_to_node.get(eth_node_addr, None)
+    return result
   
   def get_node_name(self, node_addr):
     """ 

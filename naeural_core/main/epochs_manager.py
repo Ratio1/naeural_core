@@ -33,7 +33,7 @@ from naeural_core import constants as ct
 from naeural_core.utils import Singleton
 
 from naeural_core.main.ver import __VER__ as CORE_VERSION
-from ratio1._ver import __VER__ as SDK_VERSION
+from ratio1 import version as SDK_VERSION
 
 try:
   from ver import __VER__ as NODE_VERSION
@@ -72,6 +72,7 @@ SYNC_SAVES_TS = 'SAVES_UTC'
 SYNC_SAVES_EP = 'SAVE_EPOCHS'
 SYNC_RESTARTS = 'EM_RESTARTS_UTC'
 SYNC_RELOADS = 'EM_RELOADS_UTC'
+FAULTY_EPOCHS = 'FAULTY_EPOCHS'
 
 _FULL_DATA_TEMPLATE_EXTRA = {
   SYNC_LAST_EPOCH : INITIAL_SYNC_EPOCH,
@@ -81,6 +82,10 @@ _FULL_DATA_TEMPLATE_EXTRA = {
   SYNC_RELOADS : [],
   # TODO: should this be in FULL_DATA_MANDATORY_FIELDS?
   SYNC_SIGNATURES : defaultdict(dict),
+  # In this list will be stored the epochs where consensus was not reached.
+  # For those epochs all nodes with a license associated previously
+  # will be considered as fully available.
+  FAULTY_EPOCHS : [],
   
   ct.EE_GENESIS_EPOCH_DATE_KEY : None,
   ct.BASE_CT.EE_EPOCH_INTERVALS_KEY : None,
@@ -99,6 +104,8 @@ _FULL_DATA_INFO_KEYS = [
   SYNC_SAVES_EP,
   SYNC_RESTARTS,
   SYNC_RELOADS,
+  # TODO: maybe exclude this from info?
+  FAULTY_EPOCHS,
 ]
 
 SYNC_HISTORY_SIZE = 10
@@ -383,6 +390,7 @@ class EpochsManager(Singleton):
     """
     result = False
     exists = self.log.get_data_file(FN_FULL) is not None
+    last_epoch_save = None
     if exists:
       self.P("Previous epochs state found. Current oracle era specs:\n{}".format(
         json.dumps(self.get_era_specs(), indent=2)
@@ -394,6 +402,11 @@ class EpochsManager(Singleton):
       if _full_data is not None:
         missing_fields = False
         try:
+          # This is retrieved in order to close the epoch in which the last saved happened if needed.
+          epochs_of_last_saves = _full_data.get(SYNC_SAVES_EP) or []
+          if len(epochs_of_last_saves) > 0:
+            last_epoch_save = epochs_of_last_saves[-1]
+          # endif epochs of last saves
           dct_to_display = {k: v for k, v in _full_data.items() if k not in [SYNC_NODES, SYNC_SIGNATURES]}
           self.P("Loaded epochs status with {} (current={}) nodes and specs:\n{}".format(
             len(_full_data.get(SYNC_NODES, [])),len(self.__data), json.dumps(dct_to_display, indent=2)
@@ -453,12 +466,16 @@ class EpochsManager(Singleton):
     else:
       self.P(f"No previous epochs status found in {FN_FULL}.", color='r')
 
+    # Retrieved in case of a restart right before the epoch change.
+    self.__current_epoch = last_epoch_save
     self.__add_empty_fields()
     self.__compute_eth_to_internal()
     if result:
       self.__full_data[SYNC_RELOADS].append(self.date_to_str())
       self.P(f"Epochs status loaded with {len(self.__data)} nodes", boxed=True)
     #endif exists
+    # TODO: further review if this can call maybe_close_epoch
+    #  At first inspection it seems there is no issue.
     self.__debug_status()
     return result
 
@@ -819,6 +836,23 @@ class EpochsManager(Singleton):
     return result
 
 
+  def get_epoch_of_licensing(self, node_addr):
+    """
+    Returns the epoch in which a node was associated with its current license.
+    Parameters
+    ----------
+    node_addr : str
+      The node address.
+
+    Returns
+    -------
+    int
+      The epoch id.
+    """
+    # TODO: implement this
+    return 1
+
+
   def __initialize_new_node(self, node_addr):
     name = self.get_node_name(node_addr)
     name = name[:8]
@@ -908,8 +942,11 @@ class EpochsManager(Singleton):
     as_list : bool
       If True, the epochs are returned as a list.
     """
+    # TODO: Maybe take into consideration the following use-case:
+    #  node A was never seen by the serving oracle, but was licensed before the last
+    #  faulty epoch.
     if node_addr not in self.__data:
-      return None    
+      return None
     dct_state = self.get_node_state(node_addr)
     dct_epochs = dct_state[EPCT.EPOCHS]
     current_epoch = self.get_time_epoch()
@@ -917,15 +954,28 @@ class EpochsManager(Singleton):
     if autocomplete or as_list:
       for epoch in epochs:
         if epoch not in dct_epochs:
-          dct_epochs[epoch] = 0        
+          dct_epochs[epoch] = 0
+    # endif autocomplete
+
+    # Apply faulty epochs if any.
+    # In case consensus was not achieved from various reasons after the ending of an epoch
+    # all nodes that were licensed during or prior to that epoch will be considered as fully available.
+    lst_faulty_epochs = self.get_faulty_epochs()
+    epoch_of_licensing = self.get_epoch_of_licensing(node_addr=node_addr)
+    lst_faulty_epochs = [x for x in lst_faulty_epochs if x >= epoch_of_licensing]
+    for faulty_epoch in lst_faulty_epochs:
+      dct_epochs[faulty_epoch] = EPOCH_MAX_VALUE
+    # endfor faulty epochs
+
     lst_result = [dct_epochs.get(x, 0) for x in epochs]
     last_epochs = epochs[-5:]
     dct_last_epochs = {x : dct_epochs.get(x, 0) for x in last_epochs}
     non_zero = sum([1 for x in lst_result if x > 0])
     if self.__debug > 1:
-      self.P("get_node_epochs({}), {} non zero, last epochs: {}".format(
-        node_addr[:10] +'...' + node_addr[-4:], non_zero, str(dct_last_epochs)
-      ))    
+      self.P("get_node_epochs({}), {} non zero, last epochs: {}, epoch of licensing: {}, faulty epochs: {}".format(
+        node_addr[:10] +'...' + node_addr[-4:], non_zero, str(dct_last_epochs),
+        epoch_of_licensing, lst_faulty_epochs
+      ))
     if as_list:
       result = lst_result
     else:
@@ -974,7 +1024,7 @@ class EpochsManager(Singleton):
     if epochs is None:
       return 0    
     if as_percentage:
-      return round(epochs[epoch_id] / 255, 4)
+      return round(epochs[epoch_id] / EPOCH_MAX_VALUE, 4)
     return epochs[epoch_id]
 
 
@@ -1042,6 +1092,7 @@ class EpochsManager(Singleton):
     return result
     
 
+  # TODO: maybe replace this with `get_epoch_of_licensing` after implementing
   def get_node_first_epoch(self, node_addr):
     """
     Returns the first epoch the node was alive.
@@ -1299,15 +1350,97 @@ class EpochsManager(Singleton):
     """
 
     availability_table = {}
+    epoch_signatures = {}
 
-    for node_addr in self.__data:
-      epochs: defaultdict = self.get_node_epochs(node_addr, as_list=False)
-      availability_table[node_addr] = epochs.get(epoch, 0)
-    # end for each node
-    # self.__data[EPCT.SIGNATURES] is a defaultdict(dict), thus there is no need for .get() here
-    epoch_signatures = self.__full_data[SYNC_SIGNATURES][epoch]
+    if self.is_epoch_valid(epoch):
+      for node_addr in self.__data:
+        epochs: defaultdict = self.get_node_epochs(node_addr, as_list=False)
+        availability_table[node_addr] = epochs.get(epoch, 0)
+      # end for each node
+      # self.__data[EPCT.SIGNATURES] is a defaultdict(dict), thus there is no need for .get() here
+      epoch_signatures = self.__full_data[SYNC_SIGNATURES][epoch]
+    # endif epoch is valid
 
     return (availability_table, epoch_signatures) if return_signatures else availability_table
+
+
+  def get_faulty_epochs(self):
+    """
+    Get all passed epochs for which the consensus could not be achieved.
+    Returns
+    -------
+    list : all passed epochs for which the consensus could not be achieved.
+    """
+    return self.__full_data[FAULTY_EPOCHS]
+
+
+  def is_epoch_faulty(self, epoch):
+    """
+    Checks if an epoch is marked as faulty.
+
+    Parameters
+    ----------
+    epoch : int
+      The epoch id.
+
+    Returns
+    -------
+    bool
+      True if the epoch is marked as faulty, False otherwise.
+    """
+    return epoch in self.__full_data[FAULTY_EPOCHS]
+
+
+  def is_epoch_valid(self, epoch):
+    """
+    Checks if an epoch is valid(consensus was achieved).
+
+    Parameters
+    ----------
+    epoch : int
+      The epoch id.
+
+    Returns
+    -------
+    bool
+      True if the epoch is valid, False otherwise.
+    """
+    return not self.is_epoch_faulty(epoch)
+
+
+  def mark_epoch_as_faulty(self, epoch, debug=True):
+    """
+    Marks an epoch as faulty. This means that consensus was not achieved for the given epoch.
+    In this case all nodes with licenses associated prior to it will be considered as fully available.
+    Parameters
+    ----------
+    epoch : int
+      The epoch id.
+    debug : bool
+      If True, debug messages are displayed.
+
+    Returns
+    -------
+    bool
+      True if the epoch was successfully marked as faulty, False otherwise.
+    """
+    success = True
+    last_sync_epoch = self.get_last_sync_epoch()
+
+    if epoch <= last_sync_epoch:
+      self.P(f"Epoch {epoch} is not greater than last sync epoch {last_sync_epoch}. Skipping marking.", color='r')
+      success = False
+      return success
+
+    if epoch in self.__full_data[FAULTY_EPOCHS]:
+      self.P(f"Epoch {epoch} is already marked as faulty. Skipping marking.", color='r')
+      success = False
+      return success
+
+    self.__full_data[FAULTY_EPOCHS].append(epoch)
+    if debug:
+      self.P(f"Epoch {epoch} marked as faulty.")
+    return success
 
 
   def update_epoch_availability(self, epoch, availability_table, agreement_signatures, debug=False):

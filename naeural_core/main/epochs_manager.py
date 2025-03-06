@@ -1408,7 +1408,7 @@ class EpochsManager(Singleton):
     return not self.is_epoch_faulty(epoch)
 
 
-  def mark_epoch_as_faulty(self, epoch, debug=True):
+  def mark_epoch_as_faulty(self, epoch):
     """
     Marks an epoch as faulty. This means that consensus was not achieved for the given epoch.
     In this case all nodes with licenses associated prior to it will be considered as fully available.
@@ -1416,8 +1416,6 @@ class EpochsManager(Singleton):
     ----------
     epoch : int
       The epoch id.
-    debug : bool
-      If True, debug messages are displayed.
 
     Returns
     -------
@@ -1438,8 +1436,39 @@ class EpochsManager(Singleton):
       return success
 
     self.__full_data[FAULTY_EPOCHS].append(epoch)
-    if debug:
-      self.P(f"Epoch {epoch} marked as faulty.")
+    self.P(f"Epoch {epoch} marked as faulty.")
+    return success
+
+
+  def unmark_epoch_as_faulty(self, epoch):
+    """
+    Unmarks an epoch as faulty. This means that consensus was achieved for the given epoch.
+    This can happen if the epoch is marked as faulty, but later it's requested again and
+    a valid consensus was, in fact, reached.
+    Will be used only in `update_epoch_availability` method.
+
+    Parameters
+    ----------
+    epoch : int
+      The epoch id.
+
+    Returns
+    -------
+    bool
+      True if the epoch was successfully unmarked as faulty, False otherwise.
+    """
+    success = True
+    # TODO: maybe check if the epoch is lower than the last synced one.
+    #  Should not be necessary since it's called only from `update_epoch_availability`
+    #  after validating the signatures from oracles.
+
+    if epoch not in self.__full_data[FAULTY_EPOCHS]:
+      self.P(f"Epoch {epoch} is not marked as faulty. Skipping unmarking.", color='r')
+      success = False
+      return success
+
+    self.__full_data[FAULTY_EPOCHS].remove(epoch)
+    self.P(f"Epoch {epoch} unmarked as faulty.")
     return success
 
 
@@ -1488,6 +1517,13 @@ class EpochsManager(Singleton):
     self.__full_data[SYNC_LAST_EPOCH] = epoch
 
     self.P(f"Epoch {epoch} availability updated successfully.")
+
+    if epoch in self.get_faulty_epochs():
+      self.P(f"Epoch {epoch} previously marked a faulty. Maybe unmarking...", color='r')
+      success = self.unmark_epoch_as_faulty(epoch)
+      if success:
+        self.P(f"Epoch {epoch} unmarked as faulty.")
+    # endif epoch previously marked as faulty
 
     return success
 

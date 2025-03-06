@@ -37,7 +37,6 @@ _CONFIG = {
   # In case of raw response, the response will be the actual response provided by the endpoint method.
   # The default is 'WRAPPED'.
   'RESPONSE_FORMAT': 'WRAPPED',
-  "DEBUG_WEB_APP": False,
 
   'PROCESS_DELAY': 0,
 

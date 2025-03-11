@@ -427,3 +427,35 @@ class BCWrapper:
         The EVM network
     """
     return self.__bc.evm_network
+  
+  
+  def get_node_license_info(
+    self, 
+    node_address: str = None, 
+    node_address_eth: str = None,
+    raise_if_error: bool = False,
+  ):
+    """
+    Get the license info for a node
+
+    Parameters
+    ----------
+    node_address : str, optional
+        The address of the node, if not provided, the current node's address will be used
+        
+    node_address_eth : str, optional
+        The EVM address of the node to be used instead of node_address
+
+    Returns
+    -------
+    dict
+        A dictionary with the license info for the node
+    """
+    if node_address is None and node_address_eth is None:
+      # using the current node's eth address
+      node_address_eth = self.__bc.eth_address
+    elif node_address_eth is None and node_address is not None:
+      node_address_eth = self.node_address_to_eth_address(node_address)
+    return self.__bc.web3_get_node_info(
+      node_address=node_address_eth, raise_if_issue=raise_if_error      
+    )

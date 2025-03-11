@@ -191,6 +191,15 @@ class BCWrapper:
     if with_prefix:
       lst_allowed = [self.maybe_add_prefix(addr) for addr in lst_allowed]
     return lst_allowed
+  
+  
+  def get_whitelist_with_names(self):
+    """
+    Returns the list of nodes that are allowed to connect to the current node with their names
+
+    """
+    lst_allowed = self.__bc.whitelist_with_names
+    return lst_allowed
 
 
   def get_allowed_nodes(self, with_prefix: bool = False):

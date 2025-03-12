@@ -1225,7 +1225,7 @@ class _UtilsBaseMixin(
       return commit_hash
 
 
-    def _get_latest_release_asset_info(
+    def git_get_latest_release_asset_info(
         self,
         repo_url: str,
         token: str = None,
@@ -1333,7 +1333,7 @@ class _UtilsBaseMixin(
       filtered.sort(key=lambda x: x[1])
       return filtered[-1][0]
 
-    def _clone_and_list_tags(
+    def git_clone_and_list_tags(
         self,
         repo_url: str,
         user: Optional[str] = None,
@@ -1416,7 +1416,7 @@ class _UtilsBaseMixin(
       Return the newest (by creation date) tag from the given Git repo
       that contains `tag_name` as a substring (if provided).
       """
-      tags = self._clone_and_list_tags(repo_url, user, token)
+      tags = self.git_clone_and_list_tags(repo_url, user, token)
       if not tags:
         return None
 
@@ -1428,108 +1428,7 @@ class _UtilsBaseMixin(
       return newest_tag
 
 
-    def _parse_github_owner_repo(self, repo_url: str) -> Tuple[str, str]:
-      """
-      Parse the GitHub 'owner' and 'repo' from a URL like:
-      https://github.com/owner/repo
-      """
-      segments = repo_url.rstrip("/").split("/")
-      if len(segments) < 2:
-        raise ValueError(f"Invalid repo URL: {repo_url}")
-      return segments[-2], segments[-1]
-
-    def _get_github_releases(
-        self,
-        owner: str,
-        repo: str,
-        token: Optional[str] = None,
-    ) -> List[Dict]:
-      """
-      Fetch releases from GitHub (list of dicts). Returns an empty list on error.
-      """
-      api_url = f"https://api.github.com/repos/{owner}/{repo}/releases"
-      headers = {}
-      if token:
-        headers["Authorization"] = f"token {token}"
-
-      try:
-        resp = requests.get(api_url, headers=headers, timeout=10)
-        if resp.status_code != 200:
-          self.__utils_log(f"[ERROR] Could not fetch releases: {resp.status_code} {resp.text}")
-          return []
-        releases = resp.json()
-        if not isinstance(releases, list):
-          self.__utils_log("[ERROR] GitHub returned non-list data for releases.")
-          return []
-        return releases
-      except Exception as exc:
-        self.__utils_log(f"[ERROR] Exception fetching releases: {exc}")
-        return []
-
-    def _pick_newest_github_release(
-        self,
-        releases: List[Dict],
-        tag_substring: Optional[str] = None
-    ) -> Optional[Dict]:
-      """
-      Filter GitHub releases by `tag_substring` in `tag_name`,
-      then pick the newest by `published_at` (descending).
-      Returns the release dict or None.
-      """
-      if not releases:
-        return None
-
-      # Filter by tag_substring
-      matching = []
-      for r in releases:
-        tag_name = r.get("tag_name", "")
-        if tag_substring is None or (tag_substring in tag_name):
-          matching.append(r)
-
-      if not matching:
-        return None
-
-      # Sort by published_at descending
-      matching.sort(key=lambda r: r.get("published_at", ""), reverse=True)
-      return matching[0]
-
-    def _download_github_asset(
-        self,
-        owner: str,
-        repo: str,
-        asset: Dict,
-        download_dir: str,
-        token: Optional[str] = None
-    ) -> Optional[str]:
-      """
-      Download a single asset dict from a GitHub release to `download_dir`.
-      Return the local path or None on failure.
-      """
-      asset_id = asset["id"]
-      file_name = asset["name"]
-      asset_api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}"
-      os.makedirs(download_dir, exist_ok=True)
-      local_path = os.path.join(download_dir, file_name)
-
-      headers = {
-        "Accept": "application/octet-stream"
-      }
-      if token:
-        headers["Authorization"] = f"token {token}"
-
-      self.__utils_log(f"Downloading asset '{file_name}' to '{local_path}'...")
-      try:
-        with requests.get(asset_api_url, headers=headers, stream=True, timeout=30) as r:
-          r.raise_for_status()
-          with open(local_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-              f.write(chunk)
-      except Exception as exc:
-        self.__utils_log(f"[ERROR] Download failed: {exc}")
-        return None
-      return local_path
-
-    def github_download_release_asset(
+    def git_download_release_asset(
         self,
         repo_url: str,
         user: Optional[str] = None,  # not used except for logging or if you want to unify
@@ -1546,7 +1445,7 @@ class _UtilsBaseMixin(
       Also returns None if no matching release or asset is found.
       """
       # 1) First, get the newest release + asset
-      info = self._get_latest_release_asset_info(
+      info = self.git_get_latest_release_asset_info(
         repo_url, token=token,
         release_tag_substring=release_tag_substring,
         asset_filter=asset_filter
@@ -1582,9 +1481,8 @@ class _UtilsBaseMixin(
 
       self.__utils_log(f"Asset downloaded to: {local_path}")
       return local_path
-
-
   """END GIT SECTION"""
+
 
   def indent_strings(self, strings, indent=2):
     """ Indents a string or a list of strings by a given number of spaces."""

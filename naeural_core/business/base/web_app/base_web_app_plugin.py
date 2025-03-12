@@ -708,7 +708,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
       # Try to check for an updated asset
       if self.__can_request_git():  # or rename to __can_make_gh_api_request()
-        new_info = self._get_latest_release_asset_info(
+        new_info = self.git_get_latest_release_asset_info(
           repo_url=url,
           token=token,
           release_tag_substring=release_tag_substring,
@@ -819,7 +819,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       asset_filter = dct_data.get("asset_filter")
 
       download_dir = self.os_path.join(self.get_output_folder(), relative_assets_path)
-      local_file = self.github_download_release_asset(
+      local_file = self.git_download_release_asset(
         repo_url=assets_path,
         user=username,
         token=token,
@@ -834,8 +834,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       # ------------------------------------
       # (A) Cache release metadata for checks
       # ------------------------------------
-      # We can re-call _get_latest_release_asset_info to get exactly what we used
-      latest_info = self._get_latest_release_asset_info(
+      # We can re-call git_get_latest_release_asset_info to get exactly what we used
+      latest_info = self.git_get_latest_release_asset_info(
         assets_path, token=token,
         release_tag_substring=release_tag_substring,
         asset_filter=asset_filter

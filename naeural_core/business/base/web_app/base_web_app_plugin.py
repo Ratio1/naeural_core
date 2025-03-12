@@ -71,6 +71,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     self.__git_commit_hash = None
     self.__last_release_tag = None
+    self.__last_asset_id = None
+    self.__last_asset_updated_at = None
     self.__git_request_time = 0
     self.__first_log_displayed = None
     self.ngrok_initiated = False
@@ -637,9 +639,10 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     result = False  # return false by default including if no git url is provided
     if not isinstance(self.cfg_assets, dict):
       return result
+    # endif valid assets dict
     operation = self.cfg_assets.get('operation')
     # first check not to run this operation too many times
-    if operation == 'clone' or operation == 'release_asset':
+    if operation == 'clone':
       url = self.cfg_assets.get('url')
       if url is None:
         self.P(f"Operation {operation}, but no URL provided. Check assets!", color="r")
@@ -651,17 +654,13 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       username = self.cfg_assets.get('username')
       token = self.cfg_assets.get('token')
       track_mode = self.cfg_assets.get('track', WEB_APP_DEFAULT_GIT_TRACK_MODE)
-      if operation == 'release_asset':
-        # In case of release asset, we need to check the release tag.
-        track_mode = 'release'
-      # endif operation
 
       # If we haven't cloned anything yet, treat it like a new version:
       if self.__git_commit_hash is None and track_mode == 'commit':
         self.P("No previous local git commit info. Assuming new commit and initializing...")
         return True
-      if self.__last_release_tag is None and track_mode == 'release':
-        self.P("No previous local release info. Assuming new release and initializing...")
+      if self.__last_release_tag is None and track_mode == 'tag':
+        self.P("No previous local release tag info. Assuming new release and initializing...")
         return True
 
       # 1. Check for a new commit.
@@ -679,20 +678,63 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
             result = True
         # endif can request git
       # 2. Check for a new release.
-      elif track_mode == 'release':
+      elif track_mode == 'tag':
         if self.__can_request_git():
           last_release = self.git_get_last_release_tag(repo_url=url, user=username, token=token)
           if last_release is None:
-            self.P("Could not get the last release. Assuming no new version.")
+            self.P("Could not get the last release tag. Assuming no new version.")
             result = False
           elif last_release != self.__last_release_tag:
             self.P(
-              f"New release found: local={self.__last_release_tag} vs remote={last_release}."
+              f"New release tag found: local={self.__last_release_tag} vs remote={last_release}."
               f"Server reloading procedure will be initiated..."
             )
             result = True
       # endif track_mode
-    # endif valid assets dict
+    elif operation == 'release_asset':
+      url = self.cfg_assets.get('url')
+      if not isinstance(url, str):
+        self.P(f"Operation release_asset, but URL is not valid. Check assets!", color="r")
+        return result
+
+      token = self.cfg_assets.get('token')
+      release_tag_substring = self.cfg_assets.get('release_tag')
+      asset_filter = self.cfg_assets.get('asset_filter')
+
+      # If we have never downloaded anything, assume "new version"
+      if self.__last_asset_id is None:
+        self.P("[release_asset] No cached asset ID. Assuming new asset.")
+        return True
+
+      # Try to check for an updated asset
+      if self.__can_request_git():  # or rename to __can_make_gh_api_request()
+        new_info = self._get_latest_release_asset_info(
+          repo_url=url,
+          token=token,
+          release_tag_substring=release_tag_substring,
+          asset_filter=asset_filter
+        )
+        if not new_info:
+          self.P("[release_asset] Could not get asset info. Assuming no new version.")
+          return False
+
+        # Compare new_info with our cached values
+        new_asset_id = new_info["asset_id"]
+        new_asset_updated = new_info["asset_updated_at"]
+        old_asset_id = self.__last_asset_id
+        old_asset_updated = self.__last_asset_updated_at
+
+        if new_asset_id != old_asset_id or new_asset_updated != old_asset_updated:
+          self.P(
+            f"[release_asset] New asset found!\n"
+            f"Old asset_id={old_asset_id}, updated_at={old_asset_updated}\n"
+            f"New asset_id={new_asset_id}, updated_at={new_asset_updated}\n"
+            "Server reloading procedure will be initiated..."
+          )
+          result = True
+        # endif new asset version
+      # endif can request git
+    # endif operation handling
     return result
 
   # assets handling methods
@@ -720,14 +762,14 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         "username": null,
         "token": null,
         "operation": "clone",
-        "track": "release"
+        "track": "tag"
       }
       self.cfg_assets = {
         "url": "https://github.com/user/repo",
         "username": null,
         "token": null,
         "operation": "clone",
-        "track": "release",
+        "track": "tag",
         "release_tag": "latest"
       }
       self.cfg_assets = {
@@ -771,7 +813,6 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     # 2) Handle each operation
     if operation == "release_asset":
-      # The new approach: download a prebuilt artifact from GitHub releases
       username = dct_data.get("username")
       token = dct_data.get("token")
       release_tag_substring = dct_data.get("release_tag")
@@ -786,12 +827,29 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         asset_filter=asset_filter,
         download_dir=download_dir
       )
-
       if not local_file:
         self.P("[ERROR] Could not download the prebuilt artifact.", color='r')
         return None
 
-      # Optionally auto-extract if it's .zip or .tar.gz
+      # ------------------------------------
+      # (A) Cache release metadata for checks
+      # ------------------------------------
+      # We can re-call _get_latest_release_asset_info to get exactly what we used
+      latest_info = self._get_latest_release_asset_info(
+        assets_path, token=token,
+        release_tag_substring=release_tag_substring,
+        asset_filter=asset_filter
+      )
+      if latest_info:
+        self.__last_release_tag = latest_info["release_tag"]
+        self.__last_asset_id = latest_info["asset_id"]
+        self.__last_asset_updated_at = latest_info["asset_updated_at"]
+        self.P(f"Cached release tag: {self.__last_release_tag}")
+        self.P(f"Cached asset ID: {self.__last_asset_id}")
+        self.P(f"Cached asset updated_at: {self.__last_asset_updated_at}")
+      # endif latest_info
+
+      # Auto-extract if needed
       final_extract_dir = download_dir
       if local_file.endswith(".zip"):
         new_dir = self.os_path.join('downloaded_assets', self.plugin_id, 'unzipped_asset')
@@ -804,9 +862,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         os.remove(local_file)
         final_extract_dir = self.os_path.join(self.get_output_folder(), new_dir)
       else:
-        # TODO: maybe handle this differently
-        self.P(f"Prebuilt artifact is not a zip file. Leaving it as is: {local_file}")
-      # endif zip file
+        self.P(f"Prebuilt artifact is not .zip. Leaving as is: {local_file}")
 
       self.P(f"Prebuilt artifact is ready at {final_extract_dir}")
       return final_extract_dir
@@ -826,15 +882,14 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         pull_if_exists=True, # no need to pull if each time we delete the folder
       )
 
-      # If the user wants to track "release" instead of "commit"
-      if track_mode == "release":
+      # If the user wants to track "tag" instead of "commit"
+      if track_mode == "tag":
         # 2A) Find the newest release tag (optionally filtered)
         last_release_tag = self.git_get_last_release_tag(
           repo_url=assets_path,
           user=username,
           token=token,
           tag_name=release_tag_substring,  # e.g. "latest" or "mainnet"
-          print_func=self.P
         )
         if last_release_tag:
           # 2B) Checkout that release tag in the *already cloned* repo

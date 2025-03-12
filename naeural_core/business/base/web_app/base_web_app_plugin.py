@@ -11,6 +11,12 @@ from naeural_core.business.mixins_libs.ngrok_mixin import _NgrokMixinPlugin
 
 __VER__ = '0.0.0.0'
 
+# This may be used for running ready-made builds
+WEB_APP_DEFAULT_ENV_VARS = {
+  "HOSTNAME": "0.0.0.0"
+}
+WEB_APP_DEFAULT_GIT_TRACK_MODE = 'commit'
+
 _CONFIG = {
   **BasePluginExecutor.CONFIG,
   'ALLOW_EMPTY_INPUTS': True,
@@ -64,6 +70,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
   def _on_init(self):
 
     self.__git_commit_hash = None
+    self.__last_release_tag = None
+    self.__last_asset_id = None
+    self.__last_asset_updated_at = None
     self.__git_request_time = 0
     self.__first_log_displayed = None
     self.ngrok_initiated = False
@@ -211,6 +220,12 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     prepared_env["PORT"] = str(self.port)
 
     self.base_env = prepared_env.copy()
+
+    # add default keys
+    prepared_env = {
+      **prepared_env,
+      **WEB_APP_DEFAULT_ENV_VARS,
+    }
 
     # add optional keys, found in `.env` file from assets folder if provided.
     if assets_path is not None:
@@ -621,33 +636,105 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
   
   
   def __check_new_repo_version(self):
-    result = False # return false by default including if no git url is provided
+    result = False  # return false by default including if no git url is provided
+    if not isinstance(self.cfg_assets, dict):
+      return result
+    # endif valid assets dict
+    operation = self.cfg_assets.get('operation')
     # first check not to run this operation too many times
-    if isinstance(self.cfg_assets, dict) and self.cfg_assets.get('operation') == 'clone':
+    if operation == 'clone':
       url = self.cfg_assets.get('url')
+      if url is None:
+        self.P(f"Operation {operation}, but no URL provided. Check assets!", color="r")
+        return result
+      if not isinstance(url, str):
+        self.P(f"Operation {operation}, but URL is not a string. Check assets!", color="r")
+        return result
+      # endif valid url provided
       username = self.cfg_assets.get('username')
       token = self.cfg_assets.get('token')
-      if self.__git_commit_hash is not None:
-        # check if we can request git based on a configured delay
-        can_request_git = self.__can_request_git()
-        if can_request_git:
-          commit_hash = self.git_get_last_commit_hash(
-            repo_url=url,
-            user=username,
-            token=token,
-          )
-          if commit_hash is None:
+      track_mode = self.cfg_assets.get('track', WEB_APP_DEFAULT_GIT_TRACK_MODE)
+
+      # If we haven't cloned anything yet, treat it like a new version:
+      if self.__git_commit_hash is None and track_mode == 'commit':
+        self.P("No previous local git commit info. Assuming new commit and initializing...")
+        return True
+      if self.__last_release_tag is None and track_mode == 'tag':
+        self.P("No previous local release tag info. Assuming new release and initializing...")
+        return True
+
+      # 1. Check for a new commit.
+      if track_mode == 'commit':
+        if self.__can_request_git():
+          remote_commit = self.git_get_last_commit_hash(repo_url=url, user=username, token=token)
+          if remote_commit is None:
             self.P("Could not get the commit hash. Assuming no new version.")
             result = False
-          elif commit_hash != self.__git_commit_hash:        
-            self.P(f"New git assets available: local hash {self.__git_commit_hash} differs from git {commit_hash} . Server reloading procedure will be initiated...")
+          elif remote_commit != self.__git_commit_hash:
+            self.P(
+              f"New git commit found: local={self.__git_commit_hash} vs remote={remote_commit}."
+              f"Server reloading procedure will be initiated..."
+            )
             result = True
-          # endif commit hash
         # endif can request git
-      else:
-        # no previous git info found so we assume we need to perform setup
-        self.P("No previous local git info found. Assuming new repo version and initializing...")
-        result = True
+      # 2. Check for a new release.
+      elif track_mode == 'tag':
+        if self.__can_request_git():
+          last_release = self.git_get_last_release_tag(repo_url=url, user=username, token=token)
+          if last_release is None:
+            self.P("Could not get the last release tag. Assuming no new version.")
+            result = False
+          elif last_release != self.__last_release_tag:
+            self.P(
+              f"New release tag found: local={self.__last_release_tag} vs remote={last_release}."
+              f"Server reloading procedure will be initiated..."
+            )
+            result = True
+      # endif track_mode
+    elif operation == 'release_asset':
+      url = self.cfg_assets.get('url')
+      if not isinstance(url, str):
+        self.P(f"Operation release_asset, but URL is not valid. Check assets!", color="r")
+        return result
+
+      token = self.cfg_assets.get('token')
+      release_tag_substring = self.cfg_assets.get('release_tag')
+      asset_filter = self.cfg_assets.get('asset_filter')
+
+      # If we have never downloaded anything, assume "new version"
+      if self.__last_asset_id is None:
+        self.P("[release_asset] No cached asset ID. Assuming new asset.")
+        return True
+
+      # Try to check for an updated asset
+      if self.__can_request_git():  # or rename to __can_make_gh_api_request()
+        new_info = self.git_get_latest_release_asset_info(
+          repo_url=url,
+          token=token,
+          release_tag_substring=release_tag_substring,
+          asset_filter=asset_filter
+        )
+        if not new_info:
+          self.P("[release_asset] Could not get asset info. Assuming no new version.")
+          return False
+
+        # Compare new_info with our cached values
+        new_asset_id = new_info["asset_id"]
+        new_asset_updated = new_info["asset_updated_at"]
+        old_asset_id = self.__last_asset_id
+        old_asset_updated = self.__last_asset_updated_at
+
+        if new_asset_id != old_asset_id or new_asset_updated != old_asset_updated:
+          self.P(
+            f"[release_asset] New asset found!\n"
+            f"Old asset_id={old_asset_id}, updated_at={old_asset_updated}\n"
+            f"New asset_id={new_asset_id}, updated_at={new_asset_updated}\n"
+            "Server reloading procedure will be initiated..."
+          )
+          result = True
+        # endif new asset version
+      # endif can request git
+    # endif operation handling
     return result
 
   # assets handling methods
@@ -668,6 +755,30 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         "username": null,
         "token": null,
         "operation": "clone",
+        "track": "commit"  # Default value
+      }
+      self.cfg_assets = {
+        "url": "https://github.com/user/repo",
+        "username": null,
+        "token": null,
+        "operation": "clone",
+        "track": "tag"
+      }
+      self.cfg_assets = {
+        "url": "https://github.com/user/repo",
+        "username": null,
+        "token": null,
+        "operation": "clone",
+        "track": "tag",
+        "release_tag": "latest"
+      }
+      self.cfg_assets = {
+        "url": "https://github.com/user/repo",
+        "username": null,
+        "token": null,
+        "operation": "release_asset",
+        "asset_filter": "your-web-app-build.zip"
+        "release_tag": "latest"
       }
       self.cfg_assets = {
         "url": "/path/to/local/dir",
@@ -681,8 +792,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     # handle assets url: download, extract, then copy, then delete
     relative_assets_path = self.os_path.join('downloaded_assets', self.plugin_id, 'assets')
 
+    # 1) Parse the assets configuration
     operation = None
-
     assets_path = None
 
     # check if assets is a dict or a string
@@ -700,10 +811,68 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       return None
       # raise ValueError("No assets provided")
 
-    # now download the assets there
-    if operation == "clone":
+    # 2) Handle each operation
+    if operation == "release_asset":
+      username = dct_data.get("username")
+      token = dct_data.get("token")
+      release_tag_substring = dct_data.get("release_tag")
+      asset_filter = dct_data.get("asset_filter")
+
+      download_dir = self.os_path.join(self.get_output_folder(), relative_assets_path)
+      local_file = self.git_download_release_asset(
+        repo_url=assets_path,
+        user=username,
+        token=token,
+        release_tag_substring=release_tag_substring,
+        asset_filter=asset_filter,
+        download_dir=download_dir
+      )
+      if not local_file:
+        self.P("[ERROR] Could not download the prebuilt artifact.", color='r')
+        return None
+
+      # ------------------------------------
+      # (A) Cache release metadata for checks
+      # ------------------------------------
+      # We can re-call git_get_latest_release_asset_info to get exactly what we used
+      latest_info = self.git_get_latest_release_asset_info(
+        assets_path, token=token,
+        release_tag_substring=release_tag_substring,
+        asset_filter=asset_filter
+      )
+      if latest_info:
+        self.__last_release_tag = latest_info["release_tag"]
+        self.__last_asset_id = latest_info["asset_id"]
+        self.__last_asset_updated_at = latest_info["asset_updated_at"]
+        self.P(f"Cached release tag: {self.__last_release_tag}")
+        self.P(f"Cached asset ID: {self.__last_asset_id}")
+        self.P(f"Cached asset updated_at: {self.__last_asset_updated_at}")
+      # endif latest_info
+
+      # Auto-extract if needed
+      final_extract_dir = download_dir
+      if local_file.endswith(".zip"):
+        new_dir = self.os_path.join('downloaded_assets', self.plugin_id, 'unzipped_asset')
+        self.maybe_download(
+          url=local_file,
+          fn=new_dir,
+          target='output',
+          unzip=True
+        )
+        os.remove(local_file)
+        final_extract_dir = self.os_path.join(self.get_output_folder(), new_dir)
+      else:
+        self.P(f"Prebuilt artifact is not .zip. Leaving as is: {local_file}")
+
+      self.P(f"Prebuilt artifact is ready at {final_extract_dir}")
+      return final_extract_dir
+    elif operation == "clone":
       username = dct_data.get("username", None)
       token = dct_data.get("token", None)
+      track_mode = dct_data.get("track", "commit")  # default = commit
+      release_tag_substring = dct_data.get("release_tag", None)
+
+      # Clone the repo into relative_assets_path
       self.git_clone(
         repo_url=assets_path,
         repo_dir=relative_assets_path,
@@ -712,13 +881,33 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         token=token,
         pull_if_exists=True, # no need to pull if each time we delete the folder
       )
-      # now we cache the commit hash
-      commit_hash = self.git_get_local_commit_hash(
-        repo_dir=self.os_path.join(self.get_output_folder(), relative_assets_path),
-      )
+
+      # If the user wants to track "tag" instead of "commit"
+      if track_mode == "tag":
+        # 2A) Find the newest release tag (optionally filtered)
+        last_release_tag = self.git_get_last_release_tag(
+          repo_url=assets_path,
+          user=username,
+          token=token,
+          tag_name=release_tag_substring,  # e.g. "latest" or "mainnet"
+        )
+        if last_release_tag:
+          # 2B) Checkout that release tag in the *already cloned* repo
+          full_repo_dir = self.os_path.join(self.get_output_folder(), relative_assets_path)
+          self.git_checkout_tag(repo_dir=full_repo_dir, tag=last_release_tag)
+
+          # 2C) Cache the release tag
+          self.__last_release_tag = last_release_tag
+          self.P(f"Checked out release tag: {last_release_tag}")
+        else:
+          self.P("No matching release tag found; staying on default HEAD.", color='y')
+      # endif release mode
+
+      # 2D) Regardless of commit or release, store the commit hash for debugging
+      full_repo_dir = self.os_path.join(self.get_output_folder(), relative_assets_path)
+      commit_hash = self.git_get_local_commit_hash(repo_dir=full_repo_dir)
       self.__git_commit_hash = commit_hash
-      self.P("Finished cloning git repository. Current commit hash: {}".format(self.__git_commit_hash))
-      #
+      self.P(f"Finished cloning git repository. Current commit hash: {commit_hash}")
     elif operation == "download":
       self.maybe_download(
         url=assets_path,

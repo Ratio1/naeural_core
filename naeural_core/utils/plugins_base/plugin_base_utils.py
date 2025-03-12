@@ -18,7 +18,9 @@ import zlib
 import hashlib
 import select
 
-from subprocess import Popen
+import shutil
+import tempfile
+from typing import List, Tuple, Dict, Optional
 
 from naeural_core.utils.thread_raise import ctype_async_raise
 
@@ -227,8 +229,7 @@ class LogReader():
 
     return
 
-  # TODO: maybe change decode_errors to 'replace' to have something appear in the logs.
-  def get_next_characters(self, max_characters=-1, decode='utf-8', decode_errors='ignore'):
+  def get_next_characters(self, max_characters=-1, decode='utf-8', decode_errors='replace'):
     result = []
     
     if max_characters == -1:
@@ -1019,179 +1020,469 @@ class _UtilsBaseMixin(
     else:
       self.P('Errors while downloading: {}'.format([str(x) for x in msgs]))
     return res
-  
-  def git_clone(self, repo_url, repo_dir, target='output', user=None, token=None, pull_if_exists=True):
-    """
-    Clones a git repository or pulls if the repository already exists.
 
-    Parameters
-    ----------
-    repo_url : str
-      The git repository URL
-      
-    token : str, optional
-      The token to be used for authentication. The default is None.
-      
-    user: str, optional
-      The username to be used for authentication. The default is None.
-          
-    token : str, optional
-      The token to be used for authentication. The default is None.
-      
-    pull_if_exists : bool, optional
-      If True, the repository will be pulled if it already exists. The default is True.
-      
+  """GIT SECTION"""
+  if True:
+    def __utils_log(self, msg, color=None, **kwargs):
+      """
+      Helper method for fallback in case your class doesn't have a self.P method.
+      Parameters
+      ----------
+      msg : str
+      color : str, optional
+      """
+      if hasattr(self, 'P'):
+        self.P(msg, color=color, **kwargs)
+      else:
+        print(msg)
+      return
 
-    Returns
-    -------
-    str
-      The local folder where the repository was cloned.
-    """
+    def git_clone(self, repo_url, repo_dir, target='output', user=None, token=None, pull_if_exists=True):
+      """
+      Clones a git repository or pulls if the repository already exists.
 
-    repo_path = self.os_path.join(self.get_target_folder(target), repo_dir)
-    self.P(f"git_clone: '{repo_url}' to '{repo_path}'")
+      Parameters
+      ----------
+      repo_url : str
+        The git repository URL
 
-    if user is not None and token is not None:
-      repo_url = repo_url.replace('https://', f'https://{user}:{token}@')
-      
-    USE_GIT_IGNORE_AUTH = True # for git pull -c does not work
+      token : str, optional
+        The token to be used for authentication. The default is None.
 
-    try:
-      command = None
-      if self.os_path.exists(repo_path) and pull_if_exists:
-        # Repository already exists, perform git pull
-        self.P(f"git_clone: Repo exists at {repo_path} -> pulling...")
-        if USE_GIT_IGNORE_AUTH:
-          command = ["git"] + GIT_IGNORE_AUTH + ["pull"]
+      user: str, optional
+        The username to be used for authentication. The default is None.
+
+      token : str, optional
+        The token to be used for authentication. The default is None.
+
+      pull_if_exists : bool, optional
+        If True, the repository will be pulled if it already exists. The default is True.
+
+
+      Returns
+      -------
+      str
+        The local folder where the repository was cloned.
+      """
+
+      repo_path = self.os_path.join(self.get_target_folder(target), repo_dir)
+      self.__utils_log(f"git_clone: '{repo_url}' to '{repo_path}'")
+
+      if user is not None and token is not None:
+        repo_url = repo_url.replace('https://', f'https://{user}:{token}@')
+
+      USE_GIT_IGNORE_AUTH = True # for git pull -c does not work
+
+      try:
+        command = None
+        if self.os_path.exists(repo_path) and pull_if_exists:
+          # Repository already exists, perform git pull
+          self.__utils_log(f"git_clone: Repo exists at {repo_path} -> pulling...")
+          if USE_GIT_IGNORE_AUTH:
+            command = ["git"] + GIT_IGNORE_AUTH + ["pull"]
+          else:
+            command = ["git", "pull"]
+          results = subprocess.check_output(
+              command,
+              cwd=repo_path,
+              stderr=subprocess.STDOUT,
+              universal_newlines=True,
+              # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
+          )
         else:
-          command = ["git", "pull"]
+          # Clone the repository
+          if USE_GIT_IGNORE_AUTH:
+            command = ["git"] + GIT_IGNORE_AUTH + ["clone", repo_url, repo_path]
+          else:
+            command = ["git", "clone", repo_url, repo_path]
+          results = subprocess.check_output(
+              command,
+              stderr=subprocess.STDOUT,
+              universal_newlines=True,
+              # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
+          )
+        # end if
+        self.__utils_log(f"git_clone: `{' '.join(command)}` results:\n{results}")
+      except subprocess.CalledProcessError as exc:
+        self.__utils_log(f"git_clone: Error '{exc.cmd}' returned  {exc.returncode} with output:\n{exc.output}", color='r')
+        repo_path = None
+      except Exception as exc:
+        self.__utils_log(f"git_clone: Error while cloning git repository {repo_url} in {repo_path}: {exc}", color='r  ')
+        repo_path = None
+      # end try
+      return repo_path
+
+
+    def git_checkout_tag(self, repo_dir, tag):
+      cmd = ["git", "-C", repo_dir, "checkout", f"tags/{tag}"]
+      subprocess.check_call(cmd)
+      return
+
+
+    def git_get_local_commit_hash(self, repo_dir):
+      """
+      Retrieves the latest commit hash from the local git repository.
+
+      Parameters
+      ----------
+      repo_dir : str
+        The local directory where the repository is cloned.
+
+      Returns
+      -------
+      str
+        The latest commit hash from the local repository.
+      """
+      commit_hash = None
+      self.__utils_log(f"git_get_local_commit_hash: {repo_dir}")
+
+      command = ["git", "rev-parse", "HEAD"]
+      try:
         results = subprocess.check_output(
-            command,
-            cwd=repo_path,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True, 
-            # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
+          command,
+          cwd=repo_dir,
+          stderr=subprocess.STDOUT,
+          universal_newlines=True,
+          # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
         )
-      else:
-        # Clone the repository
-        if USE_GIT_IGNORE_AUTH:
-          command = ["git"] + GIT_IGNORE_AUTH + ["clone", repo_url, repo_path]
+        if results is not None:
+          self.__utils_log(f"git_get_local_commit_hash: `rev-parse` results:\n{results}")
+          lines = results.split('\n')
+          if len(lines) > 0:
+            commit_hash = lines[0].split()[0]
         else:
-          command = ["git", "clone", repo_url, repo_path]
+          self.__utils_log(
+            f"git_get_local_commit_hash: Error while retrieving commit hash from remote repository: {results}",
+            color='r'
+          )
+      except subprocess.CalledProcessError as exc:
+        self.__utils_log(
+          f"git_get_local_commit_hash: Error '{exc.cmd}' returned  {exc.returncode} with output:\n{exc.output}",
+          color='r'
+        )
+      except Exception as exc:
+        self.__utils_log(
+          f"git_get_local_commit_hash: An unexpected exception occurred: {exc}",
+          color='r'
+        )
+      return commit_hash
+
+
+    def git_get_last_commit_hash(self, repo_url, user=None, token=None):
+      """
+      Retrieves the latest commit hash from the remote git repository.
+
+      Parameters
+      ----------
+      repo_url : str
+        The git repository URL
+
+      user : str, optional
+        The username to be used for authentication. The default is None.
+
+      token : str, optional
+        The token to be used for authentication. The default is None.
+
+      Returns
+      -------
+      str
+        The latest commit hash from the remote repository.
+      """
+      commit_hash = None
+      self.__utils_log(f"git_get_last_commit_hash: using {repo_url}")
+
+      if user is not None and token is not None:
+        repo_url = repo_url.replace('https://', f'https://{user}:{token}@')
+
+      command = ["git"] + GIT_IGNORE_AUTH + ["ls-remote", repo_url, "HEAD"]
+      try:
         results = subprocess.check_output(
-            command,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True, 
-            # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
-        )      
-      # end if
-      self.P(f"git_clone: `{' '.join(command)}` results:\n{results}")
-    except subprocess.CalledProcessError as exc:
-      self.P(f"git_clone: Error '{exc.cmd}' returned  {exc.returncode} with output:\n{exc.output}", color='r')
-      repo_path = None
-    except Exception as exc:
-      self.P(f"git_clone: Error while cloning git repository {repo_url} in {repo_path}: {exc}", color='r  ')
-      repo_path = None
-    # end try
-    return repo_path
-  
-    
-  def git_get_local_commit_hash(self, repo_dir):
-    """
-    Retrieves the latest commit hash from the local git repository.
+          command,
+          stderr=subprocess.STDOUT,
+          universal_newlines=True,
+          # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
+        )
+        if results is not None:
+          self.__utils_log(f"git_get_last_commit_hash: `ls-remote` results:\n{results}")
+          lines = results.split('\n')
+          if len(lines) > 0:
+            commit_hash = lines[0].split()[0]
+        else:
+          self.__utils_log(
+            f"git_get_last_commit_hash: Error while retrieving commit hash from remote repository: {results}",
+            color='r'
+          )
+      except subprocess.CalledProcessError as exc:
+        self.__utils_log(
+          f"git_get_last_commit_hash: Error '{exc.cmd}' returned  {exc.returncode} with output:\n{exc.output}",
+          color='r'
+        )
+      except Exception as exc:
+        self.__utils_log(
+          f"git_get_last_commit_hash: An unexpected exception occurred: {exc}",
+          color='r'
+        )
+      return commit_hash
 
-    Parameters
-    ----------
-    repo_dir : str
-      The local directory where the repository is cloned.
 
-    Returns
-    -------
-    str
-      The latest commit hash from the local repository.
-    """
-    commit_hash = None
-    def _P(msg, color=None):
-      print(msg)
+    def git_get_latest_release_asset_info(
+        self,
+        repo_url: str,
+        token: str = None,
+        release_tag_substring: str = None,
+        asset_filter: str = None
+    ):
+      """
+      1) Query GitHub releases for `repo_url`.
+      2) Filter by `release_tag_substring`, pick newest by published_at.
+      3) From that release’s assets, pick the first containing `asset_filter`.
+      4) Return a dict with { "release_tag": ..., "asset_id": ..., "asset_name": ...,
+                              "asset_updated_at": ..., "published_at": ... }
+      or None if not found.
+      """
+      # Parse https://github.com/owner/repo -> (owner, repo)
+      segments = repo_url.rstrip("/").split("/")
+      if len(segments) < 2:
+        self.__utils_log(f"[ERROR] Invalid repo URL: {repo_url}", color='r')
+        return None
+      owner, repo = segments[-2], segments[-1]
+
+      api_url = f"https://api.github.com/repos/{owner}/{repo}/releases"
+      headers = {}
+      if token:
+        headers["Authorization"] = f"token {token}"
+
+      # Fetch releases
+      try:
+        resp = requests.get(api_url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+          self.__utils_log(f"[ERROR] Could not fetch releases: {resp.status_code} {resp.text}", color='r')
+          return None
+        releases = resp.json()
+      except Exception as exc:
+        self.__utils_log(f"[ERROR] Exception fetching releases: {exc}", color='r')
+        return None
+
+      if not isinstance(releases, list) or not releases:
+        self.__utils_log("[INFO] No releases found or invalid data.", color='y')
+        return None
+
+      # Filter by release_tag_substring
+      matching = []
+      for rel in releases:
+        tag_name = rel.get("tag_name", "")
+        if release_tag_substring is None or (release_tag_substring in tag_name):
+          matching.append(rel)
+      if not matching:
+        self.__utils_log(f"[INFO] No release matches '{release_tag_substring}'.", color='y')
+        return None
+
+      # Sort by published_at descending
+      matching.sort(key=lambda r: r.get("published_at", ""), reverse=True)
+      newest_release = matching[0]
+      newest_tag = newest_release.get("tag_name", "")
+      assets = newest_release.get("assets", [])
+
+      if not assets:
+        self.__utils_log("[INFO] This release has no assets.", color='y')
+        return None
+
+      # Find the first asset that matches asset_filter
+      chosen_asset = None
+      for asset in assets:
+        if asset_filter is None or (asset_filter in asset["name"]):
+          chosen_asset = asset
+          break
+      if not chosen_asset:
+        self.__utils_log(f"[INFO] No asset matches filter '{asset_filter}'.", color='y')
+        return None
+
+      # Return relevant metadata
+      info = {
+        "release_tag": newest_tag,
+        "asset_id": chosen_asset.get("id"),
+        "asset_name": chosen_asset.get("name"),
+        "asset_updated_at": chosen_asset.get("updated_at"),
+        "published_at": newest_release.get("published_at"),
+      }
+      return info
+
+    def _filter_and_pick_newest_by_substring(
+        self, items: List[Tuple[str, int]],
+        substring: Optional[str] = None
+    ) -> Optional[str]:
+      """
+      Given a list of (name, date_as_int), filter by substring in `name`,
+      then pick the one with the greatest `date_as_int`.
+
+      Returns the `name` of the newest item, or None if no matches.
+      """
+      if not items:
+        return None
+
+      # Filter by substring
+      filtered = []
+      for (name, date_val) in items:
+        if substring is None or (substring in name):
+          filtered.append((name, date_val))
+
+      if not filtered:
+        return None
+
+      # Sort by date_val ascending, pick the last (newest)
+      filtered.sort(key=lambda x: x[1])
+      return filtered[-1][0]
+
+    def git_clone_and_list_tags(
+        self,
+        repo_url: str,
+        user: Optional[str] = None,
+        token: Optional[str] = None
+    ) -> List[Tuple[str, int]]:
+      """
+      1) Clone/fetch tags from `repo_url` into a temp directory (using `git`).
+      2) Return a list of (tag_name, creation_date_unix).
+      """
+      # Insert credentials if provided and if repo_url starts with https://
+      if user and token and repo_url.startswith("https://"):
+        repo_url = repo_url.replace("https://", f"https://{user}:{token}@", 1)
+
+      self.__utils_log(f"Fetching tags from {repo_url}...")
+
+      temp_dir = tempfile.mkdtemp(prefix="git_tags_")
+      try:
+        # Initialize empty repo
+        subprocess.check_call(["git", "init", temp_dir],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+
+        # Add remote origin
+        subprocess.check_call(["git", "-C", temp_dir, "remote", "add", "origin", repo_url],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+
+        # Fetch *all* tags (depth=1 typically suffices)
+        subprocess.check_call([
+          "git", "-C", temp_dir, "fetch", "--tags", "--depth=1", "origin"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # List tags sorted by creation date
+        cmd = [
+          "git", "-C", temp_dir, "for-each-ref",
+          "--sort=creatordate",
+          '--format=%(refname:short)___%(creatordate:unix)',
+          "refs/tags"
+        ]
+        output = subprocess.check_output(cmd, universal_newlines=True)
+        lines = output.strip().splitlines()
+        if not lines:
+          self.__utils_log("[WARNING] No tags found in the repository.")
+          return []
+
+        # Parse lines: "<tag>___<date_unix>"
+        results = []
+        for line in lines:
+          parts = line.split("___")
+          if len(parts) != 2:
+            continue
+          tag, date_unix_str = parts
+          try:
+            date_unix = int(date_unix_str)
+          except ValueError:
+            continue
+          results.append((tag, date_unix))
+
+        return results
+
+      except subprocess.CalledProcessError as exc:
+        self.__utils_log(f"[ERROR] Command {exc.cmd} failed with code={exc.returncode}")
+        return []
+      except Exception as exc:
+        self.__utils_log(f"[ERROR] Unexpected error: {exc}")
+        return []
+      finally:
+        # Cleanup
+        shutil.rmtree(temp_dir, ignore_errors=True)
       return
-    
-    printer = self.P if hasattr(self, 'P') else _P
-    printer(f"git_get_local_commit_hash: {repo_dir}")
 
-    command = ["git", "rev-parse", "HEAD"]
-    try:
-      results = subprocess.check_output(
-        command,
-        cwd=repo_dir,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True, 
-        # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
-      )
-      if results is not None:
-        printer(f"git_get_local_commit_hash: `rev-parse` results:\n{results}")
-        lines = results.split('\n')
-        if len(lines) > 0:
-          commit_hash = lines[0].split()[0]        
+    def git_get_last_release_tag(
+        self,
+        repo_url: str,
+        user: Optional[str] = None,
+        token: Optional[str] = None,
+        tag_name: Optional[str] = None
+    ) -> Optional[str]:
+      """
+      Return the newest (by creation date) tag from the given Git repo
+      that contains `tag_name` as a substring (if provided).
+      """
+      tags = self.git_clone_and_list_tags(repo_url, user, token)
+      if not tags:
+        return None
+
+      newest_tag = self._filter_and_pick_newest_by_substring(tags, tag_name)
+      if newest_tag:
+        self.__utils_log(f"Newest matching tag = {newest_tag}")
       else:
-        printer(f"git_get_local_commit_hash: Error while retrieving commit hash from remote repository: {results}", color='r')
-    except subprocess.CalledProcessError as exc:
-      printer(f"git_get_local_commit_hash: Error '{exc.cmd}' returned  {exc.returncode} with output:\n{exc.output}", color='r')
-    except Exception as exc:
-      printer(f"git_get_local_commit_hash: An unexpected exception occurred: {exc}", color='r')    
-    return commit_hash
-  
-    
-  def git_get_last_commit_hash(self, repo_url, user=None, token=None):
-    """
-    Retrieves the latest commit hash from the remote git repository.
+        self.__utils_log(f"[INFO] No tags match substring '{tag_name}'.")
+      return newest_tag
 
-    Parameters
-    ----------
-    repo_url : str
-      The git repository URL
 
-    user : str, optional
-      The username to be used for authentication. The default is None.
+    def git_download_release_asset(
+        self,
+        repo_url: str,
+        user: Optional[str] = None,  # not used except for logging or if you want to unify
+        token: Optional[str] = None,
+        release_tag_substring: Optional[str] = None,
+        asset_filter: Optional[str] = None,
+        download_dir: Optional[str] = None
+    ) -> Optional[str]:
+      """
+      1) Gets info about the most recent GitHub release asset for `repo_url`.
+      2) Downloads it to `download_dir`.
+      3) Returns the path to the downloaded file, or None on error.
 
-    token : str, optional
-      The token to be used for authentication. The default is None.
-
-    Returns
-    -------
-    str
-      The latest commit hash from the remote repository.
-    """
-    commit_hash = None
-    def _P(msg, color=None):
-      print(msg)
-      return
-    printer = self.P if hasattr(self, 'P') else _P
-    printer(f"git_get_last_commit_hash: using {repo_url}")
-
-    if user is not None and token is not None:
-      repo_url = repo_url.replace('https://', f'https://{user}:{token}@')
-      
-    command = ["git"] + GIT_IGNORE_AUTH + ["ls-remote", repo_url, "HEAD"]
-    try:
-      results = subprocess.check_output(
-        command,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True, 
-        # creationflags=subprocess.CREATE_NO_WINDOW, # WARNING: This works only on Windows
+      Also returns None if no matching release or asset is found.
+      """
+      # 1) First, get the newest release + asset
+      info = self.git_get_latest_release_asset_info(
+        repo_url, token=token,
+        release_tag_substring=release_tag_substring,
+        asset_filter=asset_filter
       )
-      if results is not None:
-        printer(f"git_get_last_commit_hash: `ls-remote` results:\n{results}")
-        lines = results.split('\n')
-        if len(lines) > 0:
-          commit_hash = lines[0].split()[0]        
-      else:
-        printer(f"git_get_last_commit_hash: Error while retrieving commit hash from remote repository: {results}", color='r')
-    except subprocess.CalledProcessError as exc:
-      printer(f"git_get_last_commit_hash: Error '{exc.cmd}' returned  {exc.returncode} with output:\n{exc.output}", color='r')
-    except Exception as exc:
-      printer(f"git_get_last_commit_hash: An unexpected exception occurred: {exc}", color='r')    
-    return commit_hash
-  
+      if not info:
+        return None  # Something failed or no match
+
+      owner, repo = repo_url.rstrip("/").split("/")[-2:]
+      asset_id = info["asset_id"]
+      file_name = info["asset_name"]
+
+      if download_dir is None:
+        download_dir = os.path.join(os.getcwd(), "github_assets")
+      os.makedirs(download_dir, exist_ok=True)
+
+      asset_api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}"
+      local_path = os.path.join(download_dir, file_name)
+
+      headers = {"Accept": "application/octet-stream"}
+      if token:
+        headers["Authorization"] = f"token {token}"
+
+      self.__utils_log(f"Downloading asset '{file_name}' to '{local_path}'...")
+      try:
+        with requests.get(asset_api_url, headers=headers, stream=True, timeout=30) as r:
+          r.raise_for_status()
+          with open(local_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+              f.write(chunk)
+      except Exception as exc:
+        self.__utils_log(f"[ERROR] Download failed: {exc}", color='r')
+        return None
+
+      self.__utils_log(f"Asset downloaded to: {local_path}")
+      return local_path
+  """END GIT SECTION"""
+
 
   def indent_strings(self, strings, indent=2):
     """ Indents a string or a list of strings by a given number of spaces."""

@@ -595,7 +595,7 @@ class Orchestrator(DecentrAIObject,
 
   @property
   def cfg_eeid(self):
-    _id = self.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')
+    _id = self.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
     return _id
   
   @property

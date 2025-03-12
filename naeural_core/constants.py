@@ -43,6 +43,8 @@ EPOCH_MAX_VALUE = 255
 ###################################################
 ###################################################
 
+EE_ALIAS_MAX_SIZE = 15
+
 
 ETH_ENABLED_ENV_KEY = BASE_CT.ETH_ENABLED_ENV_KEY # this env var tells if the system should use or not EVM compatibility in payloads
 ETH_ENABLED = str(environ.get(ETH_ENABLED_ENV_KEY, 'False')).lower() == 'true'

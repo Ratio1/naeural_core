@@ -53,7 +53,7 @@ class BaseHeavyOp(DecentrAIObject):
 
   @property
   def _eeid(self):
-    return self.log.config_data[ct.CONFIG_STARTUP_v2.K_EE_ID]
+    return self.log.config_data[ct.CONFIG_STARTUP_v2.K_EE_ID][:ct.EE_ALIAS_MAX_SIZE]
 
   @abc.abstractmethod
   def _process_dct_operation(self, dct):

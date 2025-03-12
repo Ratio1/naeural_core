@@ -487,7 +487,7 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
     dct_cap_status = OrderedDict()
     issue_caps = []
     config_startup = self.shmem['config_startup'] 
-    eeid = config_startup.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')
+    eeid = config_startup.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
     title = "Current active captures on '{}' (only DCT captures shown with no metastreams):".format(eeid)
     dct_msg = OrderedDict()
     # TODO: generalize the stat_cols keys so that they can be adapted to any type of capture

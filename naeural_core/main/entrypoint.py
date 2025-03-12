@@ -43,7 +43,7 @@ def maybe_replace_txt(fn):
 def running_with_hostname(config_file):
   result = None
   custom_ee_id = False
-  ee_id = os.environ.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')
+  ee_id = os.environ.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
   if len(ee_id) > 0:
     custom_ee_id = ee_id.upper().replace('X','') not in ['HOSTNAME', '']
     print("Found {} in env EE_ID: '{}' ".format("custom" if custom_ee_id else "default", ee_id), flush=True)    
@@ -53,7 +53,7 @@ def running_with_hostname(config_file):
   is_hostname_env = ee_id in ['HOSTNAME'] # if explicitly set to HOSTNAME in environment
   with open(config_file, 'r') as fh:
     config_data = json.load(fh)
-    config_ee_id = config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')
+    config_ee_id = config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
     print("Found EE_ID in config: '{}'".format(config_ee_id), flush=True)
     str_simple = config_ee_id.upper().replace('X','')
     is_hostname_config = str_simple in ['HOSTNAME', ''] # if explicitly set to HOSTNAME in config or first run with no config
@@ -66,7 +66,7 @@ def running_with_hostname(config_file):
   return result
   
 def get_id(log : Logger):
-  config_box_id = log.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')
+  config_box_id = log.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
   log.P("Found EE_ID '{}'".format(config_box_id))
   if config_box_id.upper().replace('X','').upper() in [None, '', 'HOSTNAME', 'E2DKR']:
     config_box_id_env = os.environ.get('EE_ID', '')

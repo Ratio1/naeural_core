@@ -902,7 +902,7 @@ class BasePluginExecutor(
 
   @property
   def _device_id(self):
-    device_id = self.log.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')
+    device_id = self.log.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
     return device_id
 
   @property

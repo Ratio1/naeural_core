@@ -164,7 +164,7 @@ class BaseDataCapture(DecentrAIObject, _ConfigHandlerMixin):
 
   @property
   def _device_id(self):
-    eeid = self.log.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')
+    eeid = self.log.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
     return eeid
 
 

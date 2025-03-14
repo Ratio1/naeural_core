@@ -1,4 +1,5 @@
 from time import time
+import traceback
 
 from naeural_core.bc import DefaultBlockEngine
 
@@ -383,15 +384,15 @@ class BCWrapper:
   
   def get_eth_oracles(self):
     """
-    Returns the list of EVM addresses for the known oracles. 
+    Returns the list of EVM addresses for the known oracles.
     OBS: it does not check if the node is alive or not or if it has a known node address.
     """
     return self.__bc.web3_get_oracles()
-  
-  
+
+
   def get_oracles(self, include_eth_addrs: bool = False, wait_interval: int = 15):
     """
-    Get the oracles node addresses via the current network smart contract and the 
+    Get the oracles node addresses via the current network smart contract and the
     current available network nodes.
     
     Returns
@@ -411,7 +412,7 @@ class BCWrapper:
       _done = False
       _check_start = time()
       while not _done:
-        for eth_addr in eth_oracles:        
+        for eth_addr in eth_oracles:
           if eth_addr in found:
             continue
           internal_addr = self.eth_addr_to_internal_addr(eth_addr)
@@ -426,7 +427,7 @@ class BCWrapper:
           _done = True
         else:
           self.P("Waiting for oracles to be converted...", color='y')
-          time.sleep(2)        
+          time.sleep(2)
         #end if
       #end while
       if len(found) < min_converted_thr:
@@ -435,9 +436,9 @@ class BCWrapper:
         )
         raise Exception(msg)
     except Exception as e:
-      self.P("Error getting whitelist data: {}".format(e), color='r')    
+      self.P(f"Error getting whitelist data: {e}\n{traceback.format_exc()}", color='r')
     if include_eth_addrs:
-      return wl, names, found  
+      return wl, names, found
     return wl, names  
   
   def is_node_licensed(self, node_address: str = None, node_address_eth: str = None):

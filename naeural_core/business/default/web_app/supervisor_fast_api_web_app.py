@@ -38,6 +38,6 @@ class SupervisorFastApiWebApp(BasePlugin):
     return res
 
   def _process(self):
-    if not self.__is_enabled:
+    if self.cfg_runs_only_on_supervisor_node and not self.__is_enabled:
       return None
     return super(SupervisorFastApiWebApp, self)._process()

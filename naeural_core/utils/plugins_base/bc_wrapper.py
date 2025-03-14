@@ -1,4 +1,7 @@
+from time import time
+
 from naeural_core.bc import DefaultBlockEngine
+
 class BCWrapper:
   def __init__(self, blockchain_manager : DefaultBlockEngine, owner):
     self.__bc : DefaultBlockEngine = blockchain_manager
@@ -378,9 +381,18 @@ class BCWrapper:
     return [self.eth_addr_to_internal_addr(eth) for eth in lst_eth]
   
   
-  def get_oracles(self, include_eth_addrs: bool = False):
+  def get_eth_oracles(self):
     """
-    Get the default (oracles) whitelist data for the current node.
+    Returns the list of EVM addresses for the known oracles. 
+    OBS: it does not check if the node is alive or not or if it has a known node address.
+    """
+    return self.__bc.web3_get_oracles()
+  
+  
+  def get_oracles(self, include_eth_addrs: bool = False, wait_interval: int = 15):
+    """
+    Get the oracles node addresses via the current network smart contract and the 
+    current available network nodes.
     
     Returns
     -------    
@@ -389,16 +401,43 @@ class BCWrapper:
     """
     wl, names, eth_oracles = [], [], []
     try:
-      eth_oracles = self.__bc.web3_get_oracles()
-      for eth_addr in eth_oracles:
-        internal_addr = self.eth_addr_to_internal_addr(eth_addr)
-        wl.append(internal_addr)
-        alias = self.__owner.netmon.network_node_eeid(internal_addr)
-        names.append(alias)
+      eth_oracles = self.get_eth_oracles()
+      n_oracles = len(eth_oracles)
+      if n_oracles == 0:
+        msg = "No oracles found in the smart-contracts!"
+        raise Exception(msg)
+      found = []
+      min_converted_thr = int(n_oracles * 0.5)
+      _done = False
+      _check_start = time()
+      while not _done:
+        for eth_addr in eth_oracles:        
+          if eth_addr in found:
+            continue
+          internal_addr = self.eth_addr_to_internal_addr(eth_addr)
+          if internal_addr is None:
+            continue
+          found.append(eth_addr)
+          wl.append(internal_addr)
+          alias = self.__owner.netmon.network_node_eeid(internal_addr)
+          names.append(alias)
+        #end for
+        if len(found) >= min_converted_thr or time() - _check_start > wait_interval:
+          _done = True
+        else:
+          self.P("Waiting for oracles to be converted...", color='y')
+          time.sleep(2)        
+        #end if
+      #end while
+      if len(found) < min_converted_thr:
+        msg = "Not enough oracles found to internal addresses. Retrieved from smart contract: {} / Found: {}".format(
+          eth_oracles, found
+        )
+        raise Exception(msg)
     except Exception as e:
       self.P("Error getting whitelist data: {}".format(e), color='r')    
     if include_eth_addrs:
-      return wl, names, eth_oracles  
+      return wl, names, found  
     return wl, names  
   
   def is_node_licensed(self, node_address: str = None, node_address_eth: str = None):

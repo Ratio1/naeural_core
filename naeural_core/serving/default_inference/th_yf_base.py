@@ -97,7 +97,10 @@ class YfBase(ParentServingProcess):
       prep_inputs, lst_original_shapes = results
     else:
       prep_inputs, lst_original_shapes, lst_original_images = results
-      self.original_input_images = lst_original_images
+    #endif check for results length
+    
+    self.original_input_images = lst_original_images
+    
     self.resized_input_images = prep_inputs
     self._stop_timer('resize_in_gpu')
 
@@ -166,11 +169,16 @@ class YfBase(ParentServingProcess):
       for det in np_pred_nms_cpu:
         det = [float(x) for x in det]
         # order is [left, top, right, bottom, proba, class] => [L, T, R, B, P, C, RP1, RC1, RP2, RC2, RP3, RC3]
-        L, T, R, B, P, C = det[:6]  # order is [left, top, right, bottom, proba, class]
+        L, T, R, B, P, C = [int(x) for x in det[:6]]
+        # now check if color needs to be computed
+        
+        # endif compute color
         dct_obj = {
           self.consts.TLBR_POS: [int(T), int(L), int(B), int(R)],
           self.consts.PROB_PRC: round(float(P), 2),
           self.consts.TYPE: self.class_names[int(C)] if self.class_names is not None else C,
+          # additional properties such as color, etc.
+          #
         }
         if self.cfg_debug_serving:
           dct_obj['CANDIDATES'] = [

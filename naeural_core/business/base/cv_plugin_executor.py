@@ -44,7 +44,8 @@ _CONFIG = {
   'SORT_MIN_IOU': 0,
   'SORT_MAX_AGE': 3,
   'SORT_MIN_HITS': 1,
-
+  
+  "COLOR_TAGGING": False,  
 
   'PRC_INTERSECT': 0.5,
   'TRUSTED_PRC': 0.65,
@@ -885,19 +886,47 @@ class CVPluginExecutor(BasePluginExecutor,
         # endfor all images
       # endif len(meta_types) > 0
       return dct_plugin_inference
+    
+    
+    def __maybe_complete_color_tag(self, dct_all_inferences, dct_images):
+      if self.cfg_color_tagging:
+        for model, lst_images_inferences in dct_all_inferences:
+          for idx, lst_image_inferences in enumerate(lst_images_inferences):
+            image = dct_images[idx]['IMG']
+            for infer in lst_image_inferences:              
+              if infer.get(ct.COLOR_TAG) is None:
+                TLBR = infer.get(ct.TLBR_POS, None)
+                T, L, B, R = TLBR
+                if TLBR is not None:
+                  crop = image[T:B, L:R]
+                  color_tag = self.get_crop_color(
+                    np_rgb_crop=crop,
+                  )
+                  if color_tag is not None:
+                    infer[ct.COLOR_TAG] = color_tag
+                  # endif
+                # endif
+              # endif
+            # endfor inferences
+          # endfor images
+        # endfor ai-engines
+      # endif cfg_color_tagging
+      return
+    
 
     def _pre_process(self):
       """
       Pre-process upstream data:
         1. Create list with ai-engine/model for each inference
         2. Filter within location with threshold
-      """
-
-      if self._coords_type == ct.COORDS_NONE and len(self.dataapi_images()) >= 1:
+      """ 
+      dct_images = self.dataapi_images()
+      if self._coords_type == ct.COORDS_NONE and len(dct_images) >= 1:
         img = self.dataapi_image()
         self._top, self._left, self._bottom, self._right = 0, 0, img.shape[-3], img.shape[-2]
 
       dct_global_inferences = self.dataapi_images_inferences()
+      
 
       dct_plugin_inference = self._filter_confidence_threshold(dct_global_inferences)
       dct_plugin_inference = self._filter_object_types(dct_plugin_inference)
@@ -920,7 +949,10 @@ class CVPluginExecutor(BasePluginExecutor,
       dct_positional_inst_inference = self._track_in_zone_objects(dct_inference=dct_positional_inst_inference)
       # end track objects time in target zone
 
+      self.__maybe_complete_color_tag(dct_positional_inst_inference, dct_images)
+
       dct_instance_inference = {**dct_generic_plugin_inference, **dct_positional_inst_inference}
+      
 
       pre_process_outputs = {
         'DCT_PLUGIN_INFERENCES': dct_plugin_inference,

@@ -2373,7 +2373,10 @@ class _UtilsBaseMixin(
       new_w = int(w * crop_ratio)
       start_row = (h - new_h) // 2
       start_col = (w - new_w) // 2
-      center_crop_rgb = np_rgb_crop[start_row:start_row + new_h, start_col:start_col + new_w]
+      center_crop_rgb = np_rgb_crop[
+        start_row:start_row + new_h, 
+        start_col:start_col + new_w
+      ]
       
       # Compute median across each channel
       median_r = int(np.median(center_crop_rgb[:, :, 0]))

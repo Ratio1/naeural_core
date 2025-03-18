@@ -1,6 +1,7 @@
 import importlib
 import os
 import shutil
+import tempfile
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -31,6 +32,7 @@ _CONFIG = {
 
   'PAGES': [],
   'STATIC_DIRECTORY': 'assets',
+  'DEFAULT_ROUTE': None,
 
   # In case of wrapped response, the response will be wrapped in a json with 2 keys:
   # 'result' and 'node_addr', where 'result' is the actual response and 'node_addr' is the node address
@@ -108,6 +110,25 @@ class FastApiWebAppPlugin(BasePlugin):
     else:
       self.P("Package '{}' not found.".format(package_name), color='r')
     return None
+
+  def validate_static_directory(self):
+    """
+    Validate the `STATIC_DIRECTORY` value.
+    This will check if the value is trying to reference a restricted directory.
+    """
+    # Creating a temporary directory to check if the static directory is valid
+    tmp_directory = tempfile.mkdtemp()
+    static_directory = self.cfg_static_directory
+
+    full_path = os.path.join(tmp_directory, static_directory)
+    # Check if the full path is a subdirectory of the temporary directory
+    if not full_path.startswith(tmp_directory):
+      # If the full path is not a subdirectory of the temporary directory, it is invalid
+      self.add_error(f"Invalid `STATIC_DIRECTORY`: {static_directory}")
+    # endif path is restricted
+    # Clean up the temporary directory
+    os.rmdir(tmp_directory)
+    return
 
   def initialize_assets(self, src_dir, dst_dir, jinja_args):
     """
@@ -386,6 +407,7 @@ class FastApiWebAppPlugin(BasePlugin):
       page['method'] = 'get'
 
     static_directory = cfg_jinja_args.pop('static_directory', self.cfg_static_directory)
+    default_route = self.cfg_default_route
 
     return {
       'static_directory': static_directory,
@@ -398,6 +420,7 @@ class FastApiWebAppPlugin(BasePlugin):
       'api_version': repr(self.__version__),
       'node_comm_params': self._node_comms_jinja_args,
       'debug_web_app': self.cfg_debug_web_app,
+      'default_route': default_route,
       **cfg_jinja_args,
     }
 

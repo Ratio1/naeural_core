@@ -55,6 +55,16 @@ from naeural_core.utils.system_shared_memory import NumpySharedMemory
 from naeural_core.main.ver import __VER__ as core_version    
 from ratio1._ver import __VER__ as sdk_version   
 
+COMMON_COLORS = {
+    "red":    (255, 0, 0),
+    "green":  (0, 255, 0),
+    "blue":   (0, 0, 255),
+    "yellow": (255, 255, 0),
+    "orange": (255, 165, 0),
+    "white":  (255, 255, 255),
+    "black":  (0, 0, 0)
+}
+
 
 GIT_IGNORE_AUTH = ["-c","http.https://github.com/.extraheader="]
 
@@ -1235,7 +1245,7 @@ class _UtilsBaseMixin(
       """
       1) Query GitHub releases for `repo_url`.
       2) Filter by `release_tag_substring`, pick newest by published_at.
-      3) From that release’s assets, pick the first containing `asset_filter`.
+      3) From that release's assets, pick the first containing `asset_filter`.
       4) Return a dict with { "release_tag": ..., "asset_id": ..., "asset_name": ...,
                               "asset_updated_at": ..., "published_at": ... }
       or None if not found.
@@ -1815,33 +1825,6 @@ class _UtilsBaseMixin(
       'timestamp': self.time()
     }
 
-  def image_entropy(self, image):
-    """
-    Computes the entropy of an image.
-
-    Parameters
-    ----------
-    image : cv2 image | PIL image | np.ndarray
-        the input image.
-
-    Returns
-    -------
-    entropy: float
-        the entropy of the image
-    """
-
-    if image is None:
-      # self.P("Image is None")
-      return 0
-
-    np_image = np.array(image)
-    entropy = 0
-
-    np_marg = np.histogramdd(np.ravel(np_image), bins=256)[0] / np_image.size
-    np_marg = np_marg[np.where(np_marg > 0)]
-    entropy = -np.sum(np.multiply(np_marg, np.log2(np_marg)))
-
-    return entropy
 
   def shorten_str(self, s, max_len=32):
     """
@@ -2143,144 +2126,264 @@ class _UtilsBaseMixin(
     """
     return self.log.match_template(dct2, dct1)
 
-
-  def receive_and_decrypt_payload(self, data, verbose=0):
-    """
-    Method for receiving and decrypting a payload addressed to us.
-    
-    Parameters
-    ----------
-    data : dict
-        The payload to be decrypted.
-        
-    verbose : int, optional
-        The verbosity level. The default is 0.
-        
-        
-    Returns
-    -------
-    dict
-        The decrypted payload addressed to us.
-    """
-    # Extract the sender, the data and if the data is encrypted.
-    sender = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
-    is_encrypted = data.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
-    encrypted_data = data.get(self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA, None)
-    # Remove the encrypted data from the payload data if it exists.
-    result = {k: v for k, v in data.items() if k != self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA}
-
-    if is_encrypted and encrypted_data:
-      # Extract the destination and check if the data is addressed to us.
-      dest = data.get(self.const.PAYLOAD_DATA.EE_DESTINATION, [])
-      if not isinstance(dest, list):
-        dest = [dest]
-      # now we check if the data is addressed to us
-      if self.e2_addr not in dest:
-        # TODO: maybe still return the encrypted data for logging purposes
-        if verbose > 0:
-          self.P(f"Payload data not addressed to us. Destination: {dest}. Ignoring.")
-        # endif verbose
-        return {}
-      # endif destination check
-
-      try:
-        # This should fail in case the data was not sent to us.
-        str_decrypted_data = self.bc.decrypt_str(
-          str_b64data=encrypted_data, str_sender=sender,
-          # embed_compressed=True, # we expect the data to be compressed
-        )
-        decrypted_data = self.json_loads(str_decrypted_data)
-      except Exception as exc:
-        self.P(f"Error while decrypting payload data from {sender}:\n{exc}")
-        if verbose > 0:
-          self.P(f"Received data:\n{self.dict_to_str(result)}")
-        # endif verbose
-        decrypted_data = None
-      # endtry decryption
+  # payload handling
+  if True:
+    def receive_and_decrypt_payload(self, data, verbose=0):
+      """
+      Method for receiving and decrypting a payload addressed to us.
       
-      if decrypted_data is not None:
-        # If the decrypted data is not a dictionary, we embed it in a dictionary.
-        # TODO: maybe review this part
-        if not isinstance(decrypted_data, dict):
-          decrypted_data = {'EE_DECRYPTED_DATA': decrypted_data}
-        # endif not dict
-        if verbose > 0:
-          decrypted_keys = list(decrypted_data.keys())
-          self.P(f"Decrypted data keys: {decrypted_keys}")
-        # endif verbose
-        # Merge the decrypted data with the original data.
-        result = {
-          **result,
-          **decrypted_data
-        }
-      else:
-        if verbose > 0:
-          self.P(f"Decryption failed. Returning original data.")
-        # endif verbose
-      # endif decrypted_data is not None
-    # endif is_encrypted
-    return result
+      Parameters
+      ----------
+      data : dict
+          The payload to be decrypted.
+          
+      verbose : int, optional
+          The verbosity level. The default is 0.
+          
+          
+      Returns
+      -------
+      dict
+          The decrypted payload addressed to us.
+      """
+      # Extract the sender, the data and if the data is encrypted.
+      sender = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
+      is_encrypted = data.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
+      encrypted_data = data.get(self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA, None)
+      # Remove the encrypted data from the payload data if it exists.
+      result = {k: v for k, v in data.items() if k != self.const.PAYLOAD_DATA.EE_ENCRYPTED_DATA}
+
+      if is_encrypted and encrypted_data:
+        # Extract the destination and check if the data is addressed to us.
+        dest = data.get(self.const.PAYLOAD_DATA.EE_DESTINATION, [])
+        if not isinstance(dest, list):
+          dest = [dest]
+        # now we check if the data is addressed to us
+        if self.e2_addr not in dest:
+          # TODO: maybe still return the encrypted data for logging purposes
+          if verbose > 0:
+            self.P(f"Payload data not addressed to us. Destination: {dest}. Ignoring.")
+          # endif verbose
+          return {}
+        # endif destination check
+
+        try:
+          # This should fail in case the data was not sent to us.
+          str_decrypted_data = self.bc.decrypt_str(
+            str_b64data=encrypted_data, str_sender=sender,
+            # embed_compressed=True, # we expect the data to be compressed
+          )
+          decrypted_data = self.json_loads(str_decrypted_data)
+        except Exception as exc:
+          self.P(f"Error while decrypting payload data from {sender}:\n{exc}")
+          if verbose > 0:
+            self.P(f"Received data:\n{self.dict_to_str(result)}")
+          # endif verbose
+          decrypted_data = None
+        # endtry decryption
+        
+        if decrypted_data is not None:
+          # If the decrypted data is not a dictionary, we embed it in a dictionary.
+          # TODO: maybe review this part
+          if not isinstance(decrypted_data, dict):
+            decrypted_data = {'EE_DECRYPTED_DATA': decrypted_data}
+          # endif not dict
+          if verbose > 0:
+            decrypted_keys = list(decrypted_data.keys())
+            self.P(f"Decrypted data keys: {decrypted_keys}")
+          # endif verbose
+          # Merge the decrypted data with the original data.
+          result = {
+            **result,
+            **decrypted_data
+          }
+        else:
+          if verbose > 0:
+            self.P(f"Decryption failed. Returning original data.")
+          # endif verbose
+        # endif decrypted_data is not None
+      # endif is_encrypted
+      return result
 
 
-  def check_payload_data(self, data, verbose=0):
-    """
-    Method for checking if a payload is addressed to us and decrypting it if necessary.
-    Parameters
-    ----------
-    data : dict
-        The payload data to be checked and maybe decrypted.
+    def check_payload_data(self, data, verbose=0):
+      """
+      Method for checking if a payload is addressed to us and decrypting it if necessary.
+      Parameters
+      ----------
+      data : dict
+          The payload data to be checked and maybe decrypted.
 
-    verbose : int, optional
-        The verbosity level. The default is 0.
-    Returns
-    -------
-    dict
-        The original payload data if not encrypted.
-        The decrypted payload data if encrypted and the payload was addressed to us.
-        None if the payload was encrypted but not addressed to us.
-    """
-    return self.receive_and_decrypt_payload(data=data, verbose=verbose)
+      verbose : int, optional
+          The verbosity level. The default is 0.
+      Returns
+      -------
+      dict
+          The original payload data if not encrypted.
+          The decrypted payload data if encrypted and the payload was addressed to us.
+          None if the payload was encrypted but not addressed to us.
+      """
+      return self.receive_and_decrypt_payload(data=data, verbose=verbose)
+    
+    
+    def get_hash(self, str_data: str, length=None, algorithm='md5'):
+      """
+      This method returns the hash of a given string.
+      
+      Parameters
+      ----------
+      str_data : str
+          The string to be hashed.
+      
+      length : int, optional
+          The length of the hash. The default is None.
+          
+      algorithm : str, optional
+          The algorithm to be used. The default is 'md5'.
+          
+      Returns
+      -------
+      
+      str
+          The hash of the string.
+          
+      Example
+      -------
+      
+      ```
+      hash = plugin.get_hash('test', length=8, algorithm='md5')
+      ```
+      
+      
+      """
+      assert algorithm in ['md5', 'sha256'], f"Invalid algorithm: {algorithm}"
+      bdata = bytes(str_data, 'utf-8')
+      if algorithm == 'md5':
+        h = hashlib.md5(bdata)
+      elif algorithm == 'sha256':
+        h = hashlib.sha256(bdata)
+      result = h.hexdigest()[:length] if length is not None else h.hexdigest()
+      return result
+
+
+  # Computer vision utils - maybe move to cv package
+  if True:      
+    def image_entropy(self, image):
+      """
+      Computes the entropy of an image.
+
+      Parameters
+      ----------
+      image : cv2 image | PIL image | np.ndarray
+          the input image.
+
+      Returns
+      -------
+      entropy: float
+          the entropy of the image
+      """
+
+      if image is None:
+        # self.P("Image is None")
+        return 0
+
+      np_image = np.array(image)
+      entropy = 0
+      # Build a 1D histogram over pixel intensities (0..255), then normalize
+      np_marg = np.histogramdd(np.ravel(np_image), bins=256)[0] / np_image.size
+      # Filter out zero-valued bins (log2(0) is undefined)
+      np_marg = np_marg[np.where(np_marg > 0)]
+      # Apply Shannon entropy: -sum(p * log2(p))
+      entropy = -np.sum(np.multiply(np_marg, np.log2(np_marg)))
+
+      return entropy    
+    
+    def infer_color(self, rgb, defaults=COMMON_COLORS):  
+      """
+      Classify an input RGB color against a predefined set of colors by picking
+      the closest color.
+
+      Parameters
+      ----------
+      rgb : tuple
+          The RGB color to classify, as a tuple of three integers (R, G, B).
+          
+      defaults : dict, optional
+          A dictionary of default colors to classify against. The default is
+          a dictionary of common colors.
+          The keys are color names and the values are their RGB values.
+          The RGB values are expected to be in the range [0, 255].
+      
+      Returns
+      -------
+      str
+          The name of the color that is closest to the input RGB color.
+
+
+      """
+      color_names = list(defaults.keys())
+      color_values = np.array(list(defaults.values()), dtype=np.float32)
+
+      # Convert input to a float NumPy array
+      rgb_arr = np.array(rgb, dtype=np.float32)
+
+      # Compute the squared Euclidean distances between rgb_arr and each default color
+      diffs = color_values - rgb_arr  # shape (N, 3)
+      dist_sq = np.sum(diffs**2, axis=1)
+
+      # Find index of the color with the minimal distance
+      idx = np.argmin(dist_sq)
+      return color_names[idx]
+
+
+    def classify_color(self, rgb, defaults=COMMON_COLORS):
+      """
+      Classify an input RGB color against a predefined set of colors by picking
+      the closest color.
+
+      Parameters
+      ----------
+      rgb : tuple
+          The RGB color to classify, as a tuple of three integers (R, G, B).
+      
+      Returns
+      -------
+      str
+          The name of the color that is closest to the input RGB color.
+      """
+      return self.infer_color(rgb=rgb, defaults=defaults)
   
-  
-  def get_hash(self, str_data: str, length=None, algorithm='md5'):
-    """
-    This method returns the hash of a given string.
-    
-    Parameters
-    ----------
-    str_data : str
-        The string to be hashed.
-    
-    length : int, optional
-        The length of the hash. The default is None.
-        
-    algorithm : str, optional
-        The algorithm to be used. The default is 'md5'.
-        
-    Returns
-    -------
-    
-    str
-        The hash of the string.
-        
-    Example
-    -------
-    
-    ```
-    hash = plugin.get_hash('test', length=8, algorithm='md5')
-    ```
-    
-    
-    """
-    assert algorithm in ['md5', 'sha256'], f"Invalid algorithm: {algorithm}"
-    bdata = bytes(str_data, 'utf-8')
-    if algorithm == 'md5':
-      h = hashlib.md5(bdata)
-    elif algorithm == 'sha256':
-      h = hashlib.sha256(bdata)
-    result = h.hexdigest()[:length] if length is not None else h.hexdigest()
-    return result
+    def get_crop_color(self, np_rgb_crop, defaults=COMMON_COLORS):
+      """
+      Get the color of a crop.
 
+      Parameters
+      ----------
+      np_rgb_crop : np.ndarray
+          The input crop, as a NumPy array in [H,W,C] RGB format.
+
+      Returns
+      -------
+      str
+          The name of the color that is closest to the input crop.
+      """
+      h, w, _ = np_rgb_crop.shape
+      crop_ratio = 0.5
+      new_h = int(h * crop_ratio)
+      new_w = int(w * crop_ratio)
+      start_row = (h - new_h) // 2
+      start_col = (w - new_w) // 2
+      center_crop_rgb = np_rgb_crop[start_row:start_row + new_h, start_col:start_col + new_w]
+      
+      # Compute median across each channel
+      median_r = int(np.median(center_crop_rgb[:, :, 0]))
+      median_g = int(np.median(center_crop_rgb[:, :, 1]))
+      median_b = int(np.median(center_crop_rgb[:, :, 2]))
+      median_color_rgb = (median_r, median_g, median_b)
+
+      # Classify using our updated infer_color
+      result = self.infer_color(median_color_rgb, defaults=defaults)
+      return result    
 
 # endclass _UtilsBaseMixin
 

@@ -17,6 +17,8 @@ _CONFIG = {
   "DEBUG_SERVING": False,
 
   "PICKED_INPUT": "IMG",
+  
+  "COLOR_TAGGING": False,
 
   'MAX_BATCH_FIRST_STAGE': 8,
 
@@ -60,6 +62,8 @@ class YfBase(ParentServingProcess):
   @property
   def has_second_stage_classifier(self):
     return self._has_second_stage_classifier and self.server_name == self.predict_server_name
+  
+  
 
   def _get_model(self, config):
     if not isinstance(config, dict):
@@ -171,14 +175,19 @@ class YfBase(ParentServingProcess):
         # order is [left, top, right, bottom, proba, class] => [L, T, R, B, P, C, RP1, RC1, RP2, RC2, RP3, RC3]
         L, T, R, B, P, C = [int(x) for x in det[:6]]
         # now check if color needs to be computed
-        
+        # the color tagging is done either in the serving or in the business logic
+        # depending on the configuration and the target compute overhead
+        # for heavy inference it is better to do it in the business logic
+        color_tag = None
+        if self.cfg_color_tagging:
+          pass
         # endif compute color
         dct_obj = {
           self.consts.TLBR_POS: [int(T), int(L), int(B), int(R)],
           self.consts.PROB_PRC: round(float(P), 2),
-          self.consts.TYPE: self.class_names[int(C)] if self.class_names is not None else C,
+          self.consts.TYPE: self.class_names[int(C)] if self.class_names is not None else C,          
           # additional properties such as color, etc.
-          #
+          self.consts.COLOR_TAG: color_tag,
         }
         if self.cfg_debug_serving:
           dct_obj['CANDIDATES'] = [

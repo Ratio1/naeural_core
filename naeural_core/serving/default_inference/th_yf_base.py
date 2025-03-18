@@ -101,9 +101,8 @@ class YfBase(ParentServingProcess):
       prep_inputs, lst_original_shapes = results
     else:
       prep_inputs, lst_original_shapes, lst_original_images = results
-    #endif check for results length
-    
-    self.original_input_images = lst_original_images
+      self.original_input_images = lst_original_images
+    # endif check for results length
     
     self.resized_input_images = prep_inputs
     self._stop_timer('resize_in_gpu')

@@ -890,9 +890,9 @@ class CVPluginExecutor(BasePluginExecutor,
     
     def __maybe_complete_color_tag(self, dct_all_inferences, dct_images):
       if self.cfg_color_tagging:
-        for model, lst_images_inferences in dct_all_inferences:
+        for model, lst_images_inferences in dct_all_inferences.items():
           for idx, lst_image_inferences in enumerate(lst_images_inferences):
-            image = dct_images[idx]['IMG']
+            image = dct_images[idx]
             for infer in lst_image_inferences:              
               if infer.get(ct.COLOR_TAG) is None:
                 TLBR = infer.get(ct.TLBR_POS, None)

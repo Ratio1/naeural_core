@@ -172,7 +172,7 @@ class YfBase(ParentServingProcess):
       for det in np_pred_nms_cpu:
         det = [float(x) for x in det]
         # order is [left, top, right, bottom, proba, class] => [L, T, R, B, P, C, RP1, RC1, RP2, RC2, RP3, RC3]
-        L, T, R, B, P, C = [int(x) for x in det[:6]]
+        L, T, R, B, P, C = det[:6]
         # now check if color needs to be computed
         # the color tagging is done either in the serving or in the business logic
         # depending on the configuration and the target compute overhead

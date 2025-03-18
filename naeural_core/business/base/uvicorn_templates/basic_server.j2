@@ -3,6 +3,8 @@ from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
+from starlette.testclient import TestClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pathlib import Path
 import json
@@ -32,6 +34,7 @@ app.add_middleware(
 
 STATIC_DIR = "{{ static_directory }}"
 DEBUG = {{ debug_web_app }}
+DEFAULT_ROUTE = "{{ default_route }}"
 
 # Define security scheme for Swagger UI
 security = HTTPBearer()
@@ -130,6 +133,15 @@ async def custom_404_handler(request: Request, exc: StarletteHTTPException):
             file_path = Path(STATIC_DIR) / request.url.path.strip("/")
             if file_path.exists() and file_path.is_file():
                 return FileResponse(file_path)
+
+    if DEFAULT_ROUTE is not None and request.url.path != DEFAULT_ROUTE:
+        # Using TestClient to simulate a request internally
+        with TestClient(app) as client:
+            # Make a get request to the default route
+            response = client.get(DEFAULT_ROUTE)
+            return Response(content=response.content, status_code=response.status_code, headers=dict(response.headers))
+    # endif DEFAULT_ROUTE defined
+
     print(f"StarletteHTTPException during request for {request.url}:\n{exc}")
     return JSONResponse(
         status_code=exc.status_code,

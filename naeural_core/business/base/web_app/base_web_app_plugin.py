@@ -737,6 +737,41 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     # endif operation handling
     return result
 
+  def validate_assets(self):
+    """
+    Validate the configuration of `ASSETS`.
+    This will check if someone is trying to retrieve local files or other sensitive data.
+
+    Returns
+    -------
+
+    """
+    # If no assets are provided, no validation is needed.
+    if self.cfg_assets is None:
+      return
+
+    if not isinstance(self.cfg_assets, (dict, str)):
+      self.add_error("`ASSETS`, if specified, must be a dictionary or a string.")
+      return
+    # endif valid assets type
+
+    # If no assets path can be obtained, no validation is needed.
+    assets_path = self.cfg_assets if isinstance(self.cfg_assets, str) else self.cfg_assets.get('url')
+    if assets_path is None:
+      return
+
+    # The assets path must be a string.
+    if not isinstance(assets_path, str):
+      self.add_error("`ASSETS.url` must be a string.")
+      return
+
+    # If the assets path is a local path, it must not exist.
+    if self.os_path.exists(assets_path):
+      self.add_error("Local assets are off-limits! Please provide a URL.")
+      return
+
+    return
+
   # assets handling methods
   def __maybe_download_assets(self):
     """
@@ -810,6 +845,11 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     if assets_path is None:
       return None
       # raise ValueError("No assets provided")
+
+    # TODO: maybe allow some local assets in case of private networks?
+    if os.path.exists(assets_path):
+      raise ValueError("Local assets are off-limits! Please provide a URL.")
+    # endif local assets
 
     # 2) Handle each operation
     if operation == "release_asset":

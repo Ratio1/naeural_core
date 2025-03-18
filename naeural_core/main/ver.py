@@ -1,5 +1,6 @@
 __VER__ = '7.7.14'
 
+
 if __name__ == "__main__":
   with open("pyproject.toml", "rt") as fd:
     new_lines = []

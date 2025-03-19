@@ -61,18 +61,18 @@ COMMON_COLORS = {
     "green_2":   (0, 50, 0),
     "blue_1":    (0, 0, 255),
     "yellow_1":  (255, 255, 0),
-    
+
     "yellow_2"  :  (255, 215, 0),
     "orange_1":  (255, 165, 0),
     "purple_1" : (128, 0, 128),
-    "blue_2":    (0, 200, 200),  # Bright bluish-green    
+    "blue_2":    (0, 200, 200),  # Bright bluish-green
     "blue_3":    (20, 90, 150),    # Dark blue
     "green_3"  :  (0, 128, 128),
-    "brown_1":   (128, 0, 0),    # brownish-red 
+    "brown_1":   (128, 0, 0),    # brownish-red
     "brown_2" :  (139, 69, 19), # chocolate brown
-    "pink_1":    (220, 185, 190), # A soft pink; tweak as desired    
-    "grey_1":  (192, 192, 192),  # A lighter grey variant        
-    "white_1":   (255, 255, 255),    
+    "pink_1":    (220, 185, 190), # A soft pink; tweak as desired
+    "grey_1":  (192, 192, 192),  # A lighter grey variant
+    "white_1":   (255, 255, 255),
     "grey_2":    (50, 50, 50),
     "black_1":   (0, 0, 0)
 }
@@ -2369,10 +2369,10 @@ class _UtilsBaseMixin(
       a = 500.0 * (fx - fy)
       b = 200.0 * (fy - fz)
 
-      return (L, a, b)  
-      
+      return (L, a, b)
+
     @staticmethod
-    def infer_color(rgb, defaults=COMMON_COLORS, scale_factor=10, return_distances=False):  
+    def infer_color(rgb, defaults=COMMON_COLORS, scale_factor=10, return_distances=False):
       """
       Classify an input RGB color against a predefined set of colors by picking
       the closest color.
@@ -2398,13 +2398,14 @@ class _UtilsBaseMixin(
       color_names = list(defaults.keys())
       color_values = np.array([
           _UtilsBaseMixin.rgb_to_lab(defaults[x]) for x in color_names
-        ], 
+        ],
         dtype=np.float32
       )
 
       # Convert input to a float NumPy array
       color_arr = np.array(_UtilsBaseMixin.rgb_to_lab(rgb), dtype=np.float32)
 
+      # scale_factor = 10
       # color_values = (color_values / scale_factor).round(0)
       # color_arr = (color_arr / scale_factor).round(0)
       # color_values = color_values / (np.sum(color_values, axis=1, keepdims=True) + 1)
@@ -2473,7 +2474,7 @@ class _UtilsBaseMixin(
 
       # Classify using our updated infer_color
       result = self.infer_color(median_color_rgb, defaults=defaults)
-      return result    
+      return result
 
 # endclass _UtilsBaseMixin
 

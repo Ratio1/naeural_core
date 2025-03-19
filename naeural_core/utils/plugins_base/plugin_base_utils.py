@@ -56,20 +56,25 @@ from naeural_core.main.ver import __VER__ as core_version
 from ratio1._ver import __VER__ as sdk_version   
 
 COMMON_COLORS = {
-    "red":    (100, 0, 0),
-    "green":  (0, 100, 0),
-    "blue":   (0, 0, 100),
-    "yellow": (100, 100, 0),
-    "gold"  : (100, 80, 0),
-    "orange": (100, 70, 0),
-    "grey":  (100, 100, 100),
-    "purple" : (100, 0, 100),
-    "white":  (255, 255, 255),    
-    "cyan":     (0, 100, 100),   # Bright bluish-green    
-    "brown":    (80, 30, 5),    # brownish-red    
-    "pink":     (220, 185, 190), # A soft pink; tweak as desired    
-    "silver":   (192, 192, 192),  # A lighter grey variant        
-    "black":  (0, 0, 0)
+    "red_1":     (255, 0, 0),
+    "green_1":   (0, 128, 0),
+    "green_2":   (0, 50, 0),
+    "blue_1":    (0, 0, 255),
+    "yellow_1":  (255, 255, 0),
+    
+    "yellow_2"  :  (255, 215, 0),
+    "orange_1":  (255, 165, 0),
+    "purple_1" : (128, 0, 128),
+    "blue_2":    (0, 200, 200),  # Bright bluish-green    
+    "blue_3":    (20, 90, 150),    # Dark blue
+    "green_3"  :  (0, 128, 128),
+    "brown_1":   (128, 0, 0),    # brownish-red 
+    "brown_2" :  (139, 69, 19), # chocolate brown
+    "pink_1":    (220, 185, 190), # A soft pink; tweak as desired    
+    "grey_1":  (192, 192, 192),  # A lighter grey variant        
+    "white_1":   (255, 255, 255),    
+    "grey_2":    (50, 50, 50),
+    "black_1":   (0, 0, 0)
 }
 
 
@@ -2306,7 +2311,68 @@ class _UtilsBaseMixin(
       return entropy    
     
     @staticmethod
-    def infer_color(rgb, defaults=COMMON_COLORS, scale_factor=10):  
+    def rgb_to_lab(rgb):
+      """
+      Convert an sRGB color (0..255 per channel) to CIE Lab (D65).
+
+      Parameters
+      ----------
+      rgb : tuple of (R, G, B)
+          R, G, B in [0..255].
+
+      Returns
+      -------
+      lab : tuple of (L, a, b)
+          L in [0..100], a in [-128..127], b in [-128..127] (approximately).
+      """
+      # Reference white point (D65), used in the Lab conversion
+      Xn, Yn, Zn = 95.047, 100.000, 108.883
+
+      # 1) Convert sRGB (0..255) to [0..1]
+      r, g, b = [channel / 255.0 for channel in rgb]
+
+      # 2) Convert sRGB to linear RGB
+      #    If c <= 0.04045 then c/12.92 else ((c+0.055)/1.055)^2.4
+      def inv_srgb_comp(c):
+          return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+      r_lin = inv_srgb_comp(r)
+      g_lin = inv_srgb_comp(g)
+      b_lin = inv_srgb_comp(b)
+
+      # 3) Linear RGB to XYZ
+      #    Matrix from sRGB spec (D65)
+      #    X = 0.4124*r_lin + 0.3576*g_lin + 0.1805*b_lin
+      #    Y = 0.2126*r_lin + 0.7152*g_lin + 0.0722*b_lin
+      #    Z = 0.0193*r_lin + 0.1192*g_lin + 0.9505*b_lin
+      X = r_lin * 0.4124 + g_lin * 0.3576 + b_lin * 0.1805
+      Y = r_lin * 0.2126 + g_lin * 0.7152 + b_lin * 0.0722
+      Z = r_lin * 0.0193 + g_lin * 0.1192 + b_lin * 0.9505
+
+      # Scale to [0..100]
+      X *= 100.0
+      Y *= 100.0
+      Z *= 100.0
+
+      # 4) XYZ to Lab
+      #    f(t) = t^(1/3) if t > (6/29)^3 else (t / (3 * (6/29)^2)) + (4/29)
+      def f_xyz(t):
+          return t ** (1.0 / 3.0) if t > (6.0 / 29.0) ** 3 else (
+              (t / (3.0 * (6.0 / 29.0) ** 2)) + (4.0 / 29.0)
+          )
+
+      fx = f_xyz(X / Xn)
+      fy = f_xyz(Y / Yn)
+      fz = f_xyz(Z / Zn)
+
+      L = 116.0 * fy - 16.0
+      a = 500.0 * (fx - fy)
+      b = 200.0 * (fy - fz)
+
+      return (L, a, b)  
+      
+    @staticmethod
+    def infer_color(rgb, defaults=COMMON_COLORS, scale_factor=10, return_distances=False):  
       """
       Classify an input RGB color against a predefined set of colors by picking
       the closest color.
@@ -2330,23 +2396,30 @@ class _UtilsBaseMixin(
 
       """
       color_names = list(defaults.keys())
-      color_values = np.array([defaults[x] for x in color_names], dtype=np.float32)
+      color_values = np.array([
+          _UtilsBaseMixin.rgb_to_lab(defaults[x]) for x in color_names
+        ], 
+        dtype=np.float32
+      )
 
       # Convert input to a float NumPy array
-      rgb_arr = np.array(rgb, dtype=np.float32)
+      color_arr = np.array(_UtilsBaseMixin.rgb_to_lab(rgb), dtype=np.float32)
 
-      color_values = (color_values / scale_factor).round(0)
-      rgb_arr = (rgb_arr / scale_factor).round(0)
-      color_values = color_values / (np.sum(color_values, axis=1, keepdims=True) + 1)
-      rgb_arr = rgb_arr / (np.sum(rgb_arr) + 1)
+      # color_values = (color_values / scale_factor).round(0)
+      # color_arr = (color_arr / scale_factor).round(0)
+      # color_values = color_values / (np.sum(color_values, axis=1, keepdims=True) + 1)
+      # color_arr = color_arr / (np.sum(color_arr) + 1)
 
-
-      # Compute the squared Euclidean distances between rgb_arr and each default color
-      diffs = color_values - rgb_arr  # shape (N, 3)
-      dist_sq = np.sum(diffs**2, axis=1)
+      # Compute the distance
+      diffs = color_values - color_arr  # shape (N, 3)
+      diffs = diffs**2
+      # np.abs(diffs)
+      distances = np.sum(diffs, axis=1)
 
       # Find index of the color with the minimal distance
-      idx = np.argmin(dist_sq)
+      idx = np.argmin(distances)
+      if return_distances:
+        return color_names[idx], distances
       return color_names[idx]
 
 
@@ -2527,20 +2600,26 @@ if __name__ == '__main__':
     log.P(f"Local:  <{local_hash}>")
   
   
-  colors = [
-    [255, 0, 0], # red
-    [100, 0, 0], # dark red
-    [120, 0, 120], # purple
-    [125, 74, 250], # blue or purple
-    [17, 82, 147], # blue, cyan
-    [0, 252, 206], # cyan, blue, green
-    [45, 44, 45],   # black, brown
-    [135, 65, 30], # brown, red
-    [90, 20, 4],   # brown, red
-    [233, 211, 6],  # yellow, gold
-    [203, 185, 18], # yellow, gold
-  ]
+  colors_dict = {
+      "red": (255, 0, 0),
+      "dark_red": (100, 0, 0),
+      "purple": (120, 0, 120),
+      "blue_purple": (125, 74, 250),
+      "blue_cyan": (17, 82, 147),
+      "cyan_blue_green": (0, 252, 206),
+      "black_brown": (45, 44, 45),
+      "brown_red_1": (135, 65, 30),
+      "brown_red_2": (90, 20, 4),
+      "yellow_gold_1": (233, 211, 6),
+      "yellow_gold_2": (203, 185, 18),
+      "green_blue_1": (57, 111, 80),
+      "green_blue_2": (59, 110, 86),
+      "green_blue_3": (37, 99, 75),
+      "green_blue_4": (58, 110, 86),
+  }
+
   
-  for c in colors:
-    name = e.classify_color(c)
-    log.P(f"Color: {c} - Name: {name}")
+  for n, c in colors_dict.items():
+    name, distances = e.infer_color(c, scale_factor=20, return_distances=True)
+    dist = [round(x,2) for x in distances]
+    log.P(f"{n}:{c} => {name}: {dist}")

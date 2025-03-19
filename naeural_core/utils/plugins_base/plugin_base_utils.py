@@ -56,12 +56,19 @@ from naeural_core.main.ver import __VER__ as core_version
 from ratio1._ver import __VER__ as sdk_version   
 
 COMMON_COLORS = {
-    "red":    (255, 0, 0),
-    "green":  (0, 255, 0),
-    "blue":   (0, 0, 255),
-    "yellow": (255, 255, 0),
-    "orange": (255, 165, 0),
-    "white":  (255, 255, 255),
+    "red":    (100, 0, 0),
+    "green":  (0, 100, 0),
+    "blue":   (0, 0, 100),
+    "yellow": (100, 100, 0),
+    "gold"  : (100, 80, 0),
+    "orange": (100, 70, 0),
+    "grey":  (100, 100, 100),
+    "purple" : (100, 0, 100),
+    "white":  (255, 255, 255),    
+    "cyan":     (0, 100, 100),   # Bright bluish-green    
+    "brown":    (80, 30, 5),    # brownish-red    
+    "pink":     (220, 185, 190), # A soft pink; tweak as desired    
+    "silver":   (192, 192, 192),  # A lighter grey variant        
     "black":  (0, 0, 0)
 }
 
@@ -2298,7 +2305,8 @@ class _UtilsBaseMixin(
 
       return entropy    
     
-    def infer_color(self, rgb, defaults=COMMON_COLORS):  
+    @staticmethod
+    def infer_color(rgb, defaults=COMMON_COLORS, scale_factor=10):  
       """
       Classify an input RGB color against a predefined set of colors by picking
       the closest color.
@@ -2322,10 +2330,16 @@ class _UtilsBaseMixin(
 
       """
       color_names = list(defaults.keys())
-      color_values = np.array(list(defaults.values()), dtype=np.float32)
+      color_values = np.array([defaults[x] for x in color_names], dtype=np.float32)
 
       # Convert input to a float NumPy array
       rgb_arr = np.array(rgb, dtype=np.float32)
+
+      color_values = (color_values / scale_factor).round(0)
+      rgb_arr = (rgb_arr / scale_factor).round(0)
+      color_values = color_values / (np.sum(color_values, axis=1, keepdims=True) + 1)
+      rgb_arr = rgb_arr / (np.sum(rgb_arr) + 1)
+
 
       # Compute the squared Euclidean distances between rgb_arr and each default color
       diffs = color_values - rgb_arr  # shape (N, 3)
@@ -2402,7 +2416,7 @@ if __name__ == '__main__':
   e.log = log  
   e.P = print
   
-  TEST_D_IN_D = True
+  TEST_D_IN_D = False
   TEST_DICTS = False
   TEST_GIT = False
   
@@ -2511,4 +2525,22 @@ if __name__ == '__main__':
     log.P(f"Cloned to: <{local_path}>")
     log.P(f"Remote: <{remote_hash}>")
     log.P(f"Local:  <{local_hash}>")
-    
+  
+  
+  colors = [
+    [255, 0, 0], # red
+    [100, 0, 0], # dark red
+    [120, 0, 120], # purple
+    [125, 74, 250], # blue or purple
+    [17, 82, 147], # blue, cyan
+    [0, 252, 206], # cyan, blue, green
+    [45, 44, 45],   # black, brown
+    [135, 65, 30], # brown, red
+    [90, 20, 4],   # brown, red
+    [233, 211, 6],  # yellow, gold
+    [203, 185, 18], # yellow, gold
+  ]
+  
+  for c in colors:
+    name = e.classify_color(c)
+    log.P(f"Color: {c} - Name: {name}")

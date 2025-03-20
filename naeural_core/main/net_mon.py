@@ -206,6 +206,9 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.HB.CONFIG_STREAMS, None)
     hb.pop(ct.HB.DCT_STATS, None)
     hb.pop(ct.HB.COMM_STATS, None)
+    
+    hb.pop(ct.HB.R1FS_ID, None)
+    hb.pop(ct.HB.R1FS_ONLINE, None)
 
     hb.pop(ct.HB.EE_WHITELIST, None)
     hb.pop(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, None)
@@ -915,7 +918,23 @@ class NetworkMonitor(DecentrAIObject):
       hb = self.__network_node_last_heartbeat(addr)
       if isinstance(hb, dict):
         result = hb.get(ct.HB.PY_VER)
-      return result      
+      return result    
+    
+    
+    def network_node_r1fs_id(self, addr):
+      result = None
+      hb = self.__network_node_last_heartbeat(addr)
+      if isinstance(hb, dict):
+        result = hb.get(ct.HB.R1FS_ID)
+      return result
+    
+    
+    def network_node_r1fs_online(self, addr):
+      result = None
+      hb = self.__network_node_last_heartbeat(addr)
+      if isinstance(hb, dict):
+        result = hb.get(ct.HB.R1FS_ONLINE)
+      return result
     
     
     def network_node_version(self, addr):
@@ -1600,6 +1619,10 @@ class NetworkMonitor(DecentrAIObject):
           last_remote_time=self.network_node_remote_time(addr),
           node_tz=self.network_node_local_tz(addr),
           node_utc=self.network_node_local_tz(addr, as_zone=False),
+          
+          r1fs_id=self.network_node_r1fs_id(addr),
+          r1fs_online=self.network_node_r1fs_online(addr),
+          
           main_loop_avg_time=main_loop_time,
           main_loop_freq=round(main_loop_freq, 2),
           

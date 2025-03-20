@@ -425,8 +425,8 @@ class Orchestrator(DecentrAIObject,
         },
       }
       try:
-        data[ct.LocalInfo.K_INFO]['r1fs_id'] = self.r1fs.ipfs_id
-        data[ct.LocalInfo.K_INFO]['r1fs_online'] = self.r1fs.ipfs_started
+        data[ct.LocalInfo.K_INFO]['r1fs_id'] = self.r1fs_id
+        data[ct.LocalInfo.K_INFO]['r1fs_online'] = self.r1fs_started
         data[ct.LocalInfo.K_INFO]['comm_last_active'] = self._comm_manager.default_comm_last_active
       except Exception as exc:
         self.P(f"Failed to get local info: {exc}", color='r')
@@ -510,6 +510,20 @@ class Orchestrator(DecentrAIObject,
   @property
   def r1fs(self):
     return self._r1fs_engine
+  
+  
+  @property
+  def r1fs_id(self):
+    if self.r1fs is not None:
+      return self.r1fs.ipfs_id
+    return None
+  
+  
+  @property
+  def r1fs_started(self):
+    if self.r1fs is not None:
+      return self.r1fs.ipfs_started
+    return False
   
   
   @property

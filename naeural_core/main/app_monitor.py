@@ -721,6 +721,9 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.ACTIVE_PLUGINS    : active_business_plugins,
       ct.HB.STOP_LOG          : self.owner.main_loop_stop_log,
       
+      ct.HB.R1FS_ID           : self.owner.r1fs_id,
+      ct.HB.R1FS_ONLINE       : self.owner.r1fs_started,
+      
       ct.HB.TEMPERATURE_INFO  : self.__last_temperature_info,
       
       ct.HB.GIT_BRANCH        : str_git_branch,

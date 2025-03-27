@@ -508,3 +508,41 @@ class BCWrapper:
     return self.__bc.web3_get_node_info(
       node_address=node_address_eth, raise_if_issue=raise_if_error      
     )
+    
+    
+  def eth_sign_payload(self, payload: dict, add_data: bool = True):
+    """
+    Signs a payload using the EVM account of the current node
+
+    Parameters
+    ----------
+    payload : dict
+        The payload to be signed
+        
+    add_data : bool, optional
+        Whether to add the signature and address to the payload. 
+        Default `True` will add the signature and address to the payload
+
+    Returns
+    -------
+    str
+        The signature of the payload
+    """
+    return self.__bc.eth_sign_payload(payload)
+  
+  
+  def eth_verify_payload_signature(self, payload: dict):
+    """
+    Verifies a payload signature using the EVM account of the current node
+
+    Parameters
+    ----------
+    payload : dict
+        The payload to be verified` 
+
+    Returns
+    -------
+    str
+        The address of the signer or None if the signature is invalid
+    """
+    return self.__bc.eth_check_payload_signature(payload)

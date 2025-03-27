@@ -315,7 +315,31 @@ class BCWrapper:
             The address of the EVM account used to sign the data
     """
     return self.__bc.eth_sign_message(types=types, values=values)  
-  
+
+  def eth_verify_message_signature(
+    self, 
+    types: list, 
+    values: list, 
+    signature: str
+  ):
+    """
+    Verifies a message signature using the EVM account of the current node
+    
+    Parameters
+    ----------
+    types : list
+        The types of the values to be verified
+    values : list
+        The values to be verified
+    signature : str
+        The signature to be verified
+        
+    Returns
+    -------
+    """
+    return self.__bc.eth_verify_message_signature(
+      types=types, values=values, signature=signature
+    )
   
   def eth_sign_node_epochs(self, node: str, epochs: list, epochs_vals: list, signature_only: bool = True):
     """
@@ -545,4 +569,16 @@ class BCWrapper:
     str
         The address of the signer or None if the signature is invalid
     """
-    return self.__bc.eth_check_payload_signature(payload)
+    return self.__bc.eth_verify_payload_signature(payload)
+  
+  
+  def eth_types(self):
+    """
+    Return a class with supported types
+
+    Returns
+    -------
+    list
+        The types of the EVM account
+    """
+    return self.__bc.eth_types

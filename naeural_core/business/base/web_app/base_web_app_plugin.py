@@ -766,7 +766,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       return
 
     # If the assets path is a local path, it must be a safe path.
-    if not self.is_path_safe(assets_path):
+    if os.path.exists(assets_path) and not self.is_path_safe(assets_path):
       self.add_error(
         "Local assets in not safe paths are off-limits! "
         "Please provide a URL or a safe relative path(without any symlink or \"../\")."

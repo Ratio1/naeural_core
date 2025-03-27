@@ -765,9 +765,12 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       self.add_error("`ASSETS.url` must be a string.")
       return
 
-    # If the assets path is a local path, it must not exist.
-    if self.os_path.exists(assets_path):
-      self.add_error("Local assets are off-limits! Please provide a URL.")
+    # If the assets path is a local path, it must be a safe path.
+    if not self.is_path_safe(assets_path):
+      self.add_error(
+        "Local assets in not safe paths are off-limits! "
+        "Please provide a URL or a safe relative path(without any symlink or \"../\")."
+      )
       return
 
     return

@@ -39,7 +39,12 @@ class _DiskAPIMixin(object):
       bool, True if the path is safe, False otherwise
       """
       abs_cache_directory = os.path.abspath(self.log.get_base_folder())
-      return os.path.abspath(path).startswith(abs_cache_directory)
+
+      # This conversion is done to avoid issues with both symbolic links and "../" segments in the path.
+      real_path_cache = os.path.realpath(abs_cache_directory)
+      real_path = os.path.realpath(path)
+
+      return os.path.commonpath([real_path_cache, real_path]) == real_path_cache
   # endif Utils
 
   # Dataframe serialization section

@@ -752,7 +752,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     """
     # TODO: maybe allow some local assets in case of private networks?
     # If the assets path is a local path, it must be a safe path.
-    if os.path.exists(assets_path) and not self.is_path_safe(assets_path):
+    if os.path.exists(assets_path) and not self.is_path_safe(assets_path, base_path='.'):
       msg = ("Local assets in not safe paths are off-limits!"
              "Please provide a URL or a safe relative path(without any symlink or \"../\").")
       if raise_exception:

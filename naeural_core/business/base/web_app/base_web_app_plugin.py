@@ -737,6 +737,31 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     # endif operation handling
     return result
 
+  def check_assets_path(self, assets_path, raise_exception=True):
+    """
+    Utility method for checking if the assets path is safe.
+    That means it is either a URL or a safe relative path.
+    Parameters
+    ----------
+    assets_path : str
+        The path to the assets.
+    raise_exception : bool
+        If True, an exception will be raised if the path is not safe.
+        Otherwise, an error will be added to the plugin.
+
+    """
+    # TODO: maybe allow some local assets in case of private networks?
+    # If the assets path is a local path, it must be a safe path.
+    if os.path.exists(assets_path) and not self.is_path_safe(assets_path):
+      msg = ("Local assets in not safe paths are off-limits!"
+             "Please provide a URL or a safe relative path(without any symlink or \"../\").")
+      if raise_exception:
+        raise ValueError(msg)
+      else:
+        self.add_error(msg)
+      return
+    return
+
   def validate_assets(self):
     """
     Validate the configuration of `ASSETS`.
@@ -766,12 +791,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       return
 
     # If the assets path is a local path, it must be a safe path.
-    if os.path.exists(assets_path) and not self.is_path_safe(assets_path):
-      self.add_error(
-        "Local assets in not safe paths are off-limits! "
-        "Please provide a URL or a safe relative path(without any symlink or \"../\")."
-      )
-      return
+    self.check_assets_path(assets_path=assets_path, raise_exception=False)
 
     return
 
@@ -849,10 +869,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       return None
       # raise ValueError("No assets provided")
 
-    # TODO: maybe allow some local assets in case of private networks?
-    if os.path.exists(assets_path):
-      raise ValueError("Local assets are off-limits! Please provide a URL.")
-    # endif local assets
+    self.check_assets_path(assets_path=assets_path, raise_exception=True)
 
     # 2) Handle each operation
     if operation == "release_asset":

@@ -27,24 +27,29 @@ class _DiskAPIMixin(object):
 
   # Utils section
   if True:
-    def is_path_safe(self, path):
+    def is_path_safe(self, path, base_path=None):
       """
-      Method for checking if a certain path is safe(it's inside the cache directory).
+      Method for checking if a certain path is safe(it's inside the base_path).
+      If the base_path is not provided, the base_path will be the base folder of the cache.
       Parameters
       ----------
       path - string, path to be checked
+      base_path - string, the base path to check against.
+        If not provided, the base path will be the base folder of the cache.
 
       Returns
       -------
       bool, True if the path is safe, False otherwise
       """
-      abs_cache_directory = os.path.abspath(self.log.get_base_folder())
+      if base_path is None:
+        base_path = self.log.get_base_folder()
+      abs_base_directory = os.path.abspath(base_path)
 
       # This conversion is done to avoid issues with both symbolic links and "../" segments in the path.
-      real_path_cache = os.path.realpath(abs_cache_directory)
+      real_path_base = os.path.realpath(abs_base_directory)
       real_path = os.path.realpath(path)
 
-      return os.path.commonpath([real_path_cache, real_path]) == real_path_cache
+      return os.path.commonpath([real_path_base, real_path]) == real_path_base
   # endif Utils
 
   # Dataframe serialization section

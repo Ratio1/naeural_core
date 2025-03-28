@@ -274,10 +274,14 @@ class NetMon01Plugin(
     should_send = (self.time() - self.__last_current_network_time) > self.send_current_network_each
     if (self.cfg_supervisor or self.cfg_send_if_not_supervisor) and should_send:
       if self.send_only_online:
-        # we only send online nodes
+        # we only send online nodes or nodes are allowed by this node (thus might be oracles)
         current_network = {
-          k:v for k,v in current_network.items() 
-          if v.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, "") == self.const.PAYLOAD_DATA.NETMON_STATUS_ONLINE
+          k : v for k,v in current_network.items() 
+          if (
+            v.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, "") == self.const.PAYLOAD_DATA.NETMON_STATUS_ONLINE 
+            or
+            self.bc.is_node_allowed(v.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS))
+          )
         }    
       message="" if len(current_alerted) == 0 else "Missing/lost processing nodes: {}".format(list(current_alerted.keys()))
       # for this plugin only ALERTS should be used in UI/BE

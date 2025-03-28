@@ -216,6 +216,25 @@ class BCWrapper:
         The list of addresses that are allowed to connect
     """
     return self.get_whitelist(with_prefix=with_prefix)
+  
+  
+  def is_node_allowed(self, node: str):
+    """
+    Checks if a node is allowed to connect to the current node
+
+    Parameters
+    ----------
+    node : str
+        The address of the node to check
+
+    Returns
+    -------
+    bool
+        True if the node is allowed, False otherwise
+    """
+    if node in [None, ""]:
+      return False
+    return self.__bc.is_allowed(sender_address=node)
 
 
   def maybe_remove_addr_prefix(self, address: str):

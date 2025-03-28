@@ -5,8 +5,6 @@ TODO: What is the purpose of LOCAL_COMMS_01 ?
 
 """
 
-import subprocess as sp
-
 from naeural_core.business.base import BasePluginExecutor
 
 __VER__ = '1.0.0'
@@ -47,6 +45,8 @@ class LocalComms01Plugin(BasePluginExecutor):
 
 
   def _start_local_mqtt_broker(self):
+    import subprocess as sp
+    
     # create the config file
     if not self.os_path.exists('mosquitto.conf'):
       with open('mosquitto.conf', 'w') as f:

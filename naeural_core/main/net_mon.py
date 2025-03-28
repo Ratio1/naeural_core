@@ -249,13 +249,14 @@ class NetworkMonitor(DecentrAIObject):
     return
   
   
-  def __register_node_pipelines(self, addr, pipelines):
+  def __register_node_pipelines(self, addr, pipelines, plugins_statuses=None):
     if isinstance(pipelines, list):      
       __addr_no_prefix = self.__remove_address_prefix(addr)
       if __addr_no_prefix not in self.__nodes_pipelines:
         self.__nodes_pipelines[__addr_no_prefix] = {
         }
       self.__nodes_pipelines[__addr_no_prefix]['pipelines'] = pipelines
+      self.__nodes_pipelines[__addr_no_prefix]['plugins_statuses'] = plugins_statuses
       self.__nodes_pipelines[__addr_no_prefix]['timestamp'] = time()
     return
   
@@ -780,8 +781,8 @@ class NetworkMonitor(DecentrAIObject):
       return self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)    
     
     
-    def register_node_pipelines(self, addr, pipelines):
-      self.__register_node_pipelines(addr, pipelines)
+    def register_node_pipelines(self, addr, pipelines, plugins_statuses=None):
+      self.__register_node_pipelines(addr, pipelines, plugins_statuses=plugins_statuses)
       self.__registered_direct_pipelines += 1
       return
     
@@ -1509,9 +1510,29 @@ class NetworkMonitor(DecentrAIObject):
         return hb.get(ct.HB.CONFIG_STREAMS)
       
       """
-      node_info = self.__nodes_pipelines.get(addr, {})
+      __addr_no_prefix = self.__remove_address_prefix(addr)
+      node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
       return node_info.get('pipelines', [])
     
+    
+    def network_node_apps(self, addr):
+      __addr_no_prefix = self.__remove_address_prefix(addr)
+      node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
+      plugins_statuses = node_info.get('plugins_statuses', [])
+      apps = {}
+      for status in plugins_statuses:
+        pipeline = status.get(ct.HB.ACTIVE_PLUGINS_INFO.STREAM_ID)
+        signature = status.get(ct.HB.ACTIVE_PLUGINS_INFO.SIGNATURE)
+        if pipeline not in apps:
+          apps[pipeline] = {}
+        apps[pipeline][signature] = {
+          'instance' : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID),
+          'start' : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
+          'last_probe' : status.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
+          'last_error' : status.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
+        }
+      return apps
+        
     
     def network_node_hb_interval(self, addr):
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)

@@ -571,10 +571,10 @@ class BCWrapper:
     """
     return self.__bc.eth_verify_payload_signature(payload)
   
-  
+  @property
   def eth_types(self):
     """
-    Return a class with supported types
+    Class with supported EVM types
 
     Returns
     -------

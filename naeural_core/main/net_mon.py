@@ -262,8 +262,8 @@ class NetworkMonitor(DecentrAIObject):
     return
   
   
-  def __register_node_pipelines(self, addr, pipelines, plugins_statuses=None):
-    if isinstance(pipelines, list):      
+  def __register_node_pipelines(self, addr, pipelines, plugins_statuses=None, verbose=False):
+    if isinstance(pipelines, list) and len(pipelines) > 0:      
       __addr_no_prefix = self.__remove_address_prefix(addr)
       if __addr_no_prefix not in self.__nodes_pipelines:
         self.__nodes_pipelines[__addr_no_prefix] = {
@@ -271,6 +271,11 @@ class NetworkMonitor(DecentrAIObject):
       self.__nodes_pipelines[__addr_no_prefix][NetMonCt.PIPELINES] = pipelines
       self.__nodes_pipelines[__addr_no_prefix][NetMonCt.PLUGINS_STATUSES] = plugins_statuses
       self.__nodes_pipelines[__addr_no_prefix][NetMonCt.TIMESTAMP] = time()
+      if verbose:
+        self.P(f"Registered {len(pipelines)} pipelines for node {addr}")
+    else:
+      if verbose:
+        self.P(f"No pipelines available for node {addr}: {pipelines}", color='r')
     return
   
   
@@ -278,8 +283,9 @@ class NetworkMonitor(DecentrAIObject):
     """Register the pipelines if available - will be used for pipeline monitoring"""
     __addr_no_prefix = self.__remove_address_prefix(addr)
     pipelines = hb.pop(ct.HB.PIPELINES, None)
-    if pipelines is not None:
-      self.__register_node_pipelines(addr, pipelines)
+    if isinstance(pipelines, list) and len(pipelines) > 0:
+      plugins_statuses = hb.pop(ct.HB.ACTIVE_PLUGINS, [])
+      self.__register_node_pipelines(addr, pipelines, plugins_statuses=plugins_statuses)
       self.__registered_hb_pipelines += 1
     return
   
@@ -794,8 +800,8 @@ class NetworkMonitor(DecentrAIObject):
       return self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)    
     
     
-    def register_node_pipelines(self, addr, pipelines, plugins_statuses=None):
-      self.__register_node_pipelines(addr, pipelines, plugins_statuses=plugins_statuses)
+    def register_node_pipelines(self, addr, pipelines, plugins_statuses=None, verbose=False):
+      self.__register_node_pipelines(addr, pipelines, plugins_statuses=plugins_statuses, verbose=verbose)
       self.__registered_direct_pipelines += 1
       return
     
@@ -1555,24 +1561,27 @@ class NetworkMonitor(DecentrAIObject):
       node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
       plugins_statuses = node_info.get(NetMonCt.PLUGINS_STATUSES, [])
       apps = {}
-      for status in plugins_statuses:
-        pipeline = status.get(ct.HB.ACTIVE_PLUGINS_INFO.STREAM_ID)
-        signature = status.get(ct.HB.ACTIVE_PLUGINS_INFO.SIGNATURE)
-        if pipeline not in apps:
-          pipeline_info = self.network_node_pipeline_info(addr=__addr_no_prefix, pipeline=pipeline)
-          apps[pipeline] = {
-            NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.INITIATOR_ADDR),
-            NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
-            NetMonCt.PLUGINS : {}
-          }
-        if signature not in apps[pipeline][NetMonCt.PLUGINS]:
-          apps[pipeline][NetMonCt.PLUGINS][signature] = []
-        apps[pipeline][NetMonCt.PLUGINS][signature].append({
-          NetMonCt.PLUGIN_INSTANCE      : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID),
-          NetMonCt.PLUGIN_START         : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
-          NetMonCt.PLUGIN_LAST_ALIVE    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
-          NetMonCt.PLUGIN_LAST_ERROR    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
-        })
+      if isinstance(plugins_statuses, list) and len(plugins_statuses) > 0:
+        for status in plugins_statuses:
+          pipeline = status.get(ct.HB.ACTIVE_PLUGINS_INFO.STREAM_ID)
+          signature = status.get(ct.HB.ACTIVE_PLUGINS_INFO.SIGNATURE)
+          if pipeline not in apps:
+            pipeline_info = self.network_node_pipeline_info(addr=__addr_no_prefix, pipeline=pipeline)
+            apps[pipeline] = {
+              NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.K_INITIATOR_ADDR),
+              NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
+              NetMonCt.PLUGINS : {}
+            }
+          if signature not in apps[pipeline][NetMonCt.PLUGINS]:
+            apps[pipeline][NetMonCt.PLUGINS][signature] = []
+          apps[pipeline][NetMonCt.PLUGINS][signature].append({
+            NetMonCt.PLUGIN_INSTANCE      : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID),
+            NetMonCt.PLUGIN_START         : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
+            NetMonCt.PLUGIN_LAST_ALIVE    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
+            NetMonCt.PLUGIN_LAST_ERROR    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
+          })
+      else:
+        pass # maybe some other logic to be added here
       return apps
     
     
@@ -1581,11 +1590,19 @@ class NetworkMonitor(DecentrAIObject):
       This function returns the apps of all remote ONLINE nodes based on the cached information.
       """
       apps = {}
+      fails = {}
       for addr in self.__nodes_pipelines:
         if self.network_node_is_online(addr=addr):
           node_apps = self.network_node_apps(addr=addr)
+          if len(node_apps) == 0:
+            fails[addr] = self.network_node_pipelines(addr=addr)
           full_addr = self._add_address_prefix(addr)
           apps[full_addr] = node_apps
+      if len(fails) > 0:
+        self.P("Failed to get plugin infor for following nodes(pipelines):\n{}".format(
+            json.dumps(fails, indent=2)
+          ), color='r'
+        )
       return apps
       
       

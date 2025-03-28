@@ -206,6 +206,7 @@ class NetMon01Plugin(
       )
     return
 
+
   def _process(self):
     payload = None
     self._nmon_counter += 1      
@@ -252,7 +253,8 @@ class NetMon01Plugin(
           str_eeid = "'{}'".format(eeid[:10])
           str_eeid = "{:<13}".format(str_eeid)
           node_info = known_nodes[addr]
-          working_status = current_network.get(eeid, {}).get(
+          _key = addr if self.address_as_index else eeid
+          working_status = current_network.get(_key, {}).get(
             self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False
           )
           pipelines = node_info['pipelines']

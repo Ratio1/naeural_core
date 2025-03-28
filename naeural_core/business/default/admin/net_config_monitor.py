@@ -72,6 +72,15 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   CT_PLG_STATUSES = "PLUGIN_STATUSES"
   
   
+  def Pd(self, *args, **kwargs):
+    """
+    This function will print the debug messages.
+    """
+    if self.cfg_verbose_netconfig_logs:
+      self.P(*args, **kwargs)
+    return
+  
+  
   def on_init(self):   
     self.P("Network fleet peer configuration monitor initializing...")
     self.__last_data_time = 0
@@ -84,6 +93,8 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self.__last_sent_to_allowed = 0
     self.__debug_netmon_count = self.cfg_debug_netmon_count
     self._get_active_plugins_instances = self.global_shmem.get("get_active_plugins_instances")
+    if not callable(self._get_active_plugins_instances):
+      self.P(" ERROR: `get_active_plugins_instances` not found!", color='r', boxed=True)
     return
   
   
@@ -201,7 +212,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     Sends a request to a node or a list of nodes to get their configuration.
     """
     if isinstance(node_addr, list):
-      node_addr = [self.bc.maybe_add_prefix(x) for x in node_addr]
+      node_addr = [self.bc.maybe_add_prefix(x) for x in node_addr if self.netmon.network_node_is_online(x)]
       node_ee_id = [self.netmon.network_node_eeid(x) for x in node_addr]
     else:
       node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
@@ -221,7 +232,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   
   def __send_set_cfg(self, node_addr):
     if isinstance(node_addr, list):
-      node_addr = [self.bc.maybe_add_prefix(x) for x in node_addr]
+      node_addr = [self.bc.maybe_add_prefix(x) for x in node_addr if self.netmon.network_node_is_online(x)]
       node_ee_id = [self.netmon.network_node_eeid(x) for x in node_addr]
     else:
       node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
@@ -232,7 +243,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     if self.cfg_verbose_netconfig_logs:
       self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{node_ee_id}' <{node_addr}>...")
       
-    statuses = None
+    statuses = []
     if self._get_active_plugins_instances is not None and callable(self._get_active_plugins_instances):
       statuses = self._get_active_plugins_instances()
     payload = {
@@ -260,13 +271,12 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     
     """
     if self.time() - self.__last_data_time > self.cfg_send_get_config_each:
-      self.__last_data_time = self.time()
       if len(self.__allowed_nodes) == 0:
-        if self.cfg_verbose_netconfig_logs:
-          self.P("No allowed nodes to send requests to. Waiting for network data...")
+        self.Pd("No allowed nodes to send requests to. Waiting for network data...")
+        self.__last_data_time = self.time() - self.cfg_send_get_config_each + 10 # we force after 10 seconds to trigger
       else:
-        if self.cfg_verbose_netconfig_logs:
-          self.P("Initiating pipeline requests to allowed nodes...")
+        self.__last_data_time = self.time()
+        self.Pd(f"Initiating pipeline requests to {len(self.__allowed_nodes)} allowed nodes...")
         to_send = []
         for node_addr in self.__allowed_nodes:
           last_request = self.__allowed_nodes[node_addr].get("last_config_get", 0)
@@ -275,11 +285,9 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
           #endif enough time since last request of this node
         #endfor __allowed_nodes
         if len(to_send) == 0:
-          if self.cfg_verbose_netconfig_logs:
-            self.P("No nodes need update.")
+          self.Pd("No nodes need update.")
         else:
-          if self.cfg_verbose_netconfig_logs:
-            self.P(f"Local {len(self.local_pipelines)} pipelines. Sending requests to {len(to_send)} nodes...")        
+          self.Pd(f"Sending requests to {len(to_send)} nodes...")        
           # now send some requests
           self.__send_get_cfg(node_addr=to_send)
           for node_addr in to_send:
@@ -311,12 +319,12 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       must_distribute = True
       self.__initial_send = True
       
-    if self.__last_pipelines != self.node_pipelines:
+    if not must_distribute and self.__last_pipelines != self.node_pipelines:
       self.P("Sending updated configuration to all allowed nodes.")
       must_distribute = True
       self.__last_pipelines = self.deepcopy(self.node_pipelines)
     
-    if self.time() - self.__last_sent_to_allowed > self.cfg_send_to_allowed_each:
+    if not must_distribute and (self.time() - self.__last_sent_to_allowed > self.cfg_send_to_allowed_each):
       self.P(f"Sending configuration to all allowed nodes at timeout={self.cfg_send_to_allowed_each}.")
       must_distribute = True      
       
@@ -361,16 +369,20 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
         op = net_config_data.get(self.const.NET_CONFIG.OPERATION, "UNKNOWN")
         # now we can process the data based on the operation
         if op == self.const.NET_CONFIG.STORE_COMMAND:
-          if self.cfg_verbose_netconfig_logs:            
-            self.P(f"Received {self.const.NET_CONFIG.STORE_COMMAND} data from '{sender_id}' <{sender}'.")
           received_pipelines = net_config_data.get(self.CT_PIPELINE, [])    
-          received_plugins_statuses = net_config_data.get(self.CT_PLG_STATUSES, None)
+          received_plugins_statuses = net_config_data.get(self.CT_PLG_STATUSES, [])
+          if self.cfg_verbose_netconfig_logs:            
+            self.P("Received {} data from '{}' <{}>'.\n  - Pipelines: {}\n  - Plugins: {}".format(
+              self.const.NET_CONFIG.STORE_COMMAND, sender_id, sender, 
+              len(received_pipelines), len(received_plugins_statuses)
+            ))
           # process in local cache
           self.__update_allowed_nodes(sender_no_prefix, received_pipelines)
           # now we can add the pipelines to the netmon cache
           self.netmon.register_node_pipelines(
             addr=sender_no_prefix, pipelines=received_pipelines,
-            plugins_statuses=received_plugins_statuses
+            plugins_statuses=received_plugins_statuses,
+            verbose=self.cfg_verbose_netconfig_logs
           )
         #finished SET_CONFIG
         
@@ -400,7 +412,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     """
     current_network = data.get(self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK, {})
     if len(current_network) == 0:
-      self.P(f"Received NET_MON_01 data without {self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK} data.", color='r ')
+      self.P(f"[netmon_handler] Received NET_MON_01 data without {self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK}.", color='r ')
     else:
       # here we will remove the prefix from each "address" within the nodes info
       current_network = self.__preprocess_current_network_data(current_network)
@@ -418,12 +430,12 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       for cached_addr in self.__allowed_nodes:
         if cached_addr in non_online and self.__allowed_nodes[cached_addr]["is_online"]:
           self.__allowed_nodes[cached_addr]["is_online"] = False
-          self.P(f"Marking node '{non_online[cached_addr]}' <{cached_addr}> as offline.", color='r')
+          self.P(f"[netmon_handler] Marking node '{non_online[cached_addr]}' <{cached_addr}> as offline.", color='r')
       # endfor marking non online nodes
       
       if self.__debug_netmon_count > 0:
         # self.P(f"NetMon debug:\n{self.json_dumps(self.__get_active_nodes(current_network), indent=2)}")
-        self.P(f"Peers status:\n{self.json_dumps(peers_status, indent=2)}")
+        self.P(f"[netmon_handler] peers status:\n{self.json_dumps(peers_status, indent=2)}")
         self.__check_dct_metadata()
         self.__debug_netmon_count -= 1
       #endif debug initial iterations
@@ -443,12 +455,12 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
             self.__new_nodes_this_iter += 1
           #endif addr not in __allowed_nodes
           if not self.__allowed_nodes[addr].get("is_online", True):
-            self.P("Node '{}' <{}> is back online.".format(peers_status[addr]["eeid"], addr))
+            self.P("[netmon_handler] Node '{}' <{}> is back online.".format(peers_status[addr]["eeid"], addr))
           self.__allowed_nodes[addr]["is_online"] = True # by default we assume the node is online due to `__get_active_nodes_summary_with_peers`
         #endif addr allows me
       #endfor each addr in peers_status
       if self.__new_nodes_this_iter > 0:
-        self.P(f"Found {self.__new_nodes_this_iter} new peered nodes.")
+        self.P(f"[netmon_handler] Found {self.__new_nodes_this_iter} new peered nodes.")
     #endif len(current_network) == 0
     return    
   

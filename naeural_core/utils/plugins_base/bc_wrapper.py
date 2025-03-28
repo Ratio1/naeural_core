@@ -601,3 +601,54 @@ class BCWrapper:
         The types of the EVM account
     """
     return self.__bc.eth_types
+  
+  
+  def is_valid_eth_address(self, address: str):
+    """
+    Checks if the address is a valid EVM address
+
+    Parameters
+    ----------
+    address : str
+        The address to be checked
+
+    Returns
+    -------
+    bool
+        True if the address is a valid EVM address, False otherwise
+    """
+    return self.__bc.is_valid_eth_address(address)
+  
+  
+  def address_is_valid(self, address: str):
+    """
+    Checks if the address is a valid internal ddress
+
+    Parameters
+    ----------
+    address : str
+        The address to be checked
+
+    Returns
+    -------
+    bool
+        True if the address is a valid address, False otherwise
+    """
+    return self.__bc.address_is_valid(address)
+  
+  
+  def is_valid_internal_address(self, address: str):
+    """
+    Checks if the address is a valid internal address
+
+    Parameters
+    ----------
+    address : str
+        The address to be checked
+
+    Returns
+    -------
+    bool
+        True if the address is a valid internal address, False otherwise
+    """
+    return self.address_is_valid(address)

@@ -22,6 +22,19 @@ UNUSEFULL_HB_KEYS = [
   ct.HB.TIMERS,
 ]
 
+class NetMonCt:
+  PIPELINES = 'pipelines'
+  PLUGINS_STATUSES = 'plugins_statuses'
+  TIMESTAMP = 'timestamp'
+  PLUGINS = 'plugins'
+  INITIATOR = 'initiator'
+  LAST_CONFIG = 'last_config'
+  PLUGIN_INSTANCE = 'instance'
+  PLUGIN_START = 'start'
+  PLUGIN_LAST_ERROR = 'last_error'
+  PLUGIN_LAST_ALIVE = 'last_alive'
+  
+
 def exponential_score(left, right, val, right_is_better=False, normed=False):
   num = 50
   interval = np.linspace(left, right, num=num)
@@ -255,9 +268,9 @@ class NetworkMonitor(DecentrAIObject):
       if __addr_no_prefix not in self.__nodes_pipelines:
         self.__nodes_pipelines[__addr_no_prefix] = {
         }
-      self.__nodes_pipelines[__addr_no_prefix]['pipelines'] = pipelines
-      self.__nodes_pipelines[__addr_no_prefix]['plugins_statuses'] = plugins_statuses
-      self.__nodes_pipelines[__addr_no_prefix]['timestamp'] = time()
+      self.__nodes_pipelines[__addr_no_prefix][NetMonCt.PIPELINES] = pipelines
+      self.__nodes_pipelines[__addr_no_prefix][NetMonCt.PLUGINS_STATUSES] = plugins_statuses
+      self.__nodes_pipelines[__addr_no_prefix][NetMonCt.TIMESTAMP] = time()
     return
   
   
@@ -1512,26 +1525,68 @@ class NetworkMonitor(DecentrAIObject):
       """
       __addr_no_prefix = self.__remove_address_prefix(addr)
       node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
-      return node_info.get('pipelines', [])
+      return node_info.get(NetMonCt.PIPELINES, [])
+    
+    
+    def network_node_pipeline_info(self, addr, pipeline):
+      """
+      This function returns the pipeline info of a remote node based on the cached information.
+      Formerly, it was based on the heartbeat information as shown below, but now it is based on the cached information.
+      
+        hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+        return hb.get(ct.HB.CONFIG_STREAMS)
+      
+      """
+      __addr_no_prefix = self.__remove_address_prefix(addr)
+      pipelines = self.network_node_pipelines(addr=__addr_no_prefix)
+      for pipeline_info in pipelines:
+        if pipeline_info.get('NAME') == pipeline:
+          return pipeline_info
+      return {}
     
     
     def network_node_apps(self, addr):
+      """
+      This function returns the apps of a remote node based on the cached information.
+      Formerly, it was based on the heartbeat information as shown below, but now it is based 
+      on the cached information.
+      """
       __addr_no_prefix = self.__remove_address_prefix(addr)
       node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
-      plugins_statuses = node_info.get('plugins_statuses', [])
+      plugins_statuses = node_info.get(NetMonCt.PLUGINS_STATUSES, [])
       apps = {}
       for status in plugins_statuses:
         pipeline = status.get(ct.HB.ACTIVE_PLUGINS_INFO.STREAM_ID)
         signature = status.get(ct.HB.ACTIVE_PLUGINS_INFO.SIGNATURE)
         if pipeline not in apps:
-          apps[pipeline] = {}
-        apps[pipeline][signature] = {
-          'instance' : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID),
-          'start' : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
-          'last_probe' : status.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
-          'last_error' : status.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
+          pipeline_info = self.network_node_pipeline_info(addr=__addr_no_prefix, pipeline=pipeline)
+          apps[pipeline] = {
+            NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.INITIATOR_ADDR),
+            NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
+            NetMonCt.PLUGINS : {}
+          }
+        apps[pipeline][NetMonCt.PLUGINS][signature] = {
+          NetMonCt.PLUGIN_INSTANCE      : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID),
+          NetMonCt.PLUGIN_START         : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
+          NetMonCt.PLUGIN_LAST_ALIVE    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
+          NetMonCt.PLUGIN_LAST_ERROR    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
         }
       return apps
+    
+    
+    def network_known_apps(self):
+      """
+      This function returns the apps of all remote ONLINE nodes based on the cached information.
+      """
+      apps = {}
+      for addr in self.__nodes_pipelines:
+        if self.network_node_is_online(addr=addr):
+          node_apps = self.network_node_apps(addr=addr)
+          full_addr = self._add_address_prefix(addr)
+          apps[full_addr] = node_apps
+      return apps
+      
+      
         
     
     def network_node_hb_interval(self, addr):

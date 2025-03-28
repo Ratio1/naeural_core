@@ -1565,12 +1565,14 @@ class NetworkMonitor(DecentrAIObject):
             NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
             NetMonCt.PLUGINS : {}
           }
-        apps[pipeline][NetMonCt.PLUGINS][signature] = {
+        if signature not in apps[pipeline][NetMonCt.PLUGINS]:
+          apps[pipeline][NetMonCt.PLUGINS][signature] = []
+        apps[pipeline][NetMonCt.PLUGINS][signature].append({
           NetMonCt.PLUGIN_INSTANCE      : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID),
           NetMonCt.PLUGIN_START         : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
           NetMonCt.PLUGIN_LAST_ALIVE    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
           NetMonCt.PLUGIN_LAST_ERROR    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
-        }
+        })
       return apps
     
     

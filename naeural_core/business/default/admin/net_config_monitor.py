@@ -364,10 +364,14 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
           if self.cfg_verbose_netconfig_logs:            
             self.P(f"Received {self.const.NET_CONFIG.STORE_COMMAND} data from '{sender_id}' <{sender}'.")
           received_pipelines = net_config_data.get(self.CT_PIPELINE, [])    
+          received_plugins_statuses = net_config_data.get(self.CT_PLG_STATUSES, None)
           # process in local cache
           self.__update_allowed_nodes(sender_no_prefix, received_pipelines)
           # now we can add the pipelines to the netmon cache
-          self.netmon.register_node_pipelines(addr=sender_no_prefix, pipelines=received_pipelines)
+          self.netmon.register_node_pipelines(
+            addr=sender_no_prefix, pipelines=received_pipelines,
+            plugins_statuses=received_plugins_statuses
+          )
         #finished SET_CONFIG
         
         elif op == self.const.NET_CONFIG.REQUEST_COMMAND:

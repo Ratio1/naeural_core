@@ -6,7 +6,10 @@
   "runArgs": [
     //"--gpus=all",
     "--hostname",
-    "core_dev"    
+    "core_dev",
+
+    "--name",
+    "core_dev"
   ],
 
 

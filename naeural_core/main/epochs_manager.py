@@ -1415,7 +1415,7 @@ class EpochsManager(Singleton):
     return not self.is_epoch_faulty(epoch)
 
 
-  def mark_epoch_as_faulty(self, epoch):
+  def mark_epoch_as_faulty(self, epoch, debug=True):
     """
     Marks an epoch as faulty. This means that consensus was not achieved for the given epoch.
     In this case all nodes with licenses associated prior to it will be considered as fully available.
@@ -1423,6 +1423,8 @@ class EpochsManager(Singleton):
     ----------
     epoch : int
       The epoch id.
+    debug : bool
+      If True, the debug messages are displayed.
 
     Returns
     -------
@@ -1433,21 +1435,24 @@ class EpochsManager(Singleton):
     last_sync_epoch = self.get_last_sync_epoch()
 
     if epoch <= last_sync_epoch:
-      self.P(f"Epoch {epoch} is not greater than last sync epoch {last_sync_epoch}. Skipping marking.", color='r')
+      if debug:
+        self.P(f"Epoch {epoch} is not greater than last sync epoch {last_sync_epoch}. Skipping marking.", color='r')
       success = False
       return success
 
     if epoch in self.__full_data[FAULTY_EPOCHS]:
-      self.P(f"Epoch {epoch} is already marked as faulty. Skipping marking.", color='r')
+      if debug:
+        self.P(f"Epoch {epoch} is already marked as faulty. Skipping marking.", color='r')
       success = False
       return success
 
     self.__full_data[FAULTY_EPOCHS].append(epoch)
-    self.P(f"Epoch {epoch} marked as faulty.")
+    if debug:
+      self.P(f"Epoch {epoch} marked as faulty.")
     return success
 
 
-  def unmark_epoch_as_faulty(self, epoch):
+  def unmark_epoch_as_faulty(self, epoch, debug=True):
     """
     Unmarks an epoch as faulty. This means that consensus was achieved for the given epoch.
     This can happen if the epoch is marked as faulty, but later it's requested again and
@@ -1470,16 +1475,18 @@ class EpochsManager(Singleton):
     #  after validating the signatures from oracles.
 
     if epoch not in self.__full_data[FAULTY_EPOCHS]:
-      self.P(f"Epoch {epoch} is not marked as faulty. Skipping unmarking.", color='r')
+      if debug:
+        self.P(f"Epoch {epoch} is not marked as faulty. Skipping unmarking.", color='r')
       success = False
       return success
 
     self.__full_data[FAULTY_EPOCHS].remove(epoch)
-    self.P(f"Epoch {epoch} unmarked as faulty.")
+    if debug:
+      self.P(f"Epoch {epoch} unmarked as faulty.")
     return success
 
 
-  def add_cid_for_epoch(self, epoch, agreement_cid):
+  def add_cid_for_epoch(self, epoch, agreement_cid, debug=False):
     """
     Adds the agreement CID for the given epoch.
 
@@ -1498,10 +1505,12 @@ class EpochsManager(Singleton):
     """
     signatures = self.__full_data[SYNC_SIGNATURES].get(epoch) or {}
     if len(signatures) == 0:
-      self.P(f"No signatures found for epoch {epoch}. Skipping CID addition.", color='r')
+      if debug:
+        self.P(f"No signatures found for epoch {epoch}. Skipping CID addition.", color='r')
       return False
     self.__full_data[SYNC_AGREEMENT_CID][epoch] = agreement_cid
-    self.P(f"Agreement CID for epoch {epoch} added successfully.")
+    if debug:
+      self.P(f"Agreement CID for epoch {epoch} added successfully.")
     return True
 
 

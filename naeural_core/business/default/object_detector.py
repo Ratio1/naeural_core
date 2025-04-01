@@ -3,9 +3,11 @@ from naeural_core.business.base.cv_plugin_executor import CVPluginExecutor as Ba
 
 _CONFIG = {
   **BasePlugin.CONFIG,
-  'PROCESS_DELAY': 2,
+  'PROCESS_DELAY': 0,
+
   "AI_ENGINE": "lowres_general_detector",
   "COLOR_TAGGING": True,
+  "DEBUG_DETECTIONS": False,
 
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES']
@@ -45,10 +47,12 @@ class ObjectDetectorPlugin(BasePlugin):
     instance_inferences = self.dataapi_image_instance_inferences()
     payload = None
 
-    self.P(f"Currently found {len(instance_inferences)} inferences.")
+    if self.cfg_debug_detections:
+      self.P(f"Currently found {len(instance_inferences)} inferences.")
 
-    if len(instance_inferences) > 0:
-      self.P(f'inference keys: {instance_inferences[0].keys()}')
+      if len(instance_inferences) > 0:
+        self.P(f'inference keys: {instance_inferences[0].keys()}')
+    # endif debug_detections
 
     payload_kwargs = {
       "objects": instance_inferences,

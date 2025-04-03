@@ -669,3 +669,20 @@ class BCWrapper:
         True if the address is a valid internal address, False otherwise
     """
     return self.address_is_valid(address)
+  
+  
+  def get_wallet_nodes(self, address: str):
+    """
+    Get the nodes based on the licenses owned by a given address
+
+    Parameters
+    ----------
+    address : str
+        The address of the wallet
+
+    Returns
+    -------
+    list
+        A list of nodes that are associated with the wallet address
+    """
+    return self.__bc.web3_get_wallet_nodes(address=address)

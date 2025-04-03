@@ -71,6 +71,9 @@ class _NgrokMixinPlugin(object):
     # Make the ngrok tunnel kwargs
     tunnel_kwargs = {}
     valid = True
+    if self.cfg_ngrok_edge_label in [None, '']:
+      self.P("WARNING: ngrok edge label is not set. Please make sure this is the intended behavior.", color='r')
+    # endif edge label
     if self.cfg_ngrok_edge_label is not None:
       # In case of using edge label, the domain is not needed and the protocol is "labeled".
       tunnel_kwargs['labels'] = f'edge:{self.cfg_ngrok_edge_label}'

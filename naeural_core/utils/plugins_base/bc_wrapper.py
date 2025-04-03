@@ -574,21 +574,38 @@ class BCWrapper:
     return self.__bc.eth_sign_payload(payload)
   
   
-  def eth_verify_payload_signature(self, payload: dict):
+  def eth_verify_payload_signature(self, payload: dict, message_prefix: str = "", no_hash: bool = False, indent=0):
     """
     Verifies a payload signature using the EVM account of the current node
 
     Parameters
     ----------
+    
     payload : dict
-        The payload to be verified` 
+        The payload that was signed. Must contain the keys ETH_SENDER and ETH_SIGN.
+        
+    no_hash : bool, optional
+        If True, the message is not hashed before verification. The default is False.
+        This is useful for raw text messages that are not hashed such as the ones signed by
+        wallets.
+        
+    message_prefix : str, optional
+        A prefix to be added to the message before hashing (or signing). The default is "".
+        
+    
+    indent : int, optional
+        The indentation level for the JSON string. The default is 0.
+        
 
     Returns
     -------
     str
         The address of the signer or None if the signature is invalid
     """
-    return self.__bc.eth_verify_payload_signature(payload)
+    return self.__bc.eth_verify_payload_signature(
+      payload=payload, message_prefix=message_prefix, 
+      no_hash=no_hash, indent=indent
+    )
   
   @property
   def eth_types(self):

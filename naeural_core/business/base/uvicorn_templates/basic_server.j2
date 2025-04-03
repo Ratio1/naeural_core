@@ -34,7 +34,11 @@ app.add_middleware(
 
 STATIC_DIR = "{{ static_directory }}"
 DEBUG = {{ debug_web_app }}
+{% if default_route is not none %}
 DEFAULT_ROUTE = "{{ default_route }}"
+{% else %}
+DEFAULT_ROUTE = None
+{% endif %}
 
 # Define security scheme for Swagger UI
 security = HTTPBearer()

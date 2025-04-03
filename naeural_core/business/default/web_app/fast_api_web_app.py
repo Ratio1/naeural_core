@@ -130,6 +130,26 @@ class FastApiWebAppPlugin(BasePlugin):
     os.rmdir(tmp_directory)
     return
 
+  def validate_default_route(self):
+    """
+    Validate the `DEFAULT_ROUTE` value.
+    It should be a valid URL path if specified.
+
+    """
+    default_route = self.cfg_default_route
+    if default_route is None:
+      # If not provided, return without validation
+      return
+
+    if not isinstance(default_route, str):
+      self.add_error(f"Invalid `DEFAULT_ROUTE`: {default_route}. It should be a string")
+      return
+
+    if not default_route.startswith('/'):
+      self.add_error(f"Invalid `DEFAULT_ROUTE`: {default_route}. It should start with '/'")
+    # endif default route is invalid
+    return
+
   def initialize_assets(self, src_dir, dst_dir, jinja_args):
     """
     Initialize and copy fastapi assets, expanding any jinja templates.

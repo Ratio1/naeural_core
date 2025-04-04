@@ -16,6 +16,8 @@ from naeural_core import constants as ct
 from typing import List, Union, Tuple
 from naeural_core.local_libraries.vision.ffmpeg_writer import FFmpegWriter
 
+from naeural_core.ipfs import R1FSEngine
+
 def assert_folder(folder : str):
   assert folder in ['data', 'models', 'output']
 
@@ -804,7 +806,7 @@ class _DiskAPIMixin(object):
         extension=extension
       )
 
-    def _diskapi_save_file(self, data: str or list, filename: str, folder: str, subdir: str, extension: str):
+    def _diskapi_save_file(self, data: any, filename: str, folder: str, subdir: str, extension: str):
       """
       Method for saving a file to local cache.
       Parameters
@@ -837,14 +839,17 @@ class _DiskAPIMixin(object):
         return False
       return True
 
-    def diskapi_save_file_output(self, data: str or list, filename: str, subdir: str = '', extension: str = ''):
+    def diskapi_save_file_output(self, data: any, filename: str, subdir: str = '', extension: str = ''):
       """
       Shortcut to _diskapi_save_file.
       Parameters
       ----------
       data - string or list, the data to be saved
+      
       filename - string, the name of the file
+      
       subdir - string, the subfolder in local cache
+      
       extension - string, the extension of the file
 
       Returns
@@ -988,3 +993,82 @@ class _DiskAPIMixin(object):
       # endif paths are safe
       return
   # endif
+  
+  # binary objects handling
+  if True:
+    def diskapi_save_bytes_to_output(
+      self, 
+      data: bytes, 
+      filename: str, 
+      subdir: str = '', 
+      extension: str = '', 
+      from_base64: bool = False,
+      from_base64_decompress: bool = False,
+      from_base64_url_safe: bool = False,
+    ):
+      """
+      Save bytes to a file in the output folder.
+      
+      
+      Parameters
+      ----------
+      
+      data - bytes, the data to be saved
+      
+      filename - string, the name of the file
+      
+      subdir - string, the subfolder in local cache
+      
+      extension - string, the extension of the file
+
+      Returns
+      -------
+      bool, True if the file was saved successfully, False otherwise
+      """
+      if isinstance(data, str) and from_base64:
+        data = self.base64_to_bytes(
+          b64=data, decompress=from_base64_decompress, url_safe=from_base64_url_safe
+        )
+      return self._diskapi_save_file(
+        data=data,
+        filename=filename,
+        folder='output',
+        subdir=subdir,
+        extension=extension
+      )
+      
+    def diskapi_load_r1fs_file(
+      self, 
+      filename: str, 
+      verbose: bool = True,
+      to_base64: bool = False,
+      url_safe: bool = False,
+      compress: bool = False,
+    ):
+      """
+      Load a file from the R1FS folder.
+      
+      
+      Parameters
+      ----------
+      
+      filename - string, the name of the file
+      
+      
+      verbose - bool, whether to print messages or not
+
+      Returns
+      -------
+        bytes, the loaded file if not to_base64, str if to_base64
+      """
+      eng : R1FSEngine = self.r1fs
+      target = eng.download_folder
+      assert self.is_path_safe(filename), f"Filename {filename} is not safe"
+      assert filename.startswith(target), f"Filename {filename} should start with {target}"
+      if verbose:
+        self.P(f"Loading binary content from {filename}")
+      with open(filename, 'rb') as f:
+        data = f.read()
+      if to_base64:
+        data = self.bytes_to_base64(data, url_safe=url_safe, compress=compress)
+      return data

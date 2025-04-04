@@ -1786,6 +1786,34 @@ class _UtilsBaseMixin(
       b_text = zlib.decompress(b_text)
     str_text = b_text.decode('utf-8')
     return str_text
+  
+
+  def base64_to_bytes(self, b64, decompress=False, url_safe=False) -> bytes:
+    """Transforms a base64 encoded string into bytes
+
+    Parameters
+    ----------
+    b64 : str
+        the base64 encoded string
+        
+    decompress : bool, optional
+        if True, the data will be decompressed after decoding. The default is False.
+
+    Returns
+    -------
+    bytes: the decoded data
+    """
+    b_encoded = b64.encode('utf-8')
+    if url_safe:
+      b_text = base64.urlsafe_b64decode(b_encoded)
+    else:
+      b_text = base64.b64decode(b_encoded)
+      
+    if decompress:
+      b_text = zlib.decompress(b_text)
+    
+    return b_text  
+  
 
   def execute_remote_code(self, code: str, debug: bool = False, timeout: int = 10):
     """
@@ -2082,7 +2110,31 @@ class _UtilsBaseMixin(
     return self.log.get_gpu_info(device_id=device_id)
 
 
-  
+  def bytes_to_base64(self, input_bytes, compress=False, url_safe=False):
+    """Transforms a bytes object into a base64 encoded string
+
+    Parameters
+    ----------
+    input_bytes : bytes
+        the input bytes
+        
+    compress : bool, optional
+        if True, the bytes will be compressed before encoding. The default is False.
+
+    Returns
+    -------
+    str: base64 encoded string
+    """
+    if compress:
+      b_code = zlib.compress(input_bytes, level=9)
+    else:
+      b_code = input_bytes
+    if url_safe:
+      b_encoded = base64.urlsafe_b64encode(b_code)
+    else:
+      b_encoded = base64.b64encode(b_code)
+    str_encoded = b_encoded.decode('utf-8')
+    return str_encoded
   
 
   def string_to_base64(self, txt, compress=False, url_safe=False):
@@ -2100,18 +2152,11 @@ class _UtilsBaseMixin(
     -------
     str: base64 encoded string
     """
-    b_text = bytes(txt, 'utf-8')    
-    if compress:
-      b_code = zlib.compress(b_text, level=9)
-    else:
-      b_code = b_text
-    if url_safe:
-      b_encoded = base64.urlsafe_b64encode(b_code)
-    else:
-      b_encoded = base64.b64encode(b_code)
-    str_encoded = b_encoded.decode('utf-8')
-    return str_encoded
-  
+    b_text = bytes(txt, 'utf-8')
+    return self.bytes_to_base64(
+      input_bytes=b_text, url_safe=url_safe, compress=compress
+    )
+
   
   def str_to_base64(self, txt, compress=False, url_safe=False):
     """

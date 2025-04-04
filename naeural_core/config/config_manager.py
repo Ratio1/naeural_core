@@ -243,6 +243,7 @@ class ConfigManager(
     fn_full =  os.path.join(self.log.get_data_folder(), self._folder_streams_configs, fname)
     if os.path.isfile(fn_full):
       os.remove(fn_full)
+      self.P(f"Pipeline '{stream_name}' deleted from local cache")
     else:
       msg = "WARNING: Seems the pipeline was already deleted: {}".format(fn_full)
       self.P(msg, color='r')      

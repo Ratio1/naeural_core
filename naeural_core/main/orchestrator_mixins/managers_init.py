@@ -32,6 +32,14 @@ class _ManagersInitMixin(object):
       folder_streams_configs=ct.CONFIG_MANAGER.DEFAULT_FOLDER_STREAMS_CONFIGS
     )
     
+    # maybe delete admin_pipeline
+    
+    if self.cfg_reset_admin_pipeline:
+      self.P("Resetting admin pipeline...")
+      self._config_manager._delete_stream_config('admin_pipeline')
+    else:
+      self.P("Preserving admin pipeline. Please make sure this is intended.", color='r', boxed=True)
+    
     # first try to retrieve the config including the streams
     self.P("Initiating ConfigManager retrieve...")
     self._config_manager.retrieve(lst_config_retrieve=self.cfg_config_retrieve)

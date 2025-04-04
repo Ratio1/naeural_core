@@ -602,6 +602,10 @@ class Orchestrator(DecentrAIObject,
   def cfg_extended_timers_dump(self):
     return self.config_data.get('EXTENDED_TIMERS_DUMP', True)
   
+  @property
+  def cfg_reset_admin_pipeline(self):
+    return self.config_data.get('RESET_ADMIN_PIPELINE', True)
+  
   
   @property
   def cfg_timers_dump_interval(self):

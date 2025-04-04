@@ -28,8 +28,6 @@ class ObjectDetectorPlugin(BasePlugin):
       box_tlbr = inference[self.consts.TLBR_POS]
       lbl = inference[self.consts.TYPE]
       lbl += f" | {inference.get(self.consts.COLOR_TAG)}"
-      if self.consts.COLOR_TAG_MEDIAN in inference:
-        lbl += f" | {inference[self.consts.COLOR_TAG_MEDIAN]}"
 
       img = self._painter.draw_detection_box(
         image=img,

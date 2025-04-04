@@ -179,7 +179,7 @@ ADMIN_PIPELINE = {
 
   "UPDATE_MONITOR_01": {
     "PROCESS_DELAY": 120,
-    "WORKING_HOURS": [["08:30", "09:30"]],
+    # "WORKING_HOURS": [],
     "VERSION_TOKEN": None,
     "RESTART_ON_BEHIND": True,
     "VERSION_URL": "https://raw.githubusercontent.com/Ratio1/edge_node/ver.py"

@@ -456,37 +456,126 @@ class _GenericUtilsApiMixin(_UtilsBaseMixin):
     return yh
   
   ## MLAPI
-  
-  def mlapi_timeseries_fit_predict(self, data, steps, **kwargs):
-    """
-    Takes a list of values and directly returns predictions using a basic AR model
+  if True:
+    def mlapi_timeseries_fit_predict(self, data, steps, **kwargs):
+      """
+      Takes a list of values and directly returns predictions using a basic AR model
 
 
-    Parameters
-    ----------
-    data : list
-      list of float values.
-    steps : int
-      number of prediction steps.
+      Parameters
+      ----------
+      data : list
+        list of float values.
+      steps : int
+        number of prediction steps.
 
-    Returns
-    -------
-    yh : list
-      the `steps` predicted values.
+      Returns
+      -------
+      yh : list
+        the `steps` predicted values.
 
 
-    Example
-    -------
-      ```
-      yh = self.basic_ts_fit_predict(data=[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89], steps=3)
-      result = {'preds' : yh}
-      ```
+      Example
+      -------
+        ```
+        yh = self.basic_ts_fit_predict(data=[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89], steps=3)
+        result = {'preds' : yh}
+        ```
 
-    """
-    result = self.basic_ts_fit_predict(data, steps)
-    return result
-  
-  
+      """
+      result = self.basic_ts_fit_predict(data, steps)
+      return result
+    
+    
+    def mlapi_create_ts_model(self, series_min=100, train_hist=None, train_periods=None):
+      """
+      Returns a basic time-series prediction model instance
+
+      Parameters
+      ----------
+      series_min : int, optional
+        Minimal accepted number of historical steps. The default is 100.
+      train_hist : int, optional
+        The training window size. The default is None.
+      train_periods : int, optional
+        how many windows to use. The default is None.
+
+      Returns
+      -------
+      BasicSeriesModel() object
+
+
+      Example
+      -------
+        ```
+          # init model
+          model = plugin.basic_ts_create(...)
+        ```
+
+      """
+      return self.create_basic_ts_model(
+        series_min=series_min,
+        train_hist=train_hist,
+        train_periods=train_periods
+      )
+      
+    def mlapi_create_anomaly_model(self):
+      """
+      Returns a basic anomaly model instance
+
+      Returns
+      -------
+      BasicAnomalyModel() object
+
+
+      Example
+      -------
+        ```
+          # init model
+          model = plugin.mlapi_create_anomaly_model(...)
+        ```
+
+      """
+      from naeural_core.utils.basic_anomaly_model import BasicAnomalyModel
+      return BasicAnomalyModel()
+    
+    
+    def mlapi_anomaly_fit_predict(self, x_train, x_test, proba=True):
+      """
+      Takes a list of values and directly returns predictions using a basic anomaly detection model
+
+
+      Parameters
+      ----------
+      x_train : list
+        list of float values. These are the training values.
+        
+      x_test : list
+        list of float values. These are the test values.
+        
+      proba : bool, optional
+        If `True` then the model will return the probability of being an anomaly. The default is True.
+
+      Returns
+      -------
+      yh : list
+        the `steps` predicted values.
+
+
+      Example
+      -------
+        ```
+        yproba = self.mlapi_anomaly_fit_predict(x_train=[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89], x_test=[0, 1, 1, 2, 3], proba=True)
+        result = {'preds' : yproba}
+        ```
+
+      """
+      model = self.mlapi_create_anomaly_model()
+      model.fit(x_train)
+      result = model.predict(x_test, proba=proba)
+      return result
+    
+    
   ## END MLAPI
 
   def create_sre(self, **kwargs):

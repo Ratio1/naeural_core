@@ -7,7 +7,6 @@ name = "naeural_core"
 version = "2.0.0"
 authors = [
   { name="Andrei Ionut Damian", email="andrei.damian@me.com" },
-  { name="Stefan Saraev", email="saraevstefan@gmail.com" },
   { name="Cristan Bleotiu", email="cristibleotiu@gmail.com" },
 ]
 description = "Ratio1 Core is the backbone of the Ratio1 Edge Protocol."
@@ -32,10 +31,6 @@ dependencies = [
   "gql",
   "opencv-python-headless",
   "decord",
-  "accelerate==0.30.1",
-  "bitsandbytes==0.43.1",
-  "tokenizers>=0.14.1",
-  "sentencepiece",
   "seaborn",
   "pandas",
   "shapely",
@@ -45,19 +40,26 @@ dependencies = [
   "pymssql",
   "h5py",
   "unidecode",
-  "transformers>=4.38.0",
   "cryptography==42.0.7",
-  "onnx",
-  "openvino==2024.1.0",
-  "onnxruntime-openvino==1.17.1",
-  "onnxsim",
   "fastapi",
   "uvicorn",
   "pydantic",
   "bs4",
   "web3",
-  "nvidia-cudnn-cu12<9.0",
   "decentra_vision",
+
+  "transformers>=4.38.0",
+  "tokenizers>=0.14.1",
+  "sentencepiece",
+
+  "onnx",
+  "openvino==2024.1.0",
+  "onnxruntime-openvino==1.17.1",
+  "onnxsim",
+  "nvidia-cudnn-cu12<9.0",
+  "accelerate==0.30.1",
+  "bitsandbytes==0.43.1"
+
 ]
 
 [project.urls]

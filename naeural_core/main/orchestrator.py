@@ -929,15 +929,16 @@ class Orchestrator(DecentrAIObject,
       # END: internal checks
       
       ## debug
-      if send_log:
-        devicelog = hb_payload.get(ct.HB.DEVICE_LOG, [])
-        msg = "MIME-Version: 1.0\nContent-Type: text/html\n\n<pre>"+"\n".join(
-          devicelog
-          ) + "\n\n</pre>"
-        self.P("Sending full log via email...", color='error')
-        self._create_mail_payload(
-          subject="'{}' full log".format(self.cfg_eeid), message=msg,
-        )
+      if False:
+        if send_log:
+          devicelog = hb_payload.get(ct.HB.DEVICE_LOG, [])
+          msg = "MIME-Version: 1.0\nContent-Type: text/html\n\n<pre>"+"\n".join(
+            devicelog
+            ) + "\n\n</pre>"        
+          self.P("Creating payload...", color='error')
+          self._create_mail_payload(
+            subject="'{}' full log".format(self.cfg_eeid), message=msg,
+          )
       ## end debug
       
       hb_payload[ct.HB.INITIATOR_ID] = initiator_id

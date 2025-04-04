@@ -757,7 +757,13 @@ class _DiskAPIMixin(object):
         extension=extension
       )
       os.makedirs(os.path.dirname(save_path), exist_ok=True)
-      return cv2.imwrite(img=image[:, :, ::-1], filename=save_path)  # TODO: use PIL instead of opencv
+      res = cv2.imwrite(img=image[:, :, ::-1], filename=save_path)  # TODO: use PIL instead of opencv
+      if res:
+        result = save_path
+      else:
+        result = None
+      return result
+      
 
     def diskapi_load_image(self, filename: str, folder: str, subdir: str):
       """
@@ -787,6 +793,7 @@ class _DiskAPIMixin(object):
     def diskapi_save_image_output(self, image, filename: str, subdir: str, extension: str = 'jpg'):
       """
       Shortcut to _diskapi_save_image.
+      
       Parameters
       ----------
       image - np.ndarray, the image to be saved
@@ -806,21 +813,38 @@ class _DiskAPIMixin(object):
         extension=extension
       )
 
-    def _diskapi_save_file(self, data: any, filename: str, folder: str, subdir: str, extension: str):
+
+    def _diskapi_save_file(
+      self, 
+      data: any, 
+      filename: str, 
+      folder: str, 
+      subdir: str, 
+      extension: str,
+      save_bytes: bool = False,
+    ):
       """
       Method for saving a file to local cache.
+      
       Parameters
       ----------
       data - string or list, the data to be saved
+      
       filename - string, the name of the file
+      
       folder - string, the folder in local cache
+      
       subdir - string, the subfolder in local cache
+      
       extension - string, the extension of the file
 
       Returns
       -------
-      bool, True if the file was saved successfully, False otherwise
+        str, the full path to the saved file or None if the file was not saved
+      
+      
       """
+      save_path = None
       try:
         assert_folder(folder)
         save_path = self._get_file_path(
@@ -832,16 +856,18 @@ class _DiskAPIMixin(object):
         if isinstance(data, list):
           data = '\n'.join([x for x in data])
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        with open(save_path, 'w') as out:
+        mode = 'w' if not save_bytes else 'wb'
+        with open(save_path, mode) as out:
           out.write(data)
       except Exception as e:
         self.P(f'Failed to save file {filename} to {folder} with error: {e}')
-        return False
-      return True
+        save_path = None
+      return save_path
 
-    def diskapi_save_file_output(self, data: any, filename: str, subdir: str = '', extension: str = ''):
+    def diskapi_save_file_to_output(self, data: any, filename: str, subdir: str = '', extension: str = ''):
       """
-      Shortcut to _diskapi_save_file.
+      Shortcut to _diskapi_save_file for ouput folder.
+      
       Parameters
       ----------
       data - string or list, the data to be saved
@@ -854,7 +880,9 @@ class _DiskAPIMixin(object):
 
       Returns
       -------
-      bool, True if the file was saved successfully, False otherwise
+      
+        str: the full path to the saved file or None if the file was not saved
+      
       """
       return self._diskapi_save_file(
         data=data,
@@ -1023,7 +1051,9 @@ class _DiskAPIMixin(object):
 
       Returns
       -------
-      bool, True if the file was saved successfully, False otherwise
+      
+        str, the full path to the saved file or None if the file was not saved
+        
       """
       if isinstance(data, str) and from_base64:
         data = self.base64_to_bytes(
@@ -1034,9 +1064,11 @@ class _DiskAPIMixin(object):
         filename=filename,
         folder='output',
         subdir=subdir,
-        extension=extension
+        extension=extension,
+        save_bytes=True,
       )
-      
+
+
     def diskapi_load_r1fs_file(
       self, 
       filename: str, 

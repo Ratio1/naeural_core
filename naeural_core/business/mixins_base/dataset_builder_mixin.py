@@ -984,7 +984,7 @@ class _DatasetBuilderMixin(object):
     current_subdir = self.__get_subdir_path(data=data)
     if self.get_label_template_type is not None:
       label_file_text = self._generate_label_file_text(data, inferences=inferences)
-      label_success = self.diskapi_save_file_output(
+      label_success = self.diskapi_save_file_to_output(
         data=label_file_text,
         filename=current_fn,
         subdir=current_subdir,

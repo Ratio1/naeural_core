@@ -343,7 +343,7 @@ class Ai4eLabelDataPlugin(BaseClass, _Ai4eMixin):
         label_path = self.os_path.join(label_subdir, f'{filename}.txt')
         if self.os_path.exists(label_path):
           continue
-        self.diskapi_save_file_output(
+        self.diskapi_save_file_to_output(
           data=decision,
           filename=f'{filename}.txt',
           subdir=label_subdir

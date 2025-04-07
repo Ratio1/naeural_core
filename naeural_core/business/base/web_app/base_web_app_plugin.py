@@ -79,6 +79,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.ngrok_started = False
     self.ngrok_listener = None
     self.__last_ngrok_url_ping_ts = 0
+    self.__wait_count = 0
 
     # TODO: move this to process
     self.__allocate_port()
@@ -551,7 +552,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     if not self.__all_start_running():
       self.P("Running START commands...")
     else:
-      self.P("Waiting for START commands...")
+      self.__wait_count += 1
+      self.P(f"Waiting for START commands (pass #{self.__wait_count})...")
+      self.sleep(1)
 
     for idx in range(len(self.get_start_commands())):
       self.__maybe_run_nth_start_command(idx)

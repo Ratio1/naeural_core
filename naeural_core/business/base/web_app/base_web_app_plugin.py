@@ -267,9 +267,10 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       cwd=self.script_temp_dir,
       stdout=subprocess.PIPE if read_stdout else None,
       stderr=subprocess.PIPE if read_stderr else None,
+      bufsize=0, # this is important for real-time output
     )
-    logs_reader = self.LogReader(process.stdout, size=5) if read_stdout else None
-    err_logs_reader = self.LogReader(process.stderr, size=5) if read_stderr else None
+    logs_reader = self.LogReader(process.stdout, size=100) if read_stdout else None
+    err_logs_reader = self.LogReader(process.stderr, size=100) if read_stderr else None
     return process, logs_reader, err_logs_reader
 
   def __wait_for_command(self, process, timeout):

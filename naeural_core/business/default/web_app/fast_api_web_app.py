@@ -12,7 +12,7 @@ from naeural_core.utils.fastapi_utils import PostponedRequest
 #TODO: move __sign and __get_response from dauth_manager to base_web_app_plugin or fastapi_web_app or utils
 #  all responses should contain the data from __get_response
 
-__VER__ = '0.0.0.0'
+__VER__ = '0.0.0'
 
 _CONFIG = {
   **BasePlugin.CONFIG,
@@ -58,6 +58,14 @@ class FastApiWebAppPlugin(BasePlugin):
   """
 
   CONFIG = _CONFIG
+  
+  @property
+  def api_title(self):
+    return repr(self.cfg_api_title or self.get_signature())
+  
+  @property
+  def uvicorn_server_started(self):
+    return self.__uvicorn_server_started
 
   @staticmethod
   def endpoint(func=None, *, method="get", require_token=False):
@@ -277,8 +285,11 @@ class FastApiWebAppPlugin(BasePlugin):
     return
 
   def on_init(self):
+    self.__uvicorn_server_started = False
     # Register all endpoint methods.
     self._init_endpoints()
+    
+  
 
     # FIXME: move to setup_manager method
     self.manager_auth = b'abc'
@@ -417,6 +428,16 @@ class FastApiWebAppPlugin(BasePlugin):
 
   def get_default_description(self):
     return self.__doc__
+  
+  
+  def on_log_handler(self, text):
+    STARTUP_MSG = "Uvicorn running on "
+    if STARTUP_MSG in text:
+      self.__uvicorn_server_started = True
+      match = self.re.search(r"running on (.*?) \(Press", text)
+      found = match.group(1) if match else ""
+      self.P(f"Server {self.api_title} started on {found}", boxed=True)
+    return
 
   @property
   def jinja_args(self):
@@ -434,7 +455,7 @@ class FastApiWebAppPlugin(BasePlugin):
       'html_files': dct_pages,
       'manager_port': self.manager_port,
       'manager_auth': self.manager_auth,
-      'api_title': repr(self.cfg_api_title or self.get_signature()),
+      'api_title': self.api_title,
       'api_summary': repr(self.cfg_api_summary or f"Ratio1 WebApp created with {self.get_signature()} plugin"),
       'api_description': repr(self.cfg_api_description or self.get_default_description()),
       'api_version': repr(self.__version__),

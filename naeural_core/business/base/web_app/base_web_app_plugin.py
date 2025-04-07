@@ -33,7 +33,7 @@ _CONFIG = {
 
   'NGROK_AUTH_TOKEN': None,
   
-  'SUPRESS_LOGS_AFTER_INTERVAL' : 0,
+  'SUPRESS_LOGS_AFTER_INTERVAL' : 120,  # 2 minutes until logs suppression
 
   'ASSETS': None,
 
@@ -268,8 +268,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       stdout=subprocess.PIPE if read_stdout else None,
       stderr=subprocess.PIPE if read_stderr else None,
     )
-    logs_reader = self.LogReader(process.stdout) if read_stdout else None
-    err_logs_reader = self.LogReader(process.stderr) if read_stderr else None
+    logs_reader = self.LogReader(process.stdout, size=100) if read_stdout else None
+    err_logs_reader = self.LogReader(process.stderr, size=100) if read_stderr else None
     return process, logs_reader, err_logs_reader
 
   def __wait_for_command(self, process, timeout):
@@ -338,23 +338,30 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     # endwhile
     return
   
+  
+  def on_log_handler(self, text):
+    return
+  
 
   # logs handling methods
   def __maybe_print_all_logs(self, indent=35):
     for key, logs_reader in self.dct_logs_reader.items():
       if logs_reader is not None:
         logs = logs_reader.get_next_characters()
-        if isinstance(self.cfg_supress_logs_after_interval, int) and self.cfg_supress_logs_after_interval > 0:
-          time_since_first_log = 0 if self.__first_log_displayed is None else (self.time() - self.__first_log_displayed)
-          if time_since_first_log > self.cfg_supress_logs_after_interval and len(logs) > 0:
-            # only print logs if the first log was displayed less than `supress_logs_after_interval` seconds ago
-            indented_logs = self.indent_strings(logs, indent=indent)
-            self.P(f"Showing stdout logs [{key}]:\n{indented_logs}")
-            self.logs.append(f"[{key}]: {logs}")
-            if self.__first_log_displayed is None:
-              self.__first_log_displayed = self.time()
-          #end if time_since_first_log
-        #end if supress_logs_after_interval
+        if len(logs) > 0:
+          self.on_log_handler(logs)
+          if isinstance(self.cfg_supress_logs_after_interval, int) and self.cfg_supress_logs_after_interval > 0:
+            time_since_first_log = 0 if self.__first_log_displayed is None else (self.time() - self.__first_log_displayed)
+            if time_since_first_log > self.cfg_supress_logs_after_interval and len(logs) > 0:
+              # only print logs if the first log was displayed less than `supress_logs_after_interval` seconds ago
+              indented_logs = self.indent_strings(logs, indent=indent)
+              self.P(f"Showing stdout logs [{key}]:\n{indented_logs}")
+              self.logs.append(f"[{key}]: {logs}")
+              if self.__first_log_displayed is None:
+                self.__first_log_displayed = self.time()
+            #end if time_since_first_log
+          #end if supress_logs_after_interval
+        # endif logs
       #end if logs_reader
     #endfor all logs readers
 
@@ -362,6 +369,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       if err_logs_reader is not None:
         err_logs = err_logs_reader.get_next_characters()
         if len(err_logs) > 0:
+          self.on_log_handler(err_logs)
           indented_err_logs = self.indent_strings(err_logs, indent=indent)
           self.P(f"Showing error logs [{key}]:\n{indented_err_logs}")
           self.err_logs.append(f"[{key}]: {err_logs}")
@@ -373,14 +381,14 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     if logs_reader is not None:
       logs = logs_reader.get_next_characters()
       if len(logs) > 0:
-        self.P(f"[{key}]: {logs}")
+        self.P(f"[stdout][{key}]: {logs}")
         self.logs.append(f"[{key}]: {logs}")
 
     err_logs_reader = self.dct_err_logs_reader.get(key)
     if err_logs_reader is not None:
       err_logs = err_logs_reader.get_next_characters()
       if len(err_logs) > 0:
-        self.P(f"[{key}]: {err_logs}")
+        self.P(f"[stderr][{key}]: {err_logs}")
         self.err_logs.append(f"[{key}]: {err_logs}")
     return
 
@@ -539,11 +547,25 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     if not self.can_run_start_commands:
       return
     
-    self.P("Running START commands...")
+    if not self.__all_start_running():
+      self.P("Running START commands...")
+    else:
+      self.P("Waiting for START commands...")
 
     for idx in range(len(self.get_start_commands())):
       self.__maybe_run_nth_start_command(idx)
     return
+  
+  
+  def __all_start_running(self):
+    result = True
+    cmds = self.get_start_commands()
+    for idx in range(len(cmds)):
+      if not self.start_commands_started[idx]:
+        result = False
+        break
+    return result
+
 
   def __maybe_close_start_commands(self):
     if not any(self.start_commands_started):
@@ -563,8 +585,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       return
 
     if not self.start_commands_started[idx]:
-      self.P(f"Running start command nr {idx}: {self.get_start_commands()[idx]}")
-      proc, logs_reader, err_logs_reader = self.__run_command(self.get_start_commands()[idx], self.prepared_env)
+      cmd = self.get_start_commands()[idx]
+      self.P(f"Running start command nr {idx}: {cmd}")
+      proc, logs_reader, err_logs_reader = self.__run_command(cmd, self.prepared_env)
       self.start_commands_processes[idx] = proc
       self.dct_logs_reader[f"start_{idx}"] = logs_reader
       self.dct_err_logs_reader[f"start_{idx}"] = err_logs_reader
@@ -591,15 +614,17 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         )
         self.P(f"Start command nr {idx} finished unexpectedly. Please check the logs.")
         self.failed = True
+        
       elif self.time() - self.start_commands_start_time[idx] > timeout:
         self.start_commands_finished[idx] = True
+        cmd = self.get_start_commands()[idx]
         self.add_payload_by_fields(
           command_type="start",
           command_idx=idx,
-          command_str=self.get_start_commands()[idx],
+          command_str=cmd,
           command_status="success"
         )
-        self.P(f"Start command nr {idx} is running")
+        self.P(f"Start cmd {idx} '{cmd}' is running after {timeout}s.")
     # endif setup command finished
     return
 

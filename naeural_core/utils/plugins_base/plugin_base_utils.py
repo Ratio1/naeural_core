@@ -200,7 +200,7 @@ class LogReader():
           if text:  # Check if any data is read
             self.on_text(text)
           else:
-            break
+            pass # break can lead to early exit so nothing to do
         # endif any data ready
     except ct.ForceStopException:
       self.owner.P("Log reader forced to stop.")
@@ -208,9 +208,13 @@ class LogReader():
       self.owner.P(f"Log reader exception: {exc}", color='r')
     self.exited = True
     # self.buff_reader.close()
+    self.owner.P("Log reader stopped.")
     return
 
   def on_text(self, text):
+    # if isinstance(text, bytes):
+    #   # Decode bytes to string
+    #   text = text.decode('utf-8', errors='replace')
     self.buffer.append(text)
     return
 

@@ -182,6 +182,9 @@ class LogReader():
     self.buff_reader: BufferedReader = buff_reader
     self.owner = owner
     self.buf_reader_size = size
+    
+    self.__fd = buff_reader.fileno()
+    self.__fd_reading = False
 
     self.buffer = []
     self.done = False
@@ -190,17 +193,35 @@ class LogReader():
     # now we start the thread
     self.start()
     return
+  
+  
+  def _do_fd_read(self):
+    if not self.__fd_reading:
+      self.__fd_reading = True
+      os.set_blocking(self.__fd, False)
+    chunk = None
+    try:
+      chunk = os.read(self.__fd, self.buf_reader_size)
+    except:
+      pass
+    return chunk
+  
+  def _do_select_read(self):
+    ready, _, _ = select.select([self.buff_reader], [], [], 0.1)  # Wait up to 0.1s
+    text = None
+    if ready:
+      text = self.buff_reader.read(self.buf_reader_size)
+    return text
 
   def _run(self):
     try:
       while not self.done:
-        ready, _, _ = select.select([self.buff_reader], [], [], 0.1)  # Wait up to 0.1s
-        if ready:
-          text = self.buff_reader.read(self.buf_reader_size)
-          if text:  # Check if any data is read
-            self.on_text(text)
-          else:
-            break
+        # text = self._do_fd_read()
+        text = self._do_select_read()
+        if text:  # Check if any data is read
+          self.on_text(text)
+        else:
+          pass # break can lead to early exit so nothing to do
         # endif any data ready
     except ct.ForceStopException:
       self.owner.P("Log reader forced to stop.")
@@ -208,9 +229,13 @@ class LogReader():
       self.owner.P(f"Log reader exception: {exc}", color='r')
     self.exited = True
     # self.buff_reader.close()
+    self.owner.P("Log reader stopped.")
     return
 
   def on_text(self, text):
+    # if isinstance(text, bytes):
+    #   # Decode bytes to string
+    #   text = text.decode('utf-8', errors='replace')
     self.buffer.append(text)
     return
 

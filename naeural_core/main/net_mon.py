@@ -957,6 +957,14 @@ class NetworkMonitor(DecentrAIObject):
       return result
     
     
+    def network_node_r1fs_relay(self, addr):
+      result = None
+      hb = self.__network_node_last_heartbeat(addr)
+      if isinstance(hb, dict):
+        result = hb.get(ct.HB.R1FS_RELAY)
+      return result
+    
+    
     def network_node_version(self, addr):
       result = None
       hb = self.__network_node_last_heartbeat(addr)
@@ -1717,6 +1725,7 @@ class NetworkMonitor(DecentrAIObject):
           
           r1fs_id=self.network_node_r1fs_id(addr),
           r1fs_online=self.network_node_r1fs_online(addr),
+          r1fs_relay=self.network_node_r1fs_relay(addr),
           
           main_loop_avg_time=main_loop_time,
           main_loop_freq=round(main_loop_freq, 2),

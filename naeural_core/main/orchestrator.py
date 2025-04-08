@@ -527,6 +527,13 @@ class Orchestrator(DecentrAIObject,
   
   
   @property
+  def r1fs_relay(self):
+    if self.r1fs is not None:
+      return self.r1fs.ipfs_relay
+    return False
+  
+  
+  @property
   def debug_r1fs(self):
     debug_r1fs = self.log.str_to_bool(
       self.config_data.get(

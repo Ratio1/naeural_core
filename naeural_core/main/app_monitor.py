@@ -723,6 +723,7 @@ class ApplicationMonitor(DecentrAIObject):
       
       ct.HB.R1FS_ID           : self.owner.r1fs_id,
       ct.HB.R1FS_ONLINE       : self.owner.r1fs_started,
+      ct.HB.R1FS_RELAY        : self.owner.r1fs_relay,  
       
       ct.HB.TEMPERATURE_INFO  : self.__last_temperature_info,
       

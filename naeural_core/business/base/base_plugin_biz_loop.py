@@ -416,99 +416,112 @@ class _BasePluginLoopMixin(object):
       PROCESS_DELAY > FORCE_PAUSE > WORKING_HOURS
       
     """
-    self.__on_init()
-    self.P("Thread initialized.", color='g')
+    try: 
+      plugin_loop_initialized = False
+      self.__on_init()
+      plugin_loop_initialized = True
+    except Exception as exc:
+      info = traceback.format_exc()
+      self.P(f"CRITICAL ERROR in plugin loop initialization: {exc}. Resuming to plugin cleanup:\n{info}", color='r')
+    
+    if plugin_loop_initialized:
+      self.P("Thread initialized.", color='g')
+      while not self.done_loop:
+        try:
+          # START postpone area
+          if self.__loop_paused: # triggered when updating config
+            sleep(0.001)          
+            continue
+          # INSTANCE_COMMAND: if no imposed parallel updating
+          # then we can check for instance commands and trigger callback
+          self.__maybe_trigger_instance_command()
+          # END INSTANCE_COMMAND
+          
+          # PROCESS_DELAY mechanism
+          if self.is_process_postponed:  
+            # skip if postpone is required
+            sleep(0.001)
+            continue
+          # END PROCESS_DELAY mechanism
+          
+          # FORCE_PAUSE mechanism
+          if self.is_plugin_temporary_stopped: 
+            sleep(0.001)
+            continue
+          # END FORCE_PAUSE mechanism
 
-    while not self.done_loop:
-      try:
-        # START postpone area
-        if self.__loop_paused: # triggered when updating config
-          sleep(0.001)          
-          continue
-        # INSTANCE_COMMAND: if no imposed parallel updating
-        # then we can check for instance commands and trigger callback
-        self.__maybe_trigger_instance_command()
-        # END INSTANCE_COMMAND
-        
-        # PROCESS_DELAY mechanism
-        if self.is_process_postponed:  
-          # skip if postpone is required
-          sleep(0.001)
-          continue
-        # END PROCESS_DELAY mechanism
-        
-        # FORCE_PAUSE mechanism
-        if self.is_plugin_temporary_stopped: 
-          sleep(0.001)
-          continue
-        # END FORCE_PAUSE mechanism
-
-        self.is_outside_working_hours = self.outside_working_hours
-        if self.is_outside_working_hours: # WORKING_HOURS mechanism
-          # always skip if outside hours
-          sleep(0.001)
-          continue
-        # END postpone area
-        # no postponing, now outside of scheduling and no pausing so we proceed
-        # to execution and save last processing time (written in process wrapper)
-        _last_run = self.last_process_time # cycle timing
-        start_it = time()
-        self._plugin_loop_in_exec = True
-        self.__exec_counter += 1
-        self.execute() # further inside process_wrapper  __last_process_time is resetted
-        self.__exec_counter_after_config += 1
-        # send "all-good with instance" after 1st post-config iter
-        if self.__exec_counter_after_config == 1:
-          msg = " >>>>>>> Instance {} exec ok post config (itr {}). <<<<<<<".format(
-            self, self.__exec_counter
+          self.is_outside_working_hours = self.outside_working_hours
+          if self.is_outside_working_hours: # WORKING_HOURS mechanism
+            # always skip if outside hours
+            sleep(0.001)
+            continue
+          # END postpone area
+          # no postponing, now outside of scheduling and no pausing so we proceed
+          # to execution and save last processing time (written in process wrapper)
+          _last_run = self.last_process_time # cycle timing
+          start_it = time()
+          self._plugin_loop_in_exec = True
+          self.__exec_counter += 1
+          self.execute() # further inside process_wrapper  __last_process_time is resetted
+          self.__exec_counter_after_config += 1
+          # send "all-good with instance" after 1st post-config iter
+          if self.__exec_counter_after_config == 1:
+            msg = " >>>>>>> Instance {} exec ok post config (itr {}). <<<<<<<".format(
+              self, self.__exec_counter
+            )
+            self.P(msg)
+            self._create_notification(
+              notif_code=ct.NOTIFICATION_CODES.PLUGIN_CONFIG_OK,
+              msg=msg,              
+              plugin_running=True,
+              displayed=False
+            )
+          #endif send "all-good with instance" after 1st post-config iter 
+          self._plugin_loop_in_exec = False
+          if self.last_process_time == _last_run:
+            # something was wrong in execution and no one has resetted __last_process_time
+            # so we can postpone/delay if needed (otherwise process delay will not work)
+            self._reset_last_process_time()
+          #endif
+          it_time = time() - start_it
+          # add this exec iteration time to the queue
+          self.__exec_times.append(it_time)
+          # now we can check if something strange is happening in the loop such as a
+          # abnormal duration of the execute
+          self.check_loop_exec_time()
+          if self.cfg_forced_loop_sleep is not None:
+            sleep_time = self.cfg_forced_loop_sleep
+          else:
+            sleep_time = max(1 / self.get_plugin_loop_resolution() - it_time, 0.00001)
+          # now check for previous errors
+          sleep_time = self.__maybe_handle_exec_errors(sleep_time=sleep_time)
+          # end error checking
+          self.start_timer('loop_sleep')
+          if sleep_time > 0:
+            sleep(sleep_time)
+          self.end_timer('loop_sleep')
+        except:
+          self._plugin_loop_in_exec = False
+          SLEEP_ON_LOOP_ERROR = 10
+          msg = "CRITICAL ERROR in business plugin loop (sleep {}) on: {}".format(
+            SLEEP_ON_LOOP_ERROR, self.log.get_error_info()
           )
-          self.P(msg)
-          self._create_notification(
-            notif_code=ct.NOTIFICATION_CODES.PLUGIN_CONFIG_OK,
-            msg=msg,              
-            plugin_running=True,
-            displayed=False
-          )
-        #endif send "all-good with instance" after 1st post-config iter 
-        self._plugin_loop_in_exec = False
-        if self.last_process_time == _last_run:
-          # something was wrong in execution and no one has resetted __last_process_time
-          # so we can postpone/delay if needed (otherwise process delay will not work)
-          self._reset_last_process_time()
-        #endif
-        it_time = time() - start_it
-        # add this exec iteration time to the queue
-        self.__exec_times.append(it_time)
-        # now we can check if something strange is happening in the loop such as a
-        # abnormal duration of the execute
-        self.check_loop_exec_time()
-        if self.cfg_forced_loop_sleep is not None:
-          sleep_time = self.cfg_forced_loop_sleep
-        else:
-          sleep_time = max(1 / self.get_plugin_loop_resolution() - it_time, 0.00001)
-        # now check for previous errors
-        sleep_time = self.__maybe_handle_exec_errors(sleep_time=sleep_time)
-        # end error checking
-        self.start_timer('loop_sleep')
-        if sleep_time > 0:
-          sleep(sleep_time)
-        self.end_timer('loop_sleep')
-      except:
-        self._plugin_loop_in_exec = False
-        SLEEP_ON_LOOP_ERROR = 10
-        msg = "CRITICAL ERROR in business plugin loop (sleep {}) on: {}".format(
-          SLEEP_ON_LOOP_ERROR, self.log.get_error_info()
-        )
-        info = traceback.format_exc()
-        self.P(msg + '\n' + info, color='r')
-        self._create_error_notification(msg=msg, displayed=True)
-        sleep(SLEEP_ON_LOOP_ERROR)
-        self.has_loop_error = True
-        self.__plugin_loop_errors += 1 # increase nr of errors
-        self.__post_error_ok_count += 3 # increase loop error level
-    #endwhile
+          info = traceback.format_exc()
+          self.P(msg + '\n' + info, color='r')
+          self._create_error_notification(msg=msg, displayed=True)
+          sleep(SLEEP_ON_LOOP_ERROR)
+          self.has_loop_error = True
+          self.__plugin_loop_errors += 1 # increase nr of errors
+          self.__post_error_ok_count += 3 # increase loop error level
+        #end try
+      #endwhile
+    #endif plugin_loop_initialized
 
-    self.__cleanup()
+    try:
+      self.__cleanup()
+    except Exception as exc:
+      info = traceback.format_exc()
+      self.P(f"CRITICAL ERROR in cleanup: {exc}:\n{info}", color='r')
 
     # handle commands emitted on close 
     commands = self.get_commands_after_exec()

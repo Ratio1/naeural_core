@@ -358,7 +358,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     branch = self.docker_branch if self.runs_in_docker else self.log.git_branch
     token = self.cfg_version_token
     url0 = self.cfg_version_url
-    if not token is None and not url0 is None:
+    if isinstance(url0, str) and url0.startswith('http'):
       if '{}' in url0:
         url0 = url0.format(branch)
       resp = None
@@ -424,8 +424,13 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     needs_restart = False
     self._update_monitor_count += 1
     
-    self.P("Running git ver check and validation {} at {} running time. Forced restart required: {}. Parsing a yaml file: {}".format(
-      self._update_monitor_count, self.get_node_running_time_str(), self.needs_forced_restart(), self.cfg_use_yaml
+    branch = self.docker_branch if self.runs_in_docker else self.log.git_branch
+    token = self.cfg_version_token
+    url0 = self.cfg_version_url
+        
+    self.P("Running git ver check{} at {} runnig time. Forced restart: {}. YAML: {}. URL/Branch/Token: {} / {} / {}".format(
+      self._update_monitor_count, self.get_node_running_time_str(), self.needs_forced_restart(), self.cfg_use_yaml,
+      url0, branch, token
     ))
     server_ver = self.get_git_server_version()
     self.P("  Received: {}".format(server_ver))

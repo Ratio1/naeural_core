@@ -20,6 +20,12 @@ class _NgrokMixinPlugin(object):
   and will be processed as part of the business plugin loop.
   """
 
+  def _reset_ngrok(self):
+    self.ngrok_listener = None
+    self.ngrok_started = False
+    self.ngrok_initiated = False
+    return
+
   @property
   def app_url(self):
     return None if self.ngrok_listener is None else self.ngrok_listener.url()

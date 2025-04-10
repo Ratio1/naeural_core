@@ -145,6 +145,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
   def __allocate_port(self):
     """
+    TODO: (Bleo) this should be migrated to the new correct version 
+    
+    
     In case the port is not provided, a random unused one will be allocated.
     In case the port is provided, it will be checked for availability.
     If the provided port is not available, the allocation will be retried

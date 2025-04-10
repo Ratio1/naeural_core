@@ -75,9 +75,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.__last_asset_updated_at = None
     self.__git_request_time = 0
     self.__first_log_displayed = None
-    self.ngrok_initiated = False
-    self.ngrok_started = False
-    self.ngrok_listener = None
+    
+    self._reset_ngrok()
+    
     self.__last_ngrok_url_ping_ts = 0
     self.__wait_count = 0
 

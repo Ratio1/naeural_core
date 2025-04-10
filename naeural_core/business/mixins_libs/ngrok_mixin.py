@@ -20,11 +20,11 @@ class _NgrokMixinPlugin(object):
   and will be processed as part of the business plugin loop.
   """
 
-  def __init__(self):
+  def _reset_ngrok(self):
+    self.ngrok_listener = None
     self.ngrok_started = False
     self.ngrok_initiated = False
-    self.ngrok_listener = None
-    super(_NgrokMixinPlugin, self).__init__()
+    return
 
   @property
   def app_url(self):

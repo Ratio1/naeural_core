@@ -134,8 +134,8 @@ class MQTTCommThread(BaseCommThread):
       )
 
       topic_name = None
-      if self._controller.recv_channel_def is not None:
-        topic_name = self._controller.recv_channel_def['TOPIC']
+      if self._controller.get_recv_channel_def() is not None:
+        topic_name = self._controller.get_recv_channel_def()['TOPIC']
 
       if self.has_recv_conn:
         self.P("Subscribing succeeded to topic '{}'".format(topic_name), color='g')

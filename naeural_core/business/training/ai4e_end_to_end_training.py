@@ -283,7 +283,7 @@ class Ai4eEndToEndTrainingPlugin(BasePlugin):
       """
       return {
         **config,
-        'CAP_RESOLUTION': config.get('CAP_RESOLUTION', 1),
+        'CAP_RESOLUTION': config.get('CAP_RESOLUTION', 25),
       }
 
     def _configured_metastream_collect_data(self):

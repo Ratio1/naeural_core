@@ -22,8 +22,11 @@ _CONFIG = {
   'COLLECT_UNTIL': None,
   'POSTPONE_THRESHOLD': 5,
 
-  'SAVE_PERIOD': 1,
+  'SAVE_PERIOD': 3,
+  "MAX_OBJECT_SAVES": 10,
   'MAX_INPUTS_QUEUE_SIZE': 32,
+  'MIN_CROP_HEIGHT': 150,
+  'MIN_CROP_WIDTH': 150,
 
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES'],
@@ -57,6 +60,7 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
     self.total_image_count = 0
     self.raw_dataset_set = set()
     self.count_saved_by_object_type = self.defaultdict(lambda: 0)
+    self.count_saved_by_object_id = self.defaultdict(lambda: 0)
     self.dataset_stats = self.defaultdict(lambda: 0)
 
     self.voting_status = 0
@@ -83,6 +87,8 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
     self.raw_dataset_set = set(obj.get('raw_dataset_set', self.raw_dataset_set))
     self.count_saved_by_object_type = obj.get('count_saved_by_object_type', self.count_saved_by_object_type)
     self.count_saved_by_object_type = self.defaultdict(lambda: 0, self.count_saved_by_object_type)
+    self.count_saved_by_object_id = obj.get('count_saved_by_object_id', self.count_saved_by_object_id)
+    self.count_saved_by_object_id = self.defaultdict(lambda: 0, self.count_saved_by_object_id)
     self.dataset_stats = obj.get('dataset_stats', self.dataset_stats)
     self.dataset_stats = self.defaultdict(lambda: 0, self.dataset_stats)
 
@@ -106,6 +112,7 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
         'total_image_count': self.total_image_count,
         'raw_dataset_set': list(self.raw_dataset_set),
         'count_saved_by_object_type': dict(self.count_saved_by_object_type),
+        'count_saved_by_object_id': dict(self.count_saved_by_object_id),
         'dataset_stats': dict(self.dataset_stats),
       }
     )
@@ -113,6 +120,21 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
 
   """UTILS SECTION"""
   if True:
+    def get_object_count_identifier(self, obj_dict):
+      """
+      Method for getting the object count identifier.
+      Parameters
+      ----------
+      obj_dict : dict, the object dictionary
+
+      Returns
+      -------
+      str, the object count identifier
+      """
+      obj_type = obj_dict.get(self.ct.TYPE, 'unk')
+      obj_id = obj_dict.get(self.ct.TRACK_ID, 'unk')
+      return f'{obj_type}_{obj_id}'
+
     @property
     def dataset_object_name_raw(self):
       return self.os_path.join(self.cfg_cloud_path, self.cfg_objective_name + '_RAW.zip')
@@ -363,6 +385,46 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
 
       return can_save
 
+    def check_if_can_save_object(self, obj):
+      """
+      Check if the current object was saved too many times.
+      Parameters
+      ----------
+      obj : dict, the object to check
+
+      Returns
+      -------
+      bool, whether the object can be saved
+      """
+      can_save = True
+      if self.cfg_max_object_saves is not None:
+        obj_count_id = self.get_object_count_identifier(obj)
+        total_apps = self.count_saved_by_object_id.get(obj_count_id, 0)
+        if total_apps >= self.cfg_max_object_saves:
+          can_save = False
+      # endif max object saves
+      return can_save
+
+    def check_if_can_save_size(self, obj):
+      """
+      Check if the object is too small to be saved.
+      Parameters
+      ----------
+      obj : dict, the object to check
+
+      Returns
+      -------
+      bool, whether the object can be saved
+      """
+      can_save = True
+      if self.cfg_min_crop_height is not None and self.cfg_min_crop_width is not None:
+        top, left, bottom, right = list(map(lambda x: int(x), obj['TLBR_POS']))
+        height = bottom - top + 1
+        width = right - left + 1
+        if height < self.cfg_min_crop_height or width < self.cfg_min_crop_width:
+          can_save = False
+      return can_save
+
     def crop_and_save_one_img(self, np_img, inference, source_name, current_interval):
       """
       Crop and save one image based on the inference data.
@@ -415,6 +477,32 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
         return None
       return rel_subdir
 
+    def can_save(self, obj_dict):
+      """
+      Run all checks to see if the object can be saved.
+      Parameters
+      ----------
+      obj_dict : dict, the object to check
+
+      Returns
+      -------
+      bool, whether the object can be saved
+      """
+      if self.enough_data():
+        return False
+      # Check if the object type can be saved
+      object_type = obj_dict.get(self.ct.TYPE, None)
+      # Check if the object can be saved
+      if not self.check_if_can_save_object_type(object_type):
+        return False
+      # Check if the object was saved too many times
+      if not self.check_if_can_save_object(obj_dict):
+        return False
+      # Check if the object is too small
+      if not self.check_if_can_save_size(obj_dict):
+        return False
+      return True
+
     def crop_and_save_all_images(self):
       """
       Crop and save all images from the dataapi.
@@ -445,13 +533,15 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
             continue
           # endif no object type
           # Check if the object type can be saved
-          if not self.enough_data() and self.check_if_can_save_object_type(object_type):
+          if self.can_save(infer):
             # Save the image
             subdir = self.crop_and_save_one_img(
               np_img=np_img, inference=infer, source_name=source_name, current_interval=current_interval
             )
             # In case the image was saved, update the statistics
             if subdir is not None:
+              count_id = self.get_object_count_identifier(infer)
+              self.count_saved_by_object_id[count_id] += 1
               self.count_saved_by_object_type[object_type] += 1
               self.dataset_stats[subdir] += 1
               self.total_image_count += 1

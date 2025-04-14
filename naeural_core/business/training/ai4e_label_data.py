@@ -252,14 +252,18 @@ class Ai4eLabelDataPlugin(BaseClass, _Ai4eMixin):
         # The filename did not have a decided label before
         # Copy it to the final dataset
         self.copy_datapoint_to_final_dataset(filename)
+        self.decision_stats[decision] += 1
       else:
         # The filename had a decided label before.
         # Remove it from the statistics in case the decision changes.
-        self.decision_stats[self.filename_decisions[filename]] -= 1
+        prev_decision = self.filename_decisions[filename]
+        if prev_decision != decision:
+          self.decision_stats[prev_decision] -= 1
+          self.decision_stats[decision] += 1
+        # endif decision changed
       # endif filename had a decided label before
       # Add the new decision to the statistics
       self.filename_decisions[filename] = decision
-      self.decision_stats[decision] += 1
       return
 
     def maybe_remove_decision(self, filename):
@@ -389,9 +393,11 @@ class Ai4eLabelDataPlugin(BaseClass, _Ai4eMixin):
       # No filename or label is present, nothing is done.
       if label is None or filename is None:
         return
-      # Increment the label updates count
-      self.label_updates_count += 1
-      self.count_vote(filename, label, worker_id)
+      counted = self.count_vote(filename, label, worker_id)
+      if counted:
+        # Increment the label updates count
+        self.label_updates_count += 1
+        self.maybe_save_current_state()
       return
 
     def filename_to_path(self, filename):

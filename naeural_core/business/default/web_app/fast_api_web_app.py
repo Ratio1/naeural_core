@@ -40,6 +40,8 @@ _CONFIG = {
   # The default is 'WRAPPED'.
   'RESPONSE_FORMAT': 'WRAPPED',
 
+  "LOG_REQUESTS": False,
+
   'PROCESS_DELAY': 0,
 
   'VALIDATION_RULES': {
@@ -380,6 +382,8 @@ class FastApiWebAppPlugin(BasePlugin):
           endpoint_name=endpoint_name
         ))
       else:
+        if self.cfg_log_requests:
+          self.P(f"Request {id} for {method} processed.")
         self.__fastapi_handle_response(id, value)
       # endif request is postponed
     # end while there are postponed requests
@@ -395,6 +399,8 @@ class FastApiWebAppPlugin(BasePlugin):
       args = value[1:]
 
       try:
+        if self.cfg_log_requests:
+          self.P(f"Received request {id} for {method}.")
         value = self._endpoints.get(method)(*args)
       except Exception as exc:
         self.P("Exception occured while processing\n"
@@ -412,6 +418,8 @@ class FastApiWebAppPlugin(BasePlugin):
           endpoint_name=method
         ))
       else:
+        if self.cfg_log_requests:
+          self.P(f"Request {id} for {method} processed.")
         self.__fastapi_handle_response(id, value)
       # endif request is postponed
     # end while

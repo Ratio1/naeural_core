@@ -64,6 +64,8 @@ _CONFIG = {
   'FORCED_PAUSE': False,
   'DISABLED': False,
   
+  'CHAINSTORE_PEERS' : [], # list of peers to be used for chainstore and will enable distribution even to non-whitelisted peers
+  
 
   # set this to 1 for real time processing (data will be lost and only latest data be avail)
   # when PROCESS_DELAY is used this should be either bigger than 1 if we want to have previous data

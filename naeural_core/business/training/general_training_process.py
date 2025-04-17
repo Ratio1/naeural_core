@@ -95,8 +95,11 @@ class GeneralTrainingProcessPlugin(BasePlugin):
   def on_training_finish(self, model_id):
     training_subdir = 'training'
     # Model
-    best_weights = self.training_output['STATUS']['BEST']['best_file']
-    traced_model_path = self.training_output['METADATA']['MODEL_EXPORT']
+    best_weights = (self.training_output['STATUS']['BEST'] or {}).get('best_file')
+    traced_model_path = (self.training_output.get['METADATA'] or {}).get('MODEL_EXPORT')
+    if best_weights is None:
+      self.P("Best weights not found, aborting upload", color='r')
+      return False
     files = {'weights': best_weights, 'trace': traced_model_path}
     if traced_model_path is None:
       self.P("Traced model path not found, uploading only the weights of best model", color='y')
@@ -142,7 +145,7 @@ class GeneralTrainingProcessPlugin(BasePlugin):
       self.inference_config_uri['URL'] = url
     #endif
 
-    return
+    return True
 
   def _process(self):
     self.training_output = self.dataapi_specific_struct_data_inferences(idx=0, how='list', raise_if_error=True)
@@ -162,24 +165,30 @@ class GeneralTrainingProcessPlugin(BasePlugin):
     save_payload_json = False
     model_id = None
     if has_finished:
+      success = self.performed_final
       if not self.performed_final:
         self.P("Training has finished", color='g')
         model_id = '{}_{}'.format(self.log.session_id, self.training_output['METADATA']['MODEL_NAME'])
         save_payload_json = True
-        self.on_training_finish(model_id=model_id)
+        success = self.on_training_finish(model_id=model_id)
 
-        if bool(self.cfg_auto_deploy):
-          self.auto_deploy()
+        if success:
+          if bool(self.cfg_auto_deploy):
+            self.auto_deploy()
 
-        self.performed_final = True
+          self.performed_final = True
+        else:
+          self.P(f"Training finished but upload failed. Will re-attempt...", color='r')
       # endif performed final
-      train_final_kwargs = {
-        'MODEL_URI': self.weights_uri,
-        'TRACE_URI': self.trace_uri,
-        'TRAINING_OUTPUT_URI': self.training_output_uri,
-        'INFERENCE_CONFIG_URI': self.inference_config_uri,
-      }
-      payload_kwargs['TRAIN_FINAL'] = train_final_kwargs
+      if success:
+        train_final_kwargs = {
+          'MODEL_URI': self.weights_uri,
+          'TRACE_URI': self.trace_uri,
+          'TRAINING_OUTPUT_URI': self.training_output_uri,
+          'INFERENCE_CONFIG_URI': self.inference_config_uri,
+        }
+        payload_kwargs['TRAIN_FINAL'] = train_final_kwargs
+      # endif success
     # endif training finished
 
     payload = self._create_payload(**payload_kwargs)

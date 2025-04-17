@@ -91,6 +91,7 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
     self.count_saved_by_object_id = self.defaultdict(lambda: 0, self.count_saved_by_object_id)
     self.dataset_stats = obj.get('dataset_stats', self.dataset_stats)
     self.dataset_stats = self.defaultdict(lambda: 0, self.dataset_stats)
+    self.voting_status = obj.get('voting_status', self.voting_status)
 
     return
 
@@ -114,6 +115,7 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
         'count_saved_by_object_type': dict(self.count_saved_by_object_type),
         'count_saved_by_object_id': dict(self.count_saved_by_object_id),
         'dataset_stats': dict(self.dataset_stats),
+        'voting_status': self.voting_status,
       }
     )
     return
@@ -557,6 +559,20 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
   """END SAVE SECTION"""
 
   def _process(self):
+    # Step 0: If the voting started, there is no need
+    # for this plugin or the data sources to continue.
+    if self.voting_status == 2:
+      self.maybe_persistence_save(force=True)
+      if self.postpone_counter < self.cfg_postpone_threshold:
+        self.P(f'Postponing the labelling finish for the upload command to be received'
+               f'({self.postpone_counter + 1}/{self.cfg_postpone_threshold})')
+        self.postpone_counter += 1
+      elif not self.finished:
+        self.stop_gather()
+      # endif postpone counter not reached
+      return
+    # endif voting started
+
     # Step 1: Start the voting process if not already started in case
     # it was requested by a command.
     self.maybe_start_voting()
@@ -574,19 +590,6 @@ class Ai4eCropDataPlugin(BasePlugin, _Ai4eMixin):
     payload = None
     # Step 3: If report period passed, generate progress payload
     self.maybe_report_status(add_crop_speed=True)
-
-    # Step 4: If the voting started, there is no need
-    # for this plugin or the data sources to continue.
-    if self.voting_status == 2:
-      if self.postpone_counter < self.cfg_postpone_threshold:
-        self.P(f'Postponing the labelling finish for the upload command to be received'
-               f'({self.postpone_counter + 1}/{self.cfg_postpone_threshold})')
-        self.postpone_counter += 1
-      elif not self.finished:
-        self.stop_gather()
-      # endif postpone counter not reached
-    # endif voting started
-
     return payload
 
 

@@ -96,7 +96,7 @@ class GeneralTrainingProcessPlugin(BasePlugin):
     training_subdir = 'training'
     # Model
     best_weights = (self.training_output['STATUS']['BEST'] or {}).get('best_file')
-    traced_model_path = (self.training_output.get['METADATA'] or {}).get('MODEL_EXPORT')
+    traced_model_path = (self.training_output['METADATA'] or {}).get('MODEL_EXPORT')
     if best_weights is None:
       self.P("Best weights not found, aborting upload", color='r')
       return False

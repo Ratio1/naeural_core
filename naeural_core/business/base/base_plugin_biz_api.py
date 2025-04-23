@@ -228,11 +228,15 @@ class _BasePluginAPIMixin:
     try:
       self.__maybe_wait_for_chain_state_init()
       func = memory.get('__chain_storage_set')
+      specific_peers = self.cfg_chainstore_peers
       if func is not None:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")
         self.start_timer("chainstore_set")
-        result = func(key, value, readonly=readonly, token=token, debug=debug)
+        result = func(
+          key, value, 
+          readonly=readonly, token=token, peers=specific_peers, debug=debug
+        )
         elapsed = self.end_timer("chainstore_set")        
         if debug:
           self.P(" ====> `chainstore_set` elapsed time: {:.6f}".format(elapsed), color="green")

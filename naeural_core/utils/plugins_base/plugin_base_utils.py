@@ -2247,7 +2247,7 @@ class _UtilsBaseMixin(
         if self.e2_addr not in dest:
           # TODO: maybe still return the encrypted data for logging purposes
           if verbose > 0:
-            self.P(f"Payload data not addressed to us. Destination: {dest}. Ignoring.")
+            self.P(f"Payload not for local, dest: {dest}. Ignoring.")
           # endif verbose
           return {}
         # endif destination check
@@ -2260,7 +2260,7 @@ class _UtilsBaseMixin(
           )
           decrypted_data = self.json_loads(str_decrypted_data)
         except Exception as exc:
-          self.P(f"Error while decrypting payload data from {sender}:\n{exc}")
+          self.P(f"Error decrypting data from {sender}, to: {dest}:\n{exc}", color='r')
           if verbose > 0:
             self.P(f"Received data:\n{self.dict_to_str(result)}")
           # endif verbose

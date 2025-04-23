@@ -54,6 +54,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_STORE = "SSTORE"
   CS_CONFIRM = "SCONFIRM"
   CS_DATA = "CHAIN_STORE_DATA"
+  CS_PEERS = "PEERS"
+
   CS_CONFIRM_BY = "confirm_by"
   CS_CONFIRM_BY_ADDR = "confirm_by_addr"
   CS_CONFIRMATIONS = "confirms"
@@ -109,6 +111,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if self.cfg_chain_store_debug:
       self.P(" === Chain storage dump:\n{}".format(self.json_dumps(self.__chain_storage, indent=2)))
     return
+   
+  
   
   
   def __maybe_refresh_chain_peers(self):
@@ -120,7 +124,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     However the chain storage should be also accessible to all the nodes in the network so that 
     they can ALL the values stored in the chain storage publicly
-    
+        
     """
     if (self.time() - self.__last_chain_peers_refresh) > self.cfg_chain_peers_refresh_interval:
       _chain_peers = self.bc.get_whitelist(with_prefix=True)
@@ -132,8 +136,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
   
   
-  def __send_data_to_chain_peers(self, data):
-    self.send_encrypted_payload(node_addr=self.__chain_peers, **data)
+  def __send_data_to_chain_peers(self, data, peers=None):
+    # check if list or str
+    send_to = self.deepcopy(self.__chain_peers)
+    if isinstance(peers, (str, list)) and len(peers) > 0:
+      if isinstance(peers, str):
+        peers = [peers]
+      # end if not a list
+      peers = [peer for peer in peers if peer not in self.__chain_peers]
+      send_to.extend(peers)
+    # end if peers
+      
+    self.send_encrypted_payload(node_addr=send_to, **data)
     return
   
   
@@ -245,6 +259,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     readonly=False,
     token=None,
     local_sync_storage_op=False, 
+    peers=None,
     debug=False, 
   ):
     """ 
@@ -273,6 +288,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             
     local_sync_storage_op : bool
       If True will only set the local kv pair without broadcasting to the network
+      
+    peers : list
+      A list of peers to send the data to. If None, will use only the chain peers list.
 
     debug : bool
       If True will print debug messages
@@ -320,7 +338,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         readonly=readonly, token=token,
       )
       if not local_sync_storage_op:      
-        # now send set-value confirmation to all
+        # now send set-value (including confirmation request) to all
         op = {      
             self.CS_OP        : self.CS_STORE,
             self.CS_KEY       : key,        
@@ -328,6 +346,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             self.CS_OWNER     : owner,
             self.CS_TOKEN     : token,
             self.CS_READONLY  : readonly, # if the key is readonly, it will not be overwritten by other owners
+            self.CS_PEERS     : peers,
         }
         self.__ops.append(op)
         if debug:
@@ -407,14 +426,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if self.cfg_chain_store_debug and len(self.__ops) > 0:
       self.P(f" === Broadcasting {len(self.__ops)} chain store {self.CS_STORE} ops to {self.__chain_peers}")
     while len(self.__ops) > 0:
-      data = {
-        self.CS_DATA : self.__ops.popleft()
+      data = self.__ops.popleft()
+      peers = data.get(self.CS_PEERS, None)
+      payload_data = {
+        self.CS_DATA : data
       }
-      self.__send_data_to_chain_peers(data)
+      self.__send_data_to_chain_peers(payload_data, peers=peers)
     return
 
 
-  def __exec_store(self, data):
+  def __exec_store(self, data, peers=None):
     """ 
     This method is called when a store operation is received from the network. The method will:
       - set the value in the chain storage
@@ -446,7 +467,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           self.CS_CONFIRM_BY_ADDR : self.ee_addr,
         }
       }
-      self.__send_data_to_chain_peers(data)
+      self.__send_data_to_chain_peers(data, peers=peers)
     else:
       if self.cfg_chain_store_debug:
         self.P(f" === REMOTE: Store for {key}={value} of {owner} failed", color='r')
@@ -507,7 +528,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       else:
         self.P(f" === PAYLOAD_CSTORE: {operation=} from {alias=} {owner=}")
     if operation == self.CS_STORE:
-      self.__exec_store(data)      
+      self.__exec_store(data, peers=sender) # make sure you send also to the sender
     elif operation == self.CS_CONFIRM:
       self.__exec_received_confirm(data)
     return

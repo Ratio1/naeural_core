@@ -43,12 +43,13 @@ class _CommandControlCommMixin(object):
               ":\n{}".format(self.log.dict_pretty_format(command)) if self.cfg_log_send_commands else ''
             ), color='g'
           )
-          self.send_to = receiver_id
           bytes_delivered = 0
           if self.has_send_conn:
-            # the "command" contains also received_id...
+            # the "command" contains also received_addr...
             # TODO: code review and refactor as there are too many unused messages!
-            bytes_delivered = self.send_wrapper(command)
+            # `received_addr` is being used, since any node will always listen to the address subtopic,
+            # even if it also listens to the alias subtopic.
+            bytes_delivered = self.send_wrapper(command, send_to=receiver_addr)
         # endif
 
         if self.has_recv_conn:

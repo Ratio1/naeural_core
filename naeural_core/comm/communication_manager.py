@@ -296,6 +296,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
       else:
         # we send the command to the network
         command = {
+          ct.EE_ADDR: receiver_addr,
           ct.EE_ID: receiver_id,
           ct.COMMS.COMM_SEND_MESSAGE.K_ACTION: command_type,
           ct.COMMS.COMM_SEND_MESSAGE.K_PAYLOAD: command_content,
@@ -308,7 +309,8 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         self.__select_communicators_and_send((receiver_id, receiver_addr, command), ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL, local_only=local_only)
     else:
       message = {
-        'EE_ID': self._device_id,
+        ct.EE_ADDR: self.blockchain_manager.address,
+        ct.EE_ID: self._device_id,
         'EE_EVENT_TYPE': event_type,
         'EE_VERSION': self._device_version,
         **data

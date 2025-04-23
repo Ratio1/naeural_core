@@ -148,8 +148,8 @@ class MQTTCommThread(BaseCommThread):
     self._controller.receive()
     return
 
-  def _send(self, data):
-    self._controller.send(data)
+  def _send(self, data, send_to=None):
+    self._controller.send(data, send_to=send_to)
     return
 
   def _release(self):

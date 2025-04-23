@@ -182,7 +182,7 @@ class LogReader():
     self.buff_reader: BufferedReader = buff_reader
     self.owner = owner
     self.buf_reader_size = size
-    
+
     self.__fd = buff_reader.fileno()
     self.__fd_reading = False
 
@@ -193,8 +193,8 @@ class LogReader():
     # now we start the thread
     self.start()
     return
-  
-  
+
+
   def _do_fd_read(self):
     if not self.__fd_reading:
       self.__fd_reading = True
@@ -205,7 +205,7 @@ class LogReader():
     except:
       pass
     return chunk
-  
+
   def _do_select_read(self):
     ready, _, _ = select.select([self.buff_reader], [], [], 0.1)  # Wait up to 0.1s
     text = None
@@ -227,9 +227,13 @@ class LogReader():
       self.owner.P("Log reader forced to stop.")
     except Exception as exc:
       self.owner.P(f"Log reader exception: {exc}", color='r')
-    self.exited = True
-    # self.buff_reader.close()
-    self.owner.P("Log reader stopped.")
+    finally:
+      if not self.buff_reader.closed:
+        self.owner.P("Closing buff reader...")
+        self.buff_reader.close()
+      # endif buff_reader not closed yet
+      self.exited = True
+      self.owner.P("Log reader stopped.")
     return
 
   def on_text(self, text):
@@ -250,8 +254,7 @@ class LogReader():
       return
     self.done = True
     self.owner.P("Stopping log reader thread...")
-    self.buff_reader.close()
-    self.owner.P("Log reader thread should be stopped.")
+
     if not self.exited:
       self.owner.P("Waiting for log reader thread to stop...")
       self.owner.sleep(0.2)

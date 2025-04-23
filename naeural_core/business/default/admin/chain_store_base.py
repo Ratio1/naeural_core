@@ -124,9 +124,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     However the chain storage should be also accessible to all the nodes in the network so that 
     they can ALL the values stored in the chain storage publicly
-    
-    TODO: add shmem peers mentioned by certain plugins or use internal plugin
-    
+        
     """
     if (self.time() - self.__last_chain_peers_refresh) > self.cfg_chain_peers_refresh_interval:
       _chain_peers = self.bc.get_whitelist(with_prefix=True)

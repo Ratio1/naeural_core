@@ -194,7 +194,7 @@ class BaseCommThread(
     raise NotImplementedError()
 
   @abc.abstractmethod
-  def _send(self, data):
+  def _send(self, data, send_to=None):
     # use SEND connection to send data
     raise NotImplementedError()
 
@@ -347,7 +347,7 @@ class BaseCommThread(
     
     
 
-  def send_wrapper(self, data):
+  def send_wrapper(self, data, send_to: str = None):
     """
     This is the "final exit" function that gets called when the only thing left is to
     json-ify the message and send it to the network with the custom `_send`
@@ -356,6 +356,11 @@ class BaseCommThread(
     ----------
     data : dict (usually) although could be a list
       the data dictionary.
+    send_to : str
+      The recipient of the message. This is used in case we want to send the message on a queue that
+      is not listened to by all the participants.
+      This will only have effect on the formatable communication topics (e.g. root/{}/config).
+      For fixed topics, this will be ignored.
 
     Returns
     -------
@@ -394,7 +399,7 @@ class BaseCommThread(
       
       # now check the message size
       if self._check_send_message(message): 
-        self._send(message)
+        self._send(message, send_to=send_to)
         is_ok = len(message)
         if is_ok > 0 and self.cfg_debug_log_payloads:
           self.payload_debugger(message)

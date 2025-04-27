@@ -115,9 +115,22 @@ class BaseTorchScripter(BaseScripter):
       ts_model.half()
     return ts_model, config
 
+  def default_predict(self, model, inputs):
+    return model.predict(inputs) if hasattr(model, 'predict') else model(inputs)
+
   def convert(self, inputs, config, fn):
-    if isinstance(inputs, dict):
-      traced_model = th.jit.trace_module(self.model, inputs, strict=False)
+    if hasattr(self.model, 'predict'):
+      try:
+        traced_model = th.jit.script(self.model)
+      except Exception as e:
+        if not isinstance(inputs, dict):
+          inputs = {"forward": inputs, "predict": inputs}
+        # endif inputs not already a dict
+        traced_model = th.jit.trace_module(
+          self.model,
+          inputs,
+          strict=False
+        )
     else:
       traced_model = th.jit.trace(self.model, inputs, strict=False)
 

@@ -429,11 +429,40 @@ class ServingManager(Manager):
           server_name), color='error')
         self.log.stop_timer('create_server')
         return None
-      dct_custom_config = self._download_and_load_config(config_url, server_name)
+      max_tries = 3
+      sleep_period = 5
+      download_success = False
+      current_exception = None
+      dct_custom_config = None
+      for try_idx in range(max_tries):
+        try:
+          dct_custom_config = self._download_and_load_config(config_url, server_name)
+          download_success = dct_custom_config is not None
+        except Exception as e:
+          current_exception = traceback.format_exc()
+        # endtry-except
+        if not download_success:
+          err_msg = (
+            f"Failed to load CUSTOM_DOWNLOADABLE_MODEL '{server_name}' from URL '{config_url}'. "
+            f"\nMaybe check URL. Attempt {try_idx + 1} of {max_tries}."
+          )
+          if current_exception is not None:
+            err_msg += f"\nException: {current_exception}"
+          if try_idx < max_tries - 1:
+            err_msg += f"\nRetrying in {sleep_period} seconds..."
+          self.P(err_msg, color='r')
+          sleep(sleep_period)
+        else:
+          download_success = True
+      # endfor try_idx
+      if not download_success:
+        self.log.stop_timer('create_server')
+        return None
+      # endif download_success
+
       # now merge the dicts
       for k,v in dct_custom_config.items():
         _default_config[k] = v
-        
     # end CUSTOM_DOWNLOADABLE_MODEL
 
     # create serving process
@@ -859,6 +888,7 @@ class ServingManager(Manager):
       if result is None or result not in self._servers:
         self.__server_failures[server_name] += 1
         if self.__server_failures[server_name] > self.cfg_serving_environment.get(SMConst.SERVING_MAX_TRIES, SMConst.SERVING_MAX_TRIES_DEFAULT):
+          # TODO: should this be a fatal error or should the node keep working?
           msg = "FATAL ERROR: Serving process creation failed for {} multiple times!".format(server_name)
           self.P(msg, color='r')
           self._create_notification(

@@ -454,6 +454,7 @@ class ServingManager(Manager):
           sleep(sleep_period)
         else:
           download_success = True
+          break
       # endfor try_idx
       if not download_success:
         self.log.stop_timer('create_server')

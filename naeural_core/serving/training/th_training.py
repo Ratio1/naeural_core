@@ -39,9 +39,30 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
 
   def __init__(self, **kwargs):
     self._pipeline : BaseTrainingPipeline = None
-    self.__done_training = False
+    self.instances_cache = {}
     super(THTraining, self).__init__(**kwargs)
     return
+
+  def on_init(self):
+    saved_data = self.cacheapi_load_pickle()
+    if saved_data is not None:
+      loaded_cache = saved_data.get('instances_cache') or {}
+      self.instances_cache = {
+        **loaded_cache,
+        **self.instances_cache
+      }
+    # endif saved data available
+    return
+
+  def save_data(self):
+    self.cacheapi_save_pickle({
+      'instances_cache': self.instances_cache
+    })
+    return
+
+  @property
+  def done_training(self):
+    return self.instances_cache.get(self.cfg_model_instance_id, {}).get('done_training', False)
 
   @property
   def th(self):
@@ -82,11 +103,7 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
     return
 
   def _on_status(self, inputs):
-    return {
-      'STATUS'       : self._pipeline.status,
-      'METADATA'     : self._pipeline.metadata,
-      'HAS_FINISHED' : self._pipeline.grid_has_finished,
-    }
+    return self.instances_cache[self.cfg_model_instance_id].get('status') or {}
 
   def _process(self):
     self._continous_process_done = True
@@ -94,7 +111,13 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
       self.sleep(1)
 
     self._pipeline.run(start_iter=self.get_start_iter(), end_iter=self.get_end_iter())
-    self.__done_training = True
+    self.instances_cache[self.cfg_model_instance_id]['done_training'] = True
+    self.instances_cache[self.cfg_model_instance_id]['status'] = {
+      'STATUS': self._pipeline.status,
+      'METADATA': self._pipeline.metadata,
+      'HAS_FINISHED': self._pipeline.grid_has_finished,
+    }
+    self.save_data()
     return
 
   def _pre_process(self, inputs):
@@ -108,7 +131,16 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
     if 'dataset_ready' in prep_inputs and self._pipeline is None:
       can_start_training = prep_inputs['dataset_ready']
       if can_start_training:
-        self._create_pipeline(path_to_dataset=prep_inputs['dataset_path'])
+        current_serving_instance = self.cfg_model_instance_id
+        done_training = self.instances_cache.get(current_serving_instance, {}).get('done_training', False)
+        if not done_training:
+          self._create_pipeline(path_to_dataset=prep_inputs['dataset_path'])
+          self.instances_cache[current_serving_instance]['status'] = {
+            'STATUS': self._pipeline.status,
+            'METADATA': self._pipeline.metadata,
+            'HAS_FINISHED': self._pipeline.grid_has_finished,
+          }
+          self.save_data()
         return self._on_status(prep_inputs)
       else:
         return {'STATUS' : 'WAITING'}
@@ -122,7 +154,7 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
 
   def _shutdown(self):
     self.P('Shutting down continuous thread...')
-    if not self.__done_training:
+    if not self.done_training:
       self.P('Training process has not finished yet, forcing stop...')
       ctype_async_raise(self._continous_thread.ident, self.ct.ForceStopException)
     self._continous_thread.join()

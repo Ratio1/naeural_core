@@ -239,6 +239,7 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.HB.GIT_BRANCH, None)
     hb.pop(ct.HB.CONDA_ENV, None)
     hb.pop(ct.HB.CPU, None)
+    hb.pop(ct.HB.CPU_NR_CORES, None)
     hb.pop(ct.HB.DEFAULT_CUDA, None)
     hb.pop(ct.HB.GPU_INFO, None)
     hb.pop(ct.HB.MACHINE_IP, None)
@@ -578,6 +579,7 @@ class NetworkMonitor(DecentrAIObject):
     def __network_node_last_cpu_used(self, addr):
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
       return hearbeat[ct.HB.CPU_USED]
+          
   #endif
 
   # "GPUS" section (protected methods)
@@ -737,6 +739,27 @@ class NetworkMonitor(DecentrAIObject):
 
   # PUBLIC METHODS SECTION
   if True:    
+
+    def network_node_get_cpu_avail_cores(
+      self, addr, minutes=60, dt_now=None, 
+      reverse_order=True
+    ):
+      """
+      Returns the available cores for a node.
+      The available cores are computed as the total cores weighted by the CPU usage
+      in the last period.
+      """
+      lst_cpu_interval = self.__network_node_past_cpu_used_by_interval(
+        addr=addr, minutes=minutes, dt_now=dt_now, reverse_order=reverse_order
+      )
+      avail_cores = 0
+      if lst_cpu_interval:
+        cpu_mean = round(np.mean(lst_cpu_interval), 2) / 100
+        hearbeat = self.__network_node_last_heartbeat(addr=addr)
+        known_cores = hearbeat.get(ct.HB.CPU_NR_CORES, 1)
+        avail_cores = (1 - cpu_mean) * known_cores
+      return avail_cores
+
     
     def network_node_last_comm_info(self, addr):
       """

@@ -555,6 +555,7 @@ class ApplicationMonitor(DecentrAIObject):
     # now get basic info
     
     str_cpu = self.log.get_processor_platform()
+    nr_cores = self.log.get_processor_cores()
     
     total_time = self.owner.running_time
     timestamp = self.log.now_str(nice_print=False)
@@ -708,6 +709,7 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.AVAILABLE_MEMORY  : avail_memory,
       ct.HB.PROCESS_MEMORY    : process_memory,      
       ct.HB.CPU_USED          : cpu_usage,
+      ct.HB.CPU_NR_CORES      : nr_cores,
       ct.HB.GPUS              : lst_gpus,
       ct.HB.GPU_INFO          : str_gpu_info,
       ct.HB.DEFAULT_CUDA      : default_cuda,

@@ -310,11 +310,13 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     result = unfiltered_message
     if isinstance(unfiltered_message, dict):
       path = unfiltered_message.get(self.ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
+      path = [x.upper() if isinstance(x, str) else x for x in path]
       for i in range(4):
         _path_filter =  path_filter[i]
         if _path_filter is not None:
           if not isinstance(_path_filter, list):
             _path_filter = [_path_filter]
+          _path_filter = [x.upper() if isinstance(x, str) else x for x in _path_filter]
           if path[i] not in _path_filter:
             if self.cfg_debug_iot_payloads:
               self.P(f"Path filter {path_filter} dropped {path}")

@@ -52,6 +52,7 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
         **self.instances_cache
       }
     # endif saved data available
+    self.instances_cache[self.cfg_model_instance_id] = self.instances_cache.get(self.cfg_model_instance_id, {})
     return
 
   def save_data(self):
@@ -131,11 +132,9 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
     if 'dataset_ready' in prep_inputs and self._pipeline is None:
       can_start_training = prep_inputs['dataset_ready']
       if can_start_training:
-        current_serving_instance = self.cfg_model_instance_id
-        done_training = self.instances_cache.get(current_serving_instance, {}).get('done_training', False)
-        if not done_training:
+        if not self.done_training:
           self._create_pipeline(path_to_dataset=prep_inputs['dataset_path'])
-          self.instances_cache[current_serving_instance]['status'] = {
+          self.instances_cache[self.cfg_model_instance_id]['status'] = {
             'STATUS': self._pipeline.status,
             'METADATA': self._pipeline.metadata,
             'HAS_FINISHED': self._pipeline.grid_has_finished,
@@ -143,7 +142,7 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
           self.save_data()
         return self._on_status(prep_inputs)
       else:
-        return {'STATUS' : 'WAITING'}
+        return {'STATUS': 'WAITING'}
       # endif
     # endif
 

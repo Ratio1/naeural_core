@@ -111,12 +111,13 @@ class THTraining(BaseServingProcess, _PluginsManagerMixin):
     while self._pipeline is None:
       self.sleep(1)
 
-    self._pipeline.run(start_iter=self.get_start_iter(), end_iter=self.get_end_iter())
-    self.instances_cache[self.cfg_model_instance_id]['done_training'] = True
+    done_training = self._pipeline.run(start_iter=self.get_start_iter(), end_iter=self.get_end_iter())
+    self.instances_cache[self.cfg_model_instance_id]['done_training'] = done_training
     self.instances_cache[self.cfg_model_instance_id]['status'] = {
       'STATUS': self._pipeline.status,
       'METADATA': self._pipeline.metadata,
       'HAS_FINISHED': self._pipeline.grid_has_finished,
+      'SUCCESS': done_training
     }
     self.save_data()
     return

@@ -738,6 +738,7 @@ class BaseTrainingPipeline(DecentrAIObject, _PluginsManagerMixin):
     return res_path
 
   def run(self, start_iter=0, end_iter=None):
+    success = False
     self.maybe_disk_preprocess_dataset()
     self._time_start_run = time()
     self._grid_loop_exception = False
@@ -868,7 +869,7 @@ class BaseTrainingPipeline(DecentrAIObject, _PluginsManagerMixin):
         if trace_path is not None:
           self._metadata['MODEL_EXPORT'] = trace_path
         self.export_done = True
-        pass
+      success = True
     except ct.ForceStopException as e:
       if not grid_finished or not self.cfg_export_model:
         self.P(f"Grid search stopped at iteration {iteration}/{self._status['NR_ALL_GRID_ITER']}: {e}")
@@ -897,4 +898,4 @@ class BaseTrainingPipeline(DecentrAIObject, _PluginsManagerMixin):
 
     self._release_data_factories()
 
-    return
+    return success

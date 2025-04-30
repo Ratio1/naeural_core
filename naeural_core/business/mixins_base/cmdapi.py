@@ -10,9 +10,21 @@ class _CmdAPIMixin(object):
   def _cmdapi_refresh(self):
     self._commands = []
     return
+  
+  def __send_commands(self):
+    # TODO: maybe change commands_deque to a private variable
+    while len(self._commands) > 0:
+      cmd = self._commands.pop(0)
+      self.commands_deque.append(cmd)
+    return
 
-  # TODO: change all cmdapi to work with addresses, not ids
-  def cmdapi_register_command(self, node_address, command_type, command_content):
+  def cmdapi_register_command(
+    self, 
+    node_address, 
+    command_type, 
+    command_content,
+    send_immediately=True,
+  ):
     """
     Send a command to a particular Execution Engine
 
@@ -20,11 +32,13 @@ class _CmdAPIMixin(object):
     ----------
     node_address : str
       target Execution Engine.
+      
     command_type : st
       type of the command - can be one of 'RESTART','STATUS', 'STOP', 'UPDATE_CONFIG', 
       'DELETE_CONFIG', 'ARCHIVE_CONFIG', 'DELETE_CONFIG_ALL', 'ARCHIVE_CONFIG_ALL', 'ACTIVE_PLUGINS', 
       'RELOAD_CONFIG_FROM_DISK', 'FULL_HEARTBEAT', 'TIMERS_ONLY_HEARTBEAT', 'SIMPLE_HEARTBEAT',
       'UPDATE_PIPELINE_INSTANCE', etc.
+      
     command_content : dict
       the actual content - can be None for some commands.
 
@@ -36,8 +50,12 @@ class _CmdAPIMixin(object):
     if isinstance(command_content, dict) and PAYLOAD_DATA.TIME not in command_content:
       command_content[PAYLOAD_DATA.TIME] = self.log.now_str(nice_print=True)
     box_id = self.net_mon.network_node_eeid(node_address)
-    self.P("CMDAPI: Sending command '{}' for node '{}' <{}>".format(command_type, box_id, node_address))
     self._commands.append((box_id, node_address, self.use_local_comms_only, command_type, command_content))
+    if send_immediately:
+      self.P("CMDAPI: Sending async command '{}' for node '{}' <{}>".format(command_type, box_id, node_address))
+      self.__send_commands()
+    else:
+      self.P("CMDAPI: Register (after process send) command '{}' for node '{}' <{}>".format(command_type, box_id, node_address))
     return
   
   ###
@@ -76,7 +94,10 @@ class _CmdAPIMixin(object):
     return
   
   
-  def cmdapi_update_instance_config(self, pipeline, signature, instance_id, instance_config, node_address=None):
+  def cmdapi_update_instance_config(
+    self, pipeline, signature, instance_id, instance_config, node_address=None,
+    send_immediately=True,
+  ):
     """
     Sends update config for a particular plugin instance in a given box/pipeline
     
@@ -110,11 +131,15 @@ class _CmdAPIMixin(object):
       instance_id=instance_id,
       instance_config=instance_config,
       node_address=node_address,
+      send_immediately=send_immediately,
     )
     return
   
   
-  def cmdapi_batch_update_instance_config(self, lst_updates, node_address=None):
+  def cmdapi_batch_update_instance_config(
+    self, lst_updates, node_address=None,
+    send_immediately=True,
+  ):
     """Send a batch of updates for multiple plugin instances within their individual pipelines
 
     Parameters
@@ -171,7 +196,8 @@ class _CmdAPIMixin(object):
     self.cmdapi_register_command(
       node_address=node_address,
       command_type=COMMANDS.BATCH_UPDATE_PIPELINE_INSTANCE,
-      command_content=lst_updates
+      command_content=lst_updates,
+      send_immediately=send_immediately,
     )
     return
   
@@ -524,7 +550,10 @@ class _CmdAPIMixin(object):
 
   # START STREAM SECTION
   if True:
-    def _cmdapi_start_stream_by_config(self, config_stream, node_address=None):
+    def _cmdapi_start_stream_by_config(
+      self, config_stream, node_address=None,
+      send_immediately=True,
+    ):
       node_address = node_address or self.node_addr
 
       for param in CONFIG_STREAM.MANDATORY:
@@ -534,7 +563,10 @@ class _CmdAPIMixin(object):
           )
           return
 
-      self.cmdapi_register_command(node_address=node_address, command_type=COMMANDS.UPDATE_CONFIG, command_content=config_stream)
+      self.cmdapi_register_command(
+        node_address=node_address, command_type=COMMANDS.UPDATE_CONFIG, command_content=config_stream,
+        send_immediately=send_immediately,
+      )
       return
 
     def cmdapi_start_stream_by_config_on_current_box(self, config_stream):
@@ -564,9 +596,13 @@ class _CmdAPIMixin(object):
     # end Metastreams
 
 
-    def _cmdapi_start_stream_by_params(self, name, stream_type, url=None,
-                                      reconnectable=None, live_feed=False, plugins=None,
-                                      stream_config_metadata=None, cap_resolution=None, node_address=None, **kwargs):
+    def _cmdapi_start_stream_by_params(
+      self, name, stream_type, url=None,
+      reconnectable=None, live_feed=False, plugins=None,
+      stream_config_metadata=None, cap_resolution=None, node_address=None, 
+      send_immediately=True, 
+      **kwargs
+    ):
 
       config_stream = {
         CONFIG_STREAM.K_NAME          : name,
@@ -595,7 +631,10 @@ class _CmdAPIMixin(object):
         **config_stream, 
         **{k.upper():v for k,v in kwargs.items()},
       }
-      self._cmdapi_start_stream_by_config(config_stream=config_stream, node_address=node_address)
+      self._cmdapi_start_stream_by_config(
+        config_stream=config_stream, node_address=node_address,
+        send_immediately=send_immediately,
+      )
       return
 
 
@@ -610,18 +649,26 @@ class _CmdAPIMixin(object):
       )
       return
 
-    def cmdapi_start_stream_by_params_on_other_box(self, node_address, name, stream_type, url=None,
-                                                   reconnectable=None, live_feed=False, plugins=None,
-                                                   stream_config_metadata=None, cap_resolution=None, **kwargs):
+    def cmdapi_start_stream_by_params_on_other_box(
+      self, node_address, name, stream_type, url=None,
+      reconnectable=None, live_feed=False, plugins=None,
+      stream_config_metadata=None, cap_resolution=None, 
+      send_immediately=True, **kwargs
+    ):
       self._cmdapi_start_stream_by_params(
         name=name, stream_type=stream_type, url=url,
         reconnectable=reconnectable, live_feed=live_feed, plugins=plugins,
         stream_config_metadata=stream_config_metadata, cap_resolution=cap_resolution,
-        node_address=node_address, **kwargs
+        node_address=node_address, 
+        send_immediately=send_immediately,
+        **kwargs
       )
       return
     
-    def _cmdapi_update_pipeline_instance(self, pipeline, signature, instance_id, instance_config, node_address=None):
+    def _cmdapi_update_pipeline_instance(
+      self, pipeline, signature, instance_id, instance_config, node_address=None,
+      send_immediately=True,
+    ):
       node_address = node_address or self.node_addr
       payload = {
         PAYLOAD_DATA.NAME : pipeline,
@@ -632,7 +679,8 @@ class _CmdAPIMixin(object):
       self.cmdapi_register_command(
         node_address=node_address,
         command_type=COMMANDS.UPDATE_PIPELINE_INSTANCE,
-        command_content=payload
+        command_content=payload,
+        send_immediately=send_immediately,
       )
       return
   #endif

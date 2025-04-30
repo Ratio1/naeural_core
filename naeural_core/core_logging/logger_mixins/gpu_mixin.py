@@ -20,7 +20,7 @@ class _GPUMixin(object):
     super(_GPUMixin, self).__init__()
 
     try:
-      from .machine_mixin import _MachineMixin
+      from ratio1.logging.logger_mixins.machine_mixin import _MachineMixin
     except ModuleNotFoundError:
       raise ModuleNotFoundError("Cannot use _GPUMixin without having _MachineMixin")
 

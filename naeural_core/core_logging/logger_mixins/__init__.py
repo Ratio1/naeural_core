@@ -11,7 +11,6 @@ from .gpu_mixin import _GPUMixin
 from .grid_search_mixin import _GridSearchMixin
 from .histogram_mixin import _HistogramMixin
 from .keras_callbacks_mixin import _KerasCallbacksMixin
-from .machine_mixin import _MachineMixin
 from .matplotlib_mixin import _MatplotlibMixin
 from .multithreading_mixin import _MultithreadingMixin
 from .nlp_mixin import _NLPMixin

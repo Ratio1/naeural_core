@@ -1267,10 +1267,6 @@ class BasePluginExecutor(
     self._payload = None
     return p
 
-  def get_commands_after_exec(self):
-    c = self._commands
-    self._cmdapi_refresh()
-    return c
 
   def start_timer(self, tmr_id):
     if self.log.is_main_thread:

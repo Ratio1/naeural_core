@@ -206,6 +206,8 @@ class _BasePluginLoopMixin(object):
     self.high_level_execution_chain()
     return  
   
+  
+  
 
   def execute(self):
     """
@@ -252,9 +254,7 @@ class _BasePluginLoopMixin(object):
       self._maybe_resend_last_payload()
       # end resend status
 
-      commands = self.get_commands_after_exec()
-      if len(commands) > 0:
-        self.commands_deque.append(commands)
+      self._cmdapi_send_commands()
 
       # we also log this exec time
       self.last_exec_time = time()

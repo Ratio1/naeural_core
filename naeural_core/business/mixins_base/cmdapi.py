@@ -7,16 +7,24 @@ class _CmdAPIMixin(object):
     super(_CmdAPIMixin, self).__init__()
     return
 
+
   def _cmdapi_refresh(self):
     self._commands = []
     return
   
-  def __send_commands(self):
-    # TODO: maybe change commands_deque to a private variable
-    while len(self._commands) > 0:
-      cmd = self._commands.pop(0)
-      self.commands_deque.append(cmd)
-    return
+
+  def get_commands_after_exec(self):
+    c = self._commands
+    self._cmdapi_refresh()
+    return c  
+  
+  
+  def _cmdapi_send_commands(self):
+    commands = self.get_commands_after_exec()
+    if len(commands) > 0:
+      self.commands_deque.append(commands)    
+    return  
+  
 
   def cmdapi_register_command(
     self, 
@@ -53,7 +61,7 @@ class _CmdAPIMixin(object):
     self._commands.append((box_id, node_address, self.use_local_comms_only, command_type, command_content))
     if send_immediately:
       self.P("CMDAPI: Sending async command '{}' for node '{}' <{}>".format(command_type, box_id, node_address))
-      self.__send_commands()
+      self._cmdapi_send_commands()
     else:
       self.P("CMDAPI: Register (after process send) command '{}' for node '{}' <{}>".format(command_type, box_id, node_address))
     return

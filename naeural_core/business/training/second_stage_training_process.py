@@ -29,6 +29,8 @@ class SecondStageTrainingProcessPlugin(GeneralTrainingProcessPlugin):
     }
 
   def auto_deploy(self):
+    if self.cfg_auto_deploy is None:
+      return
     box_auto_deploy = self.cfg_auto_deploy.get('BOX_ID', None)
     node_address_auto_deploy = self.cfg_auto_deploy.get('NODE_ADDRESS', None)
     streams = self.cfg_auto_deploy.get('STREAMS', [])

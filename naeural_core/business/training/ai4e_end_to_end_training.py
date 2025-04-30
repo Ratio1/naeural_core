@@ -173,6 +173,8 @@ class Ai4eEndToEndTrainingPlugin(BasePlugin):
 
   def get_auto_deploy(self):
     auto_deploy = self.cfg_auto_deploy
+    if auto_deploy is None:
+      return None
     if 'BOX_ID' not in auto_deploy or "NODE_ADDRESS" not in auto_deploy:
       auto_deploy['BOX_ID'] = auto_deploy.get('BOX_ID', self.ee_id)
       auto_deploy['NODE_ADDRESS'] = auto_deploy.get('NODE_ADDRESS', self.node_addr)

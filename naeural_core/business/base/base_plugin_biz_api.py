@@ -118,7 +118,72 @@ class _BasePluginAPIMixin:
 
   def on_command(self, data, **kwargs):
     """
-    Called when the instance receives new INSTANCE_COMMAND
+    Called when a INSTANCE_COMMAND is received by the plugin instance.
+    
+    The command is sent via `cmdapi_send_instance_command` as in below simplified example:
+    
+    ```python
+      pipeline = "some_app_pipeline"
+      signature = "CONTAINER_APP_RUNNER"
+      instance_id = "CONTAINER_APP_1e8dac"
+      node_address = "0xai_1asdfG11sammamssdjjaggxffaffaheASSsa"
+      
+      instance_command = "RESTART"
+      
+      plugin.cmdapi_send_instance_command(
+        pipeline=pipeline,
+        signature=signature,
+        instance_id=instance_id,
+        instance_command=instance_command,
+        node_address=node_address,
+      )
+    ```
+    
+    while the `on_command` method should look like this:
+    
+    ```python
+      def on_command(self, data, **kwargs):
+        if data == "RESTART":
+          self.P("Restarting ...")
+        elif data == "STOP":
+          self.P("Stopping ...")
+        else:
+          self.P(f"Unknown command: {data}")
+        return
+    ```
+    
+    The `instance_command` is passed to this method as `data` and in fact can be a dict with extra data. If
+    `instance_command` contains `COMMAND_PARAMS` dict then all the key-value pairs in the `COMMAND_PARAM` dict 
+    will be passed as kwargs to this method - see below example:
+    
+    ```python
+      instance_command = {
+        "COMMAND_PARAMS": {
+          "some_param1": "value1",
+          "some_param2": "value2",
+        }
+      }
+      
+      plugin.cmdapi_send_instance_command(
+        pipeline=pipeline,
+        signature=signature,
+        instance_id=instance_id,
+        instance_command=instance_command,
+        node_address=node_address,
+      )
+    ```
+    Then this `on_command` method should look like this:
+    
+    ```python
+    
+      def on_command(self, data, some_param1=None, some_param2=None, **kwargs):
+        if some_param1:
+          self.P(f"Received some_param1: {some_param1}")
+        if some_param2:
+          self.P(f"Received some_param2: {some_param2}")
+        # Process the command here
+        return
+    ```
 
     Parameters
     ----------
@@ -134,8 +199,73 @@ class _BasePluginAPIMixin:
 
   def _on_command(self, data, default_configuration=None, current_configuration=None, **kwargs):
     """
-    Called when the instance receives new INSTANCE_COMMAND
-
+    Called when a INSTANCE_COMMAND is received by the plugin instance.
+    
+    The command is sent via `cmdapi_send_instance_command` as in below simplified example:
+    
+    ```python
+      pipeline = "some_app_pipeline"
+      signature = "CONTAINER_APP_RUNNER"
+      instance_id = "CONTAINER_APP_1e8dac"
+      node_address = "0xai_1asdfG11sammamssdjjaggxffaffaheASSsa"
+      
+      instance_command = "RESTART"
+      
+      plugin.cmdapi_send_instance_command(
+        pipeline=pipeline,
+        signature=signature,
+        instance_id=instance_id,
+        instance_command=instance_command,
+        node_address=node_address,
+      )
+    ```
+    
+    while the `on_command` method should look like this:
+    
+    ```python
+      def on_command(self, data, **kwargs):
+        if data == "RESTART":
+          self.P("Restarting ...")
+        elif data == "STOP":
+          self.P("Stopping ...")
+        else:
+          self.P(f"Unknown command: {data}")
+        return
+    ```
+    
+    The `instance_command` is passed to this method as `data` and in fact can be a dict with extra data. If
+    `instance_command` contains `COMMAND_PARAMS` dict then all the key-value pairs in the `COMMAND_PARAM` dict 
+    will be passed as kwargs to this method - see below example:
+    
+    ```python
+      instance_command = {
+        "COMMAND_PARAMS": {
+          "some_param1": "value1",
+          "some_param2": "value2",
+        }
+      }
+      
+      plugin.cmdapi_send_instance_command(
+        pipeline=pipeline,
+        signature=signature,
+        instance_id=instance_id,
+        instance_command=instance_command,
+        node_address=node_address,
+      )
+    ```
+    Then this `on_command` method should look like this:
+    
+    ```python
+    
+      def on_command(self, data, some_param1=None, some_param2=None, **kwargs):
+        if some_param1:
+          self.P(f"Received some_param1: {some_param1}")
+        if some_param2:
+          self.P(f"Received some_param2: {some_param2}")
+        # Process the command here
+        return
+    ```
+    
     Parameters
     ----------
     data : any

@@ -7,6 +7,8 @@ from collections import OrderedDict
 from multiprocessing import Process
 from time import time, sleep
 
+from ratio1.ipfs import R1FSEngine
+
 #local dependencies
 from naeural_core import constants as ct
 from naeural_core import Logger
@@ -25,6 +27,8 @@ _CONFIG = {
   "SERVING_TIMERS_IDLE_DUMP_DEFAULT"      : 1801,
   "SERVING_TIMERS_PREDICT_DUMP"           : 901,
   "SERVING_TIMERS_PREDICT_DUMP_DEFAULT"   : 601,
+  
+  "R1FS_ENABLED"                          : False,
 
   "CLOSE_IF_UNUSED"                       : False,
   
@@ -115,6 +119,7 @@ class ModelServingProcess(
     self._default_config = default_config
     self._upstream_config = upstream_config or {}
     self.config_model = None
+    self.r1fs : R1FSEngine = None
     self._startup_failure = False
     self._inprocess_startup_done = False
     self._displayed_first_predict_coverage = False
@@ -687,6 +692,10 @@ class ModelServingProcess(
     return
 
   def __on_init(self):
+    if self.cfg_r1fs_enabled:
+      self.r1fs = R1FSEngine(
+        log=self.log,
+      )
     self._on_init()
     return
   

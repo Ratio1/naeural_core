@@ -185,6 +185,11 @@ _CONFIG = {
   # couple of keys for custom/rest plugins manifest sending (and any other plugins that send manifests)
   'SEND_MANIFEST_EACH': 300,
   'LOG_MANIFEST_SEND': False,
+  
+  # Network Processor
+  'ACCEPT_SELF' : False,  
+  'FULL_DEBUG_PAYLOADS' : False,
+  # END Network Processor  
 
 
 

@@ -75,9 +75,13 @@ def get_bearer_token(credentials: HTTPAuthorizationCredentials = Depends(securit
 {% for item in node_comm_params %}
 {% if item['method']=='post' %}
 class {{ item['name'] }}Model(BaseModel):
+  {% if item['args'] %}
   {% for arg in item['args'] %}
   {{ arg }}
   {% endfor %}
+  {% else %}
+  pass
+  {% endif %}
 
 
 @app.post("/{{ item['name'] }}")

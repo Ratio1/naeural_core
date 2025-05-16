@@ -342,11 +342,11 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         self.P(f'Could not kill process {key} (try {tries}/{max_tries}). Reason: {exc}')
     # endwhile
     return
-  
-  
+
+
   def on_log_handler(self, text):
     return
-  
+
 
   # logs handling methods
   def __maybe_print_all_logs(self, indent=35):
@@ -562,8 +562,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     for idx in range(len(self.get_start_commands())):
       self.__maybe_run_nth_start_command(idx)
     return
-  
-  
+
+
   def __all_start_running(self):
     result = True
     cmds = self.get_start_commands()
@@ -621,7 +621,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         )
         self.P(f"Start command nr {idx} finished unexpectedly. Please check the logs.")
         self.failed = True
-        
+
       elif self.time() - self.start_commands_start_time[idx] > timeout:
         self.start_commands_finished[idx] = True
         cmd = self.get_start_commands()[idx]
@@ -661,7 +661,13 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     self.__init_temp_dir()
     self.__deallocate_port()
-    self.P('Attempting to init assets due to reload...')    
+    self.P('Attempting to init assets due to reload...')
+    self.__allocate_port()
+    # In case a new port is allocated instead of the one previously used.
+    # The commands will be relogged in case something changed because of the
+    # port reallocation.
+    self.__commands_ready = False
+    self.__maybe_setup_commands()
     self.__maybe_init_assets()
     return  
   

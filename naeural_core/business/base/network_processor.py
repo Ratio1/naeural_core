@@ -21,13 +21,16 @@ class NetworkProcessorPlugin(
   _NetworkProcessorMixin
 ):
   CONFIG = _CONFIG
-  
 
   def _on_init(self):
     self.network_processor_init()
+    self.P(
+      "NetworkProcessorPlugin v{} base initialization completed. Proceeding to custom init...".format(__VER__),
+      color="green"
+    )
     self.on_init()
     return
-  
+
 
   def _process(self):
     """

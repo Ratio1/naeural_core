@@ -15,7 +15,6 @@ class _NetworkProcessorMixin:
   
 
   def network_processor_init(self):
-    # self._init_network_processor()
     self.__non_dicts = 0
     self.__handlers = {}
     # we get all the functions that start with on_payload_
@@ -40,9 +39,6 @@ class _NetworkProcessorMixin:
     else:
       self.P("Payload handlers found for: {}".format(list(self.__handlers.keys())), color="green")
     self._network_processor_initialized = True
-    
-    self.P("NetworkProcessorPlugin v{} base initialization completed. Proceeding to custom init...".format(__VER__), color="green")
-    self.on_init()
     return
   
   def __network_processor_maybe_check_initialized(self):

@@ -926,7 +926,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
         download_dir=download_dir
       )
       if not local_file:
-        self.P("[ERROR] Could not download the prebuilt artifact.", color='r')
+        err_msg = "[ERROR] Could not download the prebuilt artifact."
+        self.P(err_msg, color='r')
+        raise Exception(err_msg)
         return None
 
       # ------------------------------------

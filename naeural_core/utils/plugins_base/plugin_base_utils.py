@@ -214,6 +214,7 @@ class LogReader():
     return text
 
   def _run(self):
+    log_msg = None
     try:
       while not self.done:
         # text = self._do_fd_read()
@@ -223,16 +224,23 @@ class LogReader():
         else:
           pass # break can lead to early exit so nothing to do
         # endif any data ready
+      # self.exited needs to be set to True as soon as the loop is exited
+      # in order to avoid any forced exception during the finally block.
+      self.exited = True
+      log_msg = "Log reader loop finished."
     except ct.ForceStopException:
-      self.owner.P("Log reader forced to stop.")
+      self.exited = True
+      log_msg = "Log reader forced to stop."
     except Exception as exc:
-      self.owner.P(f"Log reader exception: {exc}", color='r')
+      self.exited = True
+      log_msg = f"Log reader exception: {exc}"
     finally:
+      if log_msg:
+        self.owner.P(log_msg)
       if not self.buff_reader.closed:
         self.owner.P("Closing buff reader...")
         self.buff_reader.close()
       # endif buff_reader not closed yet
-      self.exited = True
       self.owner.P("Log reader stopped.")
     return
 

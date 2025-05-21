@@ -694,7 +694,7 @@ class ModelServingProcess(
   def __on_init(self):
     if self.cfg_r1fs_enabled:
       self.r1fs = R1FSEngine(
-        log=self.log,
+        logger=self.log,
       )
     self._on_init()
     return

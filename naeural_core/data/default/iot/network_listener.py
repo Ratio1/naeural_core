@@ -32,8 +32,8 @@ class NetworkListenerDataCapture(IoTQueueListenerDataCapture):
   def __init__(self, **kwargs):
     super(NetworkListenerDataCapture, self).__init__(**kwargs)
     return
-  
+
   def _init(self):
     super(NetworkListenerDataCapture, self)._init()
-    self.P(f"Initializing Network Listener DCT with filter {self.cfg_path_filter} and message filter {self.cfg_message_filter}")
+    self.P(f"Initializing {self.__class__.__name__} with filter {self.cfg_path_filter} and message filter {self.cfg_message_filter}")
     return

@@ -128,10 +128,11 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
   # Port allocation
   def __check_port_valid(self):
     # Check the config as we're going to use it to start processes.
-    if not isinstance(self.cfg_port, int):
+    port = self.get_port()
+    if not isinstance(port, int):
       raise ValueError("Port not an int")
-    if self.cfg_port < 0 or self.cfg_port > 65535:
-      raise ValueError("Invalid port value {}".format(self.cfg_port))
+    if port < 0 or port > 65535:
+      raise ValueError("Invalid port value {}".format(port))
     return
 
   def __get_all_used_ports(self):
@@ -161,12 +162,12 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
           self.plugins_shmem['USED_PORTS'] = {}
         dct_shmem_ports = self.plugins_shmem['USED_PORTS']
         used_ports = self.__get_all_used_ports()
-
-        if self.cfg_port is not None:
+        configured_port = self.get_port()
+        if configured_port is not None:
           self.__check_port_valid()
 
-          if self.cfg_port not in used_ports:
-            dct_shmem_ports[self.str_unique_identification] = self.cfg_port
+          if configured_port not in used_ports:
+            dct_shmem_ports[self.str_unique_identification] = configured_port
             done = True
           else:
             cnt_tries += 1
@@ -188,7 +189,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       if not done:
         sleep_seconds = 5
         self.P(
-          f"Preconfigured port {self.cfg_port} is already in use at try {cnt_tries}. Retrying in {sleep_seconds}...",
+          f"Preconfigured port {configured_port} is already in use at try {cnt_tries}. Retrying in {sleep_seconds}...",
           color='r'
         )
         self.sleep(sleep_seconds)
@@ -1161,13 +1162,15 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     return
 
-  @property
-  def cfg_port(self):
+  def get_port(self):
     # Override of the auto-generated cfg_port property to handle
     # ports from environment variables.
-    configured_port = super(BaseWebAppPlugin, self).cfg_port
-    if isinstance(configured_port, str) and configured_port.isdigit():
-      configured_port = int(configured_port)
+    configured_port = self.cfg_port
+    if isinstance(configured_port, str):
+      configured_port = configured_port.strip()
+      if configured_port.isdigit():
+        configured_port = int(configured_port)
+    # endif configured_port is str
     return configured_port
 
   # Exposed methods

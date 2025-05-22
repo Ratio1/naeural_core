@@ -1161,6 +1161,15 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     return
 
+  @property
+  def cfg_port(self):
+    # Override of the auto-generated cfg_port property to handle
+    # ports from environment variables.
+    configured_port = super(BaseWebAppPlugin, self).cfg_port
+    if isinstance(configured_port, str) and configured_port.isdigit():
+      configured_port = int(configured_port)
+    return configured_port
+
   # Exposed methods
   @property
   def port(self):

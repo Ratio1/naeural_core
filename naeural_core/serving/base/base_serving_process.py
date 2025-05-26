@@ -327,8 +327,8 @@ class ModelServingProcess(
       raise ValueError('`inprocess_startup` called without actual inprocess serving process!')
     return
 
-  def _pack_results(self, results):
-    res = OrderedDict()
+  def _prepack_results(self, results):
+    results_dict = OrderedDict()
     # TODO: should the additional be added after the rest?
     meta = OrderedDict()
     additional_meta = self.get_additional_metadata()
@@ -337,7 +337,7 @@ class ModelServingProcess(
     else:
       meta['ADDITIONAL_META'] = additional_meta
     # endif additional meta
-    
+
     if results is None or len(results) == 0:
       meta[ct.ERROR] = 'No inputs received for inference'
       results = [[]]
@@ -345,21 +345,24 @@ class ModelServingProcess(
     meta[ct.SYSTEM_TIME] = self.log.now_str(nice_print=True, short=False)
     meta[ct.VER] = self.__version__
     meta['PICKED_INPUT'] = self.cfg_picked_input
-    res['INFERENCES_META'] = meta
-    
+    results_dict['INFERENCES_META'] = meta
+    return results_dict, results
+
+  def _pack_results(self, results):
+    results_dict, results = self._prepack_results(results)
     if len(self._stream_index_mapping) == 0:
-      res[ct.INFERENCES] = results
+      results_dict[ct.INFERENCES] = results
     else:
-      res[ct.INFERENCES] = []
+      results_dict[ct.INFERENCES] = []
       for stream_name, indexes in self._stream_index_mapping.items():
         crt_stream_results = []
         for i in indexes:
           crt_stream_results.append(results[i])
-        res[ct.INFERENCES].append(crt_stream_results)
+        results_dict[ct.INFERENCES].append(crt_stream_results)
       #endfor
     #endif
     
-    return res
+    return results_dict
 
   def _input_validator(self):
     pass ###TODO

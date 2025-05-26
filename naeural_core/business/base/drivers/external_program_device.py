@@ -13,6 +13,8 @@ _CONFIG = {
   "PROCESS_DELAY": 10,
 
   "COOLDOWN": 3,  # seconds
+  
+  "DEVICE_DEBUG": True,
 
   'VALIDATION_RULES': {
     **Device.CONFIG['VALIDATION_RULES'],
@@ -139,6 +141,9 @@ class ExternalProgramDevice(Device):
       raise ValueError(f"Program {program} not allowed to run")
 
     full_command = [program] + args
+    str_cmd = " ".join(full_command)
+    if self.cfg_device_debug:
+      self.P(f"Executing: {str_cmd}")
     self.__process = subprocess.Popen(full_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if not self.cfg_external_program_allow_reentrant:

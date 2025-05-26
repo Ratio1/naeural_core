@@ -7,7 +7,7 @@ class HttpDevice(Device):
     self._headers = None
     return
 
-  def device_get(self, path, headers=None, timeout=10):  # todo: prefix device
+  def device_get(self, path, headers=None, timeout=10, debug=False):  # todo: prefix device
     """
     Get data from device
     Parameters
@@ -20,9 +20,13 @@ class HttpDevice(Device):
     -------
 
     """
-    return self.__execute_request(method="GET", path=path, headers=headers, timeout=timeout)
+    return self.__execute_request(
+      method="GET", 
+      path=path, headers=headers, 
+      timeout=timeout, debug=debug,
+    )
 
-  def device_post(self, path, body, headers=None, timeout=10):
+  def device_post(self, path, body, headers=None, timeout=10, debug=False):
     """
     Post data to device
     Parameters
@@ -36,9 +40,13 @@ class HttpDevice(Device):
     -------
 
     """
-    return self.__execute_request(method="POST", path=path, body=body, headers=headers, timeout=timeout)
+    return self.__execute_request(
+      method="POST", 
+      path=path, body=body, headers=headers, 
+      timeout=timeout, debug=debug,
+    )
 
-  def device_put(self, path, body, headers=None, timeout=10):
+  def device_put(self, path, body, headers=None, timeout=10, debug=False):
     """
     Put data to device
     Parameters
@@ -52,9 +60,13 @@ class HttpDevice(Device):
     -------
 
     """
-    return self.__execute_request(method="PUT", path=path, body=body, headers=headers, timeout=timeout)
+    return self.__execute_request(
+      method="PUT", 
+      path=path, body=body, headers=headers, 
+      timeout=timeout, debug=debug,
+    )
 
-  def device_delete(self, path, headers=None, timeout=10):
+  def device_delete(self, path, headers=None, timeout=10, debug=False):
     """
     Delete data from device
     Parameters
@@ -67,9 +79,13 @@ class HttpDevice(Device):
     -------
 
     """
-    return self.__execute_request(method="DELETE", path=path, headers=headers, timeout=timeout)
+    return self.__execute_request(
+      method="DELETE", 
+      path=path, headers=headers, 
+      timeout=timeout, debug=debug,
+    )
 
-  def __execute_request(self, method, path, body=None, headers=None, timeout=10):
+  def __execute_request(self, method, path, body=None, headers=None, timeout=10, debug=False):
     """
     Execute request to device
     Parameters
@@ -85,6 +101,8 @@ class HttpDevice(Device):
 
     """
     url, dct_headers = self.__get_url_and_headers(headers=headers, path=path)
+    if debug:
+      self.P(f"Executing {method} request to {url} with headers: {dct_headers} and body: {body}")
     try:
       if method.upper() == "GET":
         response = self.requests.get(url=url, headers=dct_headers, timeout=timeout)

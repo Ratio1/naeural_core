@@ -14,10 +14,6 @@ class StructuredLiveDataCapture(DataCaptureThread,
 
   CONFIG = _CONFIG
 
-  def __init__(self, **kwargs):
-    super(StructuredLiveDataCapture, self).__init__(**kwargs)
-    return
-
 
   
   def startup(self):
@@ -28,16 +24,8 @@ class StructuredLiveDataCapture(DataCaptureThread,
     return
   
   
-  
-  def _init(self):
-    self._maybe_reconnect()
-    return
-  
-  def _maybe_reconnect(self):
-    if self.has_connection:
-      return    
-    self.has_connection = self.sensor.maybe_reconnect()
-    return  
+  def connect(self):
+    return self.sensor.maybe_reconnect()
   
     
   def _run_data_aquisition_step(self):

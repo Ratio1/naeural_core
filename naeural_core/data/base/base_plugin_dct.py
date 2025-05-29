@@ -397,17 +397,21 @@ class DataCaptureThread(BaseDataCapture,
   def _release(self):
     raise NotImplementedError()
 
-  @abc.abstractmethod
-  def data_step(self):
-    raise NotImplementedError()
-
-
-  def run_data_aquisition_step(self):
-    self.data_step()
-    return
 
   def _run_data_aquisition_step(self):
-    self.run_data_aquisition_step()
+    """
+    Runs a data acquisition step. This method is called in the main loop of the DCT.
+    It is responsible for collecting data from the source and adding it to the deque.
+    
+    
+    The `data_step` method is the main method that should be implemented in the derived classes. 
+    """    
+    if hasattr(self, 'data_step'):
+      self.data_step()
+    elif hasattr(self, 'run_data_aquisition_step'):
+      self.run_data_aquisition_step()
+    else:
+      raise NotImplementedError("Method `data_step` must be implemented in the derived class")
     return
   
   def __run_data_acquisition_step(self):

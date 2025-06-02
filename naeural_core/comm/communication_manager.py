@@ -565,8 +565,10 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
       color='y'
     )
     failed = False
-    
-    if device_id != self._device_id and device_id != self.blockchain_manager.address:
+
+    is_eth_address = self.blockchain_manager.eth_enabled and (self.blockchain_manager.eth_address == device_id)
+
+    if device_id != self._device_id and device_id != self.blockchain_manager.address and not is_eth_address:
       self.P('INCOMING:   Message is not for the current device {} != {} ({})'.format(
         device_id, self._device_id, self.blockchain_manager.address), color='y')
       failed = True

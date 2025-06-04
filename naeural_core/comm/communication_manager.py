@@ -286,6 +286,9 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
   def send(self, data, event_type='PAYLOAD'):
     if event_type == 'COMMAND':
       receiver_id, receiver_addr, local_only, command_type, command_content = data
+      
+      # in some cases the receiver_addrs is a non-prefixed address
+      receiver_addr = self.blockchain_manager.maybe_add_prefix(receiver_addr) # add prefix if needed
 
       is_command_to_self = receiver_addr == self.blockchain_manager.address
 
@@ -295,9 +298,12 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         self.__lst_commands_from_self.append((command_type, command_content))
       else:
         # we send the command to the network
+        # EE_ID is the receiver ID for command and this is a ambiguity that we need to resolve
+        # as well as EE_ADDR is the receiver address
+        # but in normal payload messages, EE_ADDR is the sender address as EE_ID is the device ID
         command = {
           ct.EE_ADDR: receiver_addr,
-          ct.EE_ID: receiver_id,
+          ct.EE_ID: receiver_id, 
           ct.COMMS.COMM_SEND_MESSAGE.K_ACTION: command_type,
           ct.COMMS.COMM_SEND_MESSAGE.K_PAYLOAD: command_content,
           ct.COMMS.COMM_SEND_MESSAGE.K_INITIATOR_ID: self._device_id,

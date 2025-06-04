@@ -1492,21 +1492,28 @@ class NetworkMonitor(DecentrAIObject):
         res = res.lower() == 'true'
       return res
 
-    def network_node_addr(self, eeid):
+
+    def network_node_addr(self, eeid, include_prefix=False):
+      addr = None
       candidates = []
       for addr in self.all_nodes:
         hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
         if hb.get(ct.EE_ID) == eeid:
           candidates.append(addr)
       if len(candidates) == 0:
-        return None
+        addr = None
       if len(candidates) == 1:
-        return candidates[0]
+        addr = candidates[0]
+      else:
+        # if there are multiple candidates, we will return the one with the most recent heartbeat
+        lst_last_seen = [(addr, self.network_node_last_seen(addr=addr, as_sec=True)) for addr in candidates]
+        addr = min(lst_last_seen, key=lambda x: x[1])[0]
+      
+      if include_prefix and addr is not None:
+        addr = self._add_address_prefix(addr)
+        
+      return addr
 
-      # if there are multiple candidates, we will return the one with the most recent heartbeat
-      lst_last_seen = [(addr, self.network_node_last_seen(addr=addr, as_sec=True)) for addr in candidates]
-
-      return min(lst_last_seen, key=lambda x: x[1])[0]
 
     def network_node_eeid(self, addr):
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)

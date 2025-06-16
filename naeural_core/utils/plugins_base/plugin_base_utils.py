@@ -194,6 +194,12 @@ class LogReader():
     self.start()
     return
 
+  def P(self, msg, color=None, **kwargs):
+    """
+    Print a message to the owner process.
+    """
+    self.owner.P(msg, color=color, **kwargs)
+    return
 
   def _do_fd_read(self):
     if not self.__fd_reading:
@@ -213,7 +219,16 @@ class LogReader():
       text = self.buff_reader.read(self.buf_reader_size)
     return text
 
+  def maybe_close_buffer(self):
+    if not self.buff_reader.closed:
+      self.P("Closing buff reader...")
+      self.buff_reader.close()
+      self.P("Buff reader closed.")
+    # endif buff_reader not closed yet
+    return
+
   def _run(self):
+    force_stop = False
     log_msg = None
     try:
       while not self.done:
@@ -226,22 +241,21 @@ class LogReader():
         # endif any data ready
       # self.exited needs to be set to True as soon as the loop is exited
       # in order to avoid any forced exception during the finally block.
-      self.exited = True
       log_msg = "Log reader loop finished."
-    except ct.ForceStopException:
-      self.exited = True
-      log_msg = "Log reader forced to stop."
+    except ct.ForceStopException as exc:
+      force_stop = True
     except Exception as exc:
-      self.exited = True
       log_msg = f"Log reader exception: {exc}"
-    finally:
-      if log_msg:
-        self.owner.P(log_msg)
-      if not self.buff_reader.closed:
-        self.owner.P("Closing buff reader...")
-        self.buff_reader.close()
-      # endif buff_reader not closed yet
-      self.owner.P("Log reader stopped.")
+    self.exited = True
+    if not force_stop:
+      try:
+        if log_msg:
+          self.P(log_msg)
+        self.maybe_close_buffer()
+        self.P("Log reader stopped.")
+      except Exception as e:
+        pass
+    # endif force_stop
     return
 
   def on_text(self, text):
@@ -261,28 +275,32 @@ class LogReader():
     if self.done:
       return
     self.done = True
-    self.owner.P("Stopping log reader thread...")
+    self.P("Stopping log reader thread...")
 
     if not self.exited:
-      self.owner.P("Waiting for log reader thread to stop...")
-      self.owner.sleep(0.2)
+      seconds = 5
+      self.P(f"Waiting {seconds} for log reader thread to stop...")
+      self.owner.sleep(seconds)
     # end if
 
     if not self.exited:
-      self.owner.P("Forcing log reader thread to stop...")
-      ctype_async_raise(self.thread.ident, ct.ForceStopException)
+      self.P("Forcing log reader thread to stop...")
+      self.maybe_close_buffer()
+
+      with self.owner.log.managed_lock_logger():
+        ctype_async_raise(self.thread.ident, ct.ForceStopException)
       self.owner.sleep(0.2)
-      self.owner.P("Log reader stopped forcefully.")
+      self.P("Log reader stopped forcefully.")
     # end if
 
-    self.owner.P("Joining log reader thread...")
+    self.P("Joining log reader thread...")
     self.thread.join(timeout=0.1)
-    self.owner.P("Log reader thread joined.")
+    self.P("Log reader thread joined.")
 
     if self.thread.is_alive():
-      self.owner.P("Log reader thread is still alive.", color='r')
+      self.P("Log reader thread is still alive.", color='r')
     else:
-      self.owner.P("Log reader thread joined gracefully.")
+      self.P("Log reader thread joined gracefully.")
     # end if
 
     return

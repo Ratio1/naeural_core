@@ -279,7 +279,37 @@ class Orchestrator(DecentrAIObject,
     return
   
   ####### end pre-init area
-  
+
+  def logger_debugger(self):
+    """
+    Debugger thread that should print periodically who has the logger lock and how long it has it.
+    Returns
+    -------
+
+    """
+    last_print_time = time()
+    print_period = 300
+    while True:
+      try:
+        if time() - last_print_time > print_period:
+          last_print_time = time()
+          locks = {
+            k: v.locked()
+            for k, v in self.log._lock_table.items()
+          }
+          current_lock_owner = None
+          locks_str = '\n'.join([
+            f"{k}: {'locked' if v else 'unlocked'}" for k, v in locks.items()
+          ])
+          print(f"Lock acquired by:\n{locks_str}", flush=True)
+          sleep(print_period)
+        # endif time() - last_print_time > print_period
+      except Exception as exc:
+        pass
+    # endwhile
+    return
+
+
   def _init_all_processes(self):
     self._data_handler = MainLoopDataHandler(log=self.log, owner=self, DEBUG=self.DEBUG)
     self._app_monitor = ApplicationMonitor(log=self.log, owner=self)
@@ -335,6 +365,15 @@ class Orchestrator(DecentrAIObject,
     )
 
     self._thread_async_comm.start()
+
+    if False:
+      self._thread_logger_debugger = Thread(
+        target=self.logger_debugger,
+        args=(),
+        name= ct.THREADS_PREFIX + 'logger_debugger',
+        daemon=True
+      )
+      self._thread_logger_debugger.start()
     return
     
   def _initialize_managers(self):

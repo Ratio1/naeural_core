@@ -105,6 +105,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.start_commands_start_time = []
     self.webapp_reload_last_timestamp = 0
 
+    self.dct_logs_reader = {}
+    self.dct_err_logs_reader = {}
+
     super(BaseWebAppPlugin, self)._on_init()
     return
   

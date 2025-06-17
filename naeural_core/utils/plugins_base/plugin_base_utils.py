@@ -266,7 +266,10 @@ class LogReader():
     return
 
   def start(self):
-    self.thread = Thread(target=self._run)
+    self.thread = Thread(
+      target=self._run,
+      daemon=True,
+    )
     self.thread.start()
     return
 

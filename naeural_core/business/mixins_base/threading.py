@@ -107,7 +107,10 @@ class _ThreadingAPIMixin():
     lst_threads: list[Thread] = []
 
     for thread_id in range(n_threads):
-      thread = Thread(target=self.__wrapper_func_run, args=(func, lst_results, thread_id, n_threads))
+      thread = Thread(
+        target=self.__wrapper_func_run, args=(func, lst_results, thread_id, n_threads),
+        daemon=True
+      )
       lst_threads.append(thread)
 
     for thread in lst_threads:

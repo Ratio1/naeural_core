@@ -508,6 +508,7 @@ class ServingManager(Manager):
       npy_shm_kwargs=npy_shm_kwargs,
       comm_method=comm_method,
     )
+    
     self.log.stop_timer('create_server_new()')
 
     success = True

@@ -118,6 +118,17 @@ class NetworkMonitor(DecentrAIObject):
         The list of remote nodes that are available.
     """
     return [x for x in self.all_nodes if self.network_node_is_available(x)]
+  
+  @property
+  def available_nodes_prefixed(self):
+    """
+    Returns the list of remote nodes that are available with the prefix.
+    Returns
+    -------
+    list[str]
+        The list of remote nodes that are available.
+    """
+    return [self._add_address_prefix(x) for x in self.all_nodes if self.network_node_is_available(x)]
 
   @property
   def accessible_nodes(self):

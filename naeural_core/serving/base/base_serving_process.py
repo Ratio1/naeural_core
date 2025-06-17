@@ -4,7 +4,7 @@ import re
 import abc
 import traceback
 from collections import OrderedDict
-from multiprocessing import Process
+from multiprocessing import Process, parent_process
 from time import time, sleep
 
 from ratio1.ipfs import R1FSEngine
@@ -586,6 +586,9 @@ class ModelServingProcess(
       # major exception will stop the process and announce the Serving Manager
       # so we do not necesarely need higher levels of exception handling unless 
       # those errors are minor and we can work around them. 
+      
+      self.__parent_process = parent_process()
+      
       n_predicts = 0
       self._create_logger() # uses only server_name
       self.create_numpy_shared_memory()
@@ -660,6 +663,10 @@ class ModelServingProcess(
             self.log.show_timers(color='d')
             must_send_timers = True
         #endif command or none
+        if self.__parent_process is not None and not self.__parent_process.is_alive():
+          self.P("Parent process {} is dead. Stopping...".format(self.__parent_process.pid), color='r')
+          self._done = True
+        # end parent process check
       #endwhile main loop
       self.P("Gracefully closing Model Server '{}'".format(self.server_name), color='r')
     except:

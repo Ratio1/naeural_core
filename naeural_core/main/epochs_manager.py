@@ -1238,7 +1238,10 @@ class EpochsManager(Singleton):
         node_last_epoch_last_hb = node_last_epoch_hb_timestamps[-1] if len(node_last_epoch_hb_timestamps) > 0 else None
         node_last_epoch_last_hb = self.date_to_str(node_last_epoch_last_hb)
         node_last_epoch_nr_hb = len(node_last_epoch_hb_timestamps)
-        node_last_epoch_avail = round(
+
+        node_last_epoch_avail = self.get_node_previous_epoch(node_addr)
+
+        node_last_epoch_avail_local = round(
           self.__calculate_avail_seconds(node_last_epoch_hb_timestamps) / self.epoch_length, 4
         )
         
@@ -1296,6 +1299,7 @@ class EpochsManager(Singleton):
             'last_epoch_nr_hb' : node_last_epoch_nr_hb,
             'last_epoch_1st_hb' : node_last_epoch_1st_hb,
             'last_epoch_last_hb' : node_last_epoch_last_hb,
+            'last_epoch_avail_local' : node_last_epoch_avail_local,
             'last_epoch_avail' : node_last_epoch_avail,
           }
         }

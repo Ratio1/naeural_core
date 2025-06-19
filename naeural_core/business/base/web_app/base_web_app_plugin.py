@@ -211,6 +211,14 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.P(f"Released port {port}")
     return
 
+  def get_additional_env_vars(self):
+    return {
+      "EE_NODE_ALIAS": self.eeid,
+      "EE_NODE_ADDRESS": self.bc.address,
+      "EE_NODE_ETH_ADDRESS": self.bc.eth_address,
+      "EE_NODE_NETWORK": self.bc.get_evm_network(),
+    }
+
   def __prepare_env(self, assets_path):
     # pop all `EE_` keys
     prepared_env = dict(self.os_environ)
@@ -255,6 +263,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     if self.cfg_env_vars is not None and isinstance(self.cfg_env_vars, dict):
       processed_env = {k: str(v) for k, v in self.cfg_env_vars.items()}
       prepared_env.update(processed_env)
+
+    additional_env_vars = self.get_additional_env_vars() or {}
+    prepared_env.update(additional_env_vars)
 
     self.prepared_env = prepared_env
 

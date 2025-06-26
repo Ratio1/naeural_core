@@ -1185,7 +1185,7 @@ class EpochsManager(Singleton):
     return dct_result
 
 
-  def get_stats(self, display=True, online_only=False):
+  def get_stats(self, display=False, online_only=False):
     """
     Returns the overall statistics for all nodes.
     """

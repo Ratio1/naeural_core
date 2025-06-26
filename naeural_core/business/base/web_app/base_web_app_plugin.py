@@ -216,7 +216,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       "EE_NODE_ALIAS": self.eeid,
       "EE_NODE_ADDRESS": self.bc.address,
       "EE_NODE_ETH_ADDRESS": self.bc.eth_address,
-      "EE_NODE_NETWORK": self.bc.get_evm_network(),
+      "EE_NODE_NETWORK": self.evm_network,
+      "EE_NODE_VER": self.ee_ver
     }
 
   def __prepare_env(self, assets_path):

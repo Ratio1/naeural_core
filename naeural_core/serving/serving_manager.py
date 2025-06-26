@@ -241,7 +241,11 @@ class ServingManager(Manager):
 
   @property
   def default_cuda(self):
-    return self.cfg_serving_environment.get(ct.DEFAULT_CUDA, 'cpu')
+    configured_cuda = self.cfg_serving_environment.get(ct.DEFAULT_CUDA, 'cuda:0')
+    gpu_info = self.log.gpu_info()
+    if gpu_info is None or len(gpu_info) == 0:
+      return 'cpu'
+    return configured_cuda
   
   @property
   def _server_collector_timedelta(self):

@@ -338,10 +338,16 @@ class FastApiWebAppPlugin(BasePlugin):
   def __fastapi_process_response(self, response):
     if self.cfg_response_format == 'RAW':
       return response
+    additional_data = self.get_additional_env_vars()
+    additional_data = {
+      (k.lower() if isinstance(k, str) else k): v for k, v in additional_data.items()
+    }
     return {
       'result': response,
-      'server_node_addr': self.e2_addr, 
+      # TO BE REMOVED maybe (they are also in the additional_data, but maybe the client expects these keys)
+      'server_node_addr': self.e2_addr,
       'evm_network' : self.evm_network,
+      **additional_data
     }
 
   def __fastapi_handle_response(self, id, value):

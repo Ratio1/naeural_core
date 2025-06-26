@@ -112,6 +112,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     self.__failed_download = False
     self.__restart_inititated = False
     self.__restart_inititated_time = None
+    self.__restart_offset = None
     DEFAULT_STATE = {
       "last_update" : None,
       "last_prev"   : None,
@@ -128,6 +129,8 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
 
   def __maybe_config_supervisor_restart_offset(self):
     """Configures the restart offset for the supervisor node"""
+    if not self.is_supervisor_node:
+      return
     self.__restart_offset = 36 * 3600 + self.np.random.randint(0, 36 * 3600)  # 36 hours + random
     restart_time = self.time() + self.__restart_offset
     restart_time_normalized = restart_time % (24 * 3600)
@@ -138,6 +141,8 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     if restart_time_normalized < upper_bound_normalized and restart_time_normalized > lower_bound_normalized:
       self.__restart_offset += 3 * 3600  # add 3 hours to the offset
       self.P("Supervisor node restart offset configured to {} seconds".format(self.__restart_offset))
+    # endif restart time is within the epoch bounds
+    return
 
   def __get_config_startup_as_base64(
     self, 
@@ -290,10 +295,8 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
 
 
   def needs_forced_restart(self):
-    if self.is_supervisor_node:
-      # Supervisors restart every 36 + rnd(36) hours
-      if self.get_node_running_time() > self.__restart_offset:
-        return True
+    if self.__restart_offset and self.get_node_running_time() > self.__restart_offset:
+      return True
 
     if self.cfg_force_restart_after is None:
       return False

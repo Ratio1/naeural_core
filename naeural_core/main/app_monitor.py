@@ -177,7 +177,7 @@ class ApplicationMonitor(DecentrAIObject):
 
     _ver = '{}{}{}'.format(
       '{} | '.format(app_ver) if core_ver is not None else '',
-      '{} | '.format(app_ver) if core_ver is None else '{} |'.format(core_ver),
+      '{} | '.format(app_ver) if core_ver is None else '{} | '.format(core_ver),
       '{}'.format(self.log.version),
     )
     return _ver

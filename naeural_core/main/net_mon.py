@@ -624,7 +624,7 @@ class NetworkMonitor(DecentrAIObject):
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
       gpus = hearbeat.get(ct.HB.GPUS, "N/A")
       if isinstance(gpus, str):
-        gpus = [{}]
+        gpus = []
       return gpus
   #endif
 
@@ -1525,7 +1525,7 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_default_gpu_data(self, addr):
       result = {}
       gpus = self.__network_node_last_gpus(addr=addr)
-      if len(gpus) == 0:
+      if len(gpus) > 0:
         device_id = self.__network_node_default_cuda(addr=addr)
         if not isinstance(device_id, int):
           device_id = 0

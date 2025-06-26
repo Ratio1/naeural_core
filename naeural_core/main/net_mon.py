@@ -1502,20 +1502,44 @@ class NetworkMonitor(DecentrAIObject):
       return result
     
     
+    def network_node_default_cuda(self, addr, as_int=True):
+      """
+      Returns the default CUDA device ID of a remote node.
+      If no GPU is available, returns None.
+      
+      Parameters
+      ----------
+      addr : str
+          The address of the remote node.
+      as_int : bool, optional
+          If True, returns the device ID as an integer, by default False (returns as string).
+      
+      Returns
+      -------
+      int or str or None
+          The default CUDA device ID or None if no GPU is available.
+      """
+      return self.__network_node_default_cuda(addr=addr, as_int=as_int)
+    
+    
+    def network_node_default_gpu_data(self, addr):
+      result = {}
+      gpus = self.__network_node_last_gpus(addr=addr)
+      if len(gpus) == 0:
+        device_id = self.__network_node_default_cuda(addr=addr)
+        if not isinstance(device_id, int):
+          device_id = 0
+        result = gpus[device_id]
+      return result
+    
+
     def network_node_default_gpu_name(self, addr):
       """
       Returns the name of the default GPU of a remote node.
       If no GPU is available, returns None.
       """
-      device_id = self.__network_node_default_cuda(addr=addr)
-      if device_id is None:
-        return None
-      
-      gpus = self.__network_node_last_gpus(addr=addr)
-      if device_id >= len(gpus):
-        return None
-      
-      return gpus[device_id].get('NAME', None)
+      default_gpu = self.network_node_default_gpu_data(addr=addr)     
+      return default_gpu.get('NAME', None)
     
     
     def network_node_default_gpu_total_mem(self, addr):
@@ -1523,15 +1547,8 @@ class NetworkMonitor(DecentrAIObject):
       Returns the memory of the default GPU of a remote node.
       If no GPU is available, returns None.
       """
-      device_id = self.__network_node_default_cuda(addr=addr)
-      if device_id is None:
-        return None
-      
-      gpus = self.__network_node_last_gpus(addr=addr)
-      if device_id >= len(gpus):
-        return None
-      
-      return gpus[device_id].get('TOTAL_MEM', None)
+      default_gpu = self.network_node_default_gpu_data(addr=addr)     
+      return default_gpu.get('TOTAL_MEM', None)
     
     
     def network_node_default_gpu_avail_mem(self, addr):
@@ -1539,15 +1556,8 @@ class NetworkMonitor(DecentrAIObject):
       Returns the available memory of the default GPU of a remote node.
       If no GPU is available, returns None.
       """
-      device_id = self.__network_node_default_cuda(addr=addr)
-      if device_id is None:
-        return None
-      
-      gpus = self.__network_node_last_gpus(addr=addr)
-      if device_id >= len(gpus):
-        return None
-      
-      return gpus[device_id].get('FREE_MEM', None)
+      default_gpu = self.network_node_default_gpu_data(addr=addr)     
+      return default_gpu.get('FREE_MEM', None)
     
     
     def network_node_default_gpu_load(self, addr):
@@ -1555,15 +1565,8 @@ class NetworkMonitor(DecentrAIObject):
       Returns the load of the default GPU of a remote node.
       If no GPU is available, returns None.
       """
-      device_id = self.__network_node_default_cuda(addr=addr)
-      if device_id is None:
-        return None
-      
-      gpus = self.__network_node_last_gpus(addr=addr)
-      if device_id >= len(gpus):
-        return None
-      
-      return gpus[device_id].get('GPU_USED', None)
+      default_gpu = self.network_node_default_gpu_data(addr=addr)     
+      return default_gpu.get('GPU_USED', None)
     
     
     def network_node_default_gpu_usage(self, addr):

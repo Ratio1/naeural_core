@@ -1232,11 +1232,14 @@ class EpochsManager(Singleton):
           gpu_mem_total = self.owner.network_node_default_gpu_total_mem(node_addr)
           gpu_mem_avail = self.owner.network_node_default_gpu_avail_mem(node_addr)
           gpu_usage = self.owner.network_node_default_gpu_usage(node_addr)
+          default_cuda = self.owner.network_node_default_cuda(node_addr, as_int=False)
           gpu_status, gpu_info = None, None # only in debug mode
+          
           # DEBUG:
           if True:
             gpu_status = self.owner.network_node_last_gpu_status(node_addr)
             gpu_info = self.owner.network_node_gpu_summary(node_addr)
+          # end DEBUG
         except:
           continue
         
@@ -1325,6 +1328,7 @@ class EpochsManager(Singleton):
             'cpu_cores_avail' : cpu_cores_avail,
             'disk_total' : disk_total,
             'disk_avail' : disk_avail,
+            'default_cuda' : default_cuda,
             'gpu_name' : gpu_name,
             'gpu_mem_total' : gpu_mem_total,
             'gpu_mem_avail' : gpu_mem_avail,

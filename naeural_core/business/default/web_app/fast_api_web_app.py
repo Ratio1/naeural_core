@@ -22,6 +22,7 @@ _CONFIG = {
 
   'PORT': None,
 
+  'ENDPOINTS': [],
   'ASSETS': None,
   'JINJA_ARGS': {},
   'TEMPLATE': 'basic_server',
@@ -223,6 +224,36 @@ class FastApiWebAppPlugin(BasePlugin):
 
     return
 
+  def __register_custom_code_endpoint(self, endpoint_name, endpoint_method, endpoint_base64_code, endpoint_arguments):
+    # First check that there is not any attribute with the same name
+    import inspect
+    existing_attribute_names = (name for name, _ in inspect.getmembers(self))
+    if endpoint_name in existing_attribute_names:
+      raise Exception("The endpoint name '{}' is already in use.".format(endpoint_name))
+
+    custom_code_method, errors, warnings = self._get_method_from_custom_code(
+      str_b64code=endpoint_base64_code,
+      self_var='plugin',
+      method_arguments=["plugin"] + endpoint_arguments
+    )
+
+    if errors is not None:
+      raise Exception("The custom code failed with the following error: {}".format(errors))
+
+    if len(warnings) > 0:
+      self.P("The custom code generated the following warnings: {}".format("\n".join(warnings)))
+
+    # Now register the custom code method as an endpoint
+    import types
+    setattr(
+      self, endpoint_name, types.MethodType(
+        FastApiWebAppPlugin.endpoint(
+          custom_code_method, method=endpoint_method
+        ), self
+      )
+    )
+    return
+
   def _init_endpoints(self) -> None:
     """
     Populate the set of jinja arguments with values needed to create http
@@ -241,6 +272,22 @@ class FastApiWebAppPlugin(BasePlugin):
     import inspect
     self._endpoints = {}
     jinja_args = []
+
+    # Check for custom endpoints sent remotely.
+    # These do not include any endpoints that serve static files or html pages.
+    configured_endpoints = self.cfg_endpoints or []
+    for dct_configured_endpoint in configured_endpoints:
+      endpoint_name = dct_configured_endpoint.get('NAME', None)
+      endpoint_method = dct_configured_endpoint.get('METHOD', "get")
+      endpoint_base64_code = dct_configured_endpoint.get('CODE', None)
+      endpoint_arguments = dct_configured_endpoint.get('ARGS', None)
+      self.__register_custom_code_endpoint(
+        endpoint_name=endpoint_name,
+        endpoint_method=endpoint_method,
+        endpoint_base64_code=endpoint_base64_code,
+        endpoint_arguments=endpoint_arguments,
+      )
+    # endfor configured endpoints
 
     def _filter(obj):
       try:

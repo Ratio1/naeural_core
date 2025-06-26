@@ -728,6 +728,21 @@ class EpochsManager(Singleton):
       prc_available = round(avail_seconds / max_possible_from_epoch_start, 4)
     return prc_available
 
+  def get_current_epoch_start(self):
+    """
+    Returns the start date of the current epoch.
+
+    The start date is computed as the genesis date plus the epoch length multiplied by the current epoch id.
+    """
+    return self.__genesis_date + timedelta(seconds=(self.epoch_length * self.get_time_epoch()))
+
+  def get_current_epoch_end(self):
+    """
+    Returns the end date of the current epoch.
+
+    The end date is computed as the start date of the current epoch plus the epoch length.
+    """
+    return self.get_current_epoch_start() + timedelta(seconds=self.epoch_length)
 
   def __recalculate_current_epoch_for_node(self, node_addr, time_between_heartbeats=10):
     """

@@ -1118,10 +1118,12 @@ class NetworkMonitor(DecentrAIObject):
       is_unsecured = not self.network_node_is_secured(addr=addr)
       return is_allowed or is_local or is_unsecured
 
-    def network_node_gpu_capability(self, addr, device_id,
-                                    min_gpu_used=20, max_gpu_used=90,
-                                    min_prc_allocated_mem=20, max_prc_allocated_mem=90,
-                                    min_gpu_mem_gb=4, max_gpu_mem_gb=30):
+    def network_node_gpu_capability(
+        self, addr, device_id, min_gpu_used=20, max_gpu_used=90,
+        min_prc_allocated_mem=20, max_prc_allocated_mem=90,
+        min_gpu_mem_gb=4, max_gpu_mem_gb=30,
+        show_warnings=False
+    ):
 
       gpus = self.__network_node_last_gpus(addr=addr)
       dct_ret = {
@@ -1132,13 +1134,13 @@ class NetworkMonitor(DecentrAIObject):
       }
 
       if not isinstance(device_id, int):
-        if device_id is not None:
-          self.P("Requested device_id '{}' in `_network_node_gpu_capability` is not integer for e2:{}".format(device_id, addr), color='r')
+        if show_warnings:
+          self.P("Requested device_id '{}' in `network_node_gpu_capability` is not integer for e2:{}".format(device_id, addr), color='r')
         return dct_ret
 
       if device_id >= len(gpus):
-        if device_id is not None:
-          self.P("Requested device_id '{}' in `_network_node_gpu_capability` not available e2:{}".format(device_id, addr), color='r')
+        if show_warnings:
+          self.P("Requested device_id '{}' in `network_node_gpu_capability` not available e2:{}".format(device_id, addr), color='r')
         return dct_ret
 
       dct_g = gpus[device_id]
@@ -1185,10 +1187,12 @@ class NetworkMonitor(DecentrAIObject):
       dct_ret['WEIGHTED_CAPABILITY'] = round(weighted_capability, 2)
       return dct_ret
 
-    def network_node_default_gpu_capability(self, addr,
-                                            min_gpu_used=20, max_gpu_used=90,
-                                            min_prc_allocated_mem=20, max_prc_allocated_mem=90,
-                                            min_gpu_mem_gb=4, max_gpu_mem_gb=30):
+    def network_node_default_gpu_capability(
+        self, addr, min_gpu_used=20, max_gpu_used=90,
+        min_prc_allocated_mem=20, max_prc_allocated_mem=90,
+        min_gpu_mem_gb=4, max_gpu_mem_gb=30,
+        show_warnings=False
+    ):
       default_cuda = self.__network_node_default_cuda(addr=addr, as_int=True)
       dct_gpu_capability = self.network_node_gpu_capability(
         addr=addr, device_id=default_cuda,
@@ -1198,15 +1202,18 @@ class NetworkMonitor(DecentrAIObject):
         max_prc_allocated_mem=max_prc_allocated_mem,
         min_gpu_mem_gb=min_gpu_mem_gb,
         max_gpu_mem_gb=max_gpu_mem_gb,
+        show_warnings=show_warnings
       )
 
       return dct_gpu_capability
     
 
-    def network_node_gpus_capabilities(self, addr,
-                                       min_gpu_used=20, max_gpu_used=90,
-                                       min_prc_allocated_mem=20, max_prc_allocated_mem=90,
-                                       min_gpu_mem_gb=8, max_gpu_mem_gb=30):
+    def network_node_gpus_capabilities(
+        self, addr, min_gpu_used=20, max_gpu_used=90,
+        min_prc_allocated_mem=20, max_prc_allocated_mem=90,
+        min_gpu_mem_gb=8, max_gpu_mem_gb=30,
+        show_warnings=False
+    ):
       capabilities = []
       for device_id in range(len(self.__network_node_last_gpus(addr=addr))):
         dct_gpu_capability = self.network_node_gpu_capability(
@@ -1217,6 +1224,7 @@ class NetworkMonitor(DecentrAIObject):
           max_prc_allocated_mem=max_prc_allocated_mem,
           min_gpu_mem_gb=min_gpu_mem_gb,
           max_gpu_mem_gb=max_gpu_mem_gb,
+          show_warnings=show_warnings
         )
 
         capabilities.append(dct_gpu_capability)

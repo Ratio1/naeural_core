@@ -67,6 +67,8 @@ class _GPUMixin(object):
     gpu_memory_map = dict(zip(range(len(gpu_memory)), gpu_memory))
     return gpu_memory_map
 
+  def skip_gpu_info_check(self):
+    return vars(self).get('_GPUMixin__no_gpu_avail', False)
 
   def gpu_info(self, show=False, mb=False, current_pid=False):
     """
@@ -91,7 +93,7 @@ class _GPUMixin(object):
     """
 
     def _main_func():
-      if vars(self).get('__no_gpu_avail', False):
+      if self.skip_gpu_info_check():
         return []
 
       try:
@@ -104,7 +106,6 @@ class _GPUMixin(object):
         )
         self.__no_gpu_avail = True
         return None
-      
 
       nvsmires, device_props, dct_proc_info = None, None, None
       try:
@@ -115,7 +116,7 @@ class _GPUMixin(object):
         pynvml_avail = True
       except:
         pynvml_avail = False
-      
+
       if not pynvml_avail or len(nvsmires) == 0:
         self.__no_gpu_avail = True
 
@@ -158,7 +159,7 @@ class _GPUMixin(object):
               gpu_used = -1
             gpu_temp = dct_gpu['temperature']['gpu_temp']
             gpu_temp_max = dct_gpu['temperature']['gpu_temp_max_threshold']
-            
+
             fan_speed = dct_gpu.get('fan_speed', -1)
             fan_speed = -1 if fan_speed == 'N/A' else fan_speed
             fan_speed_unit = dct_gpu.get('fan_speed_unit', "N/A")
@@ -178,7 +179,7 @@ class _GPUMixin(object):
                 current_pid_gpus.append(device_id)
             #endfor
             dct_device['PROCESSES'] = processes
-            dct_device['USED_BY_PROCESS'] = device_id in current_pid_gpus            
+            dct_device['USED_BY_PROCESS'] = device_id in current_pid_gpus
           else:
             str_os = platform.platform()
             ## check if platform is Tegra and record
@@ -206,14 +207,14 @@ class _GPUMixin(object):
           dct_device['GPU_USED'] = gpu_used
           dct_device['GPU_TEMP'] = gpu_temp
           dct_device['GPU_TEMP_MAX'] = gpu_temp_max
-          dct_device['GPU_FAN_SPEED'] = fan_speed 
+          dct_device['GPU_FAN_SPEED'] = fan_speed
           dct_device['GPU_FAN_SPEED_UNIT'] = fan_speed_unit
 
           lst_inf.append(dct_device)
         #end for all devices
       except Exception as e:
         self.P("gpu_info exception for device_id {}: {}\n devicepros: {}\n nvsmires: {}\n dct_proc_info: {}".format(
-          device_id, e, 
+          device_id, e,
           device_props, nvsmires, dct_proc_info), color='r'
         )
 
@@ -242,7 +243,7 @@ class _GPUMixin(object):
     Returns GPU info for a specific device
     """
     res = {}
-    if not vars(self).get('__no_gpu_avail', False):
+    if not self.skip_gpu_info_check():
       gpu_info = self.gpu_info()
       if gpu_info is not None and len(gpu_info) > 0 and device_id < len(gpu_info):
         res = gpu_info[device_id]
@@ -254,7 +255,7 @@ class _GPUMixin(object):
     Returns total memory of a specific GPU device
     """
     res = 0
-    if not vars(self).get('__no_gpu_avail', False):
+    if not self.skip_gpu_info_check():
       device_info = self.get_gpu_info(device_id=device_id, mb=mb)
       if device_info is not None and len(device_info) > 0:
         res = device_info['TOTAL_MEM']
@@ -266,7 +267,7 @@ class _GPUMixin(object):
     Returns free memory of a specific GPU device
     """
     res = 0
-    if not vars(self).get('__no_gpu_avail', False):
+    if not self.skip_gpu_info_check():
       device_info = self.get_gpu_info(device_id=device_id, mb=mb)
       if device_info is not None and len(device_info) > 0:
         res = device_info['FREE_MEM']
@@ -278,7 +279,7 @@ class _GPUMixin(object):
     Returns name of a specific GPU device
     """
     res = 'N/A'
-    if not vars(self).get('__no_gpu_avail', False):
+    if not self.skip_gpu_info_check():
       device_info = self.get_gpu_info(device_id=device_id)
       if device_info is not None and len(device_info) > 0:
         res = device_info['NAME']
@@ -290,7 +291,7 @@ class _GPUMixin(object):
     Returns fan speed of a specific GPU device
     """
     res = 'N/A'
-    if not vars(self).get('__no_gpu_avail', False):
+    if not self.skip_gpu_info_check():
       device_info = self.get_gpu_info(device_id=device_id)
       if device_info is not None and len(device_info) > 0:
         res = device_info.get('GPU_FAN_SPEED')

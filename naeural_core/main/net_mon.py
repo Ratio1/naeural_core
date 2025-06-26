@@ -518,7 +518,7 @@ class NetworkMonitor(DecentrAIObject):
   if True:
     def __network_node_machine_memory(self, addr):
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
-      return hearbeat[ct.HB.MACHINE_MEMORY]
+      return hearbeat.get(ct.HB.MACHINE_MEMORY)
   #endif
 
 
@@ -622,7 +622,7 @@ class NetworkMonitor(DecentrAIObject):
 
     def __network_node_last_gpus(self, addr):
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
-      gpus = hearbeat[ct.HB.GPUS]
+      gpus = hearbeat.get(ct.HB.GPUS, "N/A")
       if isinstance(gpus, str):
         gpus = [{}]
       return gpus
@@ -676,7 +676,7 @@ class NetworkMonitor(DecentrAIObject):
   if True:
     def __network_node_total_disk(self, addr):
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
-      return hearbeat[ct.HB.TOTAL_DISK]
+      return hearbeat.get(ct.HB.TOTAL_DISK, -1)
   #endif
 
   # "AVAILABLE_DISK" section (protected methods)
@@ -696,7 +696,8 @@ class NetworkMonitor(DecentrAIObject):
     def __network_node_last_available_disk(self, addr, norm=True):
       total_disk = self.__network_node_total_disk(addr=addr)
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
-      return hearbeat[ct.HB.AVAILABLE_DISK] / total_disk if norm else hearbeat[ct.HB.AVAILABLE_DISK]
+      avail_size = hearbeat.get(ct.HB.AVAILABLE_DISK, 0)
+      return avail_size / total_disk if norm else avail_size
   #endif
 
   # "SERVING_PIDS" section (protected methods)
@@ -750,6 +751,29 @@ class NetworkMonitor(DecentrAIObject):
 
   # PUBLIC METHODS SECTION
   if True:    
+    
+    
+    
+    def network_node_total_cpu_cores(self, addr):
+      """
+      Returns the number of CPU cores of the node.
+      """
+      hearbeat = self.__network_node_last_heartbeat(addr=addr)
+      return hearbeat.get(ct.HB.CPU_NR_CORES)
+    
+    
+    def network_node_avail_cpu_cores(self, addr):
+      """
+      Returns the number of available CPU cores of the node.
+      The available cores are computed as the total cores weighted by the CPU usage
+      in the last heartbeat.
+      """
+      hearbeat = self.__network_node_last_heartbeat(addr=addr)
+      cpu_used = hearbeat.get(ct.HB.CPU_USED, 0)
+      known_cores = self.network_node_total_cpu_cores(addr=addr)
+      avail_cores = (1 - cpu_used / 100) * known_cores
+      return avail_cores
+
 
     def network_node_get_cpu_avail_cores(
       self, addr, minutes=60, dt_now=None, 
@@ -770,6 +794,16 @@ class NetworkMonitor(DecentrAIObject):
         known_cores = hearbeat.get(ct.HB.CPU_NR_CORES, 1)
         avail_cores = (1 - cpu_mean) * known_cores
       return avail_cores
+    
+    
+    def network_node_average_avail_cpu_cores(self, addr):
+      """
+      Returns the average available CPU cores for a node in the last hour.
+      The available cores are computed as the total cores weighted by the CPU usage
+      """
+      return self.network_node_get_cpu_avail_cores(
+        addr=addr, minutes=60, dt_now=None, reverse_order=True
+      )
 
     
     def network_node_last_comm_info(self, addr):
@@ -901,19 +935,37 @@ class NetworkMonitor(DecentrAIObject):
         result = uptime_sec
       return result
 
+    def network_node_total_disk(self, addr):
+      """
+      Returns the total disk of the node.
+      """
+      total_disk = self.__network_node_total_disk(addr=addr)
+      return total_disk
 
-    def network_node_available_disk(self, addr):
-      available_disk = self.__network_node_last_available_disk(addr=addr, norm=False)
+    def network_node_available_disk(self, addr, norm=False):
+      available_disk = self.__network_node_last_available_disk(addr=addr, norm=norm)
       return available_disk
+    
+    
+    def network_node_avail_disk(self, addr, norm=False):
+      """
+      Returns the available disk of the node.
+      If norm is True, returns the percentage of available disk.
+      """
+      return self.network_node_available_disk(addr=addr, norm=norm)
+    
+
 
     def network_node_available_disk_prc(self, addr):
       prc_available_disk = self.__network_node_last_available_disk(addr=addr, norm=True)
       return prc_available_disk
 
+
     def network_node_is_ok_available_disk_prc(self, addr, min_prc_available=0.15):
       # can create other heuristics based on what happened on the last x minutes interval (using _network_node_past_available_disk_by_interval)
       prc_available_disk = self.network_node_available_disk_prc(addr=addr)
       return prc_available_disk >= min_prc_available
+
 
     def network_node_is_ok_available_disk_size(self, addr, min_gb_available=50):
       # can create other heuristics based on what happened on the last x minutes interval (using _network_node_past_available_disk_by_interval)
@@ -921,13 +973,30 @@ class NetworkMonitor(DecentrAIObject):
       return available_disk >= min_gb_available
 
 
-    def network_node_available_memory(self, addr):
-      available_mem = self.__network_node_last_available_memory(addr=addr, norm=False)
+    def network_node_available_memory(self, addr, norm=False):
+      available_mem = self.__network_node_last_available_memory(addr=addr, norm=norm)
       return available_mem
+
 
     def network_node_available_memory_prc(self, addr):
       prc_available_mem = self.__network_node_last_available_memory(addr=addr, norm=True)
       return prc_available_mem
+
+    
+    def network_node_total_mem(self, addr):
+      """
+      Returns the total memory of the node.
+      """
+      return self.__network_node_machine_memory(addr=addr)
+    
+    
+    def network_node_avail_mem(self, addr, norm=False):
+      """
+      Returns the available memory of the node.
+      If norm is True, returns the percentage of available memory.
+      """
+      return self.network_node_available_memory(addr=addr, norm=norm)
+    
 
     def network_node_is_ok_available_memory_prc(self, addr, min_prc_available=0.20):
       # can create other heuristics based on what happened on the last x minutes interval (using _network_node_past_available_memory_by_interval)
@@ -1431,7 +1500,98 @@ class NetworkMonitor(DecentrAIObject):
         'max_temp_sensor' :  max_temp_sensor[-1] if len(max_temp_sensor) > 0 else None,
       }
       return result
+    
+    
+    def network_node_default_gpu_name(self, addr):
+      """
+      Returns the name of the default GPU of a remote node.
+      If no GPU is available, returns None.
+      """
+      device_id = self.__network_node_default_cuda(addr=addr)
+      if device_id is None:
+        return None
       
+      gpus = self.__network_node_last_gpus(addr=addr)
+      if device_id >= len(gpus):
+        return None
+      
+      return gpus[device_id].get('NAME', None)
+    
+    
+    def network_node_default_gpu_total_mem(self, addr):
+      """
+      Returns the memory of the default GPU of a remote node.
+      If no GPU is available, returns None.
+      """
+      device_id = self.__network_node_default_cuda(addr=addr)
+      if device_id is None:
+        return None
+      
+      gpus = self.__network_node_last_gpus(addr=addr)
+      if device_id >= len(gpus):
+        return None
+      
+      return gpus[device_id].get('TOTAL_MEM', None)
+    
+    
+    def network_node_default_gpu_avail_mem(self, addr):
+      """
+      Returns the available memory of the default GPU of a remote node.
+      If no GPU is available, returns None.
+      """
+      device_id = self.__network_node_default_cuda(addr=addr)
+      if device_id is None:
+        return None
+      
+      gpus = self.__network_node_last_gpus(addr=addr)
+      if device_id >= len(gpus):
+        return None
+      
+      return gpus[device_id].get('FREE_MEM', None)
+    
+    
+    def network_node_default_gpu_load(self, addr):
+      """
+      Returns the load of the default GPU of a remote node.
+      If no GPU is available, returns None.
+      """
+      device_id = self.__network_node_default_cuda(addr=addr)
+      if device_id is None:
+        return None
+      
+      gpus = self.__network_node_last_gpus(addr=addr)
+      if device_id >= len(gpus):
+        return None
+      
+      return gpus[device_id].get('GPU_USED', None)
+    
+    
+    def network_node_default_gpu_usage(self, addr):
+      """
+      Returns the usage of the default GPU of a remote node.
+      If no GPU is available, returns None.
+      """
+      return self.network_node_default_gpu_load(addr=addr)
+    
+    def network_node_last_gpu_status(self, addr):
+      """
+      Returns the last GPU status of a remote node.
+      If no GPU is available, returns None.
+      """
+      gpus = self.__network_node_last_gpus(addr=addr)
+      return gpus
+    
+    
+    def network_node_gpu_summary(self, addr):
+      """
+      Returns a summary of the GPU status of a remote node.
+      If no GPU is available, returns None.
+      """
+      hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      gpu_info = hb.get(ct.HB.GPU_INFO, None)
+      return gpu_info
+
+    
       
     def network_node_default_gpu_history(
       self, addr, minutes=60, dt_now=None, 

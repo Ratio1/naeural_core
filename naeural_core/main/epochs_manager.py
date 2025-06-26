@@ -1204,6 +1204,24 @@ class EpochsManager(Singleton):
             dt_now=self.get_current_date(),
             as_sec=True
           )
+          
+          mem_total = self.owner.network_node_total_mem(node_addr)
+          mem_avail = self.owner.network_node_avail_mem(node_addr)
+          cpu_cores = self.owner.network_node_total_cpu_cores(node_addr)
+          cpu_cores_avail = self.owner.network_node_avail_cpu_cores(node_addr)
+          disk_total = self.owner.network_node_total_disk(node_addr)
+          disk_avail = self.owner.network_node_avail_disk(node_addr)
+          
+          # GPU
+          gpu_name = self.owner.network_node_default_gpu_name(node_addr)
+          gpu_mem_total = self.owner.network_node_default_gpu_total_mem(node_addr)
+          gpu_mem_avail = self.owner.network_node_default_gpu_avail_mem(node_addr)
+          gpu_usage = self.owner.network_node_default_gpu_usage(node_addr)
+          gpu_status, gpu_info = None, None # only in debug mode
+          # DEBUG:
+          if True:
+            gpu_status = self.owner.network_node_last_gpu_status(node_addr)
+            gpu_info = self.owner.network_node_gpu_summary(node_addr)
         except:
           continue
         
@@ -1284,6 +1302,21 @@ class EpochsManager(Singleton):
           'score' : score,
           'first_check' : first_seen,
           'last_check' : last_seen,
+          
+          'resources' : {
+            'mem_total' : mem_total,
+            'mem_avail' : mem_avail,
+            'cpu_cores' : cpu_cores,
+            'cpu_cores_avail' : cpu_cores_avail,
+            'disk_total' : disk_total,
+            'disk_avail' : disk_avail,
+            'gpu_name' : gpu_name,
+            'gpu_mem_total' : gpu_mem_total,
+            'gpu_mem_avail' : gpu_mem_avail,
+            'gpu_usage' : gpu_usage,
+            'gpu_status' : gpu_status,
+            'gpu_info' : gpu_info,
+          },
           
           'current_epoch' : {
             'id' : node_current_epoch_id,

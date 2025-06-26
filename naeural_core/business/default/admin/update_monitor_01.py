@@ -135,8 +135,8 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     restart_time = self.time() + self.__restart_offset
     restart_time_normalized = restart_time % (24 * 3600)
     offset = 30 * 60  # 30 minutes offset
-    upper_bound_normalized = (self.netmon.epoch_manager.get_current_epoch_end() + offset) % (24 * 3600)
-    lower_bound_normalized = (self.netmon.epoch_manager.get_current_epoch_end() - offset) % (24 * 3600)
+    upper_bound_normalized = (self.netmon.epoch_manager.get_current_epoch_end().timestamp() + offset) % (24 * 3600)
+    lower_bound_normalized = (self.netmon.epoch_manager.get_current_epoch_end().timestamp() - offset) % (24 * 3600)
 
     if restart_time_normalized < upper_bound_normalized and restart_time_normalized > lower_bound_normalized:
       self.__restart_offset += 3 * 3600  # add 3 hours to the offset

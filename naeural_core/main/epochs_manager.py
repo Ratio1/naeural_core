@@ -728,7 +728,7 @@ class EpochsManager(Singleton):
       prc_available = round(avail_seconds / max_possible_from_epoch_start, 4)
     return prc_available
 
-  def get_current_epoch_start(self):
+  def get_current_epoch_start(self) -> datetime.datetime:
     """
     Returns the start date of the current epoch.
 
@@ -736,7 +736,7 @@ class EpochsManager(Singleton):
     """
     return self.__genesis_date + timedelta(seconds=(self.epoch_length * self.get_time_epoch()))
 
-  def get_current_epoch_end(self):
+  def get_current_epoch_end(self) -> datetime.datetime:
     """
     Returns the end date of the current epoch.
 

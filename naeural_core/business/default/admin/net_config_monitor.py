@@ -24,7 +24,8 @@
 
 
 """
-from naeural_core.business.base.network_processor import NetworkProcessorPlugin 
+from naeural_core.business.base.network_processor import NetworkProcessorPlugin
+from naeural_core.constants import NET_CONFIG_MONITOR_SHOW_EACH
 
 
 __VER__ = '1.1.0'
@@ -56,7 +57,7 @@ _CONFIG = {
   'SEND_TO_ALLOWED_EACH' : 600, # runs the send to allowed nodes logic every 10 minutes
   
   
-  'SHOW_EACH' : 60,
+  'SHOW_EACH' : NET_CONFIG_MONITOR_SHOW_EACH,
   
   'DEBUG_NETMON_COUNT' : 1,
   
@@ -95,6 +96,12 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self._get_active_plugins_instances = self.global_shmem.get("get_active_plugins_instances")
     if not callable(self._get_active_plugins_instances):
       self.P(" ERROR: `get_active_plugins_instances` not found!", color='r', boxed=True)
+    msg = f'NetConfigMonitorPlugin initialised:'
+    msg += f'\n  - {self.cfg_show_each=}'
+    msg += f'\n  - {self.cfg_send_get_config_each=}'
+    msg += f'\n  - {self.cfg_node_request_configs_each=}'
+    msg += f'\n  - {self.cfg_send_to_allowed_each=}'
+    self.P(msg)
     return
   
   
@@ -184,7 +191,8 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     """
     This function will show the known nodes every `cfg_show_each` seconds.
     """
-    if ((self.time() - self.__last_shown) < self.cfg_show_each):
+    configured_show_each = self.cfg_show_each
+    if configured_show_each is None or (self.time() - self.__last_shown) < configured_show_each:
       return
     self.__last_shown = self.time()
     msg = "Known nodes: "
@@ -202,7 +210,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
           names = [p.get("NAME", "NONAME") for p in pipelines]
           me_msg = " (ME)"
         msg += f"\n  - '{eeid}' <{addr}>{me_msg} has {len(pipelines)} pipelines: {names}"
-      #endfor __allowed_nodes    
+      #endfor __allowed_nodes
     self.P(msg)
     return
   

@@ -9,6 +9,7 @@ the network status to the database and triggering the epoch serialization
 """
 from naeural_core.business.base import BasePluginExecutor
 from naeural_core.business.mixins_admin.network_monitor_mixin import _NetworkMonitorMixin, NMonConst
+from naeural_core.constants import NET_MON_01_SUPERVISOR_LOG_TIME
 
 __VER__ = '1.0.1'
 
@@ -21,7 +22,7 @@ _CONFIG = {
   
   "SUPERVISOR"                    : False, # obsolete as of 2025-02-03
   "SUPERVISOR_ALERT_TIME"         : 30,
-  "SUPERVISOR_LOG_TIME"           : 60,
+  "SUPERVISOR_LOG_TIME"           : NET_MON_01_SUPERVISOR_LOG_TIME,
   "SEND_IF_NOT_SUPERVISOR"        : False,
   
   "ALERT_RAISE_CONFIRMATION_TIME" : 1,
@@ -118,6 +119,7 @@ class NetMon01Plugin(
     msg += f'\n  - {self.send_only_online=}'
     msg += f'\n  - {self.cfg_supervisor=}'
     msg += f'\n  - {self.is_supervisor_node=}'
+    msg += f'\n  - {self.cfg_supervisor_log_time=}'
     self.P(msg)
     return
   
@@ -244,8 +246,10 @@ class NetMon01Plugin(
       current_network = current_nodes
       current_alerted = alerted_nodes
       is_supervisor = True  
-      
-      if (self.time() - self.__supervisor_log_time) > self.cfg_supervisor_log_time:
+
+      configured_supervisor_log_time = self.cfg_supervisor_log_time
+      elapsed = self.time() - self.__supervisor_log_time
+      if configured_supervisor_log_time is not None and elapsed > configured_supervisor_log_time:
         str_log = "***** Supervisor node sending status for network of {} nodes *****".format(len(current_network))
         known_nodes = self.netmon.network_known_nodes()
         for addr in known_nodes:

@@ -43,6 +43,17 @@ EPOCH_MAX_VALUE = 255
 ###################################################
 ###################################################
 
+###################################################
+############    Network constants    ##############
+###################################################
+CURRENT_EVM_NET_CONSTANTS = BASE_CT.EVM_NET_CONSTANTS[CURRENT_NETWORK]
+NET_MON_01_SUPERVISOR_LOG_TIME = CURRENT_EVM_NET_CONSTANTS[BASE_CT.EvmNetConstants.EE_NET_MON_01_SUPERVISOR_LOG_TIME_KEY]
+NET_CONFIG_MONITOR_SHOW_EACH = CURRENT_EVM_NET_CONSTANTS[BASE_CT.EvmNetConstants.NET_CONFIG_MONITOR_SHOW_EACH_KEY]
+
+###################################################
+###################################################
+###################################################
+
 EE_ALIAS_MAX_SIZE = 15
 
 

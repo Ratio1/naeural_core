@@ -1231,10 +1231,10 @@ class Orchestrator(DecentrAIObject,
     self._maybe_gracefull_stop()
     if self._comm_manager is not None:
       self._comm_manager.close()
-    if self._capture_manager is not None:
-      self._capture_manager.close()
     if self._business_manager is not None:
       self._business_manager.close()
+    if self._capture_manager is not None:
+      self._capture_manager.close()
     if self._serving_manager is not None:
       self._serving_manager.stop_all_servers()
     return

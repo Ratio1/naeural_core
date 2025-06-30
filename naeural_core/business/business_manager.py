@@ -22,6 +22,7 @@ class BusinessManager(Manager):
     self.owner = owner
     self.__netmon_instance = None
     self._dct_config_streams = None
+    self.__dauth_hash = None
     self.is_supervisor_node = self.owner.is_supervisor_node
     self.__evm_network = self.owner.evm_network
     self.shmem['is_supervisor_node'] = self.is_supervisor_node
@@ -222,6 +223,21 @@ class BusinessManager(Manager):
           jobs.append((initiator_addr, initiator_id, modified_by_addr, modified_by_id, session_id, pipeline_name, signature, instance_id, config_instance))
     return jobs
 
+  def __maybe_register_special_plugin_instance_hash(self, instance_hash, signature):
+    if signature.upper() == ct.ADMIN_PIPELINE_DAUTH.upper():
+      self.__dauth_hash = instance_hash
+    return
+
+  def __maybe_shutdown_special_instances(self):
+    """
+    This method will check if the special instances are still running and if not, it will shutdown them.
+    """
+    if self.__dauth_hash is not None:
+      self.P("Closing dAuth plugin instance {}...".format(self.__dauth_hash), color='y')
+      self._send_stop_signal_to_plugin(self.__dauth_hash, forced=True)
+    #endif
+    return
+
   def _check_instances(self):
     """
     IMPORTANT: this code section is critical wrt overall main loop functioning!
@@ -341,6 +357,7 @@ class BusinessManager(Manager):
         #end try-except
 
         self._dct_current_instances[instance_hash] = plugin
+        self.__maybe_register_special_plugin_instance_hash(instance_hash=instance_hash, signature=signature)
 
         if plugin is None:
           continue
@@ -446,6 +463,9 @@ class BusinessManager(Manager):
 
   def close(self):
     self.P("Stopping all business plugins...", color='y')
+    # First, shutdown special instances
+    self.__maybe_shutdown_special_instances()
+    # Now, we can shutdown normal instances
     keys = list(self._dct_current_instances.keys())
     for _hash in keys:
       self._send_stop_signal_to_plugin(instance_hash=_hash, forced=True)

@@ -129,11 +129,8 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
 
   def __maybe_config_supervisor_restart_offset(self):
     """Configures the restart offset for the supervisor node"""
-    self.P("Configuring restart offset for the supervisor node...")
     if not self.is_supervisor_node:
-      self.P("This is not a supervisor node. Skipping restart offset configuration.", color='y')
       return
-    self.P("This is a supervisor node. Configuring restart offset...")
     self.__restart_offset = 36 * 3600 + self.np.random.randint(0, 36 * 3600)  # 36 hours + random
     restart_time = self.time() + self.__restart_offset
     restart_time_normalized = restart_time % (24 * 3600)
@@ -298,17 +295,8 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
 
 
   def needs_forced_restart(self):
-    self.P("Checking if forced restart is needed...")
-    self.P("  Restart offset: {}".format(self.__restart_offset))
-    self.P("  Node running time: {}".format(self.get_node_running_time_str()))
-    self.P("  Force restart after: {}".format(self.cfg_force_restart_after))
-    self.P("  Restart initiated: {}".format(self.__restart_inititated))
-    self.P("self.get_node_running_time() = {}".format(self.get_node_running_time()))
-    self.P(f"self.__restart_offset and self.get_node_running_time() > self.__restart_offset = {self.__restart_offset and self.get_node_running_time() > self.__restart_offset}")
     if self.__restart_offset and self.get_node_running_time() > self.__restart_offset:
-      self.P(f"Forced restart required after {self.__restart_offset}s on node already running for {self.get_node_running_time()}s. Please check your configuration!", color='r')
       return True
-    self.P("No forced restart required based on restart offset.")
 
     if self.cfg_force_restart_after is None:
       return False

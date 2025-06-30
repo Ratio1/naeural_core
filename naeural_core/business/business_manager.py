@@ -224,7 +224,7 @@ class BusinessManager(Manager):
     return jobs
 
   def __maybe_register_special_plugin_instance_hash(self, instance_hash, signature):
-    if signature == ct.ADMIN_PIPELINE_DAUTH:
+    if signature.upper() == ct.ADMIN_PIPELINE_DAUTH.upper():
       self.__dauth_hash = instance_hash
     return
 
@@ -357,7 +357,7 @@ class BusinessManager(Manager):
         #end try-except
 
         self._dct_current_instances[instance_hash] = plugin
-        self.__maybe_register_special_plugin_instance_hash(instance_hash, signature)
+        self.__maybe_register_special_plugin_instance_hash(instance_hash=instance_hash, signature=signature)
 
         if plugin is None:
           continue

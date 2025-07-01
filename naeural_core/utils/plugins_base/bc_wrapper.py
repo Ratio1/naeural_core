@@ -424,6 +424,21 @@ class BCWrapper:
   def eth_addr_list_to_internal_addr_list(self, lst_eth):
     return [self.eth_addr_to_internal_addr(eth) for eth in lst_eth]
   
+  def eth_addr_to_checksum_address(self, address: str):
+    """
+    Converts an address to a checksum address
+
+    Parameters
+    ----------
+    address : str
+        The address to be converted
+
+    Returns
+    -------
+    str
+        The checksum address
+    """
+    return self.__bc.web3_to_checksum_address(address)
   
   def get_eth_oracles(self):
     """

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from copy import deepcopy
 from threading import Lock
-from time import time
+from time import time, sleep
 
 
 from naeural_core import constants as ct
@@ -296,7 +296,8 @@ class EpochsManager(Singleton):
   def __compute_eth_to_internal(self):
     if not hasattr(self.owner, "node_address_to_eth_address"):
       return
-    for node_addr in self.__data:
+    node_addresses = list(self.__data.keys())
+    for node_addr in node_addresses:
       eth_node_addr = self.owner.node_address_to_eth_address(node_addr)
       self.__eth_to_node[eth_node_addr] = node_addr
     return
@@ -397,10 +398,26 @@ class EpochsManager(Singleton):
       self.P("Previous epochs state found. Current oracle era specs:\n{}".format(
         json.dumps(self.get_era_specs(), indent=2)
       ))
-      _full_data = self.log.load_pickle_from_data(
-        fn=FN_NAME,
-        subfolder_path=FN_SUBFOLDER
-      )
+      max_retries = 5
+      cnt_retries = 0
+      sleep_seconds = 1
+      _full_data = None
+      while cnt_retries < max_retries and _full_data is None:
+        self.P(f"Attempting to load epochs status from {FN_FULL} [{cnt_retries + 1}/{max_retries}]")
+        _full_data = self.log.load_pickle_from_data(
+          fn=FN_NAME,
+          subfolder_path=FN_SUBFOLDER
+        )
+        if _full_data is None:
+          to_retry = cnt_retries < max_retries - 1
+          retrying_str = f"Retrying in {sleep_seconds} seconds..." if to_retry else "Giving up."
+          self.P(f"Error loading epochs status from {FN_FULL}. {retrying_str}", color='r')
+          cnt_retries += 1
+          if to_retry:
+            sleep(sleep_seconds)
+        else:
+          self.P(f"Successfully loaded epochs status from {FN_FULL}", color='g')
+      # endwhile retries
       if _full_data is not None:
         missing_fields = False
         try:
@@ -754,7 +771,7 @@ class EpochsManager(Singleton):
     """
     return self.get_current_epoch_start() + timedelta(seconds=self.epoch_length)
 
-  def __recalculate_current_epoch_for_node(self, node_addr, time_between_heartbeats=10):
+  def __recalculate_current_epoch_for_node(self, node_addr, time_between_heartbeats=10, return_msg=False):
     """
     This method recalculates the current epoch availability for a node. 
     It should be used when the epoch changes just before resetting the timestamps.
@@ -772,7 +789,9 @@ class EpochsManager(Singleton):
     prc_available = round(avail_seconds / max_possible, 4) # DO NOT USE 100% but 1.0 
     record_value = round(prc_available * EPOCH_MAX_VALUE)
     self.__data[node_addr][EPCT.EPOCHS][current_epoch] = record_value
-    
+    log_msg = None
+    log_msg_color = None
+
     if self.__debug:
       try:
         node_name = self.__data[node_addr][EPCT.NAME]
@@ -782,13 +801,20 @@ class EpochsManager(Singleton):
           start_date = self.date_to_str(lst_timestamps[0])
           end_date = self.date_to_str(lst_timestamps[-1])
         str_node_addr = node_addr[:8] + '...' + node_addr[-3:]
-        self.P("{:<8}<{}> avail in ep {}: {} ({:.2f}%) from {} to {}".format(
+        log_msg = "{:<8}<{}> avail in ep {}: {} ({:.2f}%) from {} to {}".format(
           node_name, str_node_addr, current_epoch, 
           record_value, prc_available * 100, start_date, end_date
-        ))
+        )
       except Exception as e:
-        self.P("Error calculating availability for node: {}".format(node_addr), color='r')
-        self.P(str(e), color='r')
+        log_msg = "Error calculating availability for node: {}".format(node_addr)
+        log_msg += f"\n{str(e)}"
+        log_msg_color = "r"
+      if log_msg is not None:
+        if return_msg:
+          return prc_available, current_epoch, log_msg, log_msg_color
+        self.P(log_msg, color=log_msg_color)
+      # endif log_msg is not None
+    # endif debug
     return prc_available, current_epoch
 
 
@@ -826,11 +852,21 @@ class EpochsManager(Singleton):
       self.P(msg, color='r')
     else:
       self.start_timer('recalc_all_nodes_epoch')
+      logs, logs_colors = [], []
       for node_addr in self.__data:
         self.start_timer('recalc_node_epoch')
-        self.__recalculate_current_epoch_for_node(node_addr)
+        prc_avail, current_epoch, log_msg, log_msg_color = self.__recalculate_current_epoch_for_node(
+          node_addr=node_addr,
+          return_msg=True
+        )
         self.stop_timer('recalc_node_epoch')
+        logs.append(log_msg)
+        logs_colors.append(log_msg_color)
       self.stop_timer('recalc_all_nodes_epoch')
+      all_logs_color = 'r' if 'r' in logs_colors else None
+      all_logs_str = f"Recalculated epoch {current_epoch} availability for all nodes:\n\t"
+      all_logs_str += '\n\t'.join(logs)
+      self.P(all_logs_str, color=all_logs_color)
     # endif current node was not 100% available
     return
 

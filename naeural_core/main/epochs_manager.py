@@ -59,6 +59,8 @@ EPOCHMON_MUTEX = 'epochmon_mutex'
 
 INITIAL_SYNC_EPOCH = 0  # TODO: add initial sync epoch
 
+STATS_CACHE_REFRESH_SECONDS = 60 * 2  # 2s minutes
+
 try:
   EPOCH_MANAGER_DEBUG = int(os.environ.get(ct.EE_EPOCH_MANAGER_DEBUG, 1))
 except Exception as e:
@@ -178,6 +180,10 @@ class EpochsManager(Singleton):
     self.__data = {}
     self.__full_data = {}
     self.__eth_to_node = {}
+    
+    self.__current_stats = None
+    self.__current_stats_timestamp = 0
+    
     try:
       debug = int(debug)
     except Exception as e:
@@ -1231,7 +1237,38 @@ class EpochsManager(Singleton):
     return dct_result
 
 
-  def get_stats(self, display=False, online_only=False):
+  
+  def get_stats(self, display=False, online_only=False, force_refresh=False):
+    """
+    Returns the overall statistics for all nodes.
+    
+    Parameters
+    ----------
+    display : bool
+      If True, the statistics are displayed in the console.
+      
+    online_only : bool
+      If True, only the online nodes are considered in the statistics.
+      
+    Returns
+    -------
+    dict
+      The statistics dictionary.
+    """
+    stats = self._maybe_calculate_stats(display=display, online_only=online_only, force_refresh=force_refresh)
+    if display:
+      self.P("Overall statistics:\n{}".format(json.dumps(stats, indent=2)))
+    return stats
+
+
+  def _maybe_calculate_stats(self, display=False, online_only=False, force_refresh=False):
+    if time() > (self.__current_stats_timestamp + STATS_CACHE_REFRESH_SECONDS) or self.__current_stats is None or force_refresh:
+      self.__current_stats = self.get_stats(display=display, online_only=online_only)
+      self.__current_stats_timestamp = time()
+    return self.__current_stats
+
+
+  def _get_stats(self, display=False, online_only=False):
     """
     Returns the overall statistics for all nodes.
     """

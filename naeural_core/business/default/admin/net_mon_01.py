@@ -240,6 +240,7 @@ class NetMon01Plugin(
         self.P("Saving netmon status for {} nodes".format(len(current_nodes)))
         self.netmon.network_save_status()
       #endif save status
+      self.netmon.epoch_manager._maybe_calculate_stats()
 
       is_anomaly, alerted_nodes = self._supervisor_check()
       self.alerter_add_observation(int(is_anomaly))        

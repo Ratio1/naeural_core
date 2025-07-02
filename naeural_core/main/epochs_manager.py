@@ -55,6 +55,7 @@ FN_SUBFOLDER = 'network_monitor'
 FN_FULL = FN_SUBFOLDER + '/' + FN_NAME
 
 EPOCHMON_MUTEX = 'epochmon_mutex'
+NETWORK_STATS_MUTEX = 'network_stats_mutex'
 
 
 INITIAL_SYNC_EPOCH = 0  # TODO: add initial sync epoch
@@ -728,28 +729,62 @@ class EpochsManager(Singleton):
       return avail_seconds, lst_timestamps, current_epoch
     return avail_seconds
     
-  def get_current_epoch_availability(self, node_addr=None, time_between_heartbeats=10):
+  def get_current_epoch_availability(
+      self, node_addr=None, time_between_heartbeats=10,
+      scale_to_epoch_length=False, return_absolute=False,
+      return_max=False
+  ):
+    """
+    Returns the current epoch availability for a node as a percentage of the maximum possible availability.
+    Parameters
+    ----------
+    node_addr : str, optional
+      The node address. If None, the current node address is used.
+    time_between_heartbeats : int, optional
+      The time between heartbeats in seconds. Default is 10 seconds.
+    scale_to_epoch_length : bool, optional
+      If True, the availability is scaled to the epoch length.
+      Otherwise, it is calculated as a percentage of the maximum possible availability from the epoch start.
+      Default is False.
+    return_absolute : bool, optional
+      If True, the absolute availability value in seconds is returned instead of the percentage.
+      Default is False.
+    return_max : bool, optional
+      If True, the maximum possible availability is returned alongside the availability.
+      Default is False.
+
+    Returns
+    -------
+    availability : float or None
+      The availability as a percentage of the maximum possible availability from the epoch start.
+      If the node address is not found, returns None.
+    max_availability : float or None [Only if return_max is True]
+      The maximum possible availability in seconds for the current epoch.
+    """
     # TODO: change this if we move to start-from-one offset
     epoch_start = self.__genesis_date + timedelta(
       seconds=(self.epoch_length * self.get_time_epoch()) # -1 if 1st epoch is genesis + length
     )
-    max_possible_from_epoch_start = (self.get_current_date() - epoch_start).seconds
+    seconds_from_epoch_start = (self.get_current_date() - epoch_start).seconds
+    max_availability = self.epoch_length if scale_to_epoch_length else seconds_from_epoch_start
 
     if node_addr is None:
       node_addr = self.owner.node_addr
     # if node not seen yet, return None
     if node_addr not in self.__data:
-      return None
-    
+      return None if not return_max else (None, None)
+    # endif node_addr not in data
     avail_seconds = self.__calc_node_avail_seconds(
       node_addr, 
       time_between_heartbeats=time_between_heartbeats
     )
-    if max_possible_from_epoch_start == 0:
+    if max_availability == 0:
       prc_available = 0
     else:
-      prc_available = round(avail_seconds / max_possible_from_epoch_start, 4)
-    return prc_available
+      prc_available = round(avail_seconds / max_availability, 4)
+    # endif max_availability == 0
+    result = prc_available if not return_absolute else avail_seconds
+    return result if not return_max else (result, max_availability)
 
   def get_current_epoch_start(self):
     """
@@ -1263,12 +1298,17 @@ class EpochsManager(Singleton):
 
   def _maybe_calculate_stats(self, display=False, online_only=False, force_refresh=False):
     if time() > (self.__current_stats_timestamp + STATS_CACHE_REFRESH_SECONDS) or self.__current_stats is None or force_refresh:
-      self.__current_stats = self.get_stats(display=display, online_only=online_only)
-      self.__current_stats_timestamp = time()
+      with self.log.managed_lock_resource(NETWORK_STATS_MUTEX):
+        self.P(f"Calculating overall statistics for all nodes (online_only={online_only})...")
+        self.__current_stats = self.__get_stats(display=display, online_only=online_only)
+        self.__current_stats_timestamp = time()
+        self.P("Overall statistics calculated.")
+      # endwith lock
+    # endif cache expired or no stats
     return self.__current_stats
 
 
-  def _get_stats(self, display=False, online_only=False):
+  def __get_stats(self, display=False, online_only=False):
     """
     Returns the overall statistics for all nodes.
     """

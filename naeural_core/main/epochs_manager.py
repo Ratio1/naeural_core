@@ -1290,17 +1290,28 @@ class EpochsManager(Singleton):
     dict
       The statistics dictionary.
     """
-    stats = self._maybe_calculate_stats(display=display, online_only=online_only, force_refresh=force_refresh)
+    stats = self._maybe_calculate_stats( # this always calculates for ALL the nodes including offline ones
+      force_refresh=force_refresh
+    )
+    if online_only:
+      # filter the stats for online nodes only
+      stats = {
+        k: v for k, v in stats.items() if 
+          (isinstance(v, dict) and v.get('is_online') in [True, None]) or # if dict and is_online key is True or None (non-node key)
+          not isinstance(v, dict) # if not dict, then it is a non-node key
+      } # add either online or non-node keys
     if display:
       self.P("Overall statistics:\n{}".format(json.dumps(stats, indent=2)))
     return stats
 
 
-  def _maybe_calculate_stats(self, display=False, online_only=False, force_refresh=False):
+  def _maybe_calculate_stats(self, force_refresh=False):
+    
     if time() > (self.__current_stats_timestamp + STATS_CACHE_REFRESH_SECONDS) or self.__current_stats is None or force_refresh:
       with self.log.managed_lock_resource(NETWORK_STATS_MUTEX):
-        self.P(f"Calculating overall statistics for all nodes (online_only={online_only})...")
-        self.__current_stats = self.__get_stats(display=display, online_only=online_only)
+        self.P(f"Calculating overall statistics for all nodes ...")
+        # Maybe calculate must allways calculate for ALL the nodes not just the online ones
+        self.__current_stats = self.__get_stats(display=False, online_only=False)
         self.__current_stats_timestamp = time()
         self.P("Overall statistics calculated.")
       # endwith lock
@@ -1445,6 +1456,7 @@ class EpochsManager(Singleton):
           'ver' : node_version,
           'last_state' : netmon_last_seen,
           'last_seen_ago' : self.log.elapsed_to_str(last_seen_ago),
+          'is_online' : is_online,
           'non_zero' : non_zero,
           'overall_availability' : avail,
           'score' : score,

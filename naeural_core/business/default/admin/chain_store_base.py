@@ -25,7 +25,7 @@ TODO:
 """
 
 
-from naeural_core.business.base.network_processor import NetworkProcessorPlugin 
+from naeural_core.business.base.network_processor import NetworkProcessorPlugin
 
 _CONFIG = {
   **NetworkProcessorPlugin.CONFIG,
@@ -411,6 +411,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       if get_owner:
         result_owner = self.__get_key_owner(key)
     # end if token
+    if result_value is not None:
+      result_value = self.deepcopy(result_value)  # make sure we return a copy of the value, in case it is mutable
     if get_owner:
       return result_value, result_owner
     return result_value

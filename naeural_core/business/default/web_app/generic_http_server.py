@@ -6,10 +6,6 @@ _CONFIG = {
   **BasePlugin.CONFIG,
   'PROCESS_DELAY': 5,
 
-  'NGROK_DOMAIN': None,
-  'NGROK_EDGE_LABEL': None,
-
-  'PORT': None,
   'ASSETS': None,
   'STATIC_DIRECTORY': '.',
   'DEFAULT_ROUTE': None,

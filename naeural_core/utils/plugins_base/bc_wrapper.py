@@ -1,4 +1,4 @@
-from time import time
+from time import time, sleep
 import traceback
 
 from naeural_core.bc import DefaultBlockEngine
@@ -485,7 +485,7 @@ class BCWrapper:
           _done = True
         else:
           self.P("Waiting for oracles to be converted...", color='y')
-          time.sleep(2)
+          sleep(2)
         #end if
       #end while
       if len(found) < min_converted_thr:

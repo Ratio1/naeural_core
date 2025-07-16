@@ -1031,7 +1031,9 @@ class EpochsManager(Singleton):
       return None
     return deepcopy(self.__data[node_addr])
   
-  
+  # TODO: Have method like this, only for one epoch,
+  #  to reduce complexity!!!!
+  #  For < 50 epochs this is not a problem, but for 100+ epochs it will become a problem.
   def get_node_epochs(self, node_addr, autocomplete=True, as_list=False):
     """
     Returns the epochs availability for a node.

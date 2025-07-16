@@ -358,8 +358,10 @@ class ServingManager(Manager):
   
   def _download_and_load_config(self, url, server_name, force_download=True):
     fn_custom_model_definition = server_name + '_def.txt'
+    model_zoo_kwargs = self.cfg_serving_environment.get(ct.MODEL_ZOO_CONFIG) or {}
     self.log.maybe_download_model(
-      url, fn_custom_model_definition, force_download=force_download
+      url, fn_custom_model_definition, force_download=force_download,
+      **model_zoo_kwargs
     )
     dct_config = self.log.load_models_json(fn_custom_model_definition)
     return dct_config

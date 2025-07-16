@@ -178,7 +178,7 @@ class NPJson(json.JSONEncoder):
 
 
 class LogReader():
-  def __init__(self, owner, buff_reader, size=100):
+  def __init__(self, owner, buff_reader, size=100, daemon=True):
     self.buff_reader: BufferedReader = buff_reader
     self.owner = owner
     self.buf_reader_size = size
@@ -190,6 +190,7 @@ class LogReader():
     self.done = False
     self.exited = False
     self.thread = None
+    self.daemon = daemon
     # now we start the thread
     self.start()
     return
@@ -268,7 +269,7 @@ class LogReader():
   def start(self):
     self.thread = Thread(
       target=self._run,
-      daemon=True,
+      daemon=self.daemon
     )
     self.thread.start()
     return
@@ -834,7 +835,7 @@ class _UtilsBaseMixin(
     """
     return NestedDefaultDotDict(*args)
 
-  def LogReader(self, buff_reader, size=100):
+  def LogReader(self, buff_reader, size=100, daemon=True):
     """
     Returns a `LogReader` object that is used to read from a buffer reader.
 
@@ -844,6 +845,8 @@ class _UtilsBaseMixin(
         the buffer from where to read
     size : int, optional
         the size of the buffer. The default is 100.
+    daemon : bool, optional
+        if True, the thread will be a daemon thread. The default is True.
 
     Returns
     -------
@@ -851,7 +854,7 @@ class _UtilsBaseMixin(
         the log reader object.
     """
 
-    return LogReader(owner=self, buff_reader=buff_reader, size=size)
+    return LogReader(owner=self, buff_reader=buff_reader, size=size, daemon=daemon)
 
   def path_exists(self, path):
     """

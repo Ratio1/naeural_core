@@ -76,15 +76,17 @@ class SupervisorFastApiWebApp(BasePlugin):
 
   @property
   def __is_enabled(self):
-    res = not self.cfg_disabled and self.cfg_ngrok_edge_label is not None and self.is_supervisor_node
+    is_valid, err_msg = self.check_valid_tunnel_engine_config()
+    res = not self.cfg_disabled and is_valid and self.is_supervisor_node
     if res != self.__supervisor_fastapi_plugin_running:
       self.__supervisor_fastapi_plugin_running = res
       if res:
         self.P(f"{self.__class__.__name__} is enabled")
       else:
         disabled_cause = 'disabled by config parameter' if self.cfg_disabled \
-          else 'no ngrok edge label provided' if self.cfg_ngrok_edge_label is None \
-          else 'not a supervisor node'
+          else 'not a supervisor node' if not self.is_supervisor_node \
+          else err_msg  # if not is_valid; no need to specify sice it s the only
+        # way the last else will be reached
         msg = f"{self.__class__.__name__} is disabled. (cause: {disabled_cause})"
         self.P(msg, color='r', boxed=True)
     # endif changed state

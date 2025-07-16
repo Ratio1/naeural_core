@@ -16,11 +16,7 @@ __VER__ = '0.0.0'
 
 _CONFIG = {
   **BasePlugin.CONFIG,
-  'NGROK_ENABLED': True,
-  'NGROK_DOMAIN': None,
-  'NGROK_EDGE_LABEL': None,
-
-  'PORT': None,
+  'TUNNEL_ENGINE_ENABLED': True,
 
   'ENDPOINTS': [],
   'ASSETS': None,

@@ -6,11 +6,8 @@ _CONFIG = {
   **BasePlugin.CONFIG,
   'PROCESS_DELAY': 5,
 
-  'NGROK_ENABLED': True,
-  'NGROK_DOMAIN': None,
-  'NGROK_EDGE_LABEL': None,
+  'TUNNEL_ENGINE_ENABLED': True,
 
-  'PORT': None,
   'ASSETS': None,
   'SETUP_COMMANDS': [],
   'START_COMMANDS': [],

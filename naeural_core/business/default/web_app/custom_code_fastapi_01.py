@@ -53,11 +53,7 @@ if __name__ == '__main__':
 
 _CONFIG = {
   **FastApiWebAppPlugin.CONFIG,
-  'NGROK_ENABLED': True,
-  'NGROK_DOMAIN': None,
-  'NGROK_EDGE_LABEL': None,
-
-  'PORT': None,
+  'TUNNEL_ENGINE_ENABLED': True,
 
   'ASSETS': '_custom_code',
   'JINJA_ARGS': {},

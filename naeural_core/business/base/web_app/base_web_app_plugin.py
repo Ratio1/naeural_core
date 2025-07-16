@@ -7,7 +7,7 @@ import psutil
 from jinja2 import Environment, FileSystemLoader
 
 from naeural_core.business.base import BasePluginExecutor
-from naeural_core.business.mixins_libs.ngrok_mixin import _NgrokMixinPlugin
+from naeural_core.business.base.web_app.base_tunnel_engine_plugin import BaseTunnelEnginePlugin
 
 __VER__ = '0.0.0.0'
 
@@ -25,14 +25,23 @@ _CONFIG = {
   
   'GIT_REQUEST_DELAY': 60 * 10,  # 10 minutes
 
+  # NGROK Section
+  # TODO: this will be removed after migration to the new tunnel engine
   'NGROK_USE_API': True,
   'NGROK_ENABLED': False,
   'NGROK_DOMAIN': None,
   'NGROK_EDGE_LABEL': None,
   'NGROK_URL_PING_INTERVAL': 30,
-
   'NGROK_AUTH_TOKEN': None,
-  
+
+  # Generic tunnel engine Section
+  "TUNNEL_ENGINE": "ngrok",  # or "cloudflare"
+
+  "TUNNEL_ENGINE_ENABLED": True,
+  "TUNNEL_ENGINE_PING_INTERVAL": 30,  # seconds
+  "TUNNEL_ENGINE_PARAMETERS": {
+  },
+
   'SUPRESS_LOGS_AFTER_INTERVAL' : 120,  # 2 minutes until logs suppression
 
   'ASSETS': None,
@@ -52,21 +61,27 @@ _CONFIG = {
 }
 
 
-class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
+class BaseWebAppPlugin(
+  # _NgrokMixinPlugin,
+  # _CloudflareMixinPlugin,
+  # BasePluginExecutor
+  BaseTunnelEnginePlugin
+):
   """
   A base plugin which will handle the lifecycle of a web application.
   Through this plugin, you can expose your business logic as a web application,
   using some implementation of a web server.
 
   You can also deploy your web application to the internet using ngrok.
-  To do this, set the `NGROK_ENABLED` flag to True in config and set the necessary
+  To do this, set the `TUNNEL_ENGINE_ENABLED` flag to True in config and set the necessary
   environment variables.
 
   TODO: add ngrok necessary data in the config (after securing the configs)
   """
 
   CONFIG = _CONFIG
-  
+
+
   def _on_init(self):
 
     self.__git_commit_hash = None
@@ -76,9 +91,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.__git_request_time = 0
     self.__first_log_displayed = None
     
-    self._reset_ngrok()
-    
-    self.__last_ngrok_url_ping_ts = 0
+    self.reset_tunnel_engine()
+    self.__last_tunnel_engine = self.cfg_tunnel_engine
+
     self.__wait_count = 0
 
     # TODO: move this to process
@@ -110,8 +125,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     super(BaseWebAppPlugin, self)._on_init()
     return
-  
-  
+
+
   def __init_temp_dir(self):
     if getattr(self, "script_temp_dir", None) is not None:
       self.P(f"Deleting {self.script_temp_dir} ...")
@@ -289,8 +304,9 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
       stderr=subprocess.PIPE if read_stderr else None,
       bufsize=0, # this is important for real-time output
     )
-    logs_reader = self.LogReader(process.stdout, size=100) if read_stdout else None
-    err_logs_reader = self.LogReader(process.stderr, size=100) if read_stderr else None
+    # daemon is set to None in order to allow the process to close gracefully
+    logs_reader = self.LogReader(process.stdout, size=100, daemon=None) if read_stdout else None
+    err_logs_reader = self.LogReader(process.stderr, size=100, daemon=None) if read_stderr else None
     return process, logs_reader, err_logs_reader
 
   def __wait_for_command(self, process, timeout):
@@ -662,6 +678,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.__maybe_close_start_commands()
     self.__maybe_read_and_stop_all_log_readers()
 
+    self.maybe_stop_tunnel_engine()
+
     self.assets_initialized = False
     self.failed = False
 
@@ -685,6 +703,7 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.__commands_ready = False
     self.__maybe_setup_commands()
     self.__maybe_init_assets()
+    self.maybe_start_tunnel_engine()
     return  
   
   
@@ -1105,15 +1124,17 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
   # other plugin default methods
   
   def __setup_commands(self):
-    self.setup_commands_started = [False] * len(self.get_setup_commands())
-    self.setup_commands_finished = [False] * len(self.get_setup_commands())
-    self.setup_commands_processes = [None] * len(self.get_setup_commands())
-    self.setup_commands_start_time = [None] * len(self.get_setup_commands())
+    setup_commands = self.get_setup_commands()
+    self.setup_commands_started = [False] * len(setup_commands)
+    self.setup_commands_finished = [False] * len(setup_commands)
+    self.setup_commands_processes = [None] * len(setup_commands)
+    self.setup_commands_start_time = [None] * len(setup_commands)
 
-    self.start_commands_started = [False] * len(self.get_start_commands())
-    self.start_commands_finished = [False] * len(self.get_start_commands())
-    self.start_commands_processes = [None] * len(self.get_start_commands())
-    self.start_commands_start_time = [None] * len(self.get_start_commands())
+    start_commands = self.get_start_commands()
+    self.start_commands_started = [False] * len(start_commands)
+    self.start_commands_finished = [False] * len(start_commands)
+    self.start_commands_processes = [None] * len(start_commands)
+    self.start_commands_start_time = [None] * len(start_commands)
 
     self.logs = self.deque(maxlen=1000)
     self.dct_logs_reader = {}
@@ -1122,8 +1143,8 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     self.dct_err_logs_reader = {}
 
     self.P(f"Port: {self.port}")
-    self.P(f"Setup commands: {self.get_setup_commands()}")
-    self.P(f"Start commands: {self.get_start_commands()}")
+    self.P(f"Setup commands: {setup_commands}")
+    self.P(f"Start commands: {start_commands}")
     return
 
 
@@ -1148,7 +1169,18 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
   def on_close(self):
     # This method is called by super(BaseWebAppPlugin, self)._on_close()
     super(BaseWebAppPlugin, self).on_close()
-    self.maybe_stop_ngrok()
+    self.maybe_stop_tunnel_engine()
+    return
+
+  def on_config(self):
+    self.P(f"Reconfigured plugin. Current tunnel engine: {self.cfg_tunnel_engine} | Last tunnel engine: {self.__last_tunnel_engine}")
+    if self.cfg_tunnel_engine != self.__last_tunnel_engine:
+      self.P(f"Tunnel engine changed from {self.__last_tunnel_engine} to {self.cfg_tunnel_engine}")
+      if self.__last_tunnel_engine == 'ngrok':
+        self.maybe_stop_tunnel_engine_ngrok()
+      self.__reload_server()
+      self.__last_tunnel_engine = self.cfg_tunnel_engine
+    # endif tunnel engine changed
     return
 
   def _on_command(self, data, delta_logs=None, full_logs=None, start=None, reload=None, **kwargs):
@@ -1203,16 +1235,20 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
     return {}
 
   def get_setup_commands(self):
+    setup_commands = self.cfg_setup_commands
     try:
-      return super(BaseWebAppPlugin, self).get_setup_commands() + self.cfg_setup_commands
-    except AttributeError:
-      return self.cfg_setup_commands
+      setup_commands = super(BaseWebAppPlugin, self).get_setup_commands() + setup_commands
+    except Exception as e:
+      pass
+    return setup_commands
 
   def get_start_commands(self):
+    start_commands = self.cfg_start_commands
     try:
-      return super(BaseWebAppPlugin, self).get_start_commands() + self.cfg_start_commands
-    except AttributeError:
-      return self.cfg_start_commands
+      start_commands = super(BaseWebAppPlugin, self).get_start_commands() + start_commands
+    except Exception as e:
+      pass
+    return start_commands
 
   def initialize_assets(self, src_dir, dst_dir, jinja_args):
     """
@@ -1304,25 +1340,6 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     return
 
-  def __maybe_ngrok_ping(self):
-    # Check if the Ngrok API is used.
-    if not self.cfg_ngrok_use_api:
-      return
-    # Check if the listener is available.
-    if self.ngrok_listener is None:
-      return
-    # Check if the listener has a URL.
-    # In case a Ngrok edge label or domain is provided no URL will be available since the user should already have it.
-    if self.ngrok_listener.url() is None:
-      return
-    if self.__last_ngrok_url_ping_ts is None or self.time() - self.__last_ngrok_url_ping_ts >= self.cfg_ngrok_url_ping_interval:
-      self.__last_ngrok_url_ping_ts = self.time()
-      self.add_payload_by_fields(
-        ngrok_url=self.ngrok_listener.url(),
-      )
-    # endif last ngrok url ping
-    return
-
   def __maybe_setup_commands(self):
     if self.__commands_ready:
       return
@@ -1335,16 +1352,16 @@ class BaseWebAppPlugin(_NgrokMixinPlugin, BasePluginExecutor):
 
     self.__maybe_init_assets()  # Check: auto-updates point here?
 
-    self.maybe_init_ngrok()
+    self.maybe_init_tunnel_engine()
 
     self.__maybe_run_all_setup_commands()
 
-    self.maybe_start_ngrok()
+    self.maybe_start_tunnel_engine()
 
     self.__maybe_run_all_start_commands()
 
     self.__maybe_print_all_logs() # Check: must review 
 
     super(BaseWebAppPlugin, self)._process() # Check: why is this required
-    self.__maybe_ngrok_ping()
+    self.maybe_tunnel_engine_ping()
     return

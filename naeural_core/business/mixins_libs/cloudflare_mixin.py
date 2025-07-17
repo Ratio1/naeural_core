@@ -70,7 +70,7 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       super_start_commands = super(_CloudflareMixinPlugin, self).get_start_commands()
 
       if self.cfg_tunnel_engine_enabled:
-        super_start_commands += [self.__get_cloudflare_start_command()]
+        super_start_commands = super_start_commands + [self.__get_cloudflare_start_command()]
       # endif tunnel engine enabled
       return super_start_commands
 

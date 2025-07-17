@@ -126,9 +126,9 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
 
     def get_ngrok_use_api(self):
       """
-      Retrieve the ngrok authentication token from the configuration.
+      Check if the Ngrok Python SDK will be used
       """
-      return self.get_tunnel_engine_parameters()["NGROK_USE_API"]
+      return self.cfg_tunnel_engine_enabled and self.get_tunnel_engine_parameters()["NGROK_USE_API"]
   """END RETRIEVE NGROK SPECIFIC CONFIGURATION PARAMETERS"""
 
   """BASE CLASS METHODS"""
@@ -236,7 +236,7 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       # endif ngrok api used
 
       if self.cfg_tunnel_engine_enabled:
-        super_start_commands += [self.__get_ngrok_start_command()]
+        super_start_commands = super_start_commands + [self.__get_ngrok_start_command()]
       # endif ngrok enabled
       return super_start_commands
 

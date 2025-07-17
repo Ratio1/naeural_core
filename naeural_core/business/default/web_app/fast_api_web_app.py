@@ -524,4 +524,4 @@ class FastApiWebAppPlugin(BasePlugin):
 
   def get_start_commands(self):
     super_start_commands = super(FastApiWebAppPlugin, self).get_start_commands()
-    return super_start_commands + [self.__get_uvicorn_process_args()]
+    return [self.__get_uvicorn_process_args()] + super_start_commands

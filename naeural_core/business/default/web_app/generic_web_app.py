@@ -33,6 +33,6 @@ class GenericWebAppPlugin(BasePlugin):
   def get_start_commands(self):
     super_start_commands = super(GenericWebAppPlugin, self).get_start_commands()
     if len(self.cfg_run_command) > 0:
-      return super_start_commands + [self.cfg_run_command]
+      return [self.cfg_run_command] + super_start_commands
     else:
       return super_start_commands

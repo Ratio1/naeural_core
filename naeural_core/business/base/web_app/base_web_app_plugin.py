@@ -496,7 +496,10 @@ class BaseWebAppPlugin(
       self.P("All setup commands have finished. Skipping teardown.")
       return
 
-    for idx, process in enumerate(self.setup_commands_processes):
+    idx_process_list = [(idx, process) for idx, process in enumerate(self.setup_commands_processes)]
+    # reverse the list to kill the last started processes first
+    reversed_idx_process_list = idx_process_list[::-1]
+    for idx, process in reversed_idx_process_list:
       if self.setup_commands_started[idx] and not self.setup_commands_finished[idx]:
         self.P(f"Setup command nr {idx} has not finished. Killing it.")
         self.__maybe_kill_process(process, f"setup_{idx}")
@@ -611,7 +614,10 @@ class BaseWebAppPlugin(
       self.P("Server was never started. Skipping teardown.")
       return
 
-    for idx, process in enumerate(self.start_commands_processes):
+    idx_process_list = [(idx, process) for idx, process in enumerate(self.start_commands_processes)]
+    # reverse the list to kill the last started processes first
+    reversed_start_commands = idx_process_list[::-1]
+    for idx, process in reversed_start_commands:
       self.__maybe_kill_process(process, f"start_{idx}")
     # endfor all start commands
 
@@ -1245,7 +1251,7 @@ class BaseWebAppPlugin(
   def get_start_commands(self):
     start_commands = self.cfg_start_commands
     try:
-      start_commands = super(BaseWebAppPlugin, self).get_start_commands() + start_commands
+      start_commands = start_commands + super(BaseWebAppPlugin, self).get_start_commands()
     except Exception as e:
       pass
     return start_commands

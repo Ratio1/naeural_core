@@ -1791,7 +1791,8 @@ class NetworkMonitor(DecentrAIObject):
             apps[pipeline] = {
               NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.K_INITIATOR_ADDR),
               NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
-              NetMonCt.IS_DEEPLOYED : pipeline_info.get(ct.CONFIG_STREAM.IS_DEEPLOYED, False),
+              NetMonCt.IS_DEEPLOYED : pipeline_info.get(ct.CONFIG_STREAM.IS_DEEPLOYED, False) == True,
+
               NetMonCt.PLUGINS : {}
             }
           if signature not in apps[pipeline][NetMonCt.PLUGINS]:

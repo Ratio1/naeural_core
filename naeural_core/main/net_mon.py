@@ -33,7 +33,8 @@ class NetMonCt:
   PLUGIN_START = 'start'
   PLUGIN_LAST_ERROR = 'last_error'
   PLUGIN_LAST_ALIVE = 'last_alive'
-  
+  IS_DEEPLOYED = 'is_deeployed'
+
 
 def exponential_score(left, right, val, right_is_better=False, normed=False):
   num = 50
@@ -1790,6 +1791,7 @@ class NetworkMonitor(DecentrAIObject):
             apps[pipeline] = {
               NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.K_INITIATOR_ADDR),
               NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
+              NetMonCt.IS_DEEPLOYED : pipeline_info.get(ct.CONFIG_STREAM.IS_DEEPLOYED, False),
               NetMonCt.PLUGINS : {}
             }
           if signature not in apps[pipeline][NetMonCt.PLUGINS]:

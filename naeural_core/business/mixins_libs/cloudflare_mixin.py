@@ -31,7 +31,10 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       Retrieve the Cloudflare token from the configuration parameters.
       If not set, it returns None.
       """
-      return self.get_tunnel_engine_parameters()["CLOUDFLARE_TOKEN"]
+      # Here .get is used because init_endpoints goes through every method to find all
+      # endpoints. Because this method is used by the property method app_url_cloudflare it was
+      # called during the search
+      return self.get_tunnel_engine_parameters().get("CLOUDFLARE_TOKEN")
   """END RETRIEVE CLOUDFLARE SPECIFIC CONFIGURATION_PARAMETERS"""
 
   """BASE CLASS METHODS"""

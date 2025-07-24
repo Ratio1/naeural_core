@@ -67,22 +67,27 @@ class FastApiWebAppPlugin(BasePlugin):
     return self.__uvicorn_server_started
 
   @staticmethod
-  def endpoint(func=None, *, method="get", require_token=False):
+  def endpoint(func=None, *, method="get", require_token=False, streaming_type=None, chunk_size=1024 * 1024):
     """
-    Decorator that marks a method as an HTTP endpoint. Optionally enforces a Bearer token.
-    
+    Decorator that marks a method as an HTTP endpoint with optional streaming support.
+
     Parameters
     ----------
     method : str
         HTTP method (e.g. "get", "post").
-        
     require_token : bool
         Whether this endpoint should require a Bearer token.
-        
+    streaming_type : str or None
+        Type of streaming: "upload", "download", or None for regular endpoints.
+    chunk_size : int
+        Size of chunks for streaming operations (default 1MB).
     """
     if func is None:
       def wrapper(func):
-        return FastApiWebAppPlugin.endpoint(func, method=method, require_token=require_token)
+        return FastApiWebAppPlugin.endpoint(
+          func, method=method, require_token=require_token,
+          streaming_type=streaming_type, chunk_size=chunk_size
+        )
 
       return wrapper
 
@@ -91,7 +96,10 @@ class FastApiWebAppPlugin(BasePlugin):
       method = method.lower()
     func.__http_method__ = method
     func.__require_token__ = require_token
+    func.__streaming_type__ = streaming_type
+    func.__chunk_size__ = chunk_size
     return func
+
 
   def get_web_server_path(self):
     return self.script_temp_dir
@@ -205,6 +213,11 @@ class FastApiWebAppPlugin(BasePlugin):
       app_template = env.get_template(app_template)
       rendered_content = app_template.render(jinja_args)
 
+      self.P(f'Rendering main.py from template {app_template} to {self.os_path.join(dst_dir, "main.py")}')
+      self.P("#332323")
+
+      self.P(rendered_content)
+
       with open(self.os_path.join(dst_dir, 'main.py'), 'w') as f:
         f.write(rendered_content)
     # endif render main.py
@@ -250,21 +263,9 @@ class FastApiWebAppPlugin(BasePlugin):
     )
     return
 
+
   def _init_endpoints(self) -> None:
-    """
-    Populate the set of jinja arguments with values needed to create http
-    endpoints for all methods of the plugin marked with @endpoint. Since
-    there should be at least one such method, this method is always invoked
-    via the on_init hook
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    None
-    """
+    """Enhanced to support streaming endpoints"""
     import inspect
     self._endpoints = {}
     jinja_args = []
@@ -295,15 +296,19 @@ class FastApiWebAppPlugin(BasePlugin):
     for name, method in inspect.getmembers(self, predicate=_filter):
       if not hasattr(method, '__endpoint__'):
         continue
+
       self._endpoints[name] = method
       http_method = method.__http_method__
       require_token = getattr(method, '__require_token__', False)
+      streaming_type = getattr(method, '__streaming_type__', None)
+      chunk_size = getattr(method, '__chunk_size__', 1024 * 1024)
+
       signature = inspect.signature(method)
       doc = method.__doc__ or ''
       all_params = [param.name for param in signature.parameters.values()]
       all_args = [str(param) for param in signature.parameters.values()]
-      if self.cfg_debug_web_app:
-        self.P(f'Endpoint {name}[{require_token=}] with {all_args=} and {all_params=}')
+
+      # Handle token parameter filtering as before
       if not require_token:
         args = all_args
         params = all_params
@@ -312,20 +317,23 @@ class FastApiWebAppPlugin(BasePlugin):
           raise ValueError(f"First parameter of method {name} must be 'token' if require_token is True.")
         params = all_params[1:]
         args = all_args[1:]
-        if self.cfg_debug_web_app:
-          self.P(f'Endpoint {name}[{require_token=}] left with {args=} and {params=}')
-      # endif require_token   
+
       jinja_args.append({
         'name': name,
         'method': http_method,
         'args': args,
         'params': params,
         'endpoint_doc': doc,
-        'require_token': require_token
+        'require_token': require_token,
+        'streaming_type': streaming_type,
+        'chunk_size': chunk_size
       })
+
+      streaming_info = f" (streaming: {streaming_type})" if streaming_type else ""
       str_function = f"{name}({', '.join(args)})"
-      self.P(f"Registered endpoint {str_function} with method {http_method}. Require token: {require_token}")
-    # endfor all methods
+      self.P(
+        f"Registered endpoint {str_function} with method {http_method}{streaming_info}. Require token: {require_token}")
+
     self._node_comms_jinja_args = jinja_args
     return
 

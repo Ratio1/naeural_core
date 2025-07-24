@@ -161,8 +161,8 @@ async def {{ item['name'] }}_download(
     {% endif %}
 
     file_path = None
-    if isinstance(result, dict) and 'file_path' in result:
-        file_path = result['file_path']
+    if isinstance(result, dict) and 'result' in result:
+        file_path = result.get('result', None)
     else:
         file_path = result
 

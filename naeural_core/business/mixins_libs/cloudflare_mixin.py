@@ -21,10 +21,7 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       token = self.get_cloudflare_token()
       if token is not None:
         return f"cloudflared tunnel --no-autoupdate run --token {token} --url http://127.0.0.1:{self.port}"
-      err_str = "No Cloudflare token provided in the configuration parameters."
-      err_str += "Please check your configuration.\n"
-      err_str += "You can set the token using the 'CLOUDFLARE_TOKEN' parameter in your configuration."
-      raise RuntimeError(err_str)
+      return f"cloudflared tunnel --no-autoupdate --url http://127.0.0.1:{self.port}"
   """END CLOUDFLARE UTILS METHODS"""
 
   """RETRIEVE CLOUDFLARE SPECIFIC CONFIGURATION_PARAMETERS"""
@@ -39,6 +36,10 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
 
   """BASE CLASS METHODS"""
   if True:
+    @property
+    def app_url_cloudflare(self):
+      return None if self.get_cloudflare_token() is not None else self.__app_url
+
     def get_default_tunnel_engine_parameters_cloudflare(self):
       return CLOUDFLARE_DEFAULT_PARAMETERS
 
@@ -47,7 +48,7 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       Reset the tunnel engine by stopping any existing tunnel and clearing the configuration.
       """
       super(_CloudflareMixinPlugin, self).reset_tunnel_engine()
-      # No specific reset actions needed for Cloudflare
+      self.__app_url = None
       return
 
     def maybe_init_tunnel_engine_cloudflare(self):
@@ -74,9 +75,6 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       # endif tunnel engine enabled
       return super_start_commands
 
-    def maybe_tunnel_engine_ping_cloudflare(self):
-      return
-
     def check_valid_tunnel_engine_config_cloudflare(self):
       """
       Check if the tunnel engine configuration is valid.
@@ -90,5 +88,23 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
         is_valid = False
       # endif token is None
       return is_valid, msg
+
+    def on_log_handler_cloudflare(self, text):
+      """
+      Handle log messages from the Cloudflare tunnel.
+      This method can be overridden in subclasses to handle logs differently.
+      """
+      super(_CloudflareMixinPlugin, self).on_log_handler(text)
+      if self.__app_url is not None:
+        # URL already set, no need to process further
+        return
+      # Define a regular expression pattern to match the URL format
+      url_pattern = r'https://[a-z0-9-]+\.trycloudflare\.com'
+      match = self.re.search(url_pattern, text)
+
+      if match:
+        self.__app_url = match.group(0)
+        self.P(f"Cloudflare tunnel started successfully on: {self.__app_url}", color="green")
+      return
   """END BASE CLASS METHODS"""
 

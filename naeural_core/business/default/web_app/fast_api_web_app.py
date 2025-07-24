@@ -488,6 +488,7 @@ class FastApiWebAppPlugin(BasePlugin):
   
   
   def on_log_handler(self, text):
+    super(FastApiWebAppPlugin, self).on_log_handler(text)
     STARTUP_MSG = "Uvicorn running on "
     if STARTUP_MSG in text:
       self.__uvicorn_server_started = True

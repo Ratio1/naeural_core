@@ -375,11 +375,6 @@ class BaseWebAppPlugin(
     # endwhile
     return
 
-
-  def on_log_handler(self, text):
-    return
-
-
   # logs handling methods
   def __maybe_print_all_logs(self, indent=35):
     for key, logs_reader in self.dct_logs_reader.items():

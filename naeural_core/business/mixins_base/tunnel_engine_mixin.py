@@ -162,7 +162,10 @@ class _TunnelEngineMixin(object):
       If empty dictionary is returned, no data will be included in the ping.
       If None is returned, no ping will be emitted.
     """
-    return {}
+    result = {}
+    if self.app_url is not None:
+      result['app_url'] = self.app_url
+    return result
 
   def maybe_tunnel_engine_ping(self):
     """
@@ -174,14 +177,16 @@ class _TunnelEngineMixin(object):
       return  # No ping will be emitted
     ping_interval = max(ping_interval, 0)
     if self._tunnel_engine_ping_last_ts is None or self.time() - self._tunnel_engine_ping_last_ts >= ping_interval:
-      self._tunnel_engine_ping_last_ts = self.time()
       ping_data = self.get_tunnel_engine_ping_data()
-      if ping_data is not None and isinstance(ping_data, dict):
+      if not isinstance(ping_data, dict):
         ping_data = {}
-      self.add_payload_by_fields(
-        **ping_data
-      )
-      self._tunnel_engine_ping_cnt += 1
+      if len(ping_data) > 0:
+        self.add_payload_by_fields(
+          **ping_data
+        )
+        self._tunnel_engine_ping_cnt += 1
+        self._tunnel_engine_ping_last_ts = self.time()
+      # endif ping data to send
     # endif time to send ping
     return
 
@@ -199,3 +204,6 @@ class _TunnelEngineMixin(object):
       A message describing the result of the validation.
     """
     return True, None
+
+  def on_log_handler(self, text):
+    return

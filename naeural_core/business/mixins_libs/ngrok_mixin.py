@@ -142,7 +142,7 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       return
 
     @property
-    def app_url(self):
+    def app_url_ngrok(self):
       return None if self.ngrok_listener is None else self.ngrok_listener.url()
 
     @property
@@ -240,25 +240,6 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       # endif ngrok enabled
       return super_start_commands
 
-    def get_tunnel_engine_ping_data(self):
-      return {
-        "ngrok_url": self.app_url,
-      }
-
-    def maybe_tunnel_engine_ping_ngrok(self):
-      # Check if the Ngrok API is used.
-      if not self.get_ngrok_use_api():
-        return
-      # Check if the listener is available.
-      if self.ngrok_listener is None:
-        return
-      # Check if the listener has a URL.
-      # In case a Ngrok edge label or domain is provided no URL will be available since the user should already have it.
-      if self.ngrok_listener.url() is None:
-        return
-      super(_NgrokMixinPlugin, self).maybe_tunnel_engine_ping()
-      return
-
     def check_valid_tunnel_engine_config_ngrok(self):
       """
       Check if the tunnel engine configuration is valid.
@@ -275,6 +256,10 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
         msg = "Ngrok edge label is not set. Please set the `NGROK_EDGE_LABEL` parameter in your configuration."
       # endif edge label
       return is_valid, msg
+
+    def on_log_handler_ngrok(self, text):
+      super(_NgrokMixinPlugin, self).on_log_handler(text)
+      return
   """END BASE CLASS METHODS"""
 
   """NGROK ALIAS FOR BACKWARD COMPATIBILITY"""

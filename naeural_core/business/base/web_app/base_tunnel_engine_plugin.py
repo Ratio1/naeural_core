@@ -34,6 +34,15 @@ class BaseTunnelEnginePlugin(
     """
     return self.cfg_tunnel_engine.lower() == "cloudflare"
 
+  @property
+  def app_url(self):
+    """
+    Returns the URL of the application based on the tunnel engine being used.
+    """
+    if self.use_cloudflare():
+      return self.app_url_cloudflare
+    return self.app_url_ngrok
+
   def get_default_tunnel_engine_parameters(self):
     if self.use_cloudflare():
       return self.get_default_tunnel_engine_parameters_cloudflare()
@@ -69,12 +78,12 @@ class BaseTunnelEnginePlugin(
       return self.get_start_commands_cloudflare()
     return super(BaseTunnelEnginePlugin, self).get_start_commands_ngrok()
 
-  def maybe_tunnel_engine_ping(self):
-    if self.use_cloudflare():
-      return self.maybe_tunnel_engine_ping_cloudflare()
-    return self.maybe_tunnel_engine_ping_ngrok()
-
   def check_valid_tunnel_engine_config(self):
     if self.use_cloudflare():
       return self.check_valid_tunnel_engine_config_cloudflare()
     return self.check_valid_tunnel_engine_config_ngrok()
+
+  def on_log_handler(self, text):
+    if self.use_cloudflare():
+      return self.on_log_handler_cloudflare(text)
+    return self.on_log_handler_ngrok(text)

@@ -213,11 +213,6 @@ class FastApiWebAppPlugin(BasePlugin):
       app_template = env.get_template(app_template)
       rendered_content = app_template.render(jinja_args)
 
-      self.P(f'Rendering main.py from template {app_template} to {self.os_path.join(dst_dir, "main.py")}')
-      self.P("#332323")
-
-      self.P(rendered_content)
-
       with open(self.os_path.join(dst_dir, 'main.py'), 'w') as f:
         f.write(rendered_content)
     # endif render main.py

@@ -1,12 +1,11 @@
 # FastApiWebAppPlugin — Endpoint Usage & Patterns
 
-This document explains how the **FastApiWebAppPlugin** auto-generates FastAPI endpoints for your plugin methods, including best practices for upload/download, request patterns, authentication, file handling, and example usage.
+This document explains how the **FastApiWebAppPlugin** auto-generates FastAPI endpoints for your plugin methods, including best practices for upload/download, request patterns, file handling, and example usage.
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [How Endpoints Are Generated](#how-endpoints-are-generated)
-- [Authentication](#authentication)
 - [Example Endpoints](#example-endpoints)
   - [1. Simple (Non-Streaming) Endpoints](#1-simple-non-streaming-endpoints)
   - [2. File Uploads (streaming_type="upload")](#2-file-uploads-streaming_typeupload)
@@ -22,7 +21,6 @@ This document explains how the **FastApiWebAppPlugin** auto-generates FastAPI en
   - Regular GET/POST endpoints (with JSON or query args)
   - Efficient, scalable file uploads (chunked saving, any metadata via form)
   - File downloads (plugin returns a file path, served as streaming download)
-  - Bearer token authentication
 
 ## How Endpoints Are Generated
 
@@ -34,36 +32,20 @@ This document explains how the **FastApiWebAppPlugin** auto-generates FastAPI en
     - Additional client form fields (e.g., "secret") are available as a Python dict
     - After save, the file path (and other variables) are passed to your plugin method
 
-## Authentication
-
-- Use `require_token=True` to enforce Bearer token on your endpoint
-  - Include your token in requests with  
-    `-H "Authorization: Bearer <token-here>"`
-- Token is usually passed as the first method argument (`token: str`) to your plugin
-- Example:
-    ```
-    @BasePlugin.endpoint(method="get", require_token=True)
-    def get_status(self, token: str):
-        ...
-    ```
-
 ## Example Endpoints
 
 ### 1. Simple (Non-Streaming) Endpoints
 
 #### Plugin
 ```
-@BasePlugin.endpoint(method="post", require_token=True)
-def add_data(self, token: str, value: str):
+@BasePlugin.endpoint(method="post")
+def add_data(self, value: str):
     """Add new data."""
-    if token != "admin":
-        return {"error": "invalid token"}
     return {"status": "success", "stored": value}
 ```
 #### cURL
 ```
-curl -X POST -H "Authorization: Bearer admin" \
-     -H "Content-Type: application/json" \
+curl -X POST -H "Content-Type: application/json" \
      -d '{"value": "hello"}' \
      http://localhost:8000/add_data
 ```
@@ -75,8 +57,8 @@ curl -X POST -H "Authorization: Bearer admin" \
 
 #### Plugin
 ```
-@BasePlugin.endpoint(method="post", streaming_type="upload", require_token=True)
-def add_file(self, token: str, file_path: str, body):
+@BasePlugin.endpoint(method="post", streaming_type="upload")
+def add_file(self, file_path: str, body):
     """
     Accepts a file saved at file_path and form fields (body dict).
     """
@@ -90,18 +72,17 @@ def add_file(self, token: str, file_path: str, body):
 @app.post("/add_file")
 async def add_file_upload(
     file: UploadFile = File(...),
-    secret: str = Form(None),
-    token: str = Depends(get_bearer_token)
+    secret: str = Form(None)
 ):
     # File is saved in /tmp/upload_<random>/<uuid>_<filename>
     ...
-    result = await eng.call_plugin("add_file", token, file_path, {"secret": secret})
+    result = await eng.call_plugin("add_file", file_path, {"secret": secret})
     return result
 ```
 
 #### cURL
 ```
-curl -X POST -H "Authorization: Bearer admin" \
+curl -X POST \
   -F "file=@/path/to/myfile.dat" \
   -F "secret=my_secret_value" \
   http://localhost:8000/add_file
@@ -114,15 +95,15 @@ curl -X POST -H "Authorization: Bearer admin" \
 
 #### Plugin
 ```
-@BasePlugin.endpoint(method="get", streaming_type="download", require_token=True)
-def download_file(self, token: str, cid: str):
+@BasePlugin.endpoint(method="get", streaming_type="download")
+def download_file(self, cid: str):
     """Returns file path by content id."""
     return self.r1fs.get_file(cid=cid)
 ```
 
 #### cURL
 ```
-curl -O -J -H "Authorization: Bearer admin" \
+curl -O -J \
      "http://localhost:8000/download_file?cid=Qm123abc"
 ```
 
@@ -130,14 +111,14 @@ curl -O -J -H "Authorization: Bearer admin" \
 
 - **Upload:**  
   ```
-  curl -X POST -H "Authorization: Bearer admin" \
+  curl -X POST \
     -F "file=@myphoto.jpg" -F "secret=swordfish" \
     http://localhost:8000/add_file
   ```
 
 - **Download:**  
   ```
-  curl -O -J -H "Authorization: Bearer admin" \
+  curl -O -J \
     "http://localhost:8000/download_file?cid=Qm123..."
   ```
 
@@ -148,7 +129,6 @@ curl -O -J -H "Authorization: Bearer admin" \
 
 ## Best Practices
 
-- **Token**: Always consider endpoint security — use tokens for all sensitive routes.
 - **Temp Files**: Your plugin can/should cleanup temp files/folders after processing.
 - **Body Fields**: Any extra form fields (like `secret`) arrive in a dict (`body`) for convenient use.
 - **Filename**: Original filename is preserved in saved file via a UUID+filename scheme for traceability.

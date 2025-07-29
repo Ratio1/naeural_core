@@ -359,8 +359,11 @@ class _BasePluginAPIMixin:
       self.__maybe_wait_for_chain_state_init()
       func = memory.get('__chain_storage_set')
       specific_peers = self.cfg_chainstore_peers or []
-      if not isinstance(specific_peers, list):
+      if isinstance(specific_peers, str):
+        specific_peers = [specific_peers]
+      elif not isinstance(specific_peers, list):
         specific_peers = []
+
       if isinstance(extra_peers, list):
         specific_peers += extra_peers
       if func is not None:

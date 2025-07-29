@@ -1029,7 +1029,10 @@ class EpochsManager(Singleton):
     """
     if node_addr not in self.__data:
       return None
-    return deepcopy(self.__data[node_addr])
+    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+      result = deepcopy(self.__data[node_addr])
+    # endwith lock
+    return result
   
   # TODO: Have method like this, only for one epoch,
   #  to reduce complexity!!!!

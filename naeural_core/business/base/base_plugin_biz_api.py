@@ -445,7 +445,7 @@ class _BasePluginAPIMixin:
     It uses a hash-based string composition to create a composed key.
     """
     composed_key = self.__hset_key(hkey, key)
-    return self.chainstore_set(composed_key, value, readonly=readonly, token=token, debug=debug, extra_peers=[])
+    return self.chainstore_set(composed_key, value, readonly=readonly, token=token, debug=debug, extra_peers=extra_peers)
 
   
   def chainstore_hlist(self, hkey : str, token=None, debug=False):

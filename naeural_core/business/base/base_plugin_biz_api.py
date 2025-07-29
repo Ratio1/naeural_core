@@ -334,7 +334,7 @@ class _BasePluginAPIMixin:
     self.__chain_state_initialized = True
     return
   
-  def chainstore_set(self, key, value, readonly=False, token=None, debug=False):
+  def chainstore_set(self, key, value, readonly=False, token=None, debug=False, extra_peers=[]):
     """
     Set data in the R1 Chain Storage
     
@@ -358,7 +358,14 @@ class _BasePluginAPIMixin:
     try:
       self.__maybe_wait_for_chain_state_init()
       func = memory.get('__chain_storage_set')
-      specific_peers = self.cfg_chainstore_peers
+      specific_peers = self.cfg_chainstore_peers or []
+      if isinstance(specific_peers, str):
+        specific_peers = [specific_peers]
+      elif not isinstance(specific_peers, list):
+        specific_peers = []
+
+      if isinstance(extra_peers, list):
+        specific_peers += extra_peers
       if func is not None:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")
@@ -437,13 +444,13 @@ class _BasePluginAPIMixin:
     return self.chainstore_get(composed_key, token=token, debug=debug)
   
 
-  def chainstore_hset(self, hkey, key, value, readonly=False, token=None, debug=False):
+  def chainstore_hset(self, hkey, key, value, readonly=False, token=None, debug=False, extra_peers=[]):
     """
     This is a basic implementation of a hash set operation in the chain storage.
     It uses a hash-based string composition to create a composed key.
     """
     composed_key = self.__hset_key(hkey, key)
-    return self.chainstore_set(composed_key, value, readonly=readonly, token=token, debug=debug)
+    return self.chainstore_set(composed_key, value, readonly=readonly, token=token, debug=debug, extra_peers=extra_peers)
 
   
   def chainstore_hlist(self, hkey : str, token=None, debug=False):

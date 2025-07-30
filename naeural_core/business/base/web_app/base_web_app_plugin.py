@@ -381,7 +381,7 @@ class BaseWebAppPlugin(
       if logs_reader is not None:
         logs = logs_reader.get_next_characters()
         if len(logs) > 0:
-          self.on_log_handler(logs)
+          self.on_log_handler(logs, key)
           if isinstance(self.cfg_supress_logs_after_interval, int) and self.cfg_supress_logs_after_interval > 0:
             time_since_first_log = 0 if self.__first_log_displayed is None else (self.time() - self.__first_log_displayed)
             if time_since_first_log > self.cfg_supress_logs_after_interval and len(logs) > 0:
@@ -401,7 +401,7 @@ class BaseWebAppPlugin(
       if err_logs_reader is not None:
         err_logs = err_logs_reader.get_next_characters()
         if len(err_logs) > 0:
-          self.on_log_handler(err_logs)
+          self.on_log_handler(err_logs, key)
           indented_err_logs = self.indent_strings(err_logs, indent=indent)
           self.P(f"Showing error logs [{key}]:\n{indented_err_logs}")
           self.err_logs.append(f"[{key}]: {err_logs}")
@@ -458,7 +458,7 @@ class BaseWebAppPlugin(
     self.dct_err_logs_reader.pop(key, None)
     return
 
-  def __maybe_read_and_stop_all_log_readers(self):
+  def _maybe_read_and_stop_all_log_readers(self):
     self.P("Reading and stopping all log readers...")
     log_keys = set(list(self.dct_logs_reader.keys()) + list(self.dct_err_logs_reader.keys()))
     self.P(f"Log keys: {log_keys}")
@@ -482,7 +482,7 @@ class BaseWebAppPlugin(
     return
 
 
-  def __maybe_close_setup_commands(self):
+  def _maybe_close_setup_commands(self):
     if not any(self.setup_commands_started):
       self.P("No setup commands were started. Skipping teardown.")
       return
@@ -604,7 +604,7 @@ class BaseWebAppPlugin(
     return result
 
 
-  def __maybe_close_start_commands(self):
+  def _maybe_close_start_commands(self):
     if not any(self.start_commands_started):
       self.P("Server was never started. Skipping teardown.")
       return
@@ -672,12 +672,12 @@ class BaseWebAppPlugin(
     return all(self.start_commands_finished)
   
   
-  def __reload_server(self):
+  def _reload_server(self):
     self.P("Initiating server reload...")
     
-    self.__maybe_close_setup_commands()
-    self.__maybe_close_start_commands()
-    self.__maybe_read_and_stop_all_log_readers()
+    self._maybe_close_setup_commands()
+    self._maybe_close_start_commands()
+    self._maybe_read_and_stop_all_log_readers()
 
     self.maybe_stop_tunnel_engine()
 
@@ -1088,7 +1088,7 @@ class BaseWebAppPlugin(
     reload_interval = self.cfg_forced_reload_interval or 0
     if reload_interval > 0 and self.time() - self.webapp_reload_last_timestamp > reload_interval:
       self.P(f"Forced restart initiated due to `FORCED_RELOAD_INTERVAL` ({reload_interval} seconds)")
-      self.__reload_server()
+      self._reload_server()
     return
 
   def __maybe_init_assets(self):
@@ -1098,7 +1098,7 @@ class BaseWebAppPlugin(
       new_repo_version = self.__check_new_repo_version()
       if new_repo_version:
         self.P("New git assets available. Reloading server...")        
-        self.__reload_server()
+        self._reload_server()
       return
     
     self.P("Initializing assets (`assets_initialized: {}`)".format(self.assets_initialized))
@@ -1150,13 +1150,13 @@ class BaseWebAppPlugin(
 
 
   def _on_close(self):
-    self.__maybe_close_setup_commands()
-    self.__maybe_close_start_commands()
+    self._maybe_close_setup_commands()
+    self._maybe_close_start_commands()
 
     # close all log readers that are still running
     # this should not have any effect, as the logs should have been
     # closed during the teardown of the setup and start processes
-    self.__maybe_read_and_stop_all_log_readers()
+    self._maybe_read_and_stop_all_log_readers()
 
     # cleanup the temp directory
     shutil.rmtree(self.script_temp_dir)
@@ -1179,7 +1179,7 @@ class BaseWebAppPlugin(
       self.P(f"Tunnel engine changed from {self.__last_tunnel_engine} to {self.cfg_tunnel_engine}")
       if self.__last_tunnel_engine == 'ngrok':
         self.maybe_stop_tunnel_engine_ngrok()
-      self.__reload_server()
+      self._reload_server()
       self.__last_tunnel_engine = self.cfg_tunnel_engine
     # endif tunnel engine changed
     return
@@ -1206,7 +1206,7 @@ class BaseWebAppPlugin(
       self.P("Starting server")
 
     if (isinstance(data, str) and data.upper() == 'RELOAD') or reload:
-      self.__reload_server()
+      self._reload_server()
 
     return
 
@@ -1361,7 +1361,7 @@ class BaseWebAppPlugin(
 
     self.__maybe_run_all_start_commands()
 
-    self.__maybe_print_all_logs() # Check: must review 
+    self.__maybe_print_all_logs() # Check: must review
 
     super(BaseWebAppPlugin, self)._process() # Check: why is this required
     self.maybe_tunnel_engine_ping()

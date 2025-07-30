@@ -83,7 +83,7 @@ class BaseTunnelEnginePlugin(
       return self.check_valid_tunnel_engine_config_cloudflare()
     return self.check_valid_tunnel_engine_config_ngrok()
 
-  def on_log_handler(self, text):
+  def on_log_handler(self, text, key=None):
     if self.use_cloudflare():
       return self.on_log_handler_cloudflare(text)
     return self.on_log_handler_ngrok(text)

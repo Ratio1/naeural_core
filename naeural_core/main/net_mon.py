@@ -257,6 +257,7 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.HB.MACHINE_IP, None)
     hb.pop(ct.HB.SECURED, None)
     hb.pop(ct.HB.EE_IS_SUPER, None)
+    hb.pop(ct.HB.DID, None)
 
     hb.pop(ct.PAYLOAD_DATA.EE_ID, None)
     hb.pop(ct.PAYLOAD_DATA.INITIATOR_ID, None)
@@ -1701,7 +1702,12 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_eeid(self, addr):
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       return hb.get(ct.EE_ID, MISSING_ID)
-    
+
+    def network_node_has_did(self, addr: str):
+      """ Returns True if the node has DID (Docker In Docker) enabled in the heartbeat."""
+      hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      return hb.get(ct.HB.DID, False)
+
     def network_node_whitelist(self, addr):
       """Returns the whitelist of a remote node exactly as it was received in the heartbeat - naturally without any prefix."""
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)

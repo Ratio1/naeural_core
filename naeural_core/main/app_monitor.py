@@ -1,3 +1,4 @@
+import os
 import json
 import platform
 import numpy as np
@@ -722,7 +723,8 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.AVAILABLE_DISK    : avail_disk,
       ct.HB.ACTIVE_PLUGINS    : active_business_plugins,
       ct.HB.STOP_LOG          : self.owner.main_loop_stop_log,
-      
+      ct.HB.DID               : os.environ.get('EE_DD', True),
+
       ct.HB.R1FS_ID           : self.owner.r1fs_id,
       ct.HB.R1FS_ONLINE       : self.owner.r1fs_started,
       ct.HB.R1FS_RELAY        : self.owner.r1fs_relay,  
@@ -737,7 +739,7 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.COMM_STATS        : dct_comm_info,
       ct.HB.COMM_INFO.IN_KB   : round(inkB, 3),
       ct.HB.COMM_INFO.OUT_KB  : round(outkB, 3),
-        
+
       ct.HB.SERVING_PIDS      : serving_pids, 
       ct.HB.LOOPS_TIMINGS     : loops_timings,
 

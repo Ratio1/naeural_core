@@ -258,7 +258,7 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       return is_valid, msg
 
     def on_log_handler_ngrok(self, text, key=None):
-      super(_NgrokMixinPlugin, self).on_log_handler(text)
+      super(_NgrokMixinPlugin, self).on_log_handler(text, key)
       return
   """END BASE CLASS METHODS"""
 

@@ -97,7 +97,7 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       Handle log messages from the Cloudflare tunnel.
       This method can be overridden in subclasses to handle logs differently.
       """
-      super(_CloudflareMixinPlugin, self).on_log_handler(text)
+      super(_CloudflareMixinPlugin, self).on_log_handler(text, key)
       if self.__app_url is not None:
         # URL already set, no need to process further
         return

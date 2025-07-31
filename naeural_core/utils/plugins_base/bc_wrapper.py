@@ -701,3 +701,45 @@ class BCWrapper:
         A list of nodes that are associated with the wallet address
     """
     return self.__bc.web3_get_wallet_nodes(address=address)
+
+  def get_job_details(self, job_id: int):
+    """
+    Get the details of a job
+
+    Parameters
+    ----------
+    job_id : int
+        The ID of the job
+    """
+    return self.__bc.web3_get_job_details(job_id=job_id)
+
+  def submit_node_update(self, job_id: int, nodes: list):
+    """
+    Submit nodes update for a given job.
+
+    Parameters
+    ----------
+    job_id : int
+        The ID of the job
+    nodes : list
+        The list of new nodes running the job
+    """
+    return self.__bc.web3_submit_node_update(job_id=job_id, nodes=nodes)
+
+  def allocate_rewards_across_all_escrows(self):
+    """
+    Allocate rewards across all escrows.
+    """
+    return self.__bc.web3_allocate_rewards_across_all_escrows()
+
+  def get_unvalidated_job_ids(self):
+    """
+    Get the IDs of the unvalidated jobs.
+    """
+    return self.__bc.web3_get_unvalidated_job_ids()
+
+  def get_is_last_epoch_allocated(self):
+    """
+    Check if the last epoch has been allocated.
+    """
+    return self.__bc.web3_get_is_last_epoch_allocated()

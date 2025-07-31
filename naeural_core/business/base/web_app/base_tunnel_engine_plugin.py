@@ -85,5 +85,5 @@ class BaseTunnelEnginePlugin(
 
   def on_log_handler(self, text, key=None):
     if self.use_cloudflare():
-      return self.on_log_handler_cloudflare(text)
+      return self.on_log_handler_cloudflare(text, key)
     return self.on_log_handler_ngrok(text)

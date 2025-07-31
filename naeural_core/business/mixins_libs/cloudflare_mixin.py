@@ -92,7 +92,7 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       # endif token is None
       return is_valid, msg
 
-    def on_log_handler_cloudflare(self, text):
+    def on_log_handler_cloudflare(self, text, key=None):
       """
       Handle log messages from the Cloudflare tunnel.
       This method can be overridden in subclasses to handle logs differently.

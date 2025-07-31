@@ -257,7 +257,7 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       # endif edge label
       return is_valid, msg
 
-    def on_log_handler_ngrok(self, text):
+    def on_log_handler_ngrok(self, text, key=None):
       super(_NgrokMixinPlugin, self).on_log_handler(text)
       return
   """END BASE CLASS METHODS"""

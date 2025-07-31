@@ -97,7 +97,7 @@ class BaseWebAppPlugin(
     self.__wait_count = 0
 
     # TODO: move this to process
-    self.__allocate_port()
+    self._allocate_port()
 
     self.prepared_env = None
     self.base_env = None
@@ -162,7 +162,7 @@ class BaseWebAppPlugin(
     # endfor
     return sorted(res)
 
-  def __allocate_port(self):
+  def _allocate_port(self):
     """
     TODO: (Bleo) this should be migrated to the new correct version 
     
@@ -697,7 +697,7 @@ class BaseWebAppPlugin(
     self.__init_temp_dir()
     self.__deallocate_port()
     self.P('Attempting to init assets due to reload...')
-    self.__allocate_port()
+    self._allocate_port()
     # In case a new port is allocated instead of the one previously used.
     # The commands will be relogged in case something changed because of the
     # port reallocation.

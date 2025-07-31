@@ -205,5 +205,5 @@ class _TunnelEngineMixin(object):
     """
     return True, None
 
-  def on_log_handler(self, text):
+  def on_log_handler(self, text, key=None):
     return

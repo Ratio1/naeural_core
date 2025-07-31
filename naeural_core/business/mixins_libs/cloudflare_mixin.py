@@ -92,12 +92,12 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       # endif token is None
       return is_valid, msg
 
-    def on_log_handler_cloudflare(self, text):
+    def on_log_handler_cloudflare(self, text, key=None):
       """
       Handle log messages from the Cloudflare tunnel.
       This method can be overridden in subclasses to handle logs differently.
       """
-      super(_CloudflareMixinPlugin, self).on_log_handler(text)
+      super(_CloudflareMixinPlugin, self).on_log_handler(text, key)
       if self.__app_url is not None:
         # URL already set, no need to process further
         return

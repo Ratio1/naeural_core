@@ -69,6 +69,7 @@ class NumpySharedMemory(DecentrAIObject):
     self.version = __VER__
     self._mem_name = mem_name
     self._np_shape = np_shape
+    self._init_np_shape = np_shape
     self._np_type = np_type
     prod_shape = np.prod(np_shape, dtype='uint64')
     self._np_bytes = prod_shape * np.dtype(np_type).itemsize
@@ -379,8 +380,8 @@ class NumpySharedMemory(DecentrAIObject):
       self._add_warning("Data is not a numpy array")
       valid = False
     if np.prod(data.shape) > self._max_element_size:
-      self._add_warning("Data of shape {} is larger than the maximum size {}".format(
-        data.shape, self._max_element_size
+      self._add_warning("Data of shape {} is larger than the maximum size {}. init_np_shape: {}".format(
+        data.shape, self._max_element_size, self._init_np_shape, 
       ))
       valid = False
     if len(data.shape) > self.shape_offset:

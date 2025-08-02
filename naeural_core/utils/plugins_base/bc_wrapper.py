@@ -732,11 +732,17 @@ class BCWrapper:
     """
     return self.__bc.web3_allocate_rewards_across_all_escrows()
 
-  def get_unvalidated_job_ids(self):
+  def get_unvalidated_job_ids(self, oracle_address: str):
     """
-    Get the IDs of the unvalidated jobs.
+    Retrieve all the jobs that are pending validation and
+    have not been validated by the given oracle.
+
+    Parameters
+    ----------
+    oracle_address : str
+        The oracle address to check for.
     """
-    return self.__bc.web3_get_unvalidated_job_ids()
+    return self.__bc.web3_get_unvalidated_job_ids(oracle_address=oracle_address)
 
   def get_is_last_epoch_allocated(self):
     """

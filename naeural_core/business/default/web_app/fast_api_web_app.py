@@ -2,6 +2,7 @@ import importlib
 import os
 import shutil
 import tempfile
+import inspect
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -67,7 +68,13 @@ class FastApiWebAppPlugin(BasePlugin):
     return self.__uvicorn_server_started
 
   @staticmethod
-  def endpoint(func=None, *, method="get", require_token=False, streaming_type=None, chunk_size=1024 * 1024):
+  def endpoint(
+      func=None, *,
+      method="get",
+      require_token=False,
+      streaming_type=None,
+      chunk_size=1024 * 1024
+  ):
     """
     Decorator that marks a method as an HTTP endpoint with optional streaming support.
 
@@ -300,8 +307,16 @@ class FastApiWebAppPlugin(BasePlugin):
 
       signature = inspect.signature(method)
       doc = method.__doc__ or ''
-      all_params = [param.name for param in signature.parameters.values()]
-      all_args = [str(param) for param in signature.parameters.values()]
+      has_kwargs = any([
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+      ])
+      non_kw_params = [
+        param for param in signature.parameters.values()
+        if param.kind is not inspect.Parameter.VAR_KEYWORD
+      ]
+      all_params = [param.name for param in non_kw_params]
+      all_args = [str(param) for param in non_kw_params]
 
       # Handle token parameter filtering as before
       if not require_token:
@@ -320,6 +335,7 @@ class FastApiWebAppPlugin(BasePlugin):
         'params': params,
         'endpoint_doc': doc,
         'require_token': require_token,
+        'has_kwargs': has_kwargs,
         'streaming_type': streaming_type,
         'chunk_size': chunk_size
       })
@@ -453,7 +469,20 @@ class FastApiWebAppPlugin(BasePlugin):
       try:
         if self.cfg_log_requests:
           self.P(f"Received request {id} for {method}.")
-        value = self._endpoints.get(method)(*args)
+        endpoint = self._endpoints.get(method)
+        if endpoint is None:
+          raise ValueError(f"Endpoint '{method}' not found in registered endpoints.")
+        has_kwargs = any(
+          param.kind is inspect.Parameter.VAR_KEYWORD
+          for param in inspect.signature(endpoint).parameters.values()
+        )
+        if has_kwargs and args and isinstance(args[-1], dict):
+          # If the last argument is a dict, treat it as kwargs
+          kwargs = args[-1]
+          args = args[:-1]
+        else:
+          kwargs = {}
+        value = endpoint(*args, **kwargs)
       except Exception as exc:
         self.P("Exception occured while processing\n"
                "Request: {}\nArgs: {}\nException:\n{}".format(

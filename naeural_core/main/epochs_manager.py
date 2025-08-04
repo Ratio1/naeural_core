@@ -786,31 +786,41 @@ class EpochsManager(Singleton):
     result = prc_available if not return_absolute else avail_seconds
     return result if not return_max else (result, max_availability)
 
-  def get_current_epoch_start(self):
+  def get_current_epoch_start(self, current_epoch=None):
     """
     Returns the start date of the current epoch.
-
     The start date is computed as the genesis date plus the epoch length multiplied by the current epoch id.
-    
+
+    Parameters
+    ----------
+    current_epoch : int, optional
+        The current epoch id. If None, the current epoch id is used.
+
     Returns
     -------
     datetime.datetime
         The start date of the current epoch.
     """
-    return self.__genesis_date + timedelta(seconds=(self.epoch_length * self.get_time_epoch()))
+    if current_epoch is None:
+      current_epoch = self.get_time_epoch()
+    return self.__genesis_date + timedelta(seconds=(self.epoch_length * current_epoch))
 
-  def get_current_epoch_end(self):
+  def get_current_epoch_end(self, current_epoch=None):
     """
     Returns the end date of the current epoch.
-
     The end date is computed as the start date of the current epoch plus the epoch length.
-    
+
+    Parameters
+    ----------
+    current_epoch : int, optional
+        The current epoch id. If None, the current epoch id is used.
+
     Returns
     -------
     datetime.datetime
         The end date of the current epoch.
     """
-    return self.get_current_epoch_start() + timedelta(seconds=self.epoch_length)
+    return self.get_current_epoch_start(current_epoch=current_epoch) + timedelta(seconds=self.epoch_length)
 
   def __recalculate_current_epoch_for_node(self, node_addr, time_between_heartbeats=10, return_msg=False):
     """

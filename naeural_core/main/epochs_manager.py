@@ -1065,9 +1065,9 @@ class EpochsManager(Singleton):
     # TODO: Maybe take into consideration the following use-case:
     #  node A was never seen by the serving oracle, but was licensed before the last
     #  faulty epoch.
-    if node_addr not in self.cached_data:
-      return None
     dct_state = self.get_node_state(node_addr)
+    if dct_state is None:
+      return None
     dct_epochs = dct_state[EPCT.EPOCHS]
     current_epoch = self.get_time_epoch()
     epochs = list(range(1, current_epoch))

@@ -931,7 +931,8 @@ class EpochsManager(Singleton):
     starts a new one. Closing the epoch implies recalculating the current epoch node availability 
     for all nodes and then resetting the timestamps.
     """
-    result = 0 # assume no epoch change
+    result = 0  # assume no epoch change
+    closed_epoch = False
     with self.log.managed_lock_resource(EPOCHMON_MUTEX):
       current_epoch = self.get_time_epoch()
       if self.__current_epoch is None:
@@ -943,6 +944,7 @@ class EpochsManager(Singleton):
             current_epoch, self.__current_epoch), color='r'
           )
         self.P("Closing epoch {} at start of epoch {}".format(self.__current_epoch, current_epoch))
+        closed_epoch = True
         result = self.__current_epoch
         self.__recalculate_current_epoch_for_all()
         self.P("Starting epoch: {}".format(current_epoch))
@@ -952,9 +954,10 @@ class EpochsManager(Singleton):
         #endif epoch is not the same as the current one
       #endif current epoch is not None
     # endwith lock
-    # Update the cached data
-    # This method already has a lock in it so it is safe to call it here
-    self.maybe_update_cached_data(force=True)
+    if closed_epoch:
+      # Update the cached data
+      # This method already has a lock in it so it is safe to call it here
+      self.maybe_update_cached_data(force=True)
     return result
 
 

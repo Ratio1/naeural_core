@@ -61,6 +61,7 @@ NETWORK_STATS_MUTEX = 'network_stats_mutex'
 INITIAL_SYNC_EPOCH = 0  # TODO: add initial sync epoch
 
 STATS_CACHE_REFRESH_SECONDS = 60 * 2  # 2s minutes
+CACHE_DATA_REFRESH_SECONDS = 60 * 10  # 10 minutes
 
 try:
   EPOCH_MANAGER_DEBUG = int(os.environ.get(ct.EE_EPOCH_MANAGER_DEBUG, 1))
@@ -178,6 +179,8 @@ class EpochsManager(Singleton):
     
     self.owner = owner
     self.__current_epoch = None
+    self.cached_data = {}
+    self._last_cached_data_refresh = None
     self.__data = {}
     self.__full_data = {}
     self.__eth_to_node = {}
@@ -1037,12 +1040,9 @@ class EpochsManager(Singleton):
     node_addr : str
       The node address.
     """
-    if node_addr not in self.__data:
+    if node_addr not in self.cached_data:
       return None
-    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
-      result = deepcopy(self.__data[node_addr])
-    # endwith lock
-    return result
+    return self.cached_data[node_addr]
   
   # TODO: Have method like this, only for one epoch,
   #  to reduce complexity!!!!
@@ -1065,9 +1065,9 @@ class EpochsManager(Singleton):
     # TODO: Maybe take into consideration the following use-case:
     #  node A was never seen by the serving oracle, but was licensed before the last
     #  faulty epoch.
-    if node_addr not in self.__data:
-      return None
     dct_state = self.get_node_state(node_addr)
+    if dct_state is None:
+      return None
     dct_epochs = dct_state[EPCT.EPOCHS]
     current_epoch = self.get_time_epoch()
     epochs = list(range(1, current_epoch))
@@ -1527,7 +1527,23 @@ class EpochsManager(Singleton):
       msg = "Error getting EpochManager stats: {}".format(str(e))
       stats['error'] = msg
     return stats
-  
+
+  def maybe_update_cached_data(self, force=False):
+    if force or self._last_cached_data_refresh is None or time() - self._last_cached_data_refresh > CACHE_DATA_REFRESH_SECONDS:
+      success = False
+      with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+        try:
+          tmp_cache = deepcopy(self.__data)
+          success = True
+        except Exception as e:
+          self.P(f"Error updating cached data: {str(e)}", color='r')
+      # endwith lock
+      if success:
+        self.cached_data = tmp_cache
+        self._last_cached_data_refresh = time()
+      # endif success
+    # endif force or cache expired
+    return
 
 ### Below area contains the methods for availability resulted from multi-oracle sync
 

@@ -1530,11 +1530,14 @@ class EpochsManager(Singleton):
 
   def maybe_update_cached_data(self, force=False):
     if force or self._last_cached_data_refresh is None or time() - self._last_cached_data_refresh > CACHE_DATA_REFRESH_SECONDS:
-      with self.log.managed_lock_resource(EPOCHMON_MUTEX):
-        tmp_cache = deepcopy(self.__data)
-      # endwith lock
-      self.cached_data = tmp_cache
-      self._last_cached_data_refresh = time()
+      try:
+        with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+          tmp_cache = deepcopy(self.__data)
+        # endwith lock
+        self.cached_data = tmp_cache
+        self._last_cached_data_refresh = time()
+      except Exception as e:
+        self.P(f"Error updating cached data: {str(e)}", color='r')
     # endif force or cache expired
     return
 

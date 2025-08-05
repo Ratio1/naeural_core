@@ -41,8 +41,8 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
   if True:
     @property
     def app_url_cloudflare(self):
-      return None if self.get_cloudflare_token() is not None else self.__app_url
-
+      return None if self.get_cloudflare_token() is not None or not hasattr(self,
+                                                                            '_CloudflareMixinPlugin__app_url') else self.__app_url
     def get_default_tunnel_engine_parameters_cloudflare(self):
       return CLOUDFLARE_DEFAULT_PARAMETERS
 
@@ -98,7 +98,7 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       This method can be overridden in subclasses to handle logs differently.
       """
       super(_CloudflareMixinPlugin, self).on_log_handler(text, key)
-      if self.__app_url is not None:
+      if hasattr(self, '_CloudflareMixinPlugin__app_url') and self.__app_url is not None:
         # URL already set, no need to process further
         return
       # Define a regular expression pattern to match the URL format

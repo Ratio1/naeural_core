@@ -951,6 +951,10 @@ class EpochsManager(Singleton):
         self.__save_status()  # save fresh status current epoch
         #endif epoch is not the same as the current one
       #endif current epoch is not None
+    # endwith lock
+    # Update the cached data
+    # This method already has a lock in it so it is safe to call it here
+    self.maybe_update_cached_data(force=True)
     return result
 
 

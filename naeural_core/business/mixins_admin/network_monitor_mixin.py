@@ -125,8 +125,9 @@ class _NetworkMonitorMixin:
       #endif lost node is above the threshold
     #endfor clean lost nodes after a while
     if len(removed_nodes) > 0:
-      self.P("Removed {} from active nodes after >{} fails. Ongoing issues: {}".format(
-        removed_nodes, REMOVAL_THRESHOLD, {k:v for k,v in self.__lost_nodes.items() if k not in removed_nodes},
+      self.P("Removed {} nodes from {} active nodes after {} fails: {}\nOngoing issues: {}".format(
+        len(removed_nodes), len(self.__active_nodes), REMOVAL_THRESHOLD, 
+        removed_nodes, {k:v for k,v in self.__lost_nodes.items() if k not in removed_nodes},
       ))
       #endif
     #endfor clean lost nodes after a while

@@ -211,6 +211,7 @@ class NetMon01Plugin(
 
   def _process(self):
     payload = None
+    self.netmon.epoch_manager.maybe_update_cached_data()
     self._nmon_counter += 1      
     self._maybe_load_state()
     

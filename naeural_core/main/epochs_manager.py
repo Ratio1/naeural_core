@@ -1534,6 +1534,7 @@ class EpochsManager(Singleton):
 
   def maybe_update_cached_data(self, force=False):
     if force or self._last_cached_data_refresh is None or time() - self._last_cached_data_refresh > CACHE_DATA_REFRESH_SECONDS:
+      self.P(f"Updating epoch manager cached data (force={force})...")
       success = False
       with self.log.managed_lock_resource(EPOCHMON_MUTEX):
         try:
@@ -1545,6 +1546,7 @@ class EpochsManager(Singleton):
       if success:
         self.cached_data = tmp_cache
         self._last_cached_data_refresh = time()
+        self.P("Epoch manager cached data updated.")
       # endif success
     # endif force or cache expired
     return

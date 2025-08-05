@@ -422,6 +422,8 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     if len(current_network) == 0:
       self.P(f"[netmon_handler] Received NET_MON_01 data without {self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK}.", color='r ')
     else:
+      sender_addr = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
+      sender_alias = data.get(self.const.PAYLOAD_DATA.EE_ID, None)
       # here we will remove the prefix from each "address" within the nodes info
       current_network = self.__preprocess_current_network_data(current_network)
       # from this point on we will work with the no-prefix addresses      
@@ -438,7 +440,9 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       for cached_addr in self.__allowed_nodes:
         if cached_addr in non_online and self.__allowed_nodes[cached_addr]["is_online"]:
           self.__allowed_nodes[cached_addr]["is_online"] = False
-          self.P(f"[netmon_handler] Marking node '{non_online[cached_addr]}' <{cached_addr}> as offline.", color='r')
+          self.P("[netmon_handler] Marking node '{}' <{}> as offline. Reporter '{}' <{}>".format(
+            non_online[cached_addr], cached_addr, sender_alias, sender_addr), color='r'
+          )
       # endfor marking non online nodes
       
       if self.__debug_netmon_count > 0:
@@ -463,7 +467,9 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
             self.__new_nodes_this_iter += 1
           #endif addr not in __allowed_nodes
           if not self.__allowed_nodes[addr].get("is_online", True):
-            self.P("[netmon_handler] Node '{}' <{}> is back online.".format(peers_status[addr]["eeid"], addr))
+            self.P("[netmon_handler] Node '{}' <{}> is back online. Reporter '{}' <{}>".format(
+              peers_status[addr]["eeid"], addr, sender_alias, sender_addr)
+            )
           self.__allowed_nodes[addr]["is_online"] = True # by default we assume the node is online due to `__get_active_nodes_summary_with_peers`
         #endif addr allows me
       #endfor each addr in peers_status

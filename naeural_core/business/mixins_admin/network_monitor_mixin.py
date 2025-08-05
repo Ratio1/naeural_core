@@ -116,12 +116,18 @@ class _NetworkMonitorMixin:
       #endif is active or not
     #endfor check if any "active" is not active anymore
 
+    removed_nodes = []
+    REMOVAL_THRESHOLD = 10
     for lost_addr in self.__lost_nodes:
-      if self.__lost_nodes[lost_addr] > 10 and lost_addr in self.__active_nodes:
+      if self.__lost_nodes[lost_addr] > REMOVAL_THRESHOLD and lost_addr in self.__active_nodes:
         self.__active_nodes.remove(lost_addr)
-        self.P("Removed '{}' from active nodes after {} fails. Ongoing issues: {}".format(
-          lost_addr, self.__lost_nodes[lost_addr], {k:v for k,v in self.__lost_nodes.items()},
-        ))
+        removed_nodes.append(lost_addr)
+      #endif lost node is above the threshold
+    #endfor clean lost nodes after a while
+    if len(removed_nodes) > 0:
+      self.P("Removed {} from active nodes after >{} fails. Ongoing issues: {}".format(
+        removed_nodes, REMOVAL_THRESHOLD, {k:v for k,v in self.__lost_nodes.items() if k not in removed_nodes},
+      ))
       #endif
     #endfor clean lost nodes after a while
     return is_alert, nodes    

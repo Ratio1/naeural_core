@@ -1040,7 +1040,7 @@ class EpochsManager(Singleton):
     node_addr : str
       The node address.
     """
-    if node_addr not in self.__data:
+    if node_addr not in self.cached_data:
       return None
     return self.cached_data[node_addr]
   
@@ -1065,7 +1065,7 @@ class EpochsManager(Singleton):
     # TODO: Maybe take into consideration the following use-case:
     #  node A was never seen by the serving oracle, but was licensed before the last
     #  faulty epoch.
-    if node_addr not in self.__data:
+    if node_addr not in self.cached_data:
       return None
     dct_state = self.get_node_state(node_addr)
     dct_epochs = dct_state[EPCT.EPOCHS]

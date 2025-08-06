@@ -741,6 +741,14 @@ class NetworkMonitor(DecentrAIObject):
   if True:
     def __network_node_default_cuda(self, addr, as_int=True):
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
+      if ct.HB.DEFAULT_CUDA not in hearbeat:        
+        alias = self.network_node_eeid(addr)
+        fn = self.log.save_output_json(
+          data_json=hearbeat, 
+          fname=f"{self.log.time_to_str()}_{alias}_{self.__remove_address_prefix(addr)}_heartbeat.json", 
+        )
+        self.P(f"Node {addr} does not have a default CUDA device set in hb. Hb saved in {fn}", color='error')
+        return None
       default_cuda = hearbeat[ct.HB.DEFAULT_CUDA]
       if as_int:
         if ':' not in default_cuda:

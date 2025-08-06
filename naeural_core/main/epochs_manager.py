@@ -953,11 +953,14 @@ class EpochsManager(Singleton):
         self.__save_status()  # save fresh status current epoch
         #endif epoch is not the same as the current one
       #endif current epoch is not None
+      # This is included in order to ensure that if a parallel process checks the epoch ending
+      # it will also wait in case the cache needs to be updated.
+      if closed_epoch:
+        # Update the cached data
+        # This method already has a lock in it so it is safe to call it here
+        self.maybe_update_cached_data(force=True, with_lock=False)
+      # endif closed epoch
     # endwith lock
-    if closed_epoch:
-      # Update the cached data
-      # This method already has a lock in it so it is safe to call it here
-      self.maybe_update_cached_data(force=True)
     return result
 
 
@@ -1535,17 +1538,27 @@ class EpochsManager(Singleton):
       stats['error'] = msg
     return stats
 
-  def maybe_update_cached_data(self, force=False):
+  def maybe_update_cached_data(self, force=False, with_lock=True):
     if force or self._last_cached_data_refresh is None or time() - self._last_cached_data_refresh > CACHE_DATA_REFRESH_SECONDS:
       self.P(f"Updating epoch manager cached data (force={force})...")
       success = False
-      with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+      # This is could have been replaced with condition=with_lock in the managed_lock_resource call,
+      # but it was written this way to be more explicit and clear.
+      if with_lock:
+        with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+          try:
+            tmp_cache = deepcopy(self.__data)
+            success = True
+          except Exception as e:
+            self.P(f"Error updating cached data: {str(e)}", color='r')
+        # endwith lock
+      else:
         try:
           tmp_cache = deepcopy(self.__data)
           success = True
         except Exception as e:
           self.P(f"Error updating cached data: {str(e)}", color='r')
-      # endwith lock
+      # endif with_lock
       if success:
         self.cached_data = tmp_cache
         self._last_cached_data_refresh = time()

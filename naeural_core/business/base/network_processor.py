@@ -11,6 +11,8 @@ _CONFIG = {
   
   'ALLOW_EMPTY_INPUTS' : False,
   
+  "PROCESS_DELAY" : 0,  # seconds, how often to process the network
+  
   'VALIDATION_RULES' : {
     **BaseClass.CONFIG['VALIDATION_RULES'],
   },  

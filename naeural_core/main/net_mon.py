@@ -1793,7 +1793,6 @@ class NetworkMonitor(DecentrAIObject):
       This function returns the apps of a remote node based on the cached information.
       Formerly, it was based on the heartbeat information as shown below, but now it is based 
       on the cached information.
-      If 'owner' is specified, it will return only the apps owned by that owner.
       """
       __addr_no_prefix = self.__remove_address_prefix(addr)
       node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})

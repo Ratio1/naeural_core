@@ -1787,11 +1787,12 @@ class NetworkMonitor(DecentrAIObject):
       return {}
     
     
-    def network_node_apps(self, addr):
+    def network_node_apps(self, addr, owner=None):
       """
       This function returns the apps of a remote node based on the cached information.
       Formerly, it was based on the heartbeat information as shown below, but now it is based 
       on the cached information.
+      If 'owner' is specified, it will return only the apps owned by that owner.
       """
       __addr_no_prefix = self.__remove_address_prefix(addr)
       node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
@@ -1803,6 +1804,11 @@ class NetworkMonitor(DecentrAIObject):
           signature = status.get(ct.HB.ACTIVE_PLUGINS_INFO.SIGNATURE)
           if pipeline not in apps:
             pipeline_info = self.network_node_pipeline_info(addr=__addr_no_prefix, pipeline=pipeline)
+            pipeline_owner = pipeline_info.get(ct.CONFIG_STREAM.K_OWNER, None)
+
+            if owner and pipeline_owner != owner:
+              continue
+
             apps[pipeline] = {
               NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.K_INITIATOR_ADDR),
               NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
@@ -1823,7 +1829,7 @@ class NetworkMonitor(DecentrAIObject):
       return apps
     
     
-    def network_known_apps(self):
+    def network_known_apps(self, owner=None):
       """
       This function returns the apps of all remote ONLINE nodes based on the cached information.
       """
@@ -1831,7 +1837,7 @@ class NetworkMonitor(DecentrAIObject):
       fails = {}
       for addr in self.__nodes_pipelines:
         if self.network_node_is_online(addr=addr):
-          node_apps = self.network_node_apps(addr=addr)
+          node_apps = self.network_node_apps(addr=addr, owner=owner)
           if len(node_apps) == 0:
             fails[addr] = self.network_node_pipelines(addr=addr)
           full_addr = self._add_address_prefix(addr)

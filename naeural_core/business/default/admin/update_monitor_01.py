@@ -69,6 +69,9 @@ _CONFIG = {
   'WORKING_HOURS': [], 
   # "WORKING_HOURS"       : [["08:30", "09:30"]],    
   
+  "PROCESS_DELAY"       : 5 * 60,  # seconds between process calls
+  "DELAYED_VERSION_CHECK" : 10 * 60,  # the version checks will be postponed for this ammount of seconds after restart
+  
   "FORCE_RESTART_AFTER" : 3600 * 24 * 2,  # days restart time
   "REBOOT_ON_RESTART"   : False,
   
@@ -78,7 +81,6 @@ _CONFIG = {
   
   'SERVER_URL'          : '',
 
-  "PROCESS_DELAY"       : 300,
 
   "VERSION_TOKEN"       : None,
   "VERSION_URL"         : None,
@@ -107,6 +109,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
 
 
   def on_init(self):
+    self.__update_monitor_startup_time = self.time()
     self._update_monitor_count = 0
     self.__logo = False
     self.__failed_download = False
@@ -126,6 +129,15 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     self.__maybe_config_supervisor_restart_offset()
 
     return
+  
+  def __should_postpone_version_check(self):
+    """Checks if the version check should be postponed"""
+    if self.time() - self.__update_monitor_startup_time < self.cfg_delayed_version_check:
+      self.P("Postponing version check for more {} seconds...".format(
+        self.cfg_delayed_version_check - (self.time() - self.__update_monitor_startup_time)
+      ))
+      return True
+    return False
 
   def __maybe_config_supervisor_restart_offset(self):
     """Configures the restart offset for the supervisor node"""
@@ -446,6 +458,9 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
   def _process_update_check(self):
     needs_restart = False
     self._update_monitor_count += 1
+    
+    if self.__should_postpone_version_check():
+      return
     
     branch = self.docker_branch if self.runs_in_docker else self.log.git_branch
     token = self.cfg_version_token

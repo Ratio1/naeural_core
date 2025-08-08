@@ -133,7 +133,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
   def __should_postpone_version_check(self):
     """Checks if the version check should be postponed"""
     if self.time() - self.__update_monitor_startup_time < self.cfg_delayed_version_check:
-      self.P("Postponing version check for more {} seconds...".format(
+      self.P("Postponing version check for more {:.1f} seconds...".format(
         self.cfg_delayed_version_check - (self.time() - self.__update_monitor_startup_time)
       ))
       return True

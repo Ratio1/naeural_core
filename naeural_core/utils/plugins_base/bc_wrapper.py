@@ -3,6 +3,8 @@ import traceback
 
 from naeural_core.bc import DefaultBlockEngine
 
+from ratio1.const.evm_net import EVM_NET_DATA
+
 class BCWrapper:
   def __init__(self, blockchain_manager : DefaultBlockEngine, owner):
     self.__bc : DefaultBlockEngine = blockchain_manager
@@ -749,3 +751,9 @@ class BCWrapper:
     Check if the last epoch has been allocated.
     """
     return self.__bc.web3_get_is_last_epoch_allocated()
+  
+  
+  def get_evm_net_data(self):
+    evm_net = self.get_evm_network()
+    evm_net_data = EVM_NET_DATA.get(evm_net, {})
+    return evm_net_data

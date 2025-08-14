@@ -10,7 +10,9 @@ _CONFIG = {
   **BaseClass.CONFIG,
   
   'ALLOW_EMPTY_INPUTS' : False,
-  
+
+  'MAX_INPUTS_QUEUE_SIZE' : 100,
+
   "PROCESS_DELAY" : 0,  # seconds, how often to process the network
   
   'VALIDATION_RULES' : {

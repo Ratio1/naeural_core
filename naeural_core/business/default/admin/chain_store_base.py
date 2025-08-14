@@ -29,8 +29,12 @@ from naeural_core.business.base.network_processor import NetworkProcessorPlugin
 
 _CONFIG = {
   **NetworkProcessorPlugin.CONFIG,
-  
-  'ALLOW_EMPTY_INPUTS' : True,  
+
+  'PROCESS_DELAY' : 0,
+
+  'MAX_INPUTS_QUEUE_SIZE' : 100,
+
+  'ALLOW_EMPTY_INPUTS' : True,
   "ACCEPT_SELF" : False,
   
   "FULL_DEBUG_PAYLOADS" : False,

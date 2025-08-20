@@ -1826,13 +1826,15 @@ class NetworkMonitor(DecentrAIObject):
       return apps
     
     
-    def network_known_apps(self):
+    def network_known_apps(self, target_nodes=None):
       """
       This function returns the apps of all remote ONLINE nodes based on the cached information.
       """
       apps = {}
       fails = {}
-      for addr in self.__nodes_pipelines:
+      if target_nodes is None:
+        target_nodes = list(self.__nodes_pipelines.keys())
+      for addr in target_nodes:
         if self.network_node_is_online(addr=addr):
           node_apps = self.network_node_apps(addr=addr)
           if len(node_apps) == 0:

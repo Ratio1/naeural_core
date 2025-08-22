@@ -714,7 +714,7 @@ class EpochsManager(Singleton):
         # (ended with the last set of end_timestamp as end of interval
         avail_seconds += (end_timestamp - start_timestamp).total_seconds()
         start_timestamp = timestamps[i]
-        errors.append((str(timestamps[i-1]), str(timestamps[i])))
+        errors.append((timestamps[i-1], timestamps[i]))
       # endif delta
 
       # change the end of the current interval
@@ -724,11 +724,16 @@ class EpochsManager(Singleton):
     # add the last interval length
     avail_seconds += (end_timestamp - start_timestamp).total_seconds()
     if extra_logs:
+      errors = sorted(errors, key=lambda x: (x[1] - x[0]).total_seconds(), reverse=True)
+      total = sum((x[1] - x[0]).total_seconds() for x in errors)
+      lst_str_errors = [(str(x[0]), str(x[1]), round((x[1] - x[0]).total_seconds(), 1)) for x in errors]
       min_delta = np.min(deltas)
       max_delta = np.max(deltas)
       avg_delta = np.mean(deltas)
-      self.P("Hb delta check min: {:.2f}s, max: {:.2f}s, avg: {:.2f}s. List of errors:\n{}".format(
-        min_delta, max_delta, avg_delta, json.dumps(errors, indent=2)
+      self.P("Hb delta check min: {:.2f}s, max: {:.2f}s, avg: {:.2f}s. List of errors (total {}s in {} periods):\n{}".format(
+        min_delta, max_delta, avg_delta, 
+        total, len(errors), 
+        json.dumps(lst_str_errors, indent=2)
       ))
     return avail_seconds
 

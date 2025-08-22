@@ -664,7 +664,10 @@ class EpochsManager(Singleton):
     return
   
   # FIXME: this method does not work as expected
-  def __calculate_avail_seconds(self, timestamps, time_between_heartbeats=10):
+  def __calculate_avail_seconds(
+    self, timestamps, 
+    time_between_heartbeats=10, extra_logs=False,
+  ):
     """
     This method calculates the availability of a node in the current epoch 
     based on the timestamps.
@@ -676,7 +679,10 @@ class EpochsManager(Singleton):
 
     time_between_heartbeats: int
       Mandatory time between heartbeats in seconds.
-    
+
+    extra_logs: bool
+      If True, additional logging is performed.
+
     Returns
     -------
     int
@@ -691,9 +697,12 @@ class EpochsManager(Singleton):
 
     start_timestamp = timestamps[0]
     end_timestamp = timestamps[0]
+    deltas = []
+    errors = []
     for i in range(1, nr_timestamps):
       # timestams should and must be sorted and in the same epoch
-      delta = (timestamps[i] - timestamps[i - 1]).seconds
+      delta = (timestamps[i] - timestamps[i - 1]).total_seconds()
+      deltas.append(delta)
       # the delta between timestamps is bigger than the max heartbeat interval
       # or less than half the heartbeat interval (ignore same heartbeat)
       # TODO(AID): how can a heartbeat be sent more than once?
@@ -702,8 +711,9 @@ class EpochsManager(Singleton):
         # this gets triggered when the delta is too big or too small so last interval 
         # is considered invalid thus we compute up-to-last-valid interval availability
         # (ended with the last set of end_timestamp as end of interval
-        avail_seconds += (end_timestamp - start_timestamp).seconds
+        avail_seconds += (end_timestamp - start_timestamp).total_seconds()
         start_timestamp = timestamps[i]
+        errors.append((timestamps[i-1], timestamps[i]))
       # endif delta
 
       # change the end of the current interval
@@ -711,11 +721,22 @@ class EpochsManager(Singleton):
     #endfor each hb timestamp
 
     # add the last interval length
-    avail_seconds += (end_timestamp - start_timestamp).seconds
-    return avail_seconds    
+    avail_seconds += (end_timestamp - start_timestamp).total_seconds()
+    if extra_logs:
+      min_delta = np.min(deltas)
+      max_delta = np.max(deltas)
+      avg_delta = np.mean(deltas)
+      self.P("Hb delta check min: {:.2f}s, max: {:.2f}s, avg: {:.2f}s. List of errors:\n{}".format(
+        min_delta, max_delta, avg_delta, json.dumps(errors, indent=2)
+      ))
+    return avail_seconds
 
 
-  def __calc_node_avail_seconds(self, node_addr, time_between_heartbeats=10, return_timestamps=False):
+  def __calc_node_avail_seconds(
+    self, node_addr, 
+    time_between_heartbeats=10, return_timestamps=False,
+    extra_logs=False,
+  ):
     if node_addr not in self.__data:
       self.__initialize_new_node(node_addr)
     # endif
@@ -726,7 +747,8 @@ class EpochsManager(Singleton):
     current_epoch = current_epoch_data[EPCT.ID]
     lst_timestamps = sorted(list(timestamps))
     avail_seconds = self.__calculate_avail_seconds(
-      lst_timestamps, time_between_heartbeats=time_between_heartbeats
+      lst_timestamps, time_between_heartbeats=time_between_heartbeats,
+      extra_logs=extra_logs,
     )
     if return_timestamps:
       return avail_seconds, lst_timestamps, current_epoch
@@ -825,7 +847,11 @@ class EpochsManager(Singleton):
     """
     return self.get_current_epoch_start(current_epoch=current_epoch) + timedelta(seconds=self.epoch_length)
 
-  def __recalculate_current_epoch_for_node(self, node_addr, time_between_heartbeats=10, return_msg=False):
+  def __recalculate_current_epoch_for_node(
+    self, node_addr, 
+    time_between_heartbeats=10, return_msg=False,
+    extra_logs=False,
+  ):
     """
     This method recalculates the current epoch availability for a node. 
     It should be used when the epoch changes just before resetting the timestamps.
@@ -837,7 +863,7 @@ class EpochsManager(Singleton):
     """
     avail_seconds, lst_timestamps, current_epoch = self.__calc_node_avail_seconds(
       node_addr, time_between_heartbeats=time_between_heartbeats,
-      return_timestamps=True
+      return_timestamps=True, extra_logs=extra_logs,
     )
     max_possible = self.epoch_length
     prc_available = round(avail_seconds / max_possible, 4) # DO NOT USE 100% but 1.0 
@@ -887,7 +913,8 @@ class EpochsManager(Singleton):
     # if current node was not 100% available, do not compute availability for other nodes
     self.start_timer('recalc_node_epoch')
     available_prc, current_epoch = self.__recalculate_current_epoch_for_node(
-      self.owner.node_addr
+      self.owner.node_addr,
+      extra_logs=True, # show issues on SELF
     )
     self.stop_timer('recalc_node_epoch')
     # get the record value for the current node is actually redundant
@@ -911,7 +938,8 @@ class EpochsManager(Singleton):
         self.start_timer('recalc_node_epoch')
         prc_avail, current_epoch, log_msg, log_msg_color = self.__recalculate_current_epoch_for_node(
           node_addr=node_addr,
-          return_msg=True
+          return_msg=True, 
+          extra_logs=False,
         )
         self.stop_timer('recalc_node_epoch')
         logs.append(log_msg)
@@ -1006,6 +1034,7 @@ class EpochsManager(Singleton):
       The heartbeat dict.
       
     """
+    start_proc = time()
     self.maybe_close_epoch()
 
     local_epoch = self.get_time_epoch()   
@@ -1031,6 +1060,7 @@ class EpochsManager(Singleton):
         remote_epoch, node_addr, local_epoch
       ))
     #endif remote epoch is the same as the local epoch
+    elapsed = time() - start_proc
     return
   
   

@@ -503,6 +503,13 @@ class Orchestrator(DecentrAIObject,
         }
       # endif k not in admin_pipeline
     # endfor each mandatory pipeline
+    
+    for k in ct.ADMIN_PIPELINE_EXCLUSIONS:
+      if k in admin_pipeline:
+        self.P("  Excluding `{}` from admin pipeline config.".format(k))
+        del admin_pipeline[k]
+
+    self.P(f"Final list of plugins for admin pipeline: {list(admin_pipeline.keys())}")
     self.__admin_pipeline = admin_pipeline
     return
   
@@ -1000,7 +1007,7 @@ class Orchestrator(DecentrAIObject,
         # send HB only if not stopped or if stopped but NOT dangerous
         hb_prep_time = time() - hb_prep_start
         if True:
-          self.P("Heartbeat preparation took {:.1f}s".format(hb_prep_time))
+          self.P("Heartbeat preparation took {:.3f}s".format(hb_prep_time))
         self._comm_manager.send(data=hb_payload, event_type=ct.HEARTBEAT)
         hb_sent = True
       else:

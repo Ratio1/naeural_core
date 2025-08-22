@@ -67,10 +67,10 @@ class _HeartbeatsCommMixin(object):
 
         end_it = time()
         loop_time = end_it - start_it
-        loop_times.append(loop_time)
         loop_resolution = self.loop_resolution
         sleep_time = max(1 / loop_resolution - loop_time, 0.00001)
         sleep(sleep_time)
+        loop_times.append(time() - start_it)
       except Exception as e:
         msg = "Exception in heartbeats comm thread loop. Forcing loop delay extension until the exception does not occur."
         self.P(msg, color='r')

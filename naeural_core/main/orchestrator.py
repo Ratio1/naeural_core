@@ -1067,6 +1067,7 @@ class Orchestrator(DecentrAIObject,
           extra = "Total {}/{}/{} data/inf/send".format(
             n_upstream, n_inferences, n_comms,
           )
+          summary_perf_info = self._app_monitor.get_summary_perf_info()
           hb_msg = "{} hb:{} {}{}{}itr {} ({} void), Hz: {}/{}, {:.1f} hrs, New.pl.: {}, {}, wl:{}".format(
             "'{}' {}".format(self.cfg_eeid, self.__get_system_version()),
             self._heartbeat_counter,
@@ -1074,7 +1075,7 @@ class Orchestrator(DecentrAIObject,
             str_forced, main_loop_iter, self._main_loop_counts['VOID_ITER'], self.real_main_loop_resolution, self.cfg_main_loop_resolution,
             self.running_time / 3600, self._payloads_count_queue[-1] - self._payloads_count_queue[-2],
             # self._app_monitor.get_basic_perf_info(),
-            self._app_monitor.get_summary_perf_info(),
+            summary_perf_info,
             nr_allowed,
           )
           if False:
@@ -1610,11 +1611,15 @@ class Orchestrator(DecentrAIObject,
       self.log.start_timer('main_loop', section='asynchronous_communication')
       try:
         
-        # TODO: add here one more maybe-hb for good measure
+        self._maybe_send_heartbeat(      
+          status=None,
+          full_info=self.cfg_heartbeat_timers,
+          send_log=self.cfg_heartbeat_log,
+        )
         
         lst_payloads, lst_commands = [], []
-        
-        # Commands section 
+
+        # Commands section
         nr_commands = 0
         for instance_hash, deq in self._business_manager.comm_shared_memory['commands'].items():
           while len(deq) > 0:

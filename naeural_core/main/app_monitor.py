@@ -43,6 +43,7 @@ class ApplicationMonitor(DecentrAIObject):
     self.alert_process = False
     self.critical_alert = False
     self.owner_mem = -1
+    self._last_saved_history = 0
     self.__first_payload_prepared = False
     self.__first_ram_alert_raised = False
     self.__first_ram_alert_raised_time = 0
@@ -405,19 +406,24 @@ class ApplicationMonitor(DecentrAIObject):
       str_info += ", {}".format(temp)
       cpu_temp = self.__last_temperature_info['max_temp']
 
-    self.add_local_history_and_save(
-      cpu_load=cpu_mean,
-      cpu_temp=cpu_temp,
-      total_memory=pc_total_mem,
-      occupied_memory=pc_occupied_mem,
-      gpu_load=gpu_load,
-      gpu_temp=gpu_temp,
-      gpu_fan=gpu_fan,
-      gpu_fan_unit=gpu_fan_unit,
-      gpu_occupied_memory=gpu_occupied_memory,
-      gpu_total_memory=gpu_total_mem,
-      timestamps=self.log.now_str(nice_print=True, short=False),
-    )
+    if (time() - self._last_saved_history) > 300:
+      self._last_saved_history = time()
+      start_hist_time = time()
+      self.add_local_history_and_save(
+        cpu_load=cpu_mean,
+        cpu_temp=cpu_temp,
+        total_memory=pc_total_mem,
+        occupied_memory=pc_occupied_mem,
+        gpu_load=gpu_load,
+        gpu_temp=gpu_temp,
+        gpu_fan=gpu_fan,
+        gpu_fan_unit=gpu_fan_unit,
+        gpu_occupied_memory=gpu_occupied_memory,
+        gpu_total_memory=gpu_total_mem,
+        timestamps=self.log.now_str(nice_print=True, short=False),
+      )
+      elapsed_hist_time = time() - start_hist_time
+      self.P("Elapsed time for saving history: {:.2f}s".format(elapsed_hist_time))
 
     return str_info
 

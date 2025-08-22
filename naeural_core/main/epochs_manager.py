@@ -506,6 +506,7 @@ class EpochsManager(Singleton):
     #endif exists
     # TODO: further review if this can call maybe_close_epoch
     #  At first inspection it seems there is no issue.
+    self.maybe_update_cached_data(force=True)
     self.__debug_status()
     return result
 

@@ -360,7 +360,7 @@ class FastApiWebAppPlugin(BasePlugin):
     self._manager = get_server_manager(self.manager_auth)
     self.postponed_requests = self.deque()
 
-    self.P("manager address: {}", format(self._manager.address))
+    self.P("manager address: {}".format(self._manager.address))
     _, self.manager_port = self._manager.address
 
     # Start the FastAPI app

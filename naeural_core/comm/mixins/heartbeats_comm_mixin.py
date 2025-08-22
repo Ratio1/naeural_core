@@ -1,5 +1,9 @@
+import numpy as np
+
+from collections import deque
 from time import time, sleep
 from naeural_core import constants as ct
+
 
 
 class _HeartbeatsCommMixin(object):
@@ -11,6 +15,9 @@ class _HeartbeatsCommMixin(object):
   def _run_thread_heartbeats(self):
     self._init()
     bytes_delivered = 1 # force to 1 to trigger the first send
+    last_delivered = 0
+    send_times = deque(maxlen=10_000)
+    loop_times = deque(maxlen=10_000)
     while True:
       try:
         # check stop
@@ -33,7 +40,19 @@ class _HeartbeatsCommMixin(object):
           msg_id, msg, ts_added_in_buff = to_send
           msg = self._prepare_message(msg=msg, msg_id=msg_id)
           bytes_delivered = self.send_wrapper(msg)
-          self.P("Delivered {} bytes heartbeat message".format(bytes_delivered))
+          time_from_last = 0
+          if last_delivered != 0:
+            time_from_last = time() - last_delivered
+            send_times.append(time_from_last)
+          last_delivered = time()
+          average = np.mean(send_times) if len(send_times) > 0 else 0
+          min_time = np.min(send_times) if len(send_times) > 0 else 0
+          max_time = np.max(send_times) if len(send_times) > 0 else 0
+          self.P("Delivered {:.0f}KB after {:.1f}s from last hb. Time between hb: {:.1f}s, min: {:.1f}s, max: {:.1f}s, loop freq: {:.1f}Hz".format(
+            bytes_delivered / 1024, time_from_last, average,
+            min_time, max_time,
+            1 / np.mean(loop_times) if len(loop_times) > 0 else -1
+          ))
           self.telemetry_maybe_add_message(msg=msg, ts_added_in_buff=ts_added_in_buff, successful_send=bytes_delivered > 0)
         # endif
         now = time()
@@ -48,6 +67,7 @@ class _HeartbeatsCommMixin(object):
 
         end_it = time()
         loop_time = end_it - start_it
+        loop_times.append(loop_time)
         loop_resolution = self.loop_resolution
         sleep_time = max(1 / loop_resolution - loop_time, 0.00001)
         sleep(sleep_time)

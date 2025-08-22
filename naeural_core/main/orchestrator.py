@@ -961,6 +961,7 @@ class Orchestrator(DecentrAIObject,
       
     elapsed_hb = time() - self._last_heartbeat
     if (elapsed_hb > self.cfg_app_seconds_heartbeat) or force:
+      hb_prep_start = time()
       self._last_heartbeat = time()
       
       # START: internal node status & other functionality checks
@@ -997,6 +998,9 @@ class Orchestrator(DecentrAIObject,
       
       if not self.in_mlstop or (self.in_mlstop and (not self.__is_mlstop_dangerous)):
         # send HB only if not stopped or if stopped but NOT dangerous
+        hb_prep_time = time() - hb_prep_start
+        if True:
+          self.P("Heartbeat preparation took {:.1f}s".format(hb_prep_time))
         self._comm_manager.send(data=hb_payload, event_type=ct.HEARTBEAT)
         hb_sent = True
       else:
@@ -1497,7 +1501,7 @@ class Orchestrator(DecentrAIObject,
   def communicate_send(self, payloads, commands, status=None):
     """
     Main loop step:
-      Sends all the messages and payloads collected in this main loop iteration;
+      Sends all the messages and payloads collected in this main loop iteration;      
     """    
     for cmd in commands:
       self._comm_manager.send(data=cmd, event_type='COMMAND')
@@ -1605,6 +1609,9 @@ class Orchestrator(DecentrAIObject,
       start_it = time()
       self.log.start_timer('main_loop', section='asynchronous_communication')
       try:
+        
+        # TODO: add here one more maybe-hb for good measure
+        
         lst_payloads, lst_commands = [], []
         
         # Commands section 

@@ -713,7 +713,7 @@ class EpochsManager(Singleton):
         # (ended with the last set of end_timestamp as end of interval
         avail_seconds += (end_timestamp - start_timestamp).total_seconds()
         start_timestamp = timestamps[i]
-        errors.append((timestamps[i-1], timestamps[i]))
+        errors.append((str(timestamps[i-1]), str(timestamps[i])))
       # endif delta
 
       # change the end of the current interval

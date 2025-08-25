@@ -70,6 +70,7 @@ except Exception as e:
 
 SYNC_SIGNATURES = 'SIGNATURES'
 SYNC_AGREEMENT_CID = 'AGREEMENT_CID'
+SYNC_SIGNATURES_CID = 'SIGNATURES_CID'
 SYNC_LAST_EPOCH = 'LAST_SYNC_EPOCH'
 SYNC_NODES = 'NODES'
 
@@ -88,6 +89,7 @@ _FULL_DATA_TEMPLATE_EXTRA = {
   # TODO: should this be in FULL_DATA_MANDATORY_FIELDS?
   SYNC_SIGNATURES : defaultdict(dict),
   SYNC_AGREEMENT_CID : {},
+  SYNC_SIGNATURES_CID : {},
   # In this list will be stored the epochs where consensus was not reached.
   # For those epochs all nodes with a license associated previously
   # will be considered as fully available.
@@ -485,6 +487,7 @@ class EpochsManager(Singleton):
         # is no longer in the individual node data but in the full data
         self.__full_data[SYNC_SIGNATURES] = self.__full_data.get(SYNC_SIGNATURES, defaultdict(dict))
         self.__full_data[SYNC_AGREEMENT_CID] = self.__full_data.get(SYNC_AGREEMENT_CID, {})
+        self.__full_data[SYNC_SIGNATURES_CID] = self.__full_data.get(SYNC_SIGNATURES_CID, {})
         for node_address, node_data in self.__data.items():
           if EPCT.SIGNATURES in node_data:
             node_data.pop(EPCT.SIGNATURES)
@@ -1631,19 +1634,23 @@ class EpochsManager(Singleton):
 
     Returns
     -------
-    (availability_table, signatures, cid) if return_additional else availability_table, where
+    (availability_table, signatures, agreement_cid, signatures_cid) if return_additional else availability_table, where
     availability_table: dict
       The availability table for the specified epoch.
     signatures: dict
       The signatures recorded for the current epoch.
-    cid: str
+    agreement_cid: str
       The CID of the agreement for the current epoch if it was
+      stored in R1FS. None otherwise.
+    signatures_cid: str
+      The CID of the signatures for the current epoch if it was
       stored in R1FS. None otherwise.
     """
 
     availability_table = {}
     epoch_signatures = {}
     epoch_agreement_cid = self.__full_data[SYNC_AGREEMENT_CID].get(epoch, None)
+    epoch_signatures_cid = self.__full_data[SYNC_SIGNATURES_CID].get(epoch, None)
 
     if self.is_epoch_valid(epoch):
       for node_addr in self.__data:
@@ -1654,7 +1661,9 @@ class EpochsManager(Singleton):
       epoch_signatures = self.__full_data[SYNC_SIGNATURES][epoch]
     # endif epoch is valid
 
-    return (availability_table, epoch_signatures, epoch_agreement_cid) if return_additional else availability_table
+    return (
+      availability_table, epoch_signatures, epoch_agreement_cid, epoch_signatures_cid
+    ) if return_additional else availability_table
 
 
   def get_faulty_epochs(self):
@@ -1772,7 +1781,11 @@ class EpochsManager(Singleton):
     return success
 
 
-  def add_cid_for_epoch(self, epoch, agreement_cid, debug=False):
+  def add_cid_for_epoch(
+      self, epoch, agreement_cid,
+      signatures_cid,
+      debug=False
+  ):
     """
     Adds the agreement CID for the given epoch.
 
@@ -1783,6 +1796,9 @@ class EpochsManager(Singleton):
 
     agreement_cid : str
       The agreement CID.
+
+    signatures_cid : str
+      The signatures CID.
 
     Returns
     -------
@@ -1795,14 +1811,16 @@ class EpochsManager(Singleton):
         self.P(f"No signatures found for epoch {epoch}. Skipping CID addition.", color='r')
       return False
     self.__full_data[SYNC_AGREEMENT_CID][epoch] = agreement_cid
+    self.__full_data[SYNC_SIGNATURES_CID][epoch] = signatures_cid
     if debug:
-      self.P(f"Agreement CID for epoch {epoch} added successfully.")
+      self.P(f"Agreement CID and signatures CID for epoch {epoch} added successfully.")
     return True
 
 
   def update_epoch_availability(
       self, epoch: int, availability_table: dict,
       agreement_signatures: dict, agreement_cid: str,
+      signatures_cid: str = None,
       debug: bool = False
   ):
     """
@@ -1827,6 +1845,9 @@ class EpochsManager(Singleton):
     agreement_cid : str
       The agreement CID in case the agreement was stored in R1FS.
 
+    signatures_cid : str
+      The signatures CID in case the signatures were stored in R1FS.
+
     debug : bool
       If True, the debug messages are displayed.
     """
@@ -1850,6 +1871,7 @@ class EpochsManager(Singleton):
         self.P(f'DEBUG self.__data after update: {self.__data[node_addr]}')
     self.__full_data[SYNC_SIGNATURES][epoch] = agreement_signatures
     self.__full_data[SYNC_AGREEMENT_CID][epoch] = agreement_cid
+    self.__full_data[SYNC_SIGNATURES_CID][epoch] = signatures_cid
     self.__full_data[SYNC_LAST_EPOCH] = epoch
 
     self.P(f"Epoch {epoch} availability updated successfully.")

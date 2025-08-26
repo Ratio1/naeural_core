@@ -1273,7 +1273,8 @@ class EpochsManager(Singleton):
     """
     if node_addr not in self.__data:
       return -1
-    epochs = list(self.get_node_epochs(node_addr).keys())
+    epochs_data = self.get_node_epochs(node_addr) or defaultdict(int)
+    epochs = list(epochs_data.keys())
     min_epoch = min(epochs)
     return min_epoch
   
@@ -1450,7 +1451,7 @@ class EpochsManager(Singleton):
         
         netmon_last_seen = self.date_to_str(dt_netmon_last_seen) if dt_netmon_last_seen is not None else 'N/A'
         node_name = self.get_node_name(node_addr)
-        dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True)     
+        dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True) or defaultdict(int)
         
         # current epoch hb data
         node_current_epoch_nr_hb = None
@@ -1654,7 +1655,7 @@ class EpochsManager(Singleton):
 
     if self.is_epoch_valid(epoch):
       for node_addr in self.__data:
-        epochs: defaultdict = self.get_node_epochs(node_addr, as_list=False)
+        epochs: defaultdict = self.get_node_epochs(node_addr, as_list=False) or defaultdict(int)
         availability_table[node_addr] = epochs.get(epoch, 0)
       # end for each node
       # self.__data[EPCT.SIGNATURES] is a defaultdict(dict), thus there is no need for .get() here
@@ -1877,7 +1878,7 @@ class EpochsManager(Singleton):
     self.P(f"Epoch {epoch} availability updated successfully.")
 
     if epoch in self.get_faulty_epochs():
-      self.P(f"Epoch {epoch} previously marked a faulty. Maybe unmarking...", color='r')
+      self.P(f"Epoch {epoch} previously marked as faulty. Maybe unmarking...", color='r')
       success = self.unmark_epoch_as_faulty(epoch)
       if success:
         self.P(f"Epoch {epoch} unmarked as faulty.")

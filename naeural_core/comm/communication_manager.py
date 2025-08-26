@@ -203,6 +203,13 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         send_channel_name = send_channel_name.upper()
       if recv_channel_name is not None:
         recv_channel_name = recv_channel_name.upper()
+      
+      # TODO: set next variable to TRUE if this is the HB handler
+      has_extra_receive_buffer = False
+      if has_extra_receive_buffer:
+        extra_receive_buffer = 47_000
+      else:
+        extra_receive_buffer = 0
 
       try:
         comm_plugin = _class_def(
@@ -215,6 +222,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
           environment_variables=self._environment_variables,
           send_channel_name=send_channel_name,
           recv_channel_name=recv_channel_name,
+          extra_receive_buffer=extra_receive_buffer,
           timers_section=str(id_comm) + '_' + comm_type,
         )
         comm_plugin.validate(raise_if_error=True)

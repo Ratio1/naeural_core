@@ -328,7 +328,10 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       self.__initial_send = True
       
     if not must_distribute and self.__last_pipelines != self.node_pipelines:
-      self.P("Sending updated configuration to all allowed nodes.")
+      new_pipelines = set(self.node_pipelines) - set(self.__last_pipelines if self.__last_pipelines is not None else [])
+      self.P("Sending updated configuration to all allowed nodes due to pipelines changed: {}".format(
+        new_pipelines), boxed=True
+      )
       must_distribute = True
       self.__last_pipelines = self.deepcopy(self.node_pipelines)
     

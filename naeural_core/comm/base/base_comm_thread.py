@@ -74,6 +74,7 @@ class BaseCommThread(
                send_channel_name=None,
                recv_channel_name=None,
                timers_section='comms',
+               extra_receive_buffer=0,
                loop_resolution=50,
                **kwargs
                ):
@@ -104,7 +105,7 @@ class BaseCommThread(
     self._send_to = None
     self._send_buff = deque(maxlen=ct.COMM_SEND_BUFFER)
     self._send_channel_name = send_channel_name
-    self._recv_buff = deque(maxlen=ct.COMM_RECV_BUFFER)
+    self._recv_buff = deque(maxlen=ct.COMM_RECV_BUFFER + extra_receive_buffer)
     self._recv_channel_name = recv_channel_name
     
     self.__deque_received_hashes = deque(maxlen=1000)

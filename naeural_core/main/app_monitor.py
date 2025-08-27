@@ -751,7 +751,10 @@ class ApplicationMonitor(DecentrAIObject):
 
       ct.HB.TIMERS            : 'Timers not available in summary',
       ct.HB.DEVICE_LOG        : dev_log,
-      ct.HB.ERROR_LOG         : error_log
+      ct.HB.ERROR_LOG         : error_log,
+      
+      # Node tags
+      ct.HB.EE_NODETAG_KYB        : os.environ.get('EE_NODETAG_KYB', False),
     }
     
     dct_ext_status = {    

@@ -266,7 +266,9 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.PAYLOAD_DATA.EE_IS_ENCRYPTED, None)
     hb.pop(ct.PAYLOAD_DATA.EE_EVENT_TYPE, None)
     hb.pop(ct.PAYLOAD_DATA.EE_FORMATTER, None)
-    
+
+    hb.pop(ct.HB.EE_NODETAG_KYB, None)
+
     return
 
   def __pop_repeating_info_from_previous_heartbeat(self, addr):

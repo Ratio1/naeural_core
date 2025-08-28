@@ -536,6 +536,24 @@ class BCWrapper:
         The EVM network
     """
     return self.__bc.evm_network
+
+  def get_network_data(self, network: str = None) -> dict:
+    """
+    Get the network data for a specific network
+
+    Parameters
+    ----------
+    network : str
+        The network name (mainnet, testnet, devnet)
+
+    Returns
+    -------
+    dict
+        The network data dictionary
+    """
+    if network is None:
+      network = self.__bc.evm_network
+    return self.__bc.get_network_data(network)
   
   
   def get_node_license_info(

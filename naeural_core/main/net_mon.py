@@ -266,7 +266,9 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.PAYLOAD_DATA.EE_IS_ENCRYPTED, None)
     hb.pop(ct.PAYLOAD_DATA.EE_EVENT_TYPE, None)
     hb.pop(ct.PAYLOAD_DATA.EE_FORMATTER, None)
-    
+
+    hb.pop(ct.HB.EE_NODETAG_KYB, None)
+
     return
 
   def __pop_repeating_info_from_previous_heartbeat(self, addr):
@@ -1999,6 +2001,10 @@ class NetworkMonitor(DecentrAIObject):
           #comms:
           comms=dct_comms,
           #end comms
+
+          # tags:
+          is_kyb=self.network_node_is_kyb(addr),
+          # end tags.
         )
       except Exception as e:
         self.P(f"Error in network_node_status for '{eeid}' <{addr}>: {e}", color='r')
@@ -2104,7 +2110,15 @@ class NetworkMonitor(DecentrAIObject):
       ))
       
       return dct_result
-    
+
+    # Node tags:
+    def network_node_is_kyb(self, addr):
+      result = None
+      hb = self.__network_node_last_heartbeat(addr)
+      if isinstance(hb, dict):
+        result = hb.get(ct.HB.EE_NODETAG_KYB, None)
+      return result
+    # End node tags.
   #endif
 
 

@@ -679,8 +679,15 @@ class ApplicationMonitor(DecentrAIObject):
       else:
         self.P("INFO: Heartbeat WITHOUT active plugins status", boxed=True)
       self.__logged_hb_with_active_plugins_status = True
-    
-    
+
+    did_is_on_str = os.environ.get('EE_DD', "")
+    did_is_on = did_is_on_str.lower() == 'true'
+
+    # Node Tags
+    from ratio1.const.evm_net import EvmNetData
+    network_node_is_kyb_str = os.environ.get(EvmNetData.EE_NODETAG_KYB, "")
+    network_node_is_kyb = network_node_is_kyb_str.lower() == 'true'
+    # End Node Tags
 
     address = self.owner.e2_addr      
     is_supervisor = self.owner.is_supervisor_node
@@ -729,7 +736,7 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.AVAILABLE_DISK    : avail_disk,
       ct.HB.ACTIVE_PLUGINS    : active_business_plugins,
       ct.HB.STOP_LOG          : self.owner.main_loop_stop_log,
-      ct.HB.DID               : os.environ.get('EE_DD', True),
+      ct.HB.DID               : did_is_on,
 
       ct.HB.R1FS_ID           : self.owner.r1fs_id,
       ct.HB.R1FS_ONLINE       : self.owner.r1fs_started,
@@ -752,9 +759,10 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.TIMERS            : 'Timers not available in summary',
       ct.HB.DEVICE_LOG        : dev_log,
       ct.HB.ERROR_LOG         : error_log,
-      
-      # Node tags
-      ct.HB.EE_NODETAG_KYB        : os.environ.get('EE_NODETAG_KYB', False),
+
+      # Node Tags
+      ct.HB.EE_NODETAG_KYB    : network_node_is_kyb,
+      # End Node Tags
     }
     
     dct_ext_status = {    

@@ -2159,6 +2159,13 @@ class NetworkMonitor(DecentrAIObject):
       if isinstance(hb, dict):
         result = hb.get(ct.HB.EE_NODETAG_KYB, None)
       return result
+
+    def get_network_node_tag(self, node_address, tag_name):
+      result = None
+      hb = self.__network_node_last_heartbeat(node_address)
+      if isinstance(hb, dict):
+        result = hb.get(tag_name, None)
+      return result
     # End node tags.
   #endif
 

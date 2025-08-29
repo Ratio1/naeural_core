@@ -11,6 +11,7 @@ from naeural_core import constants as ct
 from collections import deque, defaultdict
 from naeural_core import DecentrAIObject
 from naeural_core.utils.sys_mon import SystemMonitor
+from naeural_core import constants as ct
 
 from naeural_core.main.geoloc import GeoLocator
 
@@ -691,8 +692,7 @@ class ApplicationMonitor(DecentrAIObject):
     did_is_on = did_is_on_str.lower() == 'true'
 
     # Node Tags
-    from ratio1.const.evm_net import EvmNetData
-    network_node_is_kyb_str = os.environ.get(EvmNetData.EE_NODETAG_KYB, "")
+    network_node_is_kyb_str = os.environ.get(ct.HB.EE_NODETAG_KYB, "")
     network_node_is_kyb = network_node_is_kyb_str.lower() == 'true'
     # End Node Tags
 

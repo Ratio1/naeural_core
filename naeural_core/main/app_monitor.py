@@ -694,6 +694,9 @@ class ApplicationMonitor(DecentrAIObject):
     # Node Tags
     network_node_is_kyb_str = os.environ.get(ct.HB.EE_NODETAG_KYB, "")
     network_node_is_kyb = network_node_is_kyb_str.lower() == 'true'
+
+    network_node_is_datacenter_str = os.environ.get(ct.HB.EE_NODETAG_DATACENTER, "")
+    network_node_is_datacenter = network_node_is_datacenter_str.lower() == 'true'
     # End Node Tags
 
     address = self.owner.e2_addr      
@@ -768,7 +771,8 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.ERROR_LOG         : error_log,
 
       # Node Tags
-      ct.HB.EE_NODETAG_KYB    : network_node_is_kyb,
+      ct.HB.EE_NODETAG_KYB        : network_node_is_kyb,
+      ct.HB.EE_NODETAG_DATACENTER : network_node_is_datacenter,
       # End Node Tags
     }
     

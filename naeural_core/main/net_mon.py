@@ -2044,7 +2044,7 @@ class NetworkMonitor(DecentrAIObject):
           #end comms
 
           # tags:
-          is_kyb=self.network_node_is_kyb(addr),
+          is_kyb=self.network_node_has_tag_kyb(addr),
           # end tags.
         )
       except Exception as e:
@@ -2153,19 +2153,71 @@ class NetworkMonitor(DecentrAIObject):
       return dct_result
 
     # Node tags:
-    def network_node_is_kyb(self, addr):
+    def network_node_has_tag_kyb(self, addr):
       result = None
       hb = self.__network_node_last_heartbeat(addr)
       if isinstance(hb, dict):
         result = hb.get(ct.HB.EE_NODETAG_KYB, None)
       return result
 
+    def network_node_has_tag_datacenter(self, addr):
+      result = None
+      hb = self.__network_node_last_heartbeat(addr)
+      if isinstance(hb, dict):
+        result = hb.get(ct.HB.EE_NODETAG_DATACENTER, None)
+      return result
+
     def get_network_node_tag(self, node_address, tag_name):
+      """
+      Get a specific tag value for a network node.
+      
+      Parameters:
+      -----------
+      node_address : str
+          The address of the node
+      tag_name : str
+          The name of the tag to retrieve
+          
+      Returns:
+      --------
+      The tag value or None if not found
+      
+      Raises:
+      -------
+      ValueError: If tag_name is not in the allowed tags list
+      """
+      # Validate tag name
+      if tag_name not in ct.HB.ALLOWED_NODE_TAGS:
+          raise ValueError(f"Invalid tag name '{tag_name}'. Allowed tags: {ct.HB.ALLOWED_NODE_TAGS}")
+      
       result = None
       hb = self.__network_node_last_heartbeat(node_address)
       if isinstance(hb, dict):
         result = hb.get(tag_name, None)
+      self.P(f"Node {node_address} tag '{tag_name}': {result}", color='b')
       return result
+
+    def network_node_has_tag(self, node_address, tag_name):
+      """
+      Check if a network node has a specific tag set to True.
+      
+      Parameters:
+      -----------
+      node_address : str
+          The address of the node
+      tag_name : str
+          The name of the tag to check
+          
+      Returns:
+      --------
+      bool: True if the tag exists and is True, False otherwise
+      
+      Raises:
+      -------
+      ValueError: If tag_name is not in the allowed tags list
+      """
+      tag_value = self.get_network_node_tag(node_address, tag_name)
+      return tag_value is True
     # End node tags.
   #endif
 

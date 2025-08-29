@@ -2167,34 +2167,32 @@ class NetworkMonitor(DecentrAIObject):
         result = hb.get(ct.HB.EE_NODETAG_DATACENTER, None)
       return result
 
-    def get_network_node_tag(self, node_address, tag_name):
+    def get_network_node_tags(self, node_address):
       """
-      Get a specific tag value for a network node.
+      Gets all tags for a network node.
       
       Parameters:
       -----------
       node_address : str
           The address of the node
-      tag_name : str
-          The name of the tag to retrieve
-          
+
       Returns:
       --------
-      The tag value or None if not found
-      
+      list: A list of tags associated with the node
+
       Raises:
       -------
       ValueError: If tag_name is not in the allowed tags list
       """
       # Validate tag name
-      if tag_name not in ct.HB.ALLOWED_NODE_TAGS:
-          raise ValueError(f"Invalid tag name '{tag_name}'. Allowed tags: {ct.HB.ALLOWED_NODE_TAGS}")
-      
-      result = None
+
+      result = []
       hb = self.__network_node_last_heartbeat(node_address)
       if isinstance(hb, dict):
-        result = hb.get(tag_name, None)
-      self.P(f"Node {node_address} tag '{tag_name}': {result}", color='b')
+        tags = {k: v for k, v in hb.items() if k.startswith('EE_NODETAG')}
+        for tag_key, tag_value in tags.items():
+          if tag_value in ['true']:
+            result = result.append(tag_key)
       return result
 
     def network_node_has_tag(self, node_address, tag_name):
@@ -2216,8 +2214,8 @@ class NetworkMonitor(DecentrAIObject):
       -------
       ValueError: If tag_name is not in the allowed tags list
       """
-      tag_value = self.get_network_node_tag(node_address, tag_name)
-      return tag_value is True
+      tags = self.get_network_node_tags(node_address)
+      return tag_name in tags
     # End node tags.
   #endif
 

@@ -1799,32 +1799,73 @@ class NetworkMonitor(DecentrAIObject):
       __addr_no_prefix = self.__remove_address_prefix(addr)
       node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
       plugins_statuses = node_info.get(NetMonCt.PLUGINS_STATUSES, [])
+      pipelines = node_info.get(NetMonCt.PIPELINES, [])
       apps = {}
-      if isinstance(plugins_statuses, list) and len(plugins_statuses) > 0:
-        for status in plugins_statuses:
-          pipeline = status.get(ct.HB.ACTIVE_PLUGINS_INFO.STREAM_ID)
-          signature = status.get(ct.HB.ACTIVE_PLUGINS_INFO.SIGNATURE)
-          if pipeline not in apps:
-            pipeline_info = self.network_node_pipeline_info(addr=__addr_no_prefix, pipeline=pipeline)
+      
+      if isinstance(pipelines, list) and len(pipelines) > 0:
+        for pipeline_info in pipelines:
+          pipeline = pipeline_info.get(ct.NAME)
+          apps[pipeline] = {
+            NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.K_INITIATOR_ADDR),
+            NetMonCt.OWNER : pipeline_info.get(ct.CONFIG_STREAM.K_OWNER, None),
+            NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
+            NetMonCt.IS_DEEPLOYED : pipeline_info.get(ct.CONFIG_STREAM.IS_DEEPLOYED, False) == True,
+            NetMonCt.DEEPLOY_SPECS : pipeline_info.get(ct.CONFIG_STREAM.DEEPLOY_SPECS, {}),
+            NetMonCt.PLUGINS : {}
+          }
 
-            apps[pipeline] = {
-              NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.K_INITIATOR_ADDR),
-              NetMonCt.OWNER : pipeline_info.get(ct.CONFIG_STREAM.K_OWNER, None),
-              NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
-              NetMonCt.IS_DEEPLOYED : pipeline_info.get(ct.CONFIG_STREAM.IS_DEEPLOYED, False) == True,
-              NetMonCt.DEEPLOY_SPECS : pipeline_info.get(ct.CONFIG_STREAM.DEEPLOY_SPECS, {}),
-              NetMonCt.PLUGINS : {}
-            }
-          if signature not in apps[pipeline][NetMonCt.PLUGINS]:
-            apps[pipeline][NetMonCt.PLUGINS][signature] = []
-          apps[pipeline][NetMonCt.PLUGINS][signature].append({
-            NetMonCt.PLUGIN_INSTANCE      : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID),
-            NetMonCt.PLUGIN_START         : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
-            NetMonCt.PLUGIN_LAST_ALIVE    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
-            NetMonCt.PLUGIN_LAST_ERROR    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
-          })
-      else:
-        pass # maybe some other logic to be added here
+          plugins = pipeline_info.get(ct.PLUGINS, [])
+          for plugin_conf in plugins:
+            signature = plugin_conf.get(ct.SIGNATURE)
+            if signature is None:
+              continue
+            if signature not in apps[pipeline][NetMonCt.PLUGINS]:
+              apps[pipeline][NetMonCt.PLUGINS][signature] = []
+              instances = plugin_conf[ct.INSTANCES]
+              for instance_conf in instances:
+                instance_id = instance_conf.get(ct.INSTANCE_ID)
+                instance_info = {
+                  NetMonCt.PLUGIN_INSTANCE : instance_id,
+                  NetMonCt.PLUGIN_START : instance_conf.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
+                  NetMonCt.PLUGIN_LAST_ALIVE : instance_conf.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
+                  NetMonCt.PLUGIN_LAST_ERROR : instance_conf.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
+                }
+                for status_info in plugins_statuses:
+                  # now we check for instance_id, pipeline, signature
+                  if (
+                    status_info.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID) == instance_id and
+                    status_info.get(ct.HB.ACTIVE_PLUGINS_INFO.STREAM_ID) == pipeline and
+                    status_info.get(ct.HB.ACTIVE_PLUGINS_INFO.SIGNATURE) == signature
+                  ):
+                    instance_info[NetMonCt.PLUGIN_START] = status_info.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP)
+                    instance_info[NetMonCt.PLUGIN_LAST_ALIVE] = status_info.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP)
+                    instance_info[NetMonCt.PLUGIN_LAST_ERROR] = status_info.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME)
+                    break
+                  #end found the plugin status
+                #end search for status
+                apps[pipeline][NetMonCt.PLUGINS][signature].append(instance_info)
+              # end for each instance of the current signature
+            # endif signature is new
+          # end for each plugin
+        # end for each pipeline
+        
+      # if isinstance(plugins_statuses, list) and len(plugins_statuses) > 0:
+      #   for status in plugins_statuses:
+      #     pipeline = status.get(ct.HB.ACTIVE_PLUGINS_INFO.STREAM_ID)
+      #     signature = status.get(ct.HB.ACTIVE_PLUGINS_INFO.SIGNATURE)
+      #     if pipeline not in apps:
+      #       pipeline_info = self.network_node_pipeline_info(addr=__addr_no_prefix, pipeline=pipeline)
+
+      #     if signature not in apps[pipeline][NetMonCt.PLUGINS]:
+      #       apps[pipeline][NetMonCt.PLUGINS][signature] = []
+      #     apps[pipeline][NetMonCt.PLUGINS][signature].append({
+      #       NetMonCt.PLUGIN_INSTANCE      : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INSTANCE_ID),
+      #       NetMonCt.PLUGIN_START         : status.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
+      #       NetMonCt.PLUGIN_LAST_ALIVE    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
+      #       NetMonCt.PLUGIN_LAST_ERROR    : status.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
+      #     })
+      # else:
+      #   pass # maybe some other logic to be added here
       return apps
     
     

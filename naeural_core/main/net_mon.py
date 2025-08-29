@@ -1982,7 +1982,9 @@ class NetworkMonitor(DecentrAIObject):
 
         is_secured = self.network_node_is_secured(addr)
         trusted = is_secured and trusted
-        
+
+        node_tags = self.get_network_node_tags(addr)
+
         dct_result = dict(
           address=self._add_address_prefix(addr),
           eth_address=self.node_address_to_eth_address(addr),
@@ -2044,7 +2046,7 @@ class NetworkMonitor(DecentrAIObject):
           #end comms
 
           # tags:
-          is_kyb=self.network_node_has_tag_kyb(addr),
+          is_kyb=self.network_node_has_tag(addr, ct.HB.EE_NODETAG_KYB, node_tags),
           # end tags.
         )
       except Exception as e:
@@ -2153,20 +2155,6 @@ class NetworkMonitor(DecentrAIObject):
       return dct_result
 
     # Node tags:
-    def network_node_has_tag_kyb(self, addr):
-      result = None
-      hb = self.__network_node_last_heartbeat(addr)
-      if isinstance(hb, dict):
-        result = hb.get(ct.HB.EE_NODETAG_KYB, None)
-      return result
-
-    def network_node_has_tag_datacenter(self, addr):
-      result = None
-      hb = self.__network_node_last_heartbeat(addr)
-      if isinstance(hb, dict):
-        result = hb.get(ct.HB.EE_NODETAG_DATACENTER, None)
-      return result
-
     def get_network_node_tags(self, node_address):
       """
       Gets all tags for a network node.
@@ -2195,7 +2183,7 @@ class NetworkMonitor(DecentrAIObject):
             result = result.append(tag_key)
       return result
 
-    def network_node_has_tag(self, node_address, tag_name):
+    def network_node_has_tag(self, node_address, tag_name, tags=[]):
       """
       Check if a network node has a specific tag set to True.
       
@@ -2214,7 +2202,8 @@ class NetworkMonitor(DecentrAIObject):
       -------
       ValueError: If tag_name is not in the allowed tags list
       """
-      tags = self.get_network_node_tags(node_address)
+      if not tags or len(tags) == 0:
+        tags = self.get_network_node_tags(node_address)
       return tag_name in tags
     # End node tags.
   #endif

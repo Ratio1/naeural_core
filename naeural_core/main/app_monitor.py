@@ -689,14 +689,10 @@ class ApplicationMonitor(DecentrAIObject):
       self.__logged_hb_with_active_plugins_status = True
 
     did_is_on_str = os.environ.get('EE_DD', "")
-    did_is_on = did_is_on_str.lower() == 'true'
+    did_is_on = did_is_on_str.lower() in ['true', True]
 
     # Node Tags
-    network_node_is_kyb_str = os.environ.get(ct.HB.EE_NODETAG_KYB, "")
-    network_node_is_kyb = network_node_is_kyb_str.lower() == 'true'
-
-    network_node_is_datacenter_str = os.environ.get(ct.HB.EE_NODETAG_DATACENTER, "")
-    network_node_is_datacenter = network_node_is_datacenter_str.lower() == 'true'
+    env_node_tags = {k: v for k, v in os.environ.items() if k.startswith('EE_NODETAG')}
     # End Node Tags
 
     address = self.owner.e2_addr      
@@ -770,12 +766,12 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.DEVICE_LOG        : dev_log,
       ct.HB.ERROR_LOG         : error_log,
 
-      # Node Tags
-      ct.HB.EE_NODETAG_KYB        : network_node_is_kyb,
-      ct.HB.EE_NODETAG_DATACENTER : network_node_is_datacenter,
-      # End Node Tags
     }
-    
+
+    # Add Node Tags to dct_status
+    for key, value in env_node_tags.items():
+      dct_status[key] = value in ["true", True]
+
     dct_ext_status = {    
       ct.HB.TIMERS            : str_timers,
     }

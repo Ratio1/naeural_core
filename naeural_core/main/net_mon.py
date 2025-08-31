@@ -2044,11 +2044,11 @@ class NetworkMonitor(DecentrAIObject):
           #comms:
           comms=dct_comms,
           #end comms
-
-          # tags:
-          is_kyb=self.network_node_has_tag(addr, ct.HB.EE_NODETAG_KYB, node_tags),
-          # end tags.
         )
+        # node tags:
+        for key in node_tags:
+          dct_result[key.lower()] = True
+        # end node tags.
       except Exception as e:
         self.P(f"Error in network_node_status for '{eeid}' <{addr}>: {e}", color='r')
         raise
@@ -2179,8 +2179,8 @@ class NetworkMonitor(DecentrAIObject):
       if isinstance(hb, dict):
         tags = {k: v for k, v in hb.items() if k.startswith('EE_NODETAG')}
         for tag_key, tag_value in tags.items():
-          if tag_value in ['true']:
-            result = result.append(tag_key)
+          if tag_value in ['true', True, 'True', 1, '1']:
+            result.append(tag_key)
       return result
 
     def network_node_has_tag(self, node_address, tag_name, tags=[]):

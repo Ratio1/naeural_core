@@ -12,6 +12,8 @@ from collections import deque, defaultdict
 from naeural_core import DecentrAIObject
 from naeural_core.utils.sys_mon import SystemMonitor
 
+from naeural_core.main.geoloc import GeoLocator
+
 MAX_LOG_SIZE = 10_000
 
 MAX_LOCAL_HISTORY = int(30 * 60 / 10) # 30 minutes
@@ -66,6 +68,11 @@ class ApplicationMonitor(DecentrAIObject):
       
       'timestamps'          : deque(maxlen=MAX_LOCAL_HISTORY),      
     }
+    
+    self.locator = GeoLocator(logger=log)
+
+    self.location_data = self.get_location_and_datacenter()
+
     super(ApplicationMonitor, self).__init__(log=log, prefix_log='[AMON]', **kwargs)
     return
   

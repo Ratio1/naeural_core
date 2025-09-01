@@ -71,7 +71,7 @@ class ApplicationMonitor(DecentrAIObject):
     
     self.locator = GeoLocator(logger=log)
 
-    self.location_data = self.get_location_and_datacenter()
+    self.location_data = self.locator.get_location_and_datacenter()
 
     super(ApplicationMonitor, self).__init__(log=log, prefix_log='[AMON]', **kwargs)
     return

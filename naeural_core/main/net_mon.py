@@ -2193,7 +2193,7 @@ class NetworkMonitor(DecentrAIObject):
 
       # TODO: get remaining tags that are not in HB (from DB or other source).
 
-      return result
+      return list(set(result))
 
     def network_node_has_tag(self, node_address, tag_name, tags=[]):
       """

@@ -267,7 +267,7 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.PAYLOAD_DATA.EE_EVENT_TYPE, None)
     hb.pop(ct.PAYLOAD_DATA.EE_FORMATTER, None)
 
-    hb.pop(ct.HB.EE_NODETAG_KYB, None)
+    hb.pop(ct.HB.EE_NT_IS_KYB, None)
 
     return
 
@@ -2167,25 +2167,37 @@ class NetworkMonitor(DecentrAIObject):
       Returns:
       --------
       list: A list of tags associated with the node
-
-      Raises:
-      -------
-      ValueError: If tag_name is not in the allowed tags list
+        Example: ["KYB","DC:HOSTINGER", "CT:FR", "REG:EU"]
       """
-      # Validate tag name
 
       result = []
       hb = self.__network_node_last_heartbeat(node_address)
+      # get tags from HB.
       if isinstance(hb, dict):
-        tags = {k: v for k, v in hb.items() if k.startswith('EE_NODETAG')}
+        tags = {k: v for k, v in hb.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
         for tag_key, tag_value in tags.items():
-          if tag_value in ['true', True, 'True', 1, '1']:
-            result.append(tag_key)
+          tag_key = tag_key.replace(ct.HB.PREFIX_EE_NODETAG, '')
+          if not tag_value:
+            continue
+          if isinstance(tag_value, str):
+            tag_value = tag_value.strip()
+          if tag_value == '' or tag_value.lower() in ['none', 'null']:
+            continue
+
+          tag = ""
+          if isinstance(tag_value, bool):
+            tag = tag_key
+          else:
+            tag = f"{tag_key}:{tag_value}"
+          result.append(tag)
+
+      # TODO: get remaining tags that are not in HB (from DB or other source).
+
       return result
 
     def network_node_has_tag(self, node_address, tag_name, tags=[]):
       """
-      Check if a network node has a specific tag set to True.
+      Check if a network node has a specific tag.
       
       Parameters:
       -----------
@@ -2197,15 +2209,14 @@ class NetworkMonitor(DecentrAIObject):
       Returns:
       --------
       bool: True if the tag exists and is True, False otherwise
-      
-      Raises:
-      -------
-      ValueError: If tag_name is not in the allowed tags list
       """
       if not tags or len(tags) == 0:
         tags = self.get_network_node_tags(node_address)
       return tag_name in tags
     # End node tags.
+
+    def get_node_tag_datacenter(self, addr):
+      pass
   #endif
 
 

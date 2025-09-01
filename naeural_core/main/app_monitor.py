@@ -72,9 +72,10 @@ class ApplicationMonitor(DecentrAIObject):
     
     self.locator = GeoLocator(logger=log)
 
-    self.location_data = self.get_location_and_datacenter()
+    self.location_data = self.locator.get_location_and_datacenter()
 
     super(ApplicationMonitor, self).__init__(log=log, prefix_log='[AMON]', **kwargs)
+    self.P("Location data: {}".format(json.dumps(self.location_data)), color='g')
     return
   
   @property
@@ -689,10 +690,13 @@ class ApplicationMonitor(DecentrAIObject):
       self.__logged_hb_with_active_plugins_status = True
 
     did_is_on_str = os.environ.get('EE_DD', "")
-    did_is_on = did_is_on_str.lower() in ['true', True]
+    did_is_on = str(did_is_on_str).lower() in ['true', "True", "1"]
 
     # Node Tags
-    env_node_tags = {k: v for k, v in os.environ.items() if k.startswith('EE_NODETAG')}
+    env_node_tags = {k: v for k, v in os.environ.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
+    location_datacenter_tags = self.get_location_and_datacenter_tags()
+    self.P("Node tags in heartbeat: {}".format(json.dumps(env_node_tags)), color='g')
+    self.P("Location/Datacenter tags in heartbeat: {}".format(json.dumps(location_datacenter_tags)), color='g')
     # End Node Tags
 
     address = self.owner.e2_addr      
@@ -772,6 +776,12 @@ class ApplicationMonitor(DecentrAIObject):
     for key, value in env_node_tags.items():
       dct_status[key] = value in ["true", True]
 
+    # Add location and datacenter tags
+    for key, value in location_datacenter_tags.items():
+      dct_status[key] = value
+
+    # End Node Tags
+
     dct_ext_status = {    
       ct.HB.TIMERS            : str_timers,
     }
@@ -804,7 +814,19 @@ class ApplicationMonitor(DecentrAIObject):
       self.P("First hb for {}".format(address), boxed=True)
 
     return dct_status
-  
+
+  def get_location_and_datacenter_tags(self):
+    tags = {}
+    try:
+      country_code = self.location_data.get('country_code', None)
+      continent = self.location_data.get('continent', None)
+      datacenter = self.location_data.get('datacenter', False)
+      tags[ct.HB.EE_NT_CT] = country_code
+      tags[ct.HB.EE_NT_REG] = continent
+      tags[ct.HB.EE_NT_DC] = datacenter
+    except Exception as e:
+      self.P("ERROR: Could not get location/datacenter tags: {}".format(e), color='red')
+    return tags
   
   def get_sys_mon_info(self):
     if hasattr(self, 'sys_mon') and self.sys_mon is not None:

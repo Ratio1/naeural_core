@@ -770,6 +770,8 @@ class ApplicationMonitor(DecentrAIObject):
 
     # Add Node Tags to dct_status
     for key, value in env_node_tags.items():
+      if value is None or value == '' or value == 'None':
+        continue
       str_val = str(value).lower()
       if str_val in ["true", "1"]:
         dct_status[key] = True
@@ -780,6 +782,8 @@ class ApplicationMonitor(DecentrAIObject):
 
     # Add location and datacenter tags
     for key, value in location_datacenter_tags.items():
+      if value is None or value == '' or value == 'None':
+          continue  
       str_val = str(value).lower()
       if str_val in ["true", "1"]:
         dct_status[key] = True

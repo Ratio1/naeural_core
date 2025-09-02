@@ -769,28 +769,20 @@ class ApplicationMonitor(DecentrAIObject):
     }
 
     # Add Node Tags to dct_status
-    for key, value in env_node_tags.items():
-      if value is None or value == '' or value == 'None':
-        continue
-      str_val = str(value).lower()
-      if str_val in ["true", "1"]:
-        dct_status[key] = True
-      elif str_val in ["false", "0"]:
-        dct_status[key] = False
-      else:
-        dct_status[key] = value
+    def process_tags(tags_dict):
+      for key, value in tags_dict.items():
+        if value is None or value == '' or value == 'None':
+          continue
+        str_val = str(value).lower()
+        if str_val in ["true", "1"]:
+          dct_status[key] = True
+        elif str_val in ["false", "0"]:
+          dct_status[key] = False
+        else:
+          dct_status[key] = value
 
-    # Add location and datacenter tags
-    for key, value in location_datacenter_tags.items():
-      if value is None or value == '' or value == 'None':
-          continue  
-      str_val = str(value).lower()
-      if str_val in ["true", "1"]:
-        dct_status[key] = True
-      elif str_val in ["false", "0"]:
-        dct_status[key] = False
-      else:
-        dct_status[key] = value
+    process_tags(env_node_tags)
+    process_tags(location_datacenter_tags)
     # End Node Tags
 
     dct_ext_status = {    

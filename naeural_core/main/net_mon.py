@@ -2156,7 +2156,37 @@ class NetworkMonitor(DecentrAIObject):
       
       return dct_result
 
-    # Node tags:
+    def __get_tag_from_heartbeat(self, hb, tag_suffix, only_value=False):
+      """
+      Private method to get a specific tag value from heartbeat data.
+      
+      Args:
+        hb: The heartbeat data dictionary
+        tag_suffix: The suffix to look for in the heartbeat data (e.g., 'DC', 'REG', 'CT')
+        only_value: If True, return only the value part; if False, return the full tag
+        
+      Returns:
+        The tag value if found, None otherwise
+      """
+      if isinstance(hb, dict):
+        # Construct the full key and get directly from heartbeat
+        full_key = f"{ct.HB.PREFIX_EE_NODETAG}{tag_suffix}"
+        v = hb.get(full_key)
+        
+        if v is not None:
+          if not v:
+            return None
+          if isinstance(v, str):
+            v = v.strip()
+          if v == '' or v.lower() in ['none', 'null']:
+            return None
+          
+          if isinstance(v, bool):
+            return v if only_value else (tag_suffix if v else None)
+          else:
+            return v if only_value else f"{tag_suffix}:{v}"
+      return None
+
     def get_network_node_tags(self, node_address):
       """
       Gets all tags for a network node.
@@ -2177,76 +2207,50 @@ class NetworkMonitor(DecentrAIObject):
       # get tags from HB.
       if isinstance(hb, dict):
         tags = {k: v for k, v in hb.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
-        for tag_key, tag_value in tags.items():
-          tag_key = tag_key.replace(ct.HB.PREFIX_EE_NODETAG, '')
-          if not tag_value:
-            continue
-          if isinstance(tag_value, str):
-            tag_value = tag_value.strip()
-          if tag_value == '' or tag_value.lower() in ['none', 'null']:
-            continue
-
-          tag = ""
-          if isinstance(tag_value, bool):
-            tag = tag_key
-          else:
-            tag = f"{tag_key}:{tag_value}"
-          result.append(tag)
+        for tag_key in tags.keys():
+          tag_key_clean = tag_key.replace(ct.HB.PREFIX_EE_NODETAG, '')
+          tag = self.__get_tag_from_heartbeat(hb, tag_key_clean)
+          if tag:
+            result.append(tag)
 
       # get remaining tags that are not in HB (from DB or other source).
       other_tags = []
 
       for method_name in dir(self):
         if method_name.startswith(f"network_node_get_tag_"):
-          method = getattr(self, method_name)
-          if callable(method):
+          tag_name = method_name.replace("network_node_get_tag_", "").upper()
+          _method = getattr(self, method_name)
+          if callable(_method):
             try:
-              tag_name, tag_value = method(node_address)
-              if tag_name is not None and tag_value is not None:
+              tag_value = _method(node_address)
+              if tag_value is not None:
                 other_tags.append(f"{tag_name}:{tag_value}")
             except Exception as e:
-              self.P(f"Error getting tag by calling method {method_name}: {e}", color='r')
+              self.P(f"Error getting tag by calling _method {method_name}: {e}", color='r')
+      self.P(f"Other tags: {other_tags}", color='m')
 
       self.P(f"Node {node_address} tags: {result}", color='m')
-      self.P(f"Other tags: {other_tags}", color='m')
 
       result = result + other_tags
       result = list(set(result))
 
       return result
 
-
     def network_node_get_tag_is_kyb(self, addr):
-      tag_key = ct.HB.TAG_IS_KYB
-      tags = self.get_network_node_tags(addr)
-      for tag in tags:
-        if tag.startswith(ct.HB.EE_NT_IS_KYB):
-          return tag_key, tag
-      return None, None
+      hb = self.__network_node_last_heartbeat(addr)
+      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_IS_KYB, only_value=True)
 
-    def network_node_get_tag_datacenter(self, addr):
-      tag_key = ct.HB.TAG_DC
-      tags = self.get_network_node_tags(addr)
-      for tag in tags:
-        if tag.startswith(ct.HB.EE_NT_DC):
-          return tag_key, tag
-      return None, None
+    def network_node_get_tag_dc(self, addr):
+      hb = self.__network_node_last_heartbeat(addr)
+      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_DC, only_value=True)
 
-    def network_node_get_tag_region(self, addr):
-      tag_key = ct.HB.TAG_REG
-      tags = self.get_network_node_tags(addr)
-      for tag in tags:
-        if tag.startswith(ct.HB.EE_NT_REG):
-          return tag_key, tag
-      return None, None
+    def network_node_get_tag_reg(self, addr):
+      hb = self.__network_node_last_heartbeat(addr)
+      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_REG, only_value=True)
 
-    def network_node_get_tag_country(self, addr):
-      tag_key = ct.HB.TAG_CT
-      tags = self.get_network_node_tags(addr)
-      for tag in tags:
-        if tag.startswith(ct.HB.EE_NT_CT):
-          return tag_key, tag
-      return None, None
+    def network_node_get_tag_ct(self, addr):
+      hb = self.__network_node_last_heartbeat(addr)
+      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_CT, only_value=True)
 
     # End node tags.
   #endif

@@ -267,8 +267,11 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.PAYLOAD_DATA.EE_EVENT_TYPE, None)
     hb.pop(ct.PAYLOAD_DATA.EE_FORMATTER, None)
 
+    # Pop all tags starting with EE_NT
     hb.pop(ct.HB.EE_NT_IS_KYB, None)
-
+    for key in list(hb.keys()):
+      if key and key.startswith(ct.PAYLOAD_DATA.EE_NT):
+        hb.pop(key, None)
     return
 
   def __pop_repeating_info_from_previous_heartbeat(self, addr):

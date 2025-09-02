@@ -1985,8 +1985,6 @@ class NetworkMonitor(DecentrAIObject):
         is_secured = self.network_node_is_secured(addr)
         trusted = is_secured and trusted
 
-        node_tags = self.get_network_node_tags(addr)
-
         dct_result = dict(
           address=self._add_address_prefix(addr),
           eth_address=self.node_address_to_eth_address(addr),
@@ -2046,11 +2044,8 @@ class NetworkMonitor(DecentrAIObject):
           #comms:
           comms=dct_comms,
           #end comms
+          tags=self.get_network_node_tags(addr),
         )
-        # node tags:
-        for key in node_tags:
-          dct_result[key.lower()] = True
-        # end node tags.
       except Exception as e:
         self.P(f"Error in network_node_status for '{eeid}' <{addr}>: {e}", color='r')
         raise
@@ -2227,9 +2222,6 @@ class NetworkMonitor(DecentrAIObject):
                 other_tags.append(f"{tag_name}:{tag_value}")
             except Exception as e:
               self.P(f"Error getting tag by calling _method {method_name}: {e}", color='r')
-      self.P(f"Other tags: {other_tags}", color='m')
-
-      self.P(f"Node {node_address} tags: {result}", color='m')
 
       result = result + other_tags
       result = list(set(result))

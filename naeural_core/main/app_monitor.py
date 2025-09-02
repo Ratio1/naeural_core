@@ -695,16 +695,12 @@ class ApplicationMonitor(DecentrAIObject):
     # Node Tags
     env_node_tags = {k: v for k, v in os.environ.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
     location_datacenter_tags = self.get_location_and_datacenter_tags()
-    self.P("Node tags in heartbeat: {}".format(json.dumps(env_node_tags)), color='g')
-    self.P("Location/Datacenter tags in heartbeat: {}".format(json.dumps(location_datacenter_tags)), color='g')
     # End Node Tags
 
     address = self.owner.e2_addr      
     is_supervisor = self.owner.is_supervisor_node
     
     whitelist = self.owner.whitelist
-    
-    
 
     dct_status = {
       #mandatory
@@ -791,9 +787,6 @@ class ApplicationMonitor(DecentrAIObject):
         dct_status[key] = False
       else:
         dct_status[key] = value
-
-      dct_status[key] = value
-
     # End Node Tags
 
     dct_ext_status = {    

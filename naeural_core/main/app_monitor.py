@@ -690,7 +690,7 @@ class ApplicationMonitor(DecentrAIObject):
       self.__logged_hb_with_active_plugins_status = True
 
     did_is_on_str = os.environ.get('EE_DD', "")
-    did_is_on = str(did_is_on_str).lower() in ['true', "True", "1"]
+    did_is_on = str(did_is_on_str).lower() in ['true', "1"]
 
     # Node Tags
     env_node_tags = {k: v for k, v in os.environ.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}

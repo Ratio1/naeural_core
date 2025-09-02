@@ -268,9 +268,8 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.PAYLOAD_DATA.EE_FORMATTER, None)
 
     # Pop all tags starting with EE_NT
-    hb.pop(ct.HB.EE_NT_IS_KYB, None)
     for key in list(hb.keys()):
-      if key and key.startswith(ct.PAYLOAD_DATA.EE_NT):
+      if key and key.startswith(ct.HB.PREFIX_EE_NODETAG):
         hb.pop(key, None)
     return
 
@@ -2194,32 +2193,62 @@ class NetworkMonitor(DecentrAIObject):
             tag = f"{tag_key}:{tag_value}"
           result.append(tag)
 
-      # TODO: get remaining tags that are not in HB (from DB or other source).
+      # get remaining tags that are not in HB (from DB or other source).
+      other_tags = []
 
-      return list(set(result))
+      for method_name in dir(self):
+        if method_name.startswith(f"network_node_get_tag_"):
+          method = getattr(self, method_name)
+          if callable(method):
+            try:
+              tag_name, tag_value = method(node_address)
+              if tag_name is not None and tag_value is not None:
+                other_tags.append(f"{tag_name}:{tag_value}")
+            except Exception as e:
+              self.P(f"Error getting tag by calling method {method_name}: {e}", color='r')
 
-    def network_node_has_tag(self, node_address, tag_name, tags=[]):
-      """
-      Check if a network node has a specific tag.
-      
-      Parameters:
-      -----------
-      node_address : str
-          The address of the node
-      tag_name : str
-          The name of the tag to check
-          
-      Returns:
-      --------
-      bool: True if the tag exists and is True, False otherwise
-      """
-      if not tags or len(tags) == 0:
-        tags = self.get_network_node_tags(node_address)
-      return tag_name in tags
+      self.P(f"Node {node_address} tags: {result}", color='m')
+      self.P(f"Other tags: {other_tags}", color='m')
+
+      result = result + other_tags
+      result = list(set(result))
+
+      return result
+
+
+    def network_node_get_tag_is_kyb(self, addr):
+      tag_key = ct.HB.TAG_IS_KYB
+      tags = self.get_network_node_tags(addr)
+      for tag in tags:
+        if tag.startswith(ct.HB.EE_NT_IS_KYB):
+          return tag_key, tag
+      return None, None
+
+    def network_node_get_tag_datacenter(self, addr):
+      tag_key = ct.HB.TAG_DC
+      tags = self.get_network_node_tags(addr)
+      for tag in tags:
+        if tag.startswith(ct.HB.EE_NT_DC):
+          return tag_key, tag
+      return None, None
+
+    def network_node_get_tag_region(self, addr):
+      tag_key = ct.HB.TAG_REG
+      tags = self.get_network_node_tags(addr)
+      for tag in tags:
+        if tag.startswith(ct.HB.EE_NT_REG):
+          return tag_key, tag
+      return None, None
+
+    def network_node_get_tag_country(self, addr):
+      tag_key = ct.HB.TAG_CT
+      tags = self.get_network_node_tags(addr)
+      for tag in tags:
+        if tag.startswith(ct.HB.EE_NT_CT):
+          return tag_key, tag
+      return None, None
+
     # End node tags.
-
-    def get_node_tag_datacenter(self, addr):
-      pass
   #endif
 
 

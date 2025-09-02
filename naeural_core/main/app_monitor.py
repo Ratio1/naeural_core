@@ -11,6 +11,7 @@ from naeural_core import constants as ct
 from collections import deque, defaultdict
 from naeural_core import DecentrAIObject
 from naeural_core.utils.sys_mon import SystemMonitor
+from naeural_core import constants as ct
 
 from naeural_core.main.geoloc import GeoLocator
 
@@ -74,6 +75,7 @@ class ApplicationMonitor(DecentrAIObject):
     self.location_data = self.locator.get_location_and_datacenter()
 
     super(ApplicationMonitor, self).__init__(log=log, prefix_log='[AMON]', **kwargs)
+    self.P("Location data: {}".format(json.dumps(self.location_data)), color='g')
     return
   
   @property
@@ -688,20 +690,17 @@ class ApplicationMonitor(DecentrAIObject):
       self.__logged_hb_with_active_plugins_status = True
 
     did_is_on_str = os.environ.get('EE_DD', "")
-    did_is_on = did_is_on_str.lower() == 'true'
+    did_is_on = str(did_is_on_str).lower() in ["true", "1"]
 
     # Node Tags
-    from ratio1.const.evm_net import EvmNetData
-    network_node_is_kyb_str = os.environ.get(EvmNetData.EE_NODETAG_KYB, "")
-    network_node_is_kyb = network_node_is_kyb_str.lower() == 'true'
+    env_node_tags = {k: v for k, v in os.environ.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
+    location_datacenter_tags = self.get_location_and_datacenter_tags()
     # End Node Tags
 
     address = self.owner.e2_addr      
     is_supervisor = self.owner.is_supervisor_node
     
     whitelist = self.owner.whitelist
-    
-    
 
     dct_status = {
       #mandatory
@@ -767,11 +766,25 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.DEVICE_LOG        : dev_log,
       ct.HB.ERROR_LOG         : error_log,
 
-      # Node Tags
-      ct.HB.EE_NODETAG_KYB    : network_node_is_kyb,
-      # End Node Tags
     }
-    
+
+    # Add Node Tags to dct_status
+    def process_tags(tags_dict):
+      for key, value in tags_dict.items():
+        if value is None or value == '' or value == 'None':
+          continue
+        str_val = str(value).lower()
+        if str_val in ["true", "1"]:
+          dct_status[key] = True
+        elif str_val in ["false", "0"]:
+          dct_status[key] = False
+        else:
+          dct_status[key] = value
+
+    process_tags(env_node_tags)
+    process_tags(location_datacenter_tags)
+    # End Node Tags
+
     dct_ext_status = {    
       ct.HB.TIMERS            : str_timers,
     }
@@ -804,7 +817,19 @@ class ApplicationMonitor(DecentrAIObject):
       self.P("First hb for {}".format(address), boxed=True)
 
     return dct_status
-  
+
+  def get_location_and_datacenter_tags(self):
+    tags = {}
+    try:
+      country_code = self.location_data.get('country_code', None)
+      continent = self.location_data.get('continent', None)
+      datacenter = self.location_data.get('datacenter', False)
+      tags[ct.HB.EE_NT_CT] = country_code
+      tags[ct.HB.EE_NT_REG] = continent
+      tags[ct.HB.EE_NT_DC] = datacenter
+    except Exception as e:
+      self.P("ERROR: Could not get location/datacenter tags: {}".format(e), color='red')
+    return tags
   
   def get_sys_mon_info(self):
     if hasattr(self, 'sys_mon') and self.sys_mon is not None:

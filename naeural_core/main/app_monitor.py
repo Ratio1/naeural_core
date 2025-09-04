@@ -821,8 +821,8 @@ class ApplicationMonitor(DecentrAIObject):
   def get_location_and_datacenter_tags(self):
     tags = {}
     try:
-      country_code = self.location_data.get('country_code', None)
-      continent = self.location_data.get('continent', None)
+      country_code = self.location_data.get('country_code', "")
+      continent = self.location_data.get('continent', "")
       datacenter = self.location_data.get('datacenter', False)
       tags[ct.HB.EE_NT_CT] = str(country_code)[:2]
       tags[ct.HB.EE_NT_REG] = str(continent)[:2]

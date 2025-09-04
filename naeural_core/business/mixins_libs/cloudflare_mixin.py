@@ -17,7 +17,7 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
   """
   """CLOUDFLARE UTILS METHODS"""
   if True:
-    def __get_cloudflare_start_command(self):
+    def _get_cloudflare_start_command(self):
       token = self.get_cloudflare_token()
       if token is not None:
         return f"cloudflared tunnel --no-autoupdate run --token {token} --url http://127.0.0.1:{self.port}"
@@ -74,7 +74,7 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       super_start_commands = super(_CloudflareMixinPlugin, self).get_start_commands()
 
       if self.cfg_tunnel_engine_enabled:
-        super_start_commands = super_start_commands + [self.__get_cloudflare_start_command()]
+        super_start_commands = super_start_commands + [self._get_cloudflare_start_command()]
       # endif tunnel engine enabled
       return super_start_commands
 

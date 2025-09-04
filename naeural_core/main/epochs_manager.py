@@ -1433,7 +1433,10 @@ class EpochsManager(Singleton):
           gpu_usage = self.owner.network_node_default_gpu_usage(node_addr)
           default_cuda = self.owner.network_node_default_cuda(node_addr, as_int=False)
           debug_data = {}
-          
+
+          tags = self.owner.get_network_node_tags(node_addr)
+          self.P('###Tags:')
+          self.P(json.dumps(tags))
           # DEBUG:
           if True:
             gpu_status = self.owner.network_node_last_gpu_status(node_addr)
@@ -1527,6 +1530,7 @@ class EpochsManager(Singleton):
           'score' : score,
           'first_check' : first_seen,
           'last_check' : last_seen,
+          'tags' : tags,
           
           'resources' : {
             'mem_total' : mem_total,

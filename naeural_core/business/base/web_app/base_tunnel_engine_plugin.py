@@ -98,16 +98,16 @@ class BaseTunnelEnginePlugin(
     super(BaseTunnelEnginePlugin, self).on_init()
 
 
-  def run_start_command(self, command):
+  def run_tunnel_command(self, command):
     """
-    Run a start command in the background using LogReader like in base web app.
-    This is a simple implementation for running tunnel engine start commands.
+    Run a tunnel command in the background using LogReader like in base web app.
+    This is a generic implementation for running tunnel engine commands.
     """
     if not command:
       return None
     
     try:
-      self.P(f"Running start command: {command}")
+      self.P(f"Running tunnel command: {command}")
       process = subprocess.Popen(
         command,
         shell=True,
@@ -130,12 +130,12 @@ class BaseTunnelEnginePlugin(
       
       return process
     except Exception as e:
-      self.P(f"Error running start command: {e}")
+      self.P(f"Error running tunnel command: {e}")
       return None
 
-  def stop_start_command(self, process):
+  def stop_tunnel_command(self, process):
     """
-    Stop a running start command process and clean up LogReaders.
+    Stop a running tunnel command process and clean up LogReaders.
     """
     if process and process.poll() is None:
       try:
@@ -145,7 +145,7 @@ class BaseTunnelEnginePlugin(
         process.kill()
         process.wait()
       except Exception as e:
-        self.P(f"Error stopping start command: {e}")
+        self.P(f"Error stopping tunnel command: {e}")
     
     # Clean up LogReaders
     self._cleanup_tunnel_log_readers()
@@ -192,17 +192,20 @@ class BaseTunnelEnginePlugin(
         if len(err_logs) > 0:
           self.P(f"[stderr][tunnel]: {err_logs}")
 
-  def run_cloudflare_tunnel(self):
-    """
-    Run the cloudflare tunnel start command.
-    This is a simple wrapper around the cloudflare start command.
-    """
-    if not self.use_cloudflare():
-      return None
 
-    cloudflare_command = self._get_cloudflare_start_command()
-
-    if cloudflare_command:
-      return self.run_start_command(cloudflare_command)
+  def run_tunnel_engine(self):
+    """
+    Run the tunnel engine start command based on the configured engine.
+    This is a generic wrapper that delegates to the appropriate tunnel engine.
+    """
+    if self.use_cloudflare():
+      cloudflare_command = self._get_cloudflare_start_command()
+      if cloudflare_command:
+        return self.run_tunnel_command(cloudflare_command)
+    else:
+      # For ngrok or other engines
+      ngrok_command = self._get_ngrok_start_command()
+      if ngrok_command:
+        return self.run_tunnel_command(ngrok_command)
     
     return None

@@ -824,8 +824,8 @@ class ApplicationMonitor(DecentrAIObject):
       country_code = self.location_data.get('country_code', None)
       continent = self.location_data.get('continent', None)
       datacenter = self.location_data.get('datacenter', False)
-      tags[ct.HB.EE_NT_CT] = country_code
-      tags[ct.HB.EE_NT_REG] = continent
+      tags[ct.HB.EE_NT_CT] = str(country_code)[:2]
+      tags[ct.HB.EE_NT_REG] = str(continent)[:2]
       tags[ct.HB.EE_NT_DC] = datacenter
     except Exception as e:
       self.P("ERROR: Could not get location/datacenter tags: {}".format(e), color='red')

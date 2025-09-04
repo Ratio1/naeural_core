@@ -1435,8 +1435,6 @@ class EpochsManager(Singleton):
           debug_data = {}
 
           tags = self.owner.get_network_node_tags(node_addr)
-          self.P('###Tags:')
-          self.P(json.dumps(tags))
           # DEBUG:
           if True:
             gpu_status = self.owner.network_node_last_gpu_status(node_addr)

@@ -116,7 +116,6 @@ class BaseTunnelEnginePlugin(
         bufsize=0  # this is important for real-time output
       )
       
-      # Use LogReader like in base web app
       logs_reader = self.LogReader(process.stdout, size=100, daemon=None)
       err_logs_reader = self.LogReader(process.stderr, size=100, daemon=None)
       

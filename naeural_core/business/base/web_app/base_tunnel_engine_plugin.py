@@ -149,6 +149,7 @@ class BaseTunnelEnginePlugin(
     
     # Clean up LogReaders
     self._cleanup_tunnel_log_readers()
+    return
 
   def _cleanup_tunnel_log_readers(self):
     """
@@ -162,8 +163,9 @@ class BaseTunnelEnginePlugin(
         logs = logs_reader.get_next_characters()
         if len(logs) > 0:
           self.on_log_handler(logs)
+      # end if logs_reader
       self.dct_logs_reader.pop('tunnel', None)
-    
+
     if hasattr(self, 'dct_err_logs_reader') and 'tunnel' in self.dct_err_logs_reader:
       err_logs_reader = self.dct_err_logs_reader.get('tunnel')
       if err_logs_reader is not None:
@@ -173,6 +175,8 @@ class BaseTunnelEnginePlugin(
         if len(err_logs) > 0:
           self.P(f"[stderr][tunnel]: {err_logs}")
       self.dct_err_logs_reader.pop('tunnel', None)
+      # end if err_logs_reader
+    return
 
   def read_tunnel_logs(self):
     """
@@ -184,13 +188,16 @@ class BaseTunnelEnginePlugin(
         logs = logs_reader.get_next_characters()
         if len(logs) > 0:
           self.on_log_handler(logs)
-    
+      # end if logs_reader
+
     if hasattr(self, 'dct_err_logs_reader') and 'tunnel' in self.dct_err_logs_reader:
       err_logs_reader = self.dct_err_logs_reader.get('tunnel')
       if err_logs_reader is not None:
         err_logs = err_logs_reader.get_next_characters()
         if len(err_logs) > 0:
           self.P(f"[stderr][tunnel]: {err_logs}")
+      # end if err_logs_reader
+    return
 
 
   def run_tunnel_engine(self):

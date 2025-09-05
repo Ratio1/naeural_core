@@ -2173,8 +2173,8 @@ class NetworkMonitor(DecentrAIObject):
             return None
           if isinstance(v, str):
             v = v.strip()
-          if v == '' or v.lower() in ['none', 'null']:
-            return None
+            if v == '' or v.lower() in ['none', 'null']:
+              return None
           
           if isinstance(v, bool):
             return v if only_value else (tag_suffix if v else None)

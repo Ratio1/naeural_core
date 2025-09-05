@@ -2204,7 +2204,7 @@ class NetworkMonitor(DecentrAIObject):
         tags = {k: v for k, v in hb.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
         for tag_key in tags.keys():
           tag_key_clean = tag_key.replace(ct.HB.PREFIX_EE_NODETAG, '')
-          tag = self.__get_tag_from_heartbeat(hb, tag_key_clean)
+          tag = self.__get_tag_from_heartbeat(hb, tag_key_clean, only_value=False)
           if tag:
             result.append(tag)
 
@@ -2217,32 +2217,31 @@ class NetworkMonitor(DecentrAIObject):
           _method = getattr(self, method_name)
           if callable(_method):
             try:
-              tag_value = _method(node_address)
-              if tag_value is not None:
-                other_tags.append(f"{tag_name}:{tag_value}")
+              tag = _method(addr=node_address, only_value=False)
+              if tag:
+                other_tags.append(tag)
             except Exception as e:
               self.P(f"Error getting tag by calling _method {method_name}: {e}", color='r')
-
       result = result + other_tags
       result = list(set(result))
 
       return result
 
-    def network_node_get_tag_is_kyb(self, addr):
+    def network_node_get_tag_is_kyb(self, addr, only_value=True):
       hb = self.__network_node_last_heartbeat(addr)
-      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_IS_KYB, only_value=True)
+      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_IS_KYB, only_value=only_value)
 
-    def network_node_get_tag_dc(self, addr):
+    def network_node_get_tag_dc(self, addr, only_value=True):
       hb = self.__network_node_last_heartbeat(addr)
-      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_DC, only_value=True)
+      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_DC, only_value=only_value)
 
-    def network_node_get_tag_reg(self, addr):
+    def network_node_get_tag_reg(self, addr, only_value=True):
       hb = self.__network_node_last_heartbeat(addr)
-      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_REG, only_value=True)
+      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_REG, only_value=only_value)
 
-    def network_node_get_tag_ct(self, addr):
+    def network_node_get_tag_ct(self, addr, only_value=True):
       hb = self.__network_node_last_heartbeat(addr)
-      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_CT, only_value=True)
+      return self.__get_tag_from_heartbeat(hb, ct.HB.TAG_CT, only_value=only_value)
 
     # End node tags.
   #endif

@@ -36,7 +36,7 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
     def __get_ngrok_auth_command(self):
       return f"ngrok authtoken {self.__get_ng_token()}"
 
-    def __get_ngrok_start_command(self):
+    def _get_ngrok_start_command(self):
       edge_label = self.get_ngrok_edge_label()
       domain = self.get_ngrok_domain()
       if edge_label is not None:
@@ -236,7 +236,7 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       # endif ngrok api used
 
       if self.cfg_tunnel_engine_enabled:
-        super_start_commands = super_start_commands + [self.__get_ngrok_start_command()]
+        super_start_commands = super_start_commands + [self._get_ngrok_start_command()]
       # endif ngrok enabled
       return super_start_commands
 

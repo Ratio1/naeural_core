@@ -250,14 +250,16 @@ class GeoLocator:
   def _parse_ipapi_location_and_datacenter(self, data):
     city = data.get("city")
     country_name = data.get("country_name")
-    country_code_iso = data.get("country_code_iso3")
+    country_code = data.get("country_code")
+    country_code_iso3 = data.get("country_code_iso3")
     continent_code = data.get("continent_code")
     org = data.get("org")    
     
     result = {
       "ip": data.get("ip"),
       "country": country_name,
-      "country_code": country_code_iso,
+      "country_code": country_code,
+      "country_code_iso3": country_code_iso3,
       "city": city,
       "continent": continent_code,
       "datacenter": self._lookup_dc_key(org.lower() if org else "")

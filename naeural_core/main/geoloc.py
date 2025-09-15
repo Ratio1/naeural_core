@@ -37,7 +37,103 @@ class GeoLocator:
       "ovh": ("ovh",),
     }
     return
-  
+
+  # 1) Simple prefixes map (timezone → continent code)
+  _TZ_PREFIX_TO_CONTINENT = {
+    "Africa": "AF",
+    "Antarctica": "AN",
+    "Asia": "AS",
+    "Europe": "EU",
+    "Australia": "OC",  # tz database uses "Australia/..." for AU cities
+    "Pacific": "OC",    # Pacific islands -> Oceania
+    # "America" is handled specially below
+    # The ones below are edge-ish; we try country fallback if given:
+    # "Atlantic", "Indian", "Arctic", "Etc"
+  }
+
+  # 2) Countries that are in South America (ISO-3166 alpha-2)
+  _SOUTH_AMERICA = {
+    "AR","BO","BR","CL","CO","EC","FK","GF","GY","PE","PY","SR","UY","VE"
+  }
+
+  # 3) Optional helpers for a few tricky Atlantic/Indian cases.
+  _AFRICA = {
+    "DZ","AO","BJ","BW","BF","BI","CM","CV","CF","TD","KM","CG","CD","CI","DJ",
+    "EG","GQ","ER","SZ","ET","GA","GM","GH","GN","GW","KE","LS","LR","LY","MG",
+    "MW","ML","MR","MU","YT","MA","MZ","NA","NE","NG","RE","RW","ST","SN","SC",
+    "SL","SO","ZA","SS","SD","TZ","TG","TN","UG","EH","ZM","ZW"
+  }
+  _EUROPE = {
+    "AD","AL","AT","AX","BA","BE","BG","BY","CH","CY","CZ","DE","DK","EE","ES",
+    "FI","FO","FR","GG","GI","GR","HR","HU","IE","IM","IS","IT","JE","LI","LT",
+    "LU","LV","MC","MD","ME","MK","MT","NL","NO","PL","PT","RO","RS","RU","SE",
+    "SI","SJ","SK","SM","UA","UK","GB","VA"
+  }
+  _ASIA = {
+    "AE","AF","AM","AZ","BD","BH","BN","BT","CC","CN","CX","GE","HK","ID","IL",
+    "IN","IO","IQ","IR","JO","JP","KG","KH","KP","KR","KW","KZ","LA","LB","LK",
+    "MM","MN","MO","MV","MY","NP","OM","PH","PK","PS","QA","SA","SG","SY","TH",
+    "TJ","TL","TM","TW","UZ","VN","YE"
+  }
+  _OCEANIA = {
+    "AS","AU","CK","FJ","FM","GU","KI","MH","MP","NC","NF","NR","NU","NZ","PF",
+    "PG","PN","PW","SB","TK","TO","TV","UM","VU","WF","WS"
+  }
+  _NORTH_AMERICA = {
+    # Core NA
+    "BM","CA","GL","MX","PM","US","GS",
+    # Central America
+    "BZ","CR","SV","GT","HN","NI","PA",
+    # Caribbean
+    "AG","AI","AW","BB","BL","BQ","BS","CU","CW","DM","DO","GD","GP","HT","JM",
+    "KN","KY","LC","MF","MQ","MS","PR","SX","TC","TT","VG","VI"
+  }
+
+  def _continent_code_from_tz_and_country(self, timezone: str, country_code: str) -> str:
+    """
+    Best-effort continent code:
+    - Use TZ prefix for clear cases.
+    - For 'America/*', split NA vs SA using ISO country.
+    - For ambiguous prefixes ('Atlantic','Indian','Arctic','Etc'), fall back to country if available.
+    """
+    if not timezone:
+      # Fall back purely on country if we have it
+      return self._continent_from_country(country_code) or "UN"
+
+    prefix = timezone.split("/", 1)[0]
+
+    # Clear/simple prefixes
+    if prefix in self._TZ_PREFIX_TO_CONTINENT:
+      return self._TZ_PREFIX_TO_CONTINENT[prefix]
+
+    # Split 'America/*' by country
+    if prefix == "America":
+      if country_code and country_code.upper() in self._SOUTH_AMERICA:
+        return "SA"
+      return "NA"  # default America → North America
+
+    # Ambiguous prefixes: try country
+    if prefix in {"Atlantic", "Indian", "Arctic", "Etc"}:
+      cc = (country_code or "").upper()
+      if cc:
+        return self._continent_from_country(cc) or "UN"
+
+    # Fallback
+    return "UN"  # Unknown
+
+  def _continent_from_country(self, cc: Optional[str]) -> Optional[str]:
+    if not cc:
+      return None
+    cc = cc.upper()
+    if cc in self._AFRICA: return "AF"
+    if cc in self._EUROPE: return "EU"
+    if cc in self._ASIA: return "AS"
+    if cc in self._OCEANIA: return "OC"
+    if cc in self._NORTH_AMERICA: return "NA"
+    if cc in self._SOUTH_AMERICA: return "SA"
+    if cc in {"AQ","BV","TF"}:  # Antarctica-related territories
+      return "AN"
+    return None
   
   def P(self, s, *args, **kwargs):
     return self.logger.P(s, *args, **kwargs)
@@ -250,14 +346,16 @@ class GeoLocator:
   def _parse_ipapi_location_and_datacenter(self, data):
     city = data.get("city")
     country_name = data.get("country_name")
-    country_code_iso = data.get("country_code_iso3")
+    country_code = data.get("country_code")
+    country_code_iso3 = data.get("country_code_iso3")
     continent_code = data.get("continent_code")
     org = data.get("org")    
     
     result = {
       "ip": data.get("ip"),
       "country": country_name,
-      "country_code": country_code_iso,
+      "country_code": country_code,
+      "country_code_iso3": country_code_iso3,
       "city": city,
       "continent": continent_code,
       "datacenter": self._lookup_dc_key(org.lower() if org else "")
@@ -282,14 +380,17 @@ class GeoLocator:
     country_name = data.get("country")
     country_code_iso = data.get("country")
     city = data.get("city")
-    continent = data.get("timezone", "Unk").split("/")[0].upper()
+    tz = data.get("timezone")
     org = data.get("org")
+
+    continent_code = self._continent_code_from_tz_and_country(tz, country_code_iso)
+
     result = {
       "ip": data.get("ip"),
       "country": country_name,
       "country_code": country_code_iso,
       "city": city,
-      "continent": continent,
+      "continent": continent_code,
       "datacenter": self._lookup_dc_key(org.lower() if org else "")
     }
     return result

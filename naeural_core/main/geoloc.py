@@ -56,7 +56,7 @@ class GeoLocator:
     "AR","BO","BR","CL","CO","EC","FK","GF","GY","PE","PY","SR","UY","VE"
   }
 
-  # 3) Optional helpers for a few tricky Atlantic/Indian cases if you want better accuracy.
+  # 3) Optional helpers for a few tricky Atlantic/Indian cases.
   _AFRICA = {
     "DZ","AO","BJ","BW","BF","BI","CM","CV","CF","TD","KM","CG","CD","CI","DJ",
     "EG","GQ","ER","SZ","ET","GA","GM","GH","GN","GW","KE","LS","LR","LY","MG",

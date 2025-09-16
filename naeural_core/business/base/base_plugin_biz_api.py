@@ -363,9 +363,11 @@ class _BasePluginAPIMixin:
         specific_peers = [specific_peers]
       elif not isinstance(specific_peers, list):
         specific_peers = []
-
       if isinstance(extra_peers, list):
         specific_peers += extra_peers
+      # filter self address from specific_peers  
+      specific_peers = [x for x in specific_peers if x != self.ee_addr]
+      
       if func is not None:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")

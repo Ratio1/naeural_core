@@ -119,6 +119,8 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
       ct.COMMS.QOS: self.__get_stream_config_metadata_property(ct.COMMS.QOS),
       ct.COMMS.SECURED: self.__get_stream_config_metadata_property(ct.COMMS.SECURED),
     }
+    
+    self.P("IoT DCT connection config:\n{}".format(self.json_dumps(self._comm_config, indent=2)))
 
     # build the kwargs of the wrapper server
     # TODO: maybe add low-level filtering of messages in the pub-sub wrapper

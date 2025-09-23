@@ -110,6 +110,7 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
         #   displayed=True,
         # )
         continue
+      # end try-except
     return
 
   def _read_latest_imgs_from_video_streams(self):
@@ -127,3 +128,14 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
         self.P("Error reading from child '{}'".format(name), color='r')
         continue
     return imgs
+
+  def _run_data_acquisition_step(self):
+    imgs = self._read_latest_imgs_from_video_streams()
+    if len(imgs) == 0:
+      return
+
+    try:
+      self._add_img_input(imgs)
+    except Exception as exc:
+      self.P("Failed to enqueue fused frame: {}".format(exc), color='r')
+    return

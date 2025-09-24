@@ -12,10 +12,8 @@ try:
 except Exception:
   requests = None
 
-# Cache filename constant
-GEOLOC_CACHE_FILENAME = "geoloc_cache.pkl"
-# Cache expiration time: 3 days in seconds
-CACHE_EXPIRATION_SECONDS = 3 * 24 * 60 * 60  # 3 days
+GEOLOC_CACHE_FILENAME = "geoloc_cache.pkl" # Cache filename constant
+CACHE_EXPIRATION_SECONDS = 3 * 24 * 60 * 60  # Cache expiration time: 3 days in seconds
 
 
 class GeoLocator:

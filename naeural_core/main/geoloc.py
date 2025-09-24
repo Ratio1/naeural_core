@@ -3,6 +3,7 @@ import ipaddress
 import socket
 import struct
 import json
+import time
 from functools import lru_cache
 from typing import Optional, Iterable
 
@@ -10,6 +11,11 @@ try:
   import requests
 except Exception:
   requests = None
+
+# Cache filename constant
+GEOLOC_CACHE_FILENAME = "geoloc_cache.pkl"
+# Cache expiration time: 3 days in seconds
+CACHE_EXPIRATION_SECONDS = 3 * 24 * 60 * 60  # 3 days
 
 
 class GeoLocator:
@@ -395,12 +401,61 @@ class GeoLocator:
     }
     return result
 
+  def _load_from_cache(self, ip: str) -> Optional[dict]:
+    """Load geolocation data from cache if it exists and is not expired."""
+    try:
+      cache_data = self.logger.load_pickle_from_data(GEOLOC_CACHE_FILENAME, verbose=False)
+      if cache_data and isinstance(cache_data, dict):
+        # Check if we have data for this IP
+        if ip in cache_data:
+          entry = cache_data[ip]
+          if isinstance(entry, dict) and 'data' in entry and 'timestamp' in entry:
+            # Check if cache entry is not expired
+            current_time = time.time()
+            if current_time - entry['timestamp'] < CACHE_EXPIRATION_SECONDS:
+              return entry['data']
+            else:
+              # Remove expired entry
+              del cache_data[ip]
+              self.logger.save_pickle_to_data(cache_data, GEOLOC_CACHE_FILENAME, verbose=False)
+    except Exception as exc:
+      self.P(f"Error loading from cache: {exc}")
+    return None
 
+  def _save_to_cache(self, ip: str, data: dict) -> None:
+    """Save geolocation data to cache."""
+    try:
+      # Load existing cache or create new one
+      cache_data = {}
+      try:
+        cache_data = self.logger.load_pickle_from_data(GEOLOC_CACHE_FILENAME, verbose=False)
+        if cache_data is None:
+          cache_data = {}
+      except:
+        cache_data = {}
+      
+      # Add new entry with timestamp
+      cache_data[ip] = {
+        'data': data,
+        'timestamp': time.time()
+      }
+      
+      # Save updated cache
+      self.logger.save_pickle_to_data(cache_data, GEOLOC_CACHE_FILENAME, verbose=False)
+      self.P(f"Cached geolocation data for IP: {ip}")
+    except Exception as exc:
+      self.P(f"Error saving to cache: {exc}")
 
   def _http_country(self, ip: str, skip_ipapi=False) -> dict:
     """Try public APIs (ipapi.co first; then ipinfo.io if token provided)."""
     if requests is None:
       return None
+    
+    # Check cache first
+    cached_data = self._load_from_cache(ip)
+    if cached_data is not None:
+      self.P(f"Using cached geolocation data for IP: {ip}")
+      return cached_data
     
     url1 = f"https://ipapi.co/{ip}/json/"
     r = None
@@ -415,6 +470,8 @@ class GeoLocator:
             info.get("country"), info.get("country_code"), info.get("city"),
             info.get("continent"), info.get("datacenter")
           ))
+          # Save to cache
+          self._save_to_cache(ip, info)
           return info
         else:
           self.P("{} failed with code {} and data: {}".format(
@@ -440,6 +497,8 @@ class GeoLocator:
           info.get("country"), info.get("country_code"), info.get("city"),
           info.get("continent"), info.get("datacenter")
         ))
+        # Save to cache
+        self._save_to_cache(ip, info)
         return info
     except Exception as exc:
       self.P(f"Error fetching {url2}: {exc}")

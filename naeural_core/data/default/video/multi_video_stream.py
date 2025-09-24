@@ -1,13 +1,17 @@
 from naeural_core import constants as ct
 from naeural_core.data.base import DataCaptureThread
+from naeural_core.data.default.video.video_stream_cv2 import VideoStreamCv2DataCapture
 
 _CONFIG = {
   **DataCaptureThread.CONFIG,
 
 
-  # List of configs for each video stream source.
-  # Example item: {"NAME": "cam1", "URL": "rtsp://...", "BACKEND": "ffmpeg", "CONFIG": {...}, ...}
-  'SOURCES': [],
+  # Dict of configs for each video stream source.
+  # Example: {"cam1": {"NAME": "Camera 1", "URL": "rtsp://...", "CONFIG": {...}},
+  #           "cam2": {"NAME": "Camera 2", "URL": "rtsp://...", "CONFIG": {...}},
+  #           ...}
+  # All streams use VideoStreamCv2DataCapture (OpenCV backend)
+  'SOURCES': {},
 
   'VALIDATION_RULES': {
     **DataCaptureThread.CONFIG['VALIDATION_RULES'],
@@ -26,55 +30,49 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
   def _init(self):
     return
 
-  def _discover_video_stream_class(self, src_cfg):
-    src_type = src_cfg.get(ct.TYPE)
-    backend = src_cfg.get('BACKEND', None)
-    if backend and isinstance(backend, str):
-      signature = 'VIDEO_STREAM_' + backend.upper()
-    else:
-      signature = src_type
-    try:
-      _module_name, _class_name, _cls_def, _config_dict = self._get_module_name_and_class(
-        locations=ct.PLUGIN_SEARCH.LOC_DATA_ACQUISITION_PLUGINS,
-        name=signature,
-        suffix=ct.PLUGIN_SEARCH.SUFFIX_DATA_ACQUISITION_PLUGINS,
-        search_in_packages=ct.PLUGIN_SEARCH.SEARCH_IN_PACKAGES,
-        safe_locations=ct.PLUGIN_SEARCH.SAFE_LOC_DATA_ACQUISITION_PLUGINS,
-        safe_imports=ct.PLUGIN_SEARCH.SAFE_LOC_DATA_ACQUISITION_IMPORTS,
-        safety_check=True,
-      )
-    except Exception as exc:
-      msg = "Failed to resolve child class '{}' for source '{}'".format(signature, src_cfg.get(ct.NAME))
-      self.P(msg + ": {}".format(exc), color='r')
-      # self._create_notification(
-      #   notif=ct.STATUS_TYPE.STATUS_EXCEPTION,
-      #   msg=msg,
-      #   info=self.log.get_error_info(),
-      #   displayed=True,
-      # )
-      raise
-    return _cls_def, _config_dict, signature
+  def fn_loop_stage_callback(self, *args, **kwargs):
+    # Log when this callback is called and what data is passed
+    self.P("fn_loop_stage_callback called with args: {}, kwargs: {}".format(args, kwargs), color='y')
+    
+    # Log additional details if there are any interesting arguments
+    if args:
+      self.P("  - Number of positional arguments: {}".format(len(args)), color='y')
+      for i, arg in enumerate(args):
+        self.P("  - arg[{}]: {} (type: {})".format(i, arg, type(arg).__name__), color='y')
+    
+    if kwargs:
+      self.P("  - Number of keyword arguments: {}".format(len(kwargs)), color='y')
+      for key, value in kwargs.items():
+        self.P("  - {}: {} (type: {})".format(key, value, type(value).__name__), color='y')
+    
+    pass
 
   def _start_video_streams(self):
-    sources = self.config.get('SOURCES', [])
-    for src, idx in sources:
-      name = src.get(ct.NAME)
-      if not name:
-        name = 'src_{}'.format(idx)
-        src[ct.NAME] = name
-      # end if
-      if name in self._video_streams:
+    sources = self.config.get('SOURCES', {})
+    self.P("Starting video streams for {} sources".format(len(sources)))
+    for src_name, src in sources.items():
+      self.P("Starting video stream for source '{}'".format(src_name))
+      if src_name in self._video_streams:
         continue
+      
+      # Ensure the source has a NAME field for cfg_name
+      if ct.NAME not in src:
+        src[ct.NAME] = src_name
+        self.P("Added NAME field '{}' to source config".format(src_name))
+      
       try:
-        _cls, _cfg, signature = self._discover_video_stream_class(src)
-        video_stream = _cls(
+        video_stream = VideoStreamCv2DataCapture(
           log=self.log,
-          default_config=_cfg,
-          **src,
+          default_config=VideoStreamCv2DataCapture.CONFIG,
+          upstream_config=src,
+          environment_variables=self._environment_variables if hasattr(self, '_environment_variables') else {},
+          shmem=self.shmem,
+          fn_loop_stage_callback=self.fn_loop_stage_callback,
+          signature='VIDEO_STREAM_CV2',
         )
         video_stream.start()
-        self._video_streams[name] = video_stream
-        msg = "Started video stream '{}' using class '{}'".format(name, signature)
+        self._video_streams[src_name] = video_stream
+        msg = "Started video stream '{}' using VideoStreamCv2DataCapture".format(src_name)
         self.P(msg)
         self._create_notification(
           notif=ct.STATUS_TYPE.STATUS_NORMAL,
@@ -83,7 +81,7 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
           displayed=True,
         )
       except Exception as exc:
-        msg = "Failed to start video stream '{}'".format(name)
+        msg = "Failed to start video stream '{}'".format(src_name)
         self.P(msg + ": {}".format(exc), color='r')
         self._create_notification(
           notif=ct.STATUS_TYPE.STATUS_EXCEPTION,
@@ -93,6 +91,7 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
         )
         continue
       # end try-except
+    # end for
     return
 
   def _stop_video_streams(self):
@@ -129,8 +128,20 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
         continue
     return imgs
 
-  def _run_data_acquisition_step(self):
+  def connect(self):
+    # No external connection; manage video streams instead
+    self._start_video_streams()
+    return True
+
+  def _release(self):
+    self._stop_video_streams()
+    return
+
+  def data_step(self):
+    self.P("Running data acquisition step...")
     imgs = self._read_latest_imgs_from_video_streams()
+    self.P("Read {} images from {} video streams".format(len(imgs), len(self._video_streams)))
+    self.P("Image shapes: {}".format([im.shape if im is not None else None for im in imgs]))
     if len(imgs) == 0:
       return
 

@@ -95,10 +95,25 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
     return
 
   def _stop_video_streams(self):
-    for name in self._video_streams.keys():
+    """Stop all child video streams."""
+    if not self._video_streams:
+      self.P("No video streams to stop", color='y')
+      return
+    
+    self.P("Stopping {} video streams...".format(len(self._video_streams)), color='y')
+    
+    # Create a copy of the keys to avoid modification during iteration
+    stream_names = list(self._video_streams.keys())
+    
+    for name in stream_names:
+      if name not in self._video_streams:
+        continue  # Already removed
+      
       video_stream = self._video_streams.pop(name)
       try:
+        self.P("Stopping video stream '{}'".format(name))
         video_stream.stop(join_time=3)
+        self.P("Stopped video stream '{}'".format(name))
       except Exception as exc:
         msg = "Failed to stop video stream '{}'".format(name)
         self.P(msg + ": {}".format(exc), color='r')
@@ -110,10 +125,12 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
         # )
         continue
       # end try-except
+    
+    self.P("All video streams stopped", color='y')
     return
 
   def _read_latest_imgs_from_video_streams(self):
-    imgs = []
+    camera_images = {}
     for name, video_stream in self._video_streams.items():
       try:
         dct = video_stream.get_data_capture()
@@ -121,32 +138,57 @@ class MultiVideoStreamDataCapture(DataCaptureThread):
         # pick last image if present
         for item in reversed(inputs):
           if item.get('TYPE') == 'IMG' and item.get('IMG') is not None:
-            imgs.append(item.get('IMG'))
+            camera_images[name] = item.get('IMG')
             break
       except Exception:
         self.P("Error reading from child '{}'".format(name), color='r')
         continue
-    return imgs
+    return camera_images
+
+  def get_camera_images(self):
+    """Get the latest images from all cameras as a dictionary mapping camera names to images."""
+    return self._read_latest_imgs_from_video_streams()
 
   def connect(self):
     # No external connection; manage video streams instead
     self._start_video_streams()
     return True
 
+  def stop(self, join_time=10):
+    """Override stop method to ensure child video streams are stopped."""
+    self.P("Stopping MultiVideoStreamDataCapture and all child video streams...", color='y')
+    # Stop child video streams first
+    self._stop_video_streams()
+    # Call parent stop method
+    super().stop(join_time=join_time)
+    self.P("MultiVideoStreamDataCapture stopped", color='y')
+    return
+
   def _release(self):
+    """Called at the end of thread execution - ensure cleanup."""
+    self.P("Releasing MultiVideoStreamDataCapture resources...", color='y')
     self._stop_video_streams()
     return
 
   def data_step(self):
     self.P("Running data acquisition step...")
-    imgs = self._read_latest_imgs_from_video_streams()
-    self.P("Read {} images from {} video streams".format(len(imgs), len(self._video_streams)))
-    self.P("Image shapes: {}".format([im.shape if im is not None else None for im in imgs]))
-    if len(imgs) == 0:
+    camera_images = self._read_latest_imgs_from_video_streams()
+    self.P("Read {} images from {} video streams".format(len(camera_images), len(self._video_streams)))
+    
+    # Log image shapes for each camera
+    for camera_name, img in camera_images.items():
+      if img is not None:
+        self.P("Camera '{}': image shape {}".format(camera_name, img.shape))
+      else:
+        self.P("Camera '{}': no image available".format(camera_name))
+    
+    if len(camera_images) == 0:
       return
 
     try:
+      # Convert dict to list for _add_img_input (maintaining backward compatibility)
+      imgs = list(camera_images.values())
       self._add_img_input(imgs)
     except Exception as exc:
-      self.P("Failed to enqueue fused frame: {}".format(exc), color='r')
+      self.P("Failed to enqueue camera frames: {}".format(exc), color='r')
     return

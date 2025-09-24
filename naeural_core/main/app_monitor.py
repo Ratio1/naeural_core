@@ -821,6 +821,8 @@ class ApplicationMonitor(DecentrAIObject):
   def get_location_and_datacenter_tags(self):
     tags = {}
     try:
+      if not self.location_data:
+        return tags
       country_code = self.location_data.get('country_code', "")
       continent = self.location_data.get('continent', "")
       datacenter = self.location_data.get('datacenter', False)

@@ -36,6 +36,7 @@ class NetMonCt:
   PLUGIN_LAST_ALIVE = 'last_alive'
   IS_DEEPLOYED = 'is_deeployed'
   DEEPLOY_SPECS = 'deeploy_specs'
+  INSTANCE_CONF = 'instance_conf'
 
 
 def exponential_score(left, right, val, right_is_better=False, normed=False):
@@ -1831,6 +1832,7 @@ class NetworkMonitor(DecentrAIObject):
                   NetMonCt.PLUGIN_START : instance_conf.get(ct.HB.ACTIVE_PLUGINS_INFO.INIT_TIMESTAMP),
                   NetMonCt.PLUGIN_LAST_ALIVE : instance_conf.get(ct.HB.ACTIVE_PLUGINS_INFO.EXEC_TIMESTAMP),
                   NetMonCt.PLUGIN_LAST_ERROR : instance_conf.get(ct.HB.ACTIVE_PLUGINS_INFO.LAST_ERROR_TIME),
+                  NetMonCt.INSTANCE_CONF: instance_conf
                 }
                 for status_info in plugins_statuses:
                   # now we check for instance_id, pipeline, signature

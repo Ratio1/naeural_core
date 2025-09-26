@@ -1925,6 +1925,15 @@ class _UtilsBaseMixin(
       'timestamp': self.time()
     }
 
+  def shorten_address(self, addr):
+    """
+    Shortens an address to a given format.
+    Proxy to `shorten_address` method from log.
+    Parameters
+    ----------
+    addr : str
+    """
+    return self.log.shorten_address(addr)
 
   def shorten_str(self, s, max_len=32):
     """

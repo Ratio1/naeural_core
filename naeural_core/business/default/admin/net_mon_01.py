@@ -208,6 +208,27 @@ class NetMon01Plugin(
       )
     return
 
+  
+  def process_whitelists(self, current_network):
+    """
+    this function constructs a full whitelist from all nodes in the current network then
+    replaces the individual whitelists with indexes to the full whitelist
+    the full whitelist is sorted so that indexes are consistent across nodes
+    """
+    dct_whitelist = {}
+    if self.const.ETH_ENABLED:
+      full_whitelist = set()
+      for addr in current_network:
+        whitelist = current_network[addr].get(self.const.PAYLOAD_DATA.NETMON_WHITELIST, [])
+        full_whitelist.update(whitelist)
+      lst_whitelist = sorted(list(full_whitelist))
+      dct_whitelist = {addr:idx for idx,addr in enumerate(lst_whitelist)}
+      for addr in current_network:
+        whitelist = current_network[addr].get(self.const.PAYLOAD_DATA.NETMON_WHITELIST, [])
+        idxs = [dct_whitelist[w] for w in whitelist if w in dct_whitelist]
+        current_network[addr][self.const.PAYLOAD_DATA.NETMON_WHITELIST] = idxs
+    return current_network, dct_whitelist
+  
 
   def _process(self):
     payload = None
@@ -292,11 +313,33 @@ class NetMon01Plugin(
           )
         }    
       message="" if len(current_alerted) == 0 else "Missing/lost processing nodes: {}".format(list(current_alerted.keys()))
+      # compress whitelists if needed  
+      n_nodes = len(current_network)
+      netsize = len(self.json_dumps(current_network))
+      if self.const.ETH_ENABLED:
+        # this is a EVM-based implementation so we need to process whitelists
+        self.P("Compressing whitelists for {} nodes (total {} bytes full data)...".format(
+          n_nodes, netsize
+        ))
+        current_network, dct_whitelist = self.process_whitelists(current_network)
+        n_nodes = len(current_network)
+        netsize2 = len(self.json_dumps(current_network))
+        self.P("Compressed whitelists for {} to {} bytes (reduction {:.1f}%)".format(
+          n_nodes, netsize2, 100.0 * (netsize - netsize2) / netsize if netsize > 0 else 0.0
+        ))
+      else:
+        # no whitelist processing
+        self.P("Not processing whitelists for {} nodes (total {} bytes full data)...".format(
+          n_nodes, netsize
+        ))        
+        dct_whitelist = {}
+      #endif eth enabled
       # for this plugin only ALERTS should be used in UI/BE
       payload = self._create_payload(
         current_server=self.e2_addr,
         current_network=current_network,
         current_alerted=current_alerted,
+        whitelist_map=dct_whitelist,
         message=message,
         status=message,
         current_ranking=current_ranking,

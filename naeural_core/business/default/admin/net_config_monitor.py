@@ -416,7 +416,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     else:
       self.P("Received unencrypted data. Dropping.", color='r')
     return  
-  
+    
   
   @NetworkProcessorPlugin.payload_handler("NET_MON_01")
   def netmon_handler(self, data : dict):
@@ -430,6 +430,8 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     else:
       sender_addr = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
       sender_alias = data.get(self.const.PAYLOAD_DATA.EE_ID, None)
+      if self.const.ETH_ENABLED:
+        data = self.const.PAYLOAD_DATA.maybe_convert_netmon_whitelist(data)
       # here we will remove the prefix from each "address" within the nodes info
       current_network = self.__preprocess_current_network_data(current_network)
       # from this point on we will work with the no-prefix addresses      
@@ -467,7 +469,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
           # we have found a whitelist that contains our address
           if addr not in self.__allowed_nodes:
             self.__allowed_nodes[addr] = {
-              "whitelist" : peers_status[addr]["whitelist"],
+              "whitelist" : peers_status[addr][self.const.PAYLOAD_DATA.NETMON_WHITELIST],
               "last_config_get" : 0,
             } 
             self.__new_nodes_this_iter += 1

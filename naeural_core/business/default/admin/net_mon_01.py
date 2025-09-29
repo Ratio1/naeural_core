@@ -318,19 +318,16 @@ class NetMon01Plugin(
       netsize = len(self.json_dumps(current_network))
       if self.const.ETH_ENABLED:
         # this is a EVM-based implementation so we need to process whitelists
-        self.P("Compressing whitelists for {} nodes (total {} bytes full data)...".format(
-          n_nodes, netsize
-        ))
         current_network, dct_whitelist = self.process_whitelists(current_network)
         n_nodes = len(current_network)
         netsize2 = len(self.json_dumps(current_network))
-        self.P("Compressed whitelists for {} to {} bytes (reduction {:.1f}%)".format(
-          n_nodes, netsize2, 100.0 * (netsize - netsize2) / netsize if netsize > 0 else 0.0
+        self.P("Compressed wl for {} nodes from {} to {} bytes (reduction {:.1f}%)".format(
+          n_nodes, netsize, netsize2, 100.0 * (netsize - netsize2) / netsize if netsize > 0 else 0.0
         ))
       else:
         # no whitelist processing
-        self.P("Not processing whitelists for {} nodes (total {} bytes full data)...".format(
-          n_nodes, netsize
+        self.P("Not processing wl for {} nodes (total {} bytes full data, ETH_ENABLED={})...".format(
+          n_nodes, netsize, self.const.ETH_ENABLED
         ))        
         dct_whitelist = {}
       #endif eth enabled

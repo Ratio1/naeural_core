@@ -1894,8 +1894,32 @@ class NetworkMonitor(DecentrAIObject):
           ), color='r'
         )
       return apps
-      
-      
+
+    def network_known_pipelines(self, target_nodes=None):
+      """
+      This function returns the pipelines of all remote ONLINE nodes based on the cached information.
+      """
+      apps = {}
+      fails = {}
+      if target_nodes is None:
+        target_nodes = list(self.__nodes_pipelines.keys())
+      for addr in target_nodes:
+        if self.network_node_is_online(addr=addr):
+          node_apps = self.network_node_pipelines(addr=addr)
+          # Filter out admin_pipeline entries
+          filtered_apps = []
+          for pipeline in node_apps:
+            pipeline_name = pipeline.get(ct.CONFIG_STREAM.K_NAME)
+            if pipeline_name != "admin_pipeline":
+              filtered_apps.append(pipeline)
+          full_addr = self._add_address_prefix(addr)
+          apps[full_addr] = filtered_apps
+      if len(fails) > 0:
+        self.P("Failed to get plugin infor for following nodes(pipelines):\n{}".format(
+          json.dumps(fails, indent=2)
+        ), color='r'
+        )
+      return apps
         
     
     def network_node_hb_interval(self, addr):

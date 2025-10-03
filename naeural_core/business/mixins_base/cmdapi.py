@@ -133,7 +133,7 @@ class _CmdAPIMixin(object):
     None.
     
     """
-    self._cmdapi_update_pipeline_instance(
+    return self._cmdapi_update_pipeline_instance(
       pipeline=pipeline,
       signature=signature,
       instance_id=instance_id,
@@ -141,8 +141,7 @@ class _CmdAPIMixin(object):
       node_address=node_address,
       send_immediately=send_immediately,
     )
-    return
-  
+
   
   def cmdapi_batch_update_instance_config(
     self, lst_updates, node_address=None,
@@ -643,7 +642,7 @@ class _CmdAPIMixin(object):
         config_stream=config_stream, node_address=node_address,
         send_immediately=send_immediately,
       )
-      return
+      return config_stream
 
 
     def cmdapi_start_stream_by_params_on_current_box(self, name, stream_type, url=None,
@@ -690,7 +689,7 @@ class _CmdAPIMixin(object):
         command_content=payload,
         send_immediately=send_immediately,
       )
-      return
+      return payload
   #endif
 
   # STOP STREAM SECTION

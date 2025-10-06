@@ -764,6 +764,12 @@ class BCWrapper:
     """
     return self.__bc.web3_get_unvalidated_job_ids(oracle_address=oracle_address)
 
+  def get_first_closable_job_id(self):
+    """
+    Retrieve the ID of the first job that can be closed, or None if no such job exists.
+    """
+    return self.__bc.web3_get_first_closable_job_id()
+
   def get_is_last_epoch_allocated(self):
     """
     Check if the last epoch has been allocated.

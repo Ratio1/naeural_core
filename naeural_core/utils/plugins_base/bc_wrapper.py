@@ -775,6 +775,27 @@ class BCWrapper:
     Check if the last epoch has been allocated.
     """
     return self.__bc.web3_get_is_last_epoch_allocated()
+
+  def get_addresses_balances(self, addresses: list):
+    """
+    Get the ETH and $R1 balances for a list of addresses.
+
+    Parameters
+    ----------
+    addresses : list
+        The list of addresses to check the balances for.
+
+    Returns
+    -------
+    dict
+        A dictionary with the following structure:
+        {
+          "0xaddr1": {"ethBalance": float, "r1Balance": float},
+          "0xaddr2": {"ethBalance": float, "r1Balance": float},
+          ...
+        }
+    """
+    return self.__bc.web3_get_addresses_balances(addresses=addresses)
   
   
   def get_evm_net_data(self):

@@ -790,8 +790,8 @@ class BCWrapper:
     dict
         A dictionary with the following structure:
         {
-          "address1": {"eth": float, "r1": float},
-          "address2": {"eth": float, "r1": float},
+          "0xaddr1": {"ethBalance": float, "r1Balance": float},
+          "0xaddr2": {"ethBalance": float, "r1Balance": float},
           ...
         }
     """

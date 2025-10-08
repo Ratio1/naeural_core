@@ -57,7 +57,7 @@ ORACLE_SYNC_ONLINE_PRESENCE_MIN_THRESHOLD = CURRENT_EVM_NET_CONSTANTS[BASE_CT.Ev
 ###################################################
 ###################################################
 
-EE_ALIAS_MAX_SIZE = 15
+EE_ALIAS_MAX_SIZE = 20
 
 
 ETH_ENABLED_ENV_KEY = BASE_CT.ETH_ENABLED_ENV_KEY # this env var tells if the system should use or not EVM compatibility in payloads

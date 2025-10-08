@@ -666,9 +666,14 @@ class Orchestrator(DecentrAIObject,
 
   @property
   def cfg_eeid(self):
-    _id = self.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
-    return _id
-  
+    _id = str(self.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, ''))
+    if len(_id) > ct.EE_ALIAS_MAX_SIZE:
+      self.P("WARNING: EE_ID '{}' is too long (max {} chars). It will be truncated to {}".format(
+        _id, ct.EE_ALIAS_MAX_SIZE, _id[:ct.EE_ALIAS_MAX_SIZE]
+      ))
+      self.config_data[ct.CONFIG_STARTUP_v2.K_EE_ID] = _id[:ct.EE_ALIAS_MAX_SIZE]
+    return self.config_data[ct.CONFIG_STARTUP_v2.K_EE_ID]
+
   @property
   def cfg_compress_heartbeat(self):
     return self.config_data.get('COMPRESS_HEARTBEAT', True)

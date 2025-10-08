@@ -69,12 +69,32 @@ class ApplicationMonitor(DecentrAIObject):
       
       'timestamps'          : deque(maxlen=MAX_LOCAL_HISTORY),      
     }
-    
-    self.locator = GeoLocator(logger=log)
-    self.location_data = self.locator.get_location_and_datacenter()
-    self.P("Location data: {}".format(json.dumps(self.location_data)), color='g')
+    self.locator = None
+    self.location_data = {}
 
     super(ApplicationMonitor, self).__init__(log=log, prefix_log='[AMON]', **kwargs)
+    return
+
+  def configure_location(self, evm_network):
+    """
+    Initialize geolocation data based on the provided EVM network.
+    Skip lookup when running on VPN to avoid hitting external services.
+    """
+    self.locator = None
+    self.location_data = {}
+
+    network = (evm_network or "").upper()
+    if network == "VPN":
+      self.P("Skipping geo lookup because EVM network is VPN.", color='y')
+      return
+
+    try:
+      self.locator = GeoLocator(logger=self.log)
+      self.location_data = self.locator.get_location_and_datacenter()
+      self.P("Location data: {}".format(json.dumps(self.location_data)), color='g')
+    except Exception as exc:
+      self.P(f"Failed to retrieve location data: {exc}", color='r')
+      self.location_data = {}
     return
   
   @property
@@ -769,16 +789,20 @@ class ApplicationMonitor(DecentrAIObject):
 
     # Add Node Tags to dct_status
     def process_tags(tags_dict):
-      for key, value in tags_dict.items():
-        if value is None or value == '' or value == 'None':
-          continue
-        str_val = str(value).lower()
-        if str_val in ["true", "1"]:
-          dct_status[key] = True
-        elif str_val in ["false", "0"]:
-          dct_status[key] = False
-        else:
-          dct_status[key] = value
+      if isinstance(tags_dict, dict):
+        for key, value in tags_dict.items():
+          if value is None or value == '' or value == 'None':
+            continue
+          str_val = str(value).lower()
+          if str_val in ["true", "1"]:
+            dct_status[key] = True
+          elif str_val in ["false", "0"]:
+            dct_status[key] = False
+          else:
+            dct_status[key] = value
+        # end for
+      # end if
+      return
 
     process_tags(env_node_tags)
     process_tags(location_datacenter_tags)

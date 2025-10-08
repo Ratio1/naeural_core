@@ -322,6 +322,9 @@ class Orchestrator(DecentrAIObject,
     self.__evm_network = self.blockchain_manager.evm_network
     # end set EVM network
 
+    if self._app_monitor is not None:
+      self._app_monitor.configure_location(self.__evm_network)
+
     self.save_local_address()
 
     ### at this point we should check if the authentication information is available in the

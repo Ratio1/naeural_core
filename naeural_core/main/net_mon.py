@@ -1701,7 +1701,7 @@ class NetworkMonitor(DecentrAIObject):
           candidates.append(addr)
       if len(candidates) == 0:
         addr = None
-      if len(candidates) == 1:
+      elif len(candidates) == 1:
         addr = candidates[0]
       else:
         # if there are multiple candidates, we will return the one with the most recent heartbeat

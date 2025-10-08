@@ -71,11 +71,10 @@ class ApplicationMonitor(DecentrAIObject):
     }
     
     self.locator = GeoLocator(logger=log)
-
     self.location_data = self.locator.get_location_and_datacenter()
+    self.P("Location data: {}".format(json.dumps(self.location_data)), color='g')
 
     super(ApplicationMonitor, self).__init__(log=log, prefix_log='[AMON]', **kwargs)
-    self.P("Location data: {}".format(json.dumps(self.location_data)), color='g')
     return
   
   @property

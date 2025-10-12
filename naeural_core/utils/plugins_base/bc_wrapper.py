@@ -733,6 +733,17 @@ class BCWrapper:
     """
     return self.__bc.web3_get_job_details(job_id=job_id)
 
+  def get_all_active_jobs(self):
+    """
+    Retrieve the list of all active jobs available on the blockchain.
+
+    Returns
+    -------
+    list[dict]
+        List of job details for each active job.
+    """
+    return self.__bc.web3_get_all_active_jobs()
+
   def submit_node_update(self, job_id: int, nodes: list):
     """
     Submit nodes update for a given job.

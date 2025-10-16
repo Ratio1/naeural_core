@@ -244,7 +244,12 @@ class AlertHelper:
       # compute current status
       alert_value = self._lower_alert_value if self._state else self._raise_alert_value
       eval_func = self._eval_func_lower if self._state else self._eval_func
-      current_state = bool(eval_func(self.queue) >= alert_value)
+      # lowering transition uses strict compare so hitting the lower threshold clears the alert,
+      # raising transition keeps >= to allow equality to trigger the alert
+      if self._state:
+        current_state = bool(eval_func(self.queue) > alert_value)
+      else:
+        current_state = bool(eval_func(self.queue) >= alert_value)
         
       # check if this was first change after reset
       if current_state != self._state and self._first_change:

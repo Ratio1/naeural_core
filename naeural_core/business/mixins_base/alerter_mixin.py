@@ -47,10 +47,13 @@ class _AlerterMixin(object):
 
     reduce_threshold = self._get_alerter_reduce_threshold() if reduce_threshold is None else reduce_threshold
 
-    self.P("  Creating alerter '{}' for {}: data, thr_raise/time_raise, thr_lower/time_lower: {}, {}/{} , {}/{}".format(
+    self.P("  Creating alerter '{}': data, thr_raise/time_raise/mode, thr_lower/time_lower/mode, raise/lower modes: {}, {}/{}/{} , {}/{}/{}".format(
       alerter,
-      self._signature, value_count,
-      raise_thr, raise_time, lower_thr, lower_time), color='y')
+      value_count,
+      raise_thr, raise_time, alert_mode,
+      lower_thr, lower_time, alert_mode_lower
+      ), color='y'
+    )
 
     if not (raise_time < lower_time):
       self.P("    WARNING: Alerter raise time should be below lowering time: raise={} vs lower={}".format(

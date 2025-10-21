@@ -711,6 +711,8 @@ class ApplicationMonitor(DecentrAIObject):
     did_is_on_str = os.environ.get('EE_DD', "")
     did_is_on = str(did_is_on_str).lower() in ["true", "1"]
 
+    comm_relay = os.environ.get('EE_MQTT_HOST', "")
+
     # Node Tags
     env_node_tags = {k: v for k, v in os.environ.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
     location_datacenter_tags = self.get_location_and_datacenter_tags()
@@ -762,6 +764,7 @@ class ApplicationMonitor(DecentrAIObject):
       ct.HB.ACTIVE_PLUGINS    : active_business_plugins,
       ct.HB.STOP_LOG          : self.owner.main_loop_stop_log,
       ct.HB.DID               : did_is_on,
+      ct.HB.COMM_RELAY        : comm_relay,
 
       ct.HB.R1FS_ID           : self.owner.r1fs_id,
       ct.HB.R1FS_ONLINE       : self.owner.r1fs_started,

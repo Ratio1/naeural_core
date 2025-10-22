@@ -1040,8 +1040,9 @@ class NetworkMonitor(DecentrAIObject):
 
       return True
 
-    def network_node_simple_status(self, addr, dt_now=None):
-      if ct.DEVICE_STATUS_EXCEPTION in self.__network_node_past_device_status_by_interval(addr=addr, minutes=60):
+    def network_node_simple_status(self, addr, dt_now=None, last_exception_check_time_minutes=60):
+      # TODO: review this method wrt the timing of the last exception
+      if ct.DEVICE_STATUS_EXCEPTION in self.__network_node_past_device_status_by_interval(addr=addr, minutes=last_exception_check_time_minutes):
         return "PAST-EXCEPTION"
       
       if self.network_node_last_seen(addr=addr, as_sec=True, dt_now=dt_now) > 60:

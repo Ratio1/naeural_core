@@ -89,6 +89,9 @@ class BaseDataCapture(DecentrAIObject, _ConfigHandlerMixin):
     else:
       margin = 1
 
+    if self.cfg_max_idle_time is None or self.cfg_max_idle_time <= 0:
+      return False
+    
     is_idle = self.time_since_last_data > (margin + self.cfg_max_idle_time)
     return is_idle  
   

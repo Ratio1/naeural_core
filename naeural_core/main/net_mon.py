@@ -261,6 +261,7 @@ class NetworkMonitor(DecentrAIObject):
     hb.pop(ct.HB.SECURED, None)
     hb.pop(ct.HB.EE_IS_SUPER, None)
     hb.pop(ct.HB.DID, None)
+    hb.pop(ct.HB.R1FS_RELAY, None)
     hb.pop(ct.HB.COMM_RELAY, None)
 
     hb.pop(ct.PAYLOAD_DATA.EE_ID, None)
@@ -2038,7 +2039,8 @@ class NetworkMonitor(DecentrAIObject):
           r1fs_id=self.network_node_r1fs_id(addr),
           r1fs_online=self.network_node_r1fs_online(addr),
           r1fs_relay=self.network_node_r1fs_relay(addr),
-          
+          comm_relay=self.network_node_comm_relay(addr),
+
           main_loop_avg_time=main_loop_time,
           main_loop_freq=round(main_loop_freq, 2),
           

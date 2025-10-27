@@ -37,6 +37,7 @@ class NetMonCt:
   IS_DEEPLOYED = 'is_deeployed'
   DEEPLOY_SPECS = 'deeploy_specs'
   INSTANCE_CONF = 'instance_conf'
+  PIPELINE_DATA = 'pipeline_data'
 
 
 def exponential_score(left, right, val, right_is_better=False, normed=False):
@@ -1816,12 +1817,16 @@ class NetworkMonitor(DecentrAIObject):
       if isinstance(pipelines, list) and len(pipelines) > 0:
         for pipeline_info in pipelines:
           pipeline = pipeline_info.get(ct.NAME)
+          pipeline_copy = deepcopy(pipeline_info)
+          pipeline_copy.pop(ct.PLUGINS, None)  # remove plugins from pipeline info copy
+          pipeline_copy.pop(ct.CONFIG_STREAM.DEEPLOY_SPECS, None)
           apps[pipeline] = {
             NetMonCt.INITIATOR : pipeline_info.get(ct.CONFIG_STREAM.K_INITIATOR_ADDR),
             NetMonCt.OWNER : pipeline_info.get(ct.CONFIG_STREAM.K_OWNER, None),
             NetMonCt.LAST_CONFIG : pipeline_info.get(ct.CONFIG_STREAM.LAST_UPDATE_TIME),
             NetMonCt.IS_DEEPLOYED : pipeline_info.get(ct.CONFIG_STREAM.IS_DEEPLOYED, False) == True,
             NetMonCt.DEEPLOY_SPECS : pipeline_info.get(ct.CONFIG_STREAM.DEEPLOY_SPECS, {}),
+            NetMonCt.PIPELINE_DATA : pipeline_copy,
             NetMonCt.PLUGINS : {}
           }
 

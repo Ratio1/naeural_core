@@ -529,6 +529,9 @@ class DataCaptureThread(BaseDataCapture,
   #   """
   #   self._deque.clear()
     
+  def __maybe_reconnect(self):
+    self._maybe_reconnect()
+    return
   
   def _reset_state(self):
     self.has_connection = False
@@ -562,7 +565,7 @@ class DataCaptureThread(BaseDataCapture,
         start_processing_time = time()
         self.start_timer('thread_loop')
         #  _maybe_reconnect must be defined by each individual DCT
-        self._maybe_reconnect()
+        self.__maybe_reconnect()
 
         # first run commands in any (this will also take care of LAST_UPDATE_TIME)
         self.__maybe_trigger_pipeline_command()

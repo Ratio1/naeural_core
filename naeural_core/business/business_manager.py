@@ -290,8 +290,8 @@ class BusinessManager(Manager):
           continue
         #endif
 
-        self.comm_shared_memory['payloads'][instance_hash] = deque(maxlen=100)
-        self.comm_shared_memory['commands'][instance_hash] = deque(maxlen=100)
+        self.comm_shared_memory['payloads'][instance_hash] = deque(maxlen=1000)
+        self.comm_shared_memory['commands'][instance_hash] = deque(maxlen=1000)
 
         try:
           self.set_loop_stage('2.bm.refresh.call_class.{}:{}:{}'.format(stream_name, signature, instance_id))

@@ -1608,7 +1608,15 @@ class BasePluginExecutor(
           # TODO: some things may be missing (cvpluginexecutor._add_plugin_identifiers_to_payload)
           # self._add_plugin_identifiers_to_payload(payload=payload)
           payload = self.__process_payload(payload)
-        self.payloads_deque.append(payload)
+        # TODO: 
+        # if this is loopback do NOT append to output queue but to dct shmem
+        # here we need to write in the specific shmem location
+        # below mokup code for loopback shmem write
+        # if self.cfg_is_loopback_plugin:
+        #   self.write_to_dct_shmem(payload)
+        else:
+          self.payloads_deque.append(payload)
+        # increase total payloads counter one way or another
         self.__total_payloads += 1
       return payload
 

@@ -74,6 +74,10 @@ _CONFIG = {
   
   "FORCE_RESTART_AFTER" : 3600 * 24 * 2,  # days restart time
   "REBOOT_ON_RESTART"   : False,
+
+  "DELAY_RESTART_ON_ORACLE": False,
+  "CONSENSUS_WINDOW": 30 * 60,  # seconds during which the restart will be delayed
+  # if too close to epoch end(before or after)
   
   "BUILD_DELAY"         : 10 * 60,
 
@@ -129,7 +133,41 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     self.__maybe_config_supervisor_restart_offset()
 
     return
-  
+
+  def is_near_epoch_end(self, return_time_left):
+    """
+    Check if we are near the epoch end(right before or right after)
+    Parameters
+    ----------
+    return_time_left : bool
+        If True, returns the time left until consensus window passes(or 0 if not in window)
+
+    Returns
+    -------
+    res : is_near_end or (is_near_end, time_left), where
+        is_near_end : bool
+            True if we are near the epoch end
+        time_left : float
+            Time left until consensus window passes (0 if not in window)
+    """
+    """Check if we are near the epoch end(right before or right after)"""
+    curr_epoch_start_ts = self.netmon.epoch_manager.get_current_epoch_start().timestamp()
+    curr_epoch_end_ts = self.netmon.epoch_manager.get_current_epoch_end().timestamp()
+    check_interval = self.cfg_consensus_window / 2  # seconds
+    now_ts = self.time()
+    is_near_end = False
+    time_left = 0
+    # Check if right before epoch end
+    if now_ts >= (curr_epoch_end_ts - check_interval):
+      time_left = (curr_epoch_end_ts + check_interval) - now_ts
+      is_near_end = True
+    # Check if right after epoch start
+    elif now_ts <= (curr_epoch_start_ts + check_interval):
+      time_left = (curr_epoch_start_ts + check_interval) - now_ts
+      is_near_end = True
+    # endif near epoch end
+    return (is_near_end, time_left) if return_time_left else is_near_end
+
   def __should_postpone_version_check(self):
     """Checks if the version check should be postponed"""
     if self.time() - self.__update_monitor_startup_time < self.cfg_delayed_version_check:
@@ -137,6 +175,15 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
         self.cfg_delayed_version_check - (self.time() - self.__update_monitor_startup_time)
       ))
       return True
+    if self.is_supervisor_node and self.cfg_delay_restart_on_oracle:
+      is_near_end, time_left = self.is_near_epoch_end(return_time_left=True)
+      if is_near_end:
+        log_msg = f"Postponing version check for another {time_left:.1f} seconds"
+        log_msg += f" due to oracle being too close to epoch end!"
+        self.P(log_msg)
+        return True
+      # endif is near end
+    # endif supervisor node and delay restart on oracle
     return False
 
   def __maybe_config_supervisor_restart_offset(self):
@@ -502,6 +549,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
           full_msg = "Local version is below server version. E2 update is required! {}".format(msg)
           if self.cfg_restart_on_behind:
             full_msg = "Restarting E2 initiated for auto-update: " + full_msg
+          # endif restart on behind
           self.P(full_msg, color='r')
           self.add_payload_by_fields(
             local_ver=local_ver,
@@ -513,14 +561,14 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
             restart_initiated=self.cfg_restart_on_behind,
             restart_now=False,
             forced_restart=False,
-            forced_restart_running_time=self.get_node_running_time_str(),            
+            forced_restart_running_time=self.get_node_running_time_str(),
           )
           # now save the update initiation and check for potential previous failed update
           self._maybe_raise_failed_update_alert_and_save(prev_ver=local_ver, new_ver=server_ver)
-          
+
           if self.cfg_restart_on_behind:
-            needs_restart = True            
-          #endif restart on behind            
+            needs_restart = True
+          # endif restart on behind
         else:
           self.P("{} Local version is synced or better than server. All good.".format(msg))
         #endif server version is higher or lower

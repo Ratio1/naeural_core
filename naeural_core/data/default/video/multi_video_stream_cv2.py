@@ -108,7 +108,7 @@ class MultiVideoStreamCv2DataCapture(DataCaptureThread):
   def startup(self):
     super().startup()
     self._update_global_metadata()
-    new_contexts = self._sync_streams(initial=True)
+    new_contexts = self._sync_streams()
     for ctx in new_contexts:
       self._launch_reconnect(ctx)
     return
@@ -157,12 +157,12 @@ class MultiVideoStreamCv2DataCapture(DataCaptureThread):
     return
 
   def _on_config_changed(self):
-    new_contexts = self._sync_streams(initial=False)
+    new_contexts = self._sync_streams()
     for ctx in new_contexts:
       self._launch_reconnect(ctx)
     return
 
-  def _sync_streams(self, initial: bool) -> List[_StreamContext]:
+  def _sync_streams(self) -> List[_StreamContext]:
     sources = self.cfg_sources or []
     if not isinstance(sources, list):
       raise ValueError("SOURCES must be a list")

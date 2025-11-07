@@ -126,6 +126,7 @@ _CONFIG = {
   # if ALLOW_EMPTY_INPUTS is set to true the on-idle will trigger continously the process
   # default is False, set to True if we want to process empty inputs
   'ALLOW_EMPTY_INPUTS': False,
+  'IS_LOOPBACK_PLUGIN': False,
 
   'SIMPLE_WITNESS': False,  # only the simple picture is returned
 
@@ -305,7 +306,12 @@ _CONFIG = {
     'LINKED_INSTANCES': {
       "DESCRIPTION": "List of tuple/lists [<STREAM_NAME>,<INSTANCE_ID>] that identify all the 'subordinates' of the current instances",
       "TYPE": "list",
-    }
+    },
+
+    'IS_LOOPBACK_PLUGIN': {
+      "DESCRIPTION": "Route plugin outputs back into the paired loopback data capture instead of emitting downstream payloads.",
+      "TYPE": "bool",
+    },
   }
 }
 
@@ -1608,9 +1614,32 @@ class BasePluginExecutor(
           # TODO: some things may be missing (cvpluginexecutor._add_plugin_identifiers_to_payload)
           # self._add_plugin_identifiers_to_payload(payload=payload)
           payload = self.__process_payload(payload)
-        self.payloads_deque.append(payload)
+        if self.cfg_is_loopback_plugin:
+          self.write_to_dct_shmem(payload)
+        else:
+          self.payloads_deque.append(payload)
+        # increase total payloads counter one way or another
         self.__total_payloads += 1
       return payload
+
+    def write_to_dct_shmem(self, payload):
+      """
+      Append the provided payload into the loopback DCT shared-memory queue.
+
+      Parameters
+      ----------
+      payload : dict
+        The payload produced by the business plugin.
+      """
+      key = f"loopback_dct_{self._stream_id}"
+
+      queue = self.global_shmem.get(key)
+      if not isinstance(queue, deque):
+        queue = deque(maxlen=32)
+        self.global_shmem[key] = queue
+
+      queue.append(payload)
+      return
 
     def add_payload_by_fields(self, **kwargs):
       """

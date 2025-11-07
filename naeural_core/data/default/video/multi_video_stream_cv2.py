@@ -115,7 +115,7 @@ class MultiVideoStreamCv2DataCapture(DataCaptureThread):
 
   def _init(self):
     if not self.has_cap_resolution_config:
-      str_err = "Cannot start MultiVideStreamCv2DataCapture without CAP_RESOLUTION!"
+      str_err = "Cannot start MultiVideoStreamCv2DataCapture without CAP_RESOLUTION!"
       self.P(str_err, color="error")
       raise ValueError(str_err)
     return

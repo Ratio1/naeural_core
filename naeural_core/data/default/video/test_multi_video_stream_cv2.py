@@ -16,7 +16,7 @@ _serving_utils_stub.get_ai_engine_given_serving_process = lambda *args, **kwargs
 _serving_utils_stub.get_params_given_ai_engine = lambda *args, **kwargs: {}
 sys.modules.setdefault("naeural_core.serving.ai_engines.utils", _serving_utils_stub)
 
-from naeural_core.data.default.video.multi_video_stream_cv2 import MultiVideStreamCv2DataCapture
+from naeural_core.data.default.video.multi_video_stream_cv2 import MultiVideoStreamCv2DataCapture
 
 
 class DummyBC:
@@ -226,10 +226,10 @@ class MultiVideoStreamCv2Tests(unittest.TestCase):
     config = self._build_config()
 
     with mock.patch("naeural_core.data.default.video.multi_vide_stream_cv2.cv2.VideoCapture", side_effect=factory), \
-         mock.patch.object(MultiVideStreamCv2DataCapture, "sleep", new=no_sleep):
-      dct = MultiVideStreamCv2DataCapture(
+         mock.patch.object(MultiVideoStreamCv2DataCapture, "sleep", new=no_sleep):
+      dct = MultiVideoStreamCv2DataCapture(
         log=self.logger,
-        default_config=MultiVideStreamCv2DataCapture.CONFIG,
+        default_config=MultiVideoStreamCv2DataCapture.CONFIG,
         upstream_config=config,
         environment_variables={},
         shmem=self.shmem,

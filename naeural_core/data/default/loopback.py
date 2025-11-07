@@ -5,6 +5,7 @@ import numpy as np
 
 from naeural_core import constants as ct
 from naeural_core.data.base import DataCaptureThread
+from naeural_core.data_structures import GeneralPayload
 
 __VER__ = "0.1.0"
 
@@ -45,9 +46,16 @@ class LoopbackDataCapture(DataCaptureThread):
       return
 
     pending_payloads = self._drain_queue(queue)
+    if not pending_payloads:
+      return
+
+    self.P(f"Dequeued {len(pending_payloads)} payload(s) for stream '{self.cfg_name}'")
     inputs = self._build_inputs(pending_payloads)
     if inputs:
+      self.P(f"Emitting {len(inputs)} input(s) downstream for stream '{self.cfg_name}'")
       self._add_inputs(inputs)
+    else:
+      self.P(f"No valid inputs built from payload batch on stream '{self.cfg_name}'", color='y')
     return
 
 
@@ -92,18 +100,40 @@ class LoopbackDataCapture(DataCaptureThread):
   def _build_inputs(self, payloads: List[Any]):
     inputs = []
     for payload in payloads:
+      if isinstance(payload, GeneralPayload):
+        payload = payload.to_dict()
+
       if isinstance(payload, dict):
-        if "IMG" in payload and len(payload["IMG"]) > 0:
-          img = payload["IMG"]
+        img = payload.get("IMG")
+        if isinstance(img, np.ndarray):
           inputs.append(
             self._new_input(img=img, struct_data=None, metadata=self._metadata.__dict__.copy())
           )
+        elif img is not None:
+          try:
+            has_content = len(img) > 0  # type: ignore
+          except TypeError:
+            has_content = True
+          if has_content:
+            inputs.append(
+              self._new_input(img=img, struct_data=None, metadata=self._metadata.__dict__.copy())
+            )
+          else:
+            inputs.append(
+              self._new_input(img=None, struct_data=payload, metadata=self._metadata.__dict__.copy())
+            )
         else:
           inputs.append(
             self._new_input(img=None, struct_data=payload, metadata=self._metadata.__dict__.copy())
-          )          
+          )
       elif isinstance(payload, np.ndarray):
         inputs.append(
           self._new_input(img=payload, struct_data=None, metadata=self._metadata.__dict__.copy())
         )
+      else:
+        # fallback to structured data for unsupported payload types
+        if payload is not None:
+          inputs.append(
+            self._new_input(img=None, struct_data=payload, metadata=self._metadata.__dict__.copy())
+          )
     return inputs

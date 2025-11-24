@@ -28,8 +28,8 @@ import torch
 import torchvision
 import yaml
 
-from y5utils.downloads import gsutil_getsize
-from y5utils.metrics import box_iou, fitness
+from naeural_core.utils._y5.y5utils.downloads import gsutil_getsize
+from naeural_core.utils._y5.y5utils.metrics import box_iou, fitness
 
 # Settings
 torch.set_printoptions(linewidth=320, precision=5, profile='long')

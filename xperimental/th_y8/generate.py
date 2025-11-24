@@ -66,26 +66,42 @@ except:
 from naeural_core import Logger
 from decentra_vision.draw_utils import DrawUtils
 from naeural_core.local_libraries.nn.th.utils import th_resize_with_pad
-from plugins.serving.architectures.y5.general import scale_coords
+from naeural_core.serving.mixins_base.th_utils import _ThUtilsMixin
+# Workaround to get access to torch proxy while only using _ThUtilsMixin
+utils_obj = _ThUtilsMixin()
+utils_obj.th = th
+scale_coords = utils_obj.scale_coords
 
-from naeural_core.xperimental.th_y8.utils import predict
-from naeural_core.xperimental.th_y8.utils import Y5, Y8, BackendType
+from xperimental.th_y8.utils import predict
+from xperimental.th_y8.utils import Y5, Y8, BackendType
   
-from naeural_core.xperimental.onnx.utils import create_from_torch
-from naeural_core.xperimental.th_y8.y_generate import yolo_models
+from naeural_core.utils.tracing.onnx.utils import create_from_torch
+from xperimental.th_y8.y_generate import yolo_models
 
 def get_test_images():
   folder = os.path.split(__file__)[0]
   img_names = [
-    'bus.jpg',
-    'faces9.jpg',
-    'faces21.jpg',
-    'img.png',
-    '688220.png',
-    'bmw_man3.png',
-    'faces3.jpg',
-    'LP3.jpg',
-    'pic1_crop.jpg'
+    # 'bus.jpg',
+    # 'faces9.jpg',
+    # 'faces21.jpg',
+    # 'img.png',
+    # '688220.png',
+    # 'bmw_man3.png',
+    # 'faces3.jpg',
+    # 'LP3.jpg',
+    # 'pic1_crop.jpg',
+    'drone/drone1.jpg',
+    'drone/drone2.jpg',
+    'drone/drone3.jpg',
+    'drone/drone4.jpg',
+    'drone/drone5.jpg',
+    'drone/drone6.jpg',
+    # 'drone/drone7.jpg',
+    'drone/airplane1.jpg',
+    'drone/airplane2.jpg',
+    'drone/bird1.jpg',
+    'drone/helicopter1.jpg',
+    'drone/helicopter2.jpg',
   ]
   models_for_nms_prep = [
     {
@@ -99,7 +115,7 @@ def get_test_images():
     cv2.imread(os.path.join(folder, im_name))
     for im_name in img_names
   ]
-  return imgs
+  return imgs, img_names
 
 
 def get_shape_for_pt_file(filename):
@@ -155,7 +171,8 @@ def load_onnx(path, log, dev, half=None, max_batch_size=None):
   loaded_model.load_model(
     model_path=path,
     max_batch_size=max_batch_size,
-    device=dev
+    device=dev,
+    half=bool(half)
   )
   config = loaded_model.get_metadata()
   return loaded_model, config
@@ -216,49 +233,71 @@ def is_valid_for_export(precision, device_str, topk, backend):
   return True
 
 
-def get_generation_configs(log):
+def get_generation_configs(
+    log,
+    explicit_model_paths=None,
+    classnames=None,
+    classnames_donate_from=None,
+    include_topk=False,
+    skip_onnx_trt=False
+):
   models_folder = log.get_models_folder()
-  files = os.listdir(models_folder)
+  if not explicit_model_paths:
+    files = os.listdir(models_folder)
+    file_paths = [os.path.join(models_folder, f) for f in files]
+  else:
+    file_paths = explicit_model_paths
   # Maybe filter only yolo models or have only yolo models in the folder
   export_grid = {
-    'topk' : [True, False],
+    'topk' : [True, False] if include_topk else [False],
     'device' : ['cpu', 'cuda'],
     'precision' : [16, 32]
   }
 
   combinations = list(it.product(*(export_grid[Param] for Param in export_grid.keys())))
 
-  for file_name in files:
+  for file_path in file_paths:
+    file_name = os.path.basename(file_path)
     fn = get_model_config_name(file_name)
     if fn is None:
       continue
 
     for topk, device, precision in combinations:
       if is_valid_for_export(precision, device, topk, 'ths'):
-        continue
         conf = {
-          'path' : os.path.join(models_folder, file_name),
+          'path' : file_path,
           'model_name': fn,
           'backend' : 'ths',
           'precision' : precision,
           'device' : device,
-          'topk' : topk
+          'topk' : topk,
         }
         yield conf
     #endfor all combinations
   #endfor all models
 
+  if skip_onnx_trt:
+    return
+
   # For onnx/trt we need to start from pytorch model directly, so the exported
   # torchscript files won't help us (except for getting the actual configuration).
-  for model, export_kwargs in yolo_models(log):
+  yolo_models_kwargs = {}
+  if classnames is not None:
+    yolo_models_kwargs['classnames'] = classnames
+  if classnames_donate_from is not None:
+    yolo_models_kwargs['classnames_donate_from'] = classnames_donate_from
+  for model, export_kwargs in yolo_models(log, **yolo_models_kwargs):
     pt_path = os.path.join(models_folder, model.model.pt_path)
     extra_files = {'config.txt' : ''}
     fn = get_model_config_name(pt_path)
 
     # Read the config from the already exported model.
     # Ideally YOLO would give us a way to generate this ourselves.
-    ths_m = th.jit.load(pt_path, map_location='cpu', _extra_files=extra_files)
-    config = json.loads(extra_files['config.txt' ].decode('utf-8'))
+    if os.path.exists(pt_path):
+      ths_m = th.jit.load(pt_path, map_location='cpu', _extra_files=extra_files)
+      config = json.loads(extra_files['config.txt'].decode('utf-8'))
+    else:
+      config = export_kwargs
     shape = config['imgsz']
     for backend in ['trt', 'onnx']:
       for topk, device, precision in combinations:
@@ -284,11 +323,18 @@ def get_test_configs(log):
   models_folder = log.get_models_folder()
   files = os.listdir(models_folder)
 
+  SKIP_MULTIPLE_COMBINATIONS = True
+
   test_grid = {
     'device' : ['cpu', 'cuda'],
     'precision' : [16, 32]
   }
   combinations = list(it.product(*(test_grid[Param] for Param in test_grid.keys())))
+  if SKIP_MULTIPLE_COMBINATIONS:
+    combinations = [
+      ['cuda', 16]
+    ]
+  # endif SKIP_MULTIPLE_COMBINATIONS
 
   for file_name in files:
     backend = None
@@ -327,7 +373,45 @@ def get_test_configs(log):
   #endfor
   return
 
+
+def safe_json_dumps(obj, clean_non_serializable=True, **kwargs):
+  if clean_non_serializable:
+    def handle_non_serializable(o):
+      return f"<non-serializable:{type(o).__name__}>"
+  else:
+    def handle_non_serializable(o):
+      return str(o)
+  # endif clean_non_serializable
+  def clean(o):
+    if isinstance(o, dict):
+      return {k: clean(v) for k, v in o.items()}
+    elif isinstance(o, list):
+      return [clean(i) for i in o]
+    elif isinstance(o, (str, int, float, bool)) or o is None:
+      return o
+    return handle_non_serializable(o)
+  # enddef clean
+  obj = clean(obj)
+  try:
+    return json.dumps(obj, **kwargs)
+  except:
+    return str(obj)
+  # endtry
+
+
 if __name__ == "__main__":
+  """
+  This script is used for adding NMS to existing YOLO models exports and for testing the resulting models.
+  You can specify the local path(s) of the model(s) for tracing in `explicit_model_paths`.
+  `generation_kwargs` can be used to specify classnames to use for the generated models.
+  This script can be used for TORCHSCRIPT, ONNX and TENSORRT models, however for fine-tuned YOLO models
+  the ONNX and TENSORRT models cannot be generated from existing exported models, only from the original
+  PyTorch YOLO model. This can be tricky, because if the fine-tuned model has a different architecture from
+  the pre-trained one there will be issues at loading time.
+  In order to skip the ONNX and TENSORRT generation, set `SKIP_TRT_ONNX` to True.
+  
+  For testing see get_test_images() method for images used.
+  """
   parser = argparse.ArgumentParser(description='Build flavours of YOLO')
   parser.add_argument(
     "--notest",
@@ -341,17 +425,60 @@ if __name__ == "__main__":
   )
   args = parser.parse_args()
 
-  GENERATE_FULL = True
-  GENERATE_TOPK = True
+  log = Logger('Y8', base_folder='.', app_folder='_local_cache')
+  GENERATE_FULL = False
+  GENERATE_TOPK = False
+  # If this is on False, the models will be generated for onnx/trt too.
+  # This is tricky for finetuning because we need to start from the pytorch
+  # model directly. If the fine-tuned model has a different number of classes
+  # than the original pretrained model, this will not work correctly.
+  SKIP_TRT_ONNX = True
   TOP_K_VALUES = [False, True] if GENERATE_TOPK else [False]
   generated_models = []
-  TRANSFER_CLASSNAMES = False
-  CLASSNAMES = None
-  CLASSNAMES_DONATE_FROM = os.path.join('_local_cache', '_models', '20230723_y8l_nms.ths') 
+  # These are no longer used because get_generation_configs
+  # will also include the classnames
+  # See generation_kwargs below for new way of passing classnames
+  if False:
+    TRANSFER_CLASSNAMES = False
+    CLASSNAMES = None
+    CLASSNAMES_DONATE_FROM = os.path.join('_local_cache', '_models', '20230723_y8l_nms.ths')
+    if CLASSNAMES is None:
+      extra_files = {'config.txt': ''}
+      model = th.jit.load(CLASSNAMES_DONATE_FROM, map_location='cpu', _extra_files=extra_files)
+      CLASSNAMES = json.loads(extra_files['config.txt'])['names']
+    # end if CLASSNAMES is None
+  # end OLD CLASSNAMES handling
   TEST = not args.notest
   SHOW = args.show
+  TEST = True
+  SHOW = True
   SHOW_LABELS = True
   dev = th.device('cuda')
+  # If explicit_model_paths is empty, the paths for generation
+  # will be taken from the models folder.
+  explicit_model_paths = [
+    # r'C:\repos\HyFy_E2\xperimental\lpd\yolo11s_drone_v1_896_20.torchscript',
+    r'C:\repos\HyFy_E2\xperimental\lpd\yolo11s_drone_v2_896_20.torchscript',
+    r'C:\repos\HyFy_E2\xperimental\lpd\yolo11s_drone_v2_896_40.torchscript'
+  ]
+  generation_kwargs = {
+    'explicit_model_paths': explicit_model_paths,
+    # If set, the generated models will use these classnames.
+    # 'classnames': {0: 'drone'},
+    'classnames': {
+      0: 'drone',
+      1: 'ariplane',
+      2: 'bird',
+      3: 'helicopter'
+    },
+    # If set, the generated models will use the classnames from the
+    # donate_from model.
+    # The file should be a torchscript model with a config.txt that has
+    # 'names' entry.
+    'classnames_donate_from': None,
+    'include_topk': GENERATE_TOPK,
+    'skip_onnx_trt': SKIP_TRT_ONNX,
+  }
 
   top_candidates = 6
 
@@ -362,21 +489,15 @@ if __name__ == "__main__":
     log.P('No available CUDA devices, exiting')
     exit(-1)
 
-  if CLASSNAMES is None:
-    extra_files = {'config.txt': ''}
-    model = th.jit.load(CLASSNAMES_DONATE_FROM, map_location='cpu', _extra_files=extra_files)
-    CLASSNAMES = json.loads(extra_files['config.txt'])['names']
-  # end if CLASSNAMES is None
-
-  log = Logger('Y8', base_folder='.', app_folder='_local_cache')
   models_folder = log.get_models_folder()
   model_date = time.strftime('%Y%m%d', time.localtime(time.time()))
   pyver = sys.version.split()[0].replace('.','')
   thver = th.__version__.replace('.','')
 
   # assert img is not None
-  origs = get_test_images()
+  origs, origs_names = get_test_images()
   images = origs
+  images_names = origs_names
   
   model_ext = {
     'ths' : 'ths',
@@ -385,7 +506,7 @@ if __name__ == "__main__":
   }
 
   if GENERATE_FULL:
-    for m in get_generation_configs(log):
+    for m in get_generation_configs(log, **generation_kwargs):
       export_type = m['backend']
       trt = (export_type == 'trt')
       onnx = (export_type == 'onnx')
@@ -400,6 +521,8 @@ if __name__ == "__main__":
       else:
         dev = th.device(device)
 
+      log.P(f"Current config: {safe_json_dumps(m, indent=2)}")
+
       backend_type = BackendType.TORCH
       if trt and not device.startswith('cuda'):
         # Only the cuda device is supported for trt
@@ -412,10 +535,11 @@ if __name__ == "__main__":
       else:
         y_model_arg = fn_path
 
-      log.P("Generating for: {} and backend {}".format(m['path'], m['backend']))
-      fn_path = m['path']
+      log.P("Generating for: {} and backend {}".format(fn_path, m['backend']))
       model_name = os.path.splitext(os.path.split(fn_path)[1])[0]
-      is_y5 = '_y5' in model_name
+      is_y5 = 'y5' in model_name
+      is_y8 = 'y8' in model_name
+      is_y11 = 'y11' in model_name
 
       if is_y5 and (onnx or trt):
         # No support for y5 in onnx at the moment (although
@@ -425,6 +549,7 @@ if __name__ == "__main__":
       if is_y5:
         model = Y5(y_model_arg, dev=dev, topk=topk)
       else:
+        # This does also cover y11 models
         model = Y8(y_model_arg, dev=dev, topk=topk, backend_type=backend_type)
 
       model.eval()
@@ -449,7 +574,8 @@ if __name__ == "__main__":
         'n_candidates': top_candidates,
         'date': model_date,
         'model': fn_model_name,
-        'names': CLASSNAMES if TRANSFER_CLASSNAMES else model.config['names'],
+        # 'names': CLASSNAMES if TRANSFER_CLASSNAMES else model.config['names'],
+        'names': model.config['names'],
         'input_names' : input_names,
         'output_names' : output_names,
         'includes_nms' : True,
@@ -548,10 +674,10 @@ if __name__ == "__main__":
   # endif GENERATE_FULL
 
   dev = th.device('cuda')
+  dct_results = {}
 
   if TEST:
     painter = DrawUtils(log=log)
-    dct_results = {}
     for m in get_test_configs(log):
       print("Running for {}".format(m))
       dev = th.device(m['device'])
@@ -647,9 +773,32 @@ if __name__ == "__main__":
             det = [float(x) for x in det]
             # order is [left, top, right, bottom, proba, class] => [L, T, R, B, P, C, RP1, RC1, RP2, RC2, RP3, RC3]
             L, T, R, B, P, C = det[:6]  # order is [left, top, right, bottom, proba, class]
-            label = class_names[str(int(C))] if SHOW_LABELS else ''
+            try:
+              label = class_names[str(int(C))] if SHOW_LABELS else ''
+            except:
+              label = f"unknown_class_{str(int(C))}" if SHOW_LABELS else ''
+            log.P(f"Image size: {img_bgr.shape}, original shape: {original_shape}, box: {(L,T,R,B)}, proba: {P}, class: {C} => '{label}'")
             img_bgr = painter.draw_detection_box(image=img_bgr, top=int(T), left=int(L), bottom=int(B), right=int(R), label=label, prc=P)
-          painter.show(fn_path, img_bgr, orig=(0, 0))
+
+          # Resize the image if too big
+          max_display_size = 1400
+          if img_bgr.shape[0] > max_display_size or img_bgr.shape[1] > max_display_size:
+            scale = max_display_size / max(img_bgr.shape[0], img_bgr.shape[1])
+            img_bgr = cv2.resize(
+              img_bgr,
+              (
+                int(img_bgr.shape[1] * scale),
+                int(img_bgr.shape[0] * scale)
+              ),
+              interpolation=cv2.INTER_AREA
+            )
+          # endif needs resize
+          img_name = origs_names[i]
+          show_name = f"{fn_path}__{img_name}"
+          painter.show(
+            show_name, img_bgr,
+            # orig=(0, 0)
+          )
         #endfor plot images
       #endif show
 

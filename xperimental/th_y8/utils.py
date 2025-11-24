@@ -4,17 +4,17 @@ import torch as th
 import torchvision as tv
 import json
 
-from naeural_core.xperimental.th_y8.graph_nms import y5_nms, y8_nms, y5_nms_topk, y8_nms_topk
-from naeural_core.xperimental.th_y8.graph_nms import y8_nms_trt_efficient, y8_nms_onnx
+from xperimental.th_y8.graph_nms import y5_nms, y8_nms, y5_nms_topk, y8_nms_topk
+from xperimental.th_y8.graph_nms import y8_nms_trt_efficient, y8_nms_onnx
 
-from plugins.serving.architectures.y5.general import non_max_suppression as y5_nms_orig
+from naeural_core.utils._y5.y5utils.general import non_max_suppression as y5_nms_orig
 # try:
 #   from ultralytics.yolo.utils.ops import non_max_suppression as y8_nms_orig
 # except:
 #   print("EXCEPTION in loading original nms functions. Defaulting to graph ones.", flush=True)
 #   y8_nms_orig = y8_nms
 
-from naeural_core.xperimental.th_y8.graph_nms import xywh2xyxy
+from xperimental.th_y8.graph_nms import xywh2xyxy
 
 class BackendType(Enum):
   TORCH = 1

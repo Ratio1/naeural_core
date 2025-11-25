@@ -271,6 +271,7 @@ def get_generation_configs(
           'precision' : precision,
           'device' : device,
           'topk' : topk,
+          'classnames' : classnames,
         }
         yield conf
     #endfor all combinations
@@ -464,6 +465,7 @@ if __name__ == "__main__":
   generation_kwargs = {
     'explicit_model_paths': explicit_model_paths,
     # If set, the generated models will use these classnames.
+    # If None, or missing classes will be taken from the original model.
     # 'classnames': {0: 'drone'},
     'classnames': {
       0: 'drone',
@@ -516,6 +518,7 @@ if __name__ == "__main__":
       device = m['device']
       config = m.get('config')
       precision = m['precision']
+      classnames = m.get('classnames')
       if device.startswith('cuda'):
         dev = th.device('cuda:0')
       else:
@@ -563,6 +566,9 @@ if __name__ == "__main__":
 
       input_names = ['inputs']
       output_names = ['preds', 'num_preds']
+      if classnames is None:
+        classnames = model.config['names']
+      # endif classnames is None
       config = {
         **model.config,
         'input_shape': (*imgsz, 3),
@@ -575,7 +581,7 @@ if __name__ == "__main__":
         'date': model_date,
         'model': fn_model_name,
         # 'names': CLASSNAMES if TRANSFER_CLASSNAMES else model.config['names'],
-        'names': model.config['names'],
+        'names': classnames,
         'input_names' : input_names,
         'output_names' : output_names,
         'includes_nms' : True,

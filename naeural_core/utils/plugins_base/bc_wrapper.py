@@ -609,7 +609,7 @@ class BCWrapper:
     return self.__bc.eth_sign_payload(payload)
   
   
-  def eth_verify_payload_signature(self, payload: dict, message_prefix: str = "", no_hash: bool = False, indent=0):
+  def eth_verify_payload_signature(self, payload: dict, message_prefix: str = "", no_hash: bool = False, indent=0, raise_if_error: bool = False):
     """
     Verifies a payload signature using the EVM account of the current node
 
@@ -639,7 +639,7 @@ class BCWrapper:
     """
     return self.__bc.eth_verify_payload_signature(
       payload=payload, message_prefix=message_prefix, 
-      no_hash=no_hash, indent=indent
+      no_hash=no_hash, indent=indent, raise_if_error=raise_if_error
     )
   
   @property

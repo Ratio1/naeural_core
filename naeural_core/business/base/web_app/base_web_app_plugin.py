@@ -35,7 +35,7 @@ _CONFIG = {
   'NGROK_AUTH_TOKEN': None,
 
   # Generic tunnel engine Section
-  "TUNNEL_ENGINE": "ngrok",  # or "cloudflare"
+  "TUNNEL_ENGINE": "cloudflare",  # or "cloudflare"
 
   "TUNNEL_ENGINE_ENABLED": True,
   "TUNNEL_ENGINE_PING_INTERVAL": 30,  # seconds

@@ -2,7 +2,9 @@ FROM aidamian/base_edge_node:x86_64-py3.10.12-th2.3.1.cu121-tr4.43.3
 
 WORKDIR /edge_node
 
-COPY  . /edge_node
+RUN npm install -g @openai/codex
+#COPY  . /edge_node
+COPY requirements.txt .
 
 # set a generic env variable 
 ENV AINODE_DOCKER Yes
@@ -28,7 +30,8 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 ENV EE_CONFIG .config_startup.json
 
 ## The following line should NOT be moved to based as it should always be updated
-RUN pip install --no-cache-dir kmonitor ratio1 decentra-vision python-telegram-bot
+RUN pip install --no-cache-dir -r requirements.txt
+RUN #pip install --no-cache-dir kmonitor ratio1 decentra-vision python-telegram-bot
 ## END do not move
 
 RUN pip install --no-cache-dir --no-deps naeural-core

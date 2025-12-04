@@ -462,6 +462,9 @@ class _BasePluginAPIMixin:
     chain_storage = memory.get('__chain_storage')
     result = []
     for key in chain_storage:
+      if type(key) != str or key == "":
+        self.P("Invalid key type in chain storage: {}".format(type(key)), color="red")
+        continue
       if key.startswith(index):
         b64field = key[len(index):]
         field = self.base64_to_str(b64field, url_safe=True)

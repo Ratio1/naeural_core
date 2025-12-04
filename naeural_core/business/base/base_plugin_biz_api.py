@@ -336,28 +336,86 @@ class _BasePluginAPIMixin:
   
   def chainstore_set(self, key, value, readonly=False, token=None, debug=False, extra_peers=[]):
     """
-    Set data in the R1 Chain Storage
-    
+    Set data in the R1 Chain Storage.
+
+    This method stores a key-value pair in the distributed chain storage, broadcasting
+    the data to peer nodes for replication and waiting for confirmations.
+
+    IMPORTANT - JSON Normalization:
+    -------------------------------
+    Values are automatically normalized through JSON serialization before storage.
+    This ensures deterministic behavior across the distributed network, as all nodes
+    will store and compare identical data structures regardless of the original
+    Python types used.
+
+    Key implications of JSON normalization:
+      - Dictionary keys are converted to strings (e.g., {8080: "http"} becomes {"8080": "http"})
+      - Values must be JSON-serializable (no datetime, bytes, custom objects without serialization)
+      - Numeric precision follows JSON spec (integers preserved, floats may have precision limits)
+      - Dictionary ordering is preserved (Python 3.7+)
+
+    Example:
+    --------
+    ```python
+    # Integer keys are converted to string keys
+    data = {'ports': {8080: 'http', 443: 'https'}}
+    self.chainstore_set('my_key', data)
+
+    # When retrieved, keys will be strings:
+    result = self.chainstore_get('my_key')
+    # result = {'ports': {'8080': 'http', '443': 'https'}}
+    ```
+
     Parameters
     ----------
     key : str
-      Key
-      
-    value : any
-      Value
-      
+      The key under which to store the value. Should be a unique identifier
+      within the chain storage namespace.
+
+    value : any (JSON-serializable)
+      The value to store. Must be JSON-serializable. Complex types like
+      datetime objects should be converted to strings before storing.
+
     readonly : bool, optional
-      Read-only flag, by default False
-      
+      If True, the key-value pair becomes read-only and cannot be overwritten
+      by other owners. Default is False.
+
     token : any, optional
-      Token, by default None
-      
+      A token for access control. If provided, subsequent read/write operations
+      on this key must provide the same token. Default is None.
+
+    debug : bool, optional
+      If True, enables verbose logging of the operation including peer counts,
+      confirmation status, and timing information. Default is False.
+
+    extra_peers : list, optional
+      Additional peer addresses to broadcast the data to, beyond the default
+      chain peers. Default is an empty list.
+
+    Returns
+    -------
+    bool
+      True if the value was successfully stored and confirmed by peers,
+      False if the operation failed (timeout, no confirmations, etc.)
+
+    See Also
+    --------
+    chainstore_get : Retrieve a value from chain storage
+    chainstore_hset : Store a value in a hash set within chain storage
     """
     memory = self.__chainstorage_memory()
     result = False
     try:
       self.__maybe_wait_for_chain_state_init()
       func = memory.get('__chain_storage_set')
+
+      # JSON normalization: ensure deterministic storage by normalizing through JSON.
+      # This converts integer dict keys to strings and ensures consistent data structures
+      # across all nodes in the distributed network. Without this normalization, the
+      # local storage could have {8080: "http"} while the transmitted/received data
+      # would have {"8080": "http"}, causing confirmation comparisons to fail.
+      value = self.json_loads(self.json_dumps(value))
+
       specific_peers = self.cfg_chainstore_peers or []
       if isinstance(specific_peers, str):
         specific_peers = [specific_peers]
@@ -462,6 +520,9 @@ class _BasePluginAPIMixin:
     chain_storage = memory.get('__chain_storage')
     result = []
     for key in chain_storage:
+      if not isinstance(key, str) or key == "":
+        self.P("Invalid key type in chain storage: {}".format(type(key)), color="red")
+        continue
       if key.startswith(index):
         b64field = key[len(index):]
         field = self.base64_to_str(b64field, url_safe=True)

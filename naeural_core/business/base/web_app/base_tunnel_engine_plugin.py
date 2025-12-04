@@ -8,7 +8,7 @@ from naeural_core.business.mixins_libs.cloudflare_mixin import _CloudflareMixinP
 _CONFIG = {
   **BasePluginExecutor.CONFIG,
 
-  "TUNNEL_ENGINE": "ngrok",  # or "cloudflare"
+  "TUNNEL_ENGINE": "cloudflare",  # or "cloudflare"
 
   "VALIDATION_RULES": {
     **BasePluginExecutor.CONFIG['VALIDATION_RULES'],

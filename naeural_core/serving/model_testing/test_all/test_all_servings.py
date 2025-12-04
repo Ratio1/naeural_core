@@ -63,6 +63,11 @@ class GenericServingTester(Base):
     return self.draw_inference_default(img, inference, **kwargs)
 
   def plot(self, dataset_name, **kwargs):
+    input_type = kwargs.get("INPUT_TYPE") or self.get_dataset_input_type(dataset_name)
+    if input_type != "IMG":
+      self.log.P(f"Skipping plot for non-image dataset '{dataset_name}'", color='y')
+      return
+
     lst_imgs = self.get_images(dataset_name)
     preds = self.get_last_preds()
     for i in range(len(lst_imgs)):
@@ -146,7 +151,7 @@ if __name__ == '__main__':
       test_process = GenericServingTester(
         log=log,
         model_name=serving_name,
-        test_files=current_data,
+        test_datasets=current_data,
         gpu_device=GPU_DEVICE,
         save_plots=False,
         show_plots=False,
@@ -174,7 +179,8 @@ if __name__ == '__main__':
       }
       current_df = test_process.run_tests(
         lst_tests=current_tests,
-        dct_params=dct_params
+        dct_params=dct_params,
+        save_results=False
       )
       total_df = pd.concat([total_df, current_df])
       log.save_dataframe(total_df, 'results.csv', folder='output', subfolder_path=save_subdir)
@@ -182,4 +188,3 @@ if __name__ == '__main__':
     except Exception as e:
       log.P(f'[({i + 1} / {len(serving_data)})]Failed tests for serving {serving_name} with test configs:\n{current_tests}')
   # endfor serving_data
-

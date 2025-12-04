@@ -1,6 +1,8 @@
 # global dependencies
 import gc
 import random
+
+import psutil
 import torch as th
 import pandas as pd
 import numpy as np
@@ -15,14 +17,15 @@ from collections import OrderedDict
 from naeural_core import DecentrAIObject
 from decentra_vision.draw_utils import DrawUtils
 from naeural_core.serving.serving_manager import ServingManager
-from plugins.serving.model_testing.utils import Dataset
-from plugins.serving.model_testing.utils import ServingUtils
+from naeural_core.serving.model_testing.utils import Dataset
+from naeural_core.serving.model_testing.utils import ServingUtils
 
 
 class Base(DecentrAIObject):
   def __init__(self,
                model_name,
-               test_files,
+               # Previously named test_files
+               test_datasets,
                sleep_time=10,
                save_plots=True,
                show_plots=False,
@@ -39,8 +42,10 @@ class Base(DecentrAIObject):
     :param model_name: tuple(CLASS, NAME)
       Passed to ServingManager.start_server server_name
 
-    :param test_files: dict(dataset_name: [list of paths])
-      Files to run inference on
+    :param test_datasets: dict(dataset_name: [list of paths or list of raw inference items])
+      Datasets to run inference on
+
+      !! Previously named test_files - before non-image inference support was added.
 
     :param sleep_time: int
       Sleep time at startup
@@ -72,7 +77,7 @@ class Base(DecentrAIObject):
     """
     super().__init__(**kwargs)
     self._model_name = model_name
-    self._test_files = test_files
+    self._initial_test_datasets = test_datasets
     self._sleep_time = sleep_time
     self._save_plots = save_plots
     self._show_plots = show_plots
@@ -98,12 +103,13 @@ class Base(DecentrAIObject):
       'TIME': [],
       'TOTAL_MEM': [],
       'INITIALIZATION_MEM': [],
-      'TIME_PER_IMAGE': [],
-      'NUMBER_OF_IMAGES': [],
+      'TIME_PER_INPUT': [],
+      'NUMBER_OF_INPUTS': [],
       'SUCCESS': []
     }
     self._test_datasets = {}
     self._test_datasets_paths = {}
+    self._dataset_types = {}
     self.label_extension = label_extension
     self._preds = OrderedDict()
     self._init()
@@ -129,7 +135,7 @@ class Base(DecentrAIObject):
     return
 
   def _load_data(self):
-    """Loading testing dataset from indicated list of files"""
+    """Loading testing dataset from indicated list of files or inference items"""
 
     self.log.P("Preparing data...", color='r')
     self.load_data()
@@ -137,36 +143,79 @@ class Base(DecentrAIObject):
     return
 
   def load_data(self):
-    for dataset_name, dataset_paths in self._test_files.items():
-      self._test_datasets[dataset_name] = self._dataset.load_images(dataset_paths)
-      self._test_datasets_paths[dataset_name] = [
-        f'{os.path.splitext(dataset_path)[0]}.{self.label_extension}'
-        for dataset_path in dataset_paths
-      ]
+    for dataset_name, dataset_paths in self._initial_test_datasets.items():
+      if not isinstance(dataset_paths, list):
+        dataset_paths = [dataset_paths]
+      loaded_data, data_type = self._dataset.load(dataset_paths)
+      self._test_datasets[dataset_name] = loaded_data
+      self._dataset_types[dataset_name] = data_type
+      if all(isinstance(dataset_path, str) for dataset_path in dataset_paths):
+        self._test_datasets_paths[dataset_name] = [
+          f'{os.path.splitext(dataset_path)[0]}.{self.label_extension}'
+          for dataset_path in dataset_paths
+        ]
+      else:
+        self._test_datasets_paths[dataset_name] = []
     # self._lst_imgs = list(dct.values())
     # self._lst_img_names = list(dct.keys())
     return
 
+  def get_device_free_memory(
+      self, device, device_id: int = None,
+      show_logs: bool = True
+  ):
+    if device == 'cpu':
+      res = psutil.virtual_memory().available
+    else:
+      gpus_info = self.log.gpu_info(show=show_logs, mb=True)
+      if device_id is None:
+        device_id = [
+          i for i, gpu_info in enumerate(gpus_info)
+          if gpus_info['NAME'] == th.cuda.get_device_name(device)
+        ][0]
+      # endif device_id not provided
+      res = gpus_info[device_id]['FREE_MEM']
+    return res
+
   def run(self, dct_test={}, dct_params={}, _lst_images=None, kill_serving_manager=True):
     """
-    TODO: big ambiguity in dct_test vs dct_params
-
     Execute inference testing
-
     Video file testing params:
       _lst_images = force the use of the given _lst_images
       kill_serving_manager = set to false in video file testing in order to not create a new manager for every movie batch
+
+    Parameters
+    ----------
+    dct_test : dict
+      Test specific parameters
+    dct_params : dict
+      Common parameters for all tests
+    _lst_images : list
+      List of images to use for testing
+    kill_serving_manager : bool
+      Whether to kill the serving manager after test
+
+    Returns
+    -------
+    preds : list
+      List of predictions
     """
-    gpu_id = 0
+    dct_aggregated = {
+      **dct_params,
+      **dct_test,
+    }
+    device_id = None
     preds = None
+    default_device = dct_aggregated.get('DEFAULT_DEVICE', None)
+    dataset_name = dct_aggregated.get('dataset_name')
+    dataset_input_type = self.get_dataset_input_type(dataset_name) if dataset_name is not None else None
+    input_type = dct_aggregated.get("INPUT_TYPE") or dataset_input_type or "IMG"
 
-    gpu = dct_test.get('DEFAULT_DEVICE', None)
-
-    if "MAX_BATCH_FIRST_STAGE" not in dct_test:
+    if "MAX_BATCH_FIRST_STAGE" not in dct_aggregated:
       self.P("WARNING! Parameter 'MAX_BATCH_FIRST_STAGE' not set. Using default value 5", color='r')
 
-    batch_first_stage = dct_test.get("MAX_BATCH_FIRST_STAGE", 5)
-    batch_second_stage = dct_test.get("MAX_BATCH_SECOND_STAGE", 1)
+    batch_first_stage = dct_aggregated.get("MAX_BATCH_FIRST_STAGE", 5)
+    batch_second_stage = dct_aggregated.get("MAX_BATCH_SECOND_STAGE", 1)
 
     batch_size = max(batch_first_stage, batch_second_stage)
 
@@ -176,50 +225,70 @@ class Base(DecentrAIObject):
       'TIME': None,
       'TOTAL_MEM': None,
       'INITIALIZATION_MEM': None,
-      'TIME_PER_IMAGE': None,
-      'NUMBER_OF_IMAGES': None,
+      'TIME_PER_INPUT': None,
+      'NUMBER_OF_INPUTS': None,
       'SUCCESS': None,
       'PREDICTS': self._nr_predicts,
       'WARMUPS': self._nr_warmup,
-      **dct_test
+      'INPUT_TYPE': input_type,
+      **dct_aggregated
     }
     try:
-      # TODO Bleo: Implement cpu testing
-      if gpu is not None:
-        gpus_info = self.log.gpu_info(show=True, mb=True)[gpu_id]
-        gpu_id = [i for i, gpu_info in enumerate(gpus_info) if gpus_info['NAME'] == th.cuda.get_device_name(gpu)][0]
+      gpus_info = self.log.gpu_info(show=True, mb=True)
+      if len(gpus_info) == 0:
+        self.P(f"WARNING! No GPUs found. Running on CPU only.", color='r')
+        default_device = "cpu"
+      else:
+        if default_device is not None:
+          if default_device in ['gpu', 'cuda']:
+            default_device = 'cuda:0'
+          device_id = [
+            i for i, gpu_info in enumerate(gpus_info)
+            if gpus_info['NAME'] == th.cuda.get_device_name(default_device)
+          ][0]
+        else:
+          default_device = "cuda:0"
+          device_id = 0
+        # endif default_device
+      # endif no gpus
+      run_dct['DEFAULT_DEVICE'] = default_device
 
       self.log.P("Running test for {}".format(dct_test), color='g')
-      g1 = self.log.gpu_info(show=True, mb=True)[gpu_id]
-      self.log.P("Free memory before start: {}".format(g1['FREE_MEM']))
+      mem1 = self.get_device_free_memory(
+        device=default_device,
+        device_id=device_id
+      )
+      self.log.P(f"Free memory before start: {mem1}")
 
-      upstream_config = {
-        **dct_test,
-        **dct_params
-      }
       str_model_name = self._serving_manager.start_server(
         server_name=self._model_name,
         inprocess=self._inprocess,
-        upstream_config=upstream_config,
+        upstream_config=dct_aggregated,
       )
       run_dct['MODEL'] = str_model_name
 
-      g15 = self.log.gpu_info(show=True, mb=True)[gpu_id]
-      initialzation_mem = g1['FREE_MEM'] - g15['FREE_MEM']
-      run_dct['INITIALIZATION_MEM'] = initialzation_mem
+      mem15 = self.get_device_free_memory(
+        device=default_device,
+        device_id=device_id
+      )
+      initialization_mem = mem1 - mem15
+      run_dct['INITIALIZATION_MEM'] = initialization_mem
 
       self.log.P("Model is ready. Check nvidia-smi in next {} seconds...".format(self._sleep_time))
       sleep(self._sleep_time)
 
       self.log.P("Running warm-up predict...")
       if _lst_images is None:
-        _lst_images = self.get_images(dct_test['dataset_name'])
+        _lst_images = self.get_inputs(dataset_name)
 
       no_imgs = len(_lst_images)
       _lst_images = (_lst_images * np.ceil(batch_size / no_imgs).astype(int))[:max(batch_size, no_imgs)]
-      run_dct['NUMBER_OF_IMAGES'] = len(_lst_images)
+      run_dct['NUMBER_OF_INPUTS'] = len(_lst_images)
 
-      yolo_model_inputs = self._serving_utils.get_model_input(_lst_images)
+      yolo_model_inputs = self._serving_utils.get_model_input(
+        _lst_images,
+        input_type=input_type
+      )
       for _ in range(self._nr_warmup):
         preds = self._serving_manager.predict(self._model_name, yolo_model_inputs)
       # endfor
@@ -230,7 +299,10 @@ class Base(DecentrAIObject):
       self.log.reset_timers()
 
       self.log.P("Running batch predict...")
-      yolo_model_inputs = self._serving_utils.get_model_input(_lst_images)
+      yolo_model_inputs = self._serving_utils.get_model_input(
+        _lst_images,
+        input_type=input_type
+      )
       preds = self._serving_manager.predict(self._model_name, yolo_model_inputs)
 
       if preds is None:
@@ -238,15 +310,21 @@ class Base(DecentrAIObject):
 
       for _ in range(self._nr_predicts - 1):
         random.shuffle(_lst_images)
-        yolo_model_inputs = self._serving_utils.get_model_input(_lst_images)
+        yolo_model_inputs = self._serving_utils.get_model_input(
+          _lst_images,
+          input_type=input_type
+        )
         self._serving_manager.predict(self._model_name, yolo_model_inputs)
       # endfor
 
       self._preds[len(self._preds)] = preds
 
-      g2 = self.log.gpu_info(show=True, mb=True)[gpu_id]
-      self.log.P("Free memory after run: {}".format(g2['FREE_MEM']))
-      total_model_mem = g1['FREE_MEM'] - g2['FREE_MEM']
+      mem2 = self.get_device_free_memory(
+        device=default_device,
+        device_id=device_id
+      )
+      self.log.P(f"Free memory after run: {mem2}")
+      total_model_mem = mem1 - mem2
       run_dct['TOTAL_MEM'] = total_model_mem
       self.log.P("Model memory {:.0f} MB".format(total_model_mem), color='m')
 
@@ -258,9 +336,14 @@ class Base(DecentrAIObject):
         div=max(len(_lst_images), 1)
       )
 
-      if dct_test.get('dataset_name') is not None:
-        self.plot(**{**dct_test, **dct_params})
-        res = self.score(**{**dct_test, **dct_params})
+      if dataset_name is not None:
+        plot_kwargs = {**dct_test, **dct_params, "INPUT_TYPE": input_type}
+        if input_type == "IMG":
+          self.plot(**plot_kwargs)
+        elif self._show_plots or self._save_plots:
+          self.log.P(f"Skipping plot for dataset '{dataset_name}' with non-image input type '{input_type}'")
+
+        res = self.score(**plot_kwargs)
         if res is not None:
           run_dct['SCORE'] = res
         # endif res None
@@ -270,15 +353,18 @@ class Base(DecentrAIObject):
         self.log.P("Skipped showing images & inferences.")
       # endif
 
-      g3 = self.log.gpu_info(show=True, mb=True)[gpu_id]
-      self.log.P("Free memory after shutdown: {}".format(g3['FREE_MEM']))
+      mem3 = self.get_device_free_memory(
+        device=default_device,
+        device_id=device_id
+      )
+      self.log.P(f"Free memory after shutdown: {mem3}")
 
       if kill_serving_manager:
         self._serving_manager.stop_server(server_name=self._model_name)
 
       timer_prefix = 'local_pred_' if self._inprocess else 'remote_pred_'
       run_dct['TIME'] = self.log.get_timer(timer_prefix + str_model_name.upper())['MEAN']
-      run_dct['TIME_PER_IMAGE'] = self.log.get_timer(timer_prefix + str_model_name.upper())['MEAN'] / len(_lst_images)
+      run_dct['TIME_PER_INPUT'] = self.log.get_timer(timer_prefix + str_model_name.upper())['MEAN'] / len(_lst_images)
       run_dct['SUCCESS'] = True
     except:
       run_dct['SUCCESS'] = False
@@ -327,6 +413,22 @@ class Base(DecentrAIObject):
                             subfolder_path=self._testing_subfolder_path_helper(skip_subdirs=True))
 
   def run_tests(self, lst_tests, dct_params, save_results=True):
+    """
+    Run a series of tests over all datasets
+    Parameters
+    ----------
+    lst_tests : list of dicts
+      Each dict contains a test configuration
+    dct_params : dict
+      Common parameters for all tests
+    save_results : bool
+      Whether to save results to disk
+
+    Returns
+    -------
+    pd.DataFrame
+      Dataframe with results
+    """
     # TODO: big ambiguity between lists of test dicts and dct_params
     for dataset_name in self.get_dataset_names():
       for dct_test in lst_tests:
@@ -355,11 +457,20 @@ class Base(DecentrAIObject):
     raise NotImplementedError()
     return
 
+  def get_inputs(self, dataset_name):
+    return self._test_datasets[dataset_name]
+
   def get_images(self, dataset_name):
     return self._test_datasets[dataset_name]
 
+  def get_dataset_input_type(self, dataset_name):
+    return self._dataset_types.get(dataset_name, "IMG")
+
   def get_dataset_names(self):
     return list(self._test_datasets.keys())
+
+  def get_dataset_output_folder(self, dataset_name):
+    return os.path.join(self._testing_subfolder_path, dataset_name)
 
   def get_dataset_labels_path(self, dataset_name):
     return self._test_datasets_paths[dataset_name]
@@ -483,7 +594,7 @@ if __name__ == '__main__':
   test = Base(
     log=log,
     model_name=MODEL_NAME,
-    test_files=TEST_FILES,
+    test_datasets=TEST_FILES,
     gpu_device=GPU_DEVICE,
   )
 

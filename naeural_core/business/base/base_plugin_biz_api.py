@@ -520,7 +520,7 @@ class _BasePluginAPIMixin:
     chain_storage = memory.get('__chain_storage')
     result = []
     for key in chain_storage:
-      if type(key) != str or key == "":
+      if not isinstance(key, str) or key == "":
         self.P("Invalid key type in chain storage: {}".format(type(key)), color="red")
         continue
       if key.startswith(index):

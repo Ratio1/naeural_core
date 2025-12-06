@@ -58,7 +58,7 @@ class _SemaphoredPairedPluginMixin(object):
 
     if semaphore_key not in self.plugins_shmem:
       self.plugins_shmem[semaphore_key] = {
-        'start': False,
+        'is_ready': False,
         'env': {},
         'metadata': {
           'instance_id': self.cfg_instance_id,
@@ -71,7 +71,7 @@ class _SemaphoredPairedPluginMixin(object):
   def semaphore_set_ready(self):
     """
     Signal that this plugin is ready.
-    Sets 'start' = True in the shared memory segment identified by cfg_semaphore.
+    Sets 'is_ready' = True in the shared memory segment identified by cfg_semaphore.
 
     Returns
     -------
@@ -83,29 +83,24 @@ class _SemaphoredPairedPluginMixin(object):
       return False
 
     semaphore_data = self._semaphore_ensure_structure()
-    semaphore_data['start'] = True
+    semaphore_data['is_ready'] = True
     semaphore_data['metadata']['ready_timestamp'] = tm()
     self._semaphore_Pd("Semaphore '{}' set to READY".format(semaphore_key))
     return True
 
-  def semaphore_set_env(self, key, value, use_prefix=True):
+  def semaphore_set_env(self, key, value):
     """
     Set an environment variable to be shared with the paired plugin.
 
-    By default, the key is prefixed with the semaphore name to avoid collisions.
-    For example: semaphore_set_env("PORT", 5080) with SEMAPHORE="JEEVES"
-    results in env var "JEEVES_PORT=5080".
-
-    Set use_prefix=False to use the key as-is without prefixing.
+    The key is stored twice: once prefixed with the semaphore name for namespacing,
+    and once without prefix for consumers that expect the raw key.
 
     Parameters
     ----------
     key : str
-      The environment variable name (prefixed with semaphore key if use_prefix=True)
+      The environment variable name (stored as both prefixed and raw)
     value : any
       The environment variable value (will be converted to string)
-    use_prefix : bool
-      If True (default), prefix key with semaphore name. If False, use key as-is.
 
     Returns
     -------
@@ -118,25 +113,27 @@ class _SemaphoredPairedPluginMixin(object):
 
     semaphore_data = self._semaphore_ensure_structure()
 
-    # Prefix the key with semaphore name for namespacing (unless disabled)
-    if use_prefix:
-      full_key = "{}_{}".format(semaphore_key, key)
-    else:
-      full_key = key
-    semaphore_data['env'][full_key] = str(value)
-    self._semaphore_Pd("Semaphore '{}' env var set: {} = {}".format(semaphore_key, full_key, value))
+    # Store both prefixed and raw variants for flexibility
+    value_str = str(value)
+    prefixed_key = "{}_{}".format(semaphore_key, key)
+    semaphore_data['env'][prefixed_key] = value_str
+    semaphore_data['env'][key] = value_str
+    self._semaphore_Pd(
+      "Semaphore '{}' env vars set: {} / {} = {}".format(
+        semaphore_key, prefixed_key, key, value))
     return True
 
-  def semaphore_set_env_dict(self, env_dict, use_prefix=True):
+  def semaphore_set_env_dict(self, env_dict):
     """
     Set multiple environment variables at once.
+
+    Each key is stored with both prefixed and raw variants, matching
+    semaphore_set_env() behavior.
 
     Parameters
     ----------
     env_dict : dict
       Dictionary of {key: value} pairs.
-    use_prefix : bool
-      If True (default), prefix keys with semaphore name. If False, use keys as-is.
 
     Returns
     -------
@@ -148,7 +145,7 @@ class _SemaphoredPairedPluginMixin(object):
       return False
 
     for key, value in env_dict.items():
-      self.semaphore_set_env(key, value, use_prefix=use_prefix)
+      self.semaphore_set_env(key, value)
     return True
 
   def semaphore_clear(self):
@@ -163,7 +160,7 @@ class _SemaphoredPairedPluginMixin(object):
       return
 
     if semaphore_key in self.plugins_shmem:
-      self.plugins_shmem[semaphore_key]['start'] = False
+      self.plugins_shmem[semaphore_key]['is_ready'] = False
       self.plugins_shmem[semaphore_key]['metadata']['ready_timestamp'] = None
       self._semaphore_Pd("Semaphore '{}' cleared".format(semaphore_key))
     return
@@ -194,7 +191,7 @@ class _SemaphoredPairedPluginMixin(object):
     if semaphore_key:
       # Check specific semaphore
       shmem_data = self.plugins_shmem.get(semaphore_key, {})
-      return shmem_data.get('start', False)
+      return shmem_data.get('is_ready', False)
 
     # Check all required semaphores
     required_keys = self._semaphore_get_keys()
@@ -203,7 +200,7 @@ class _SemaphoredPairedPluginMixin(object):
 
     for key in required_keys:
       shmem_data = self.plugins_shmem.get(key, {})
-      if not shmem_data.get('start', False):
+      if not shmem_data.get('is_ready', False):
         return False
 
     return True
@@ -224,7 +221,7 @@ class _SemaphoredPairedPluginMixin(object):
     result = {}
     for key in required_keys:
       shmem_data = self.plugins_shmem.get(key, {})
-      if shmem_data.get('start', False):
+      if shmem_data.get('is_ready', False):
         env_vars = shmem_data.get('env', {})
         if env_vars:
           self._semaphore_Pd("Semaphore '{}' provides {} env vars: {}".format(
@@ -265,7 +262,7 @@ class _SemaphoredPairedPluginMixin(object):
       if shmem_data:
         metadata = shmem_data.get('metadata', {})
         status[key] = {
-          'ready': shmem_data.get('start', False),
+          'ready': shmem_data.get('is_ready', False),
           'env_count': len(shmem_data.get('env', {})),
           'provider': metadata.get('plugin_signature'),
           'ready_since': metadata.get('ready_timestamp'),

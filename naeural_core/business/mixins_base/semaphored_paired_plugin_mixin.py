@@ -40,6 +40,12 @@ class _SemaphoredPairedPluginMixin(object):
     super(_SemaphoredPairedPluginMixin, self).__init__()
     return
 
+  def _semaphore_Pd(self, msg):
+    """Safe debug logging - only logs if Pd method is available."""
+    if hasattr(self, 'Pd') and callable(self.Pd):
+      self.Pd(msg)
+    return
+
   # ============================================================================
   # Provider Methods (for native plugins that signal readiness)
   # ============================================================================
@@ -79,7 +85,7 @@ class _SemaphoredPairedPluginMixin(object):
     semaphore_data = self._semaphore_ensure_structure()
     semaphore_data['start'] = True
     semaphore_data['metadata']['ready_timestamp'] = tm()
-
+    self._semaphore_Pd("Semaphore '{}' set to READY".format(semaphore_key))
     return True
 
   def semaphore_set_env(self, key, value, use_prefix=True):
@@ -118,6 +124,7 @@ class _SemaphoredPairedPluginMixin(object):
     else:
       full_key = key
     semaphore_data['env'][full_key] = str(value)
+    self._semaphore_Pd("Semaphore '{}' env var set: {} = {}".format(semaphore_key, full_key, value))
     return True
 
   def semaphore_set_env_dict(self, env_dict, use_prefix=True):
@@ -158,6 +165,7 @@ class _SemaphoredPairedPluginMixin(object):
     if semaphore_key in self.plugins_shmem:
       self.plugins_shmem[semaphore_key]['start'] = False
       self.plugins_shmem[semaphore_key]['metadata']['ready_timestamp'] = None
+      self._semaphore_Pd("Semaphore '{}' cleared".format(semaphore_key))
     return
 
   # ============================================================================
@@ -218,7 +226,12 @@ class _SemaphoredPairedPluginMixin(object):
       shmem_data = self.plugins_shmem.get(key, {})
       if shmem_data.get('start', False):
         env_vars = shmem_data.get('env', {})
+        if env_vars:
+          self._semaphore_Pd("Semaphore '{}' provides {} env vars: {}".format(
+            key, len(env_vars), list(env_vars.keys())))
         result.update(env_vars)
+      else:
+        self._semaphore_Pd("Semaphore '{}' not ready, skipping env retrieval".format(key))
 
     return result
 
@@ -274,6 +287,8 @@ class _SemaphoredPairedPluginMixin(object):
     """
     if self.__semaphore_wait_start is None:
       self.__semaphore_wait_start = tm()
+      required_keys = self._semaphore_get_keys()
+      self._semaphore_Pd("Starting wait for semaphores: {}".format(required_keys))
     return
 
   def semaphore_get_wait_elapsed(self):
@@ -314,6 +329,12 @@ class _SemaphoredPairedPluginMixin(object):
     for key in required_keys:
       is_ready = self.semaphore_is_ready(key)
       if is_ready and key not in self.__semaphore_ready_logged:
+        shmem_data = self.plugins_shmem.get(key, {})
+        metadata = shmem_data.get('metadata', {})
+        provider = metadata.get('plugin_signature', 'unknown')
+        env_count = len(shmem_data.get('env', {}))
+        self._semaphore_Pd("Semaphore '{}' READY (provider: {}, env_vars: {})".format(
+          key, provider, env_count))
         self.__semaphore_ready_logged.add(key)
       elif not is_ready:
         all_ready = False

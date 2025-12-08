@@ -37,6 +37,7 @@ from naeural_core.business.mixins_base import (
   _GenericUtilsApiMixin, _DiskAPIMixin, _DeAPIMixin,
   _DatasetBuilderMixin, _StateMachineAPIMixin,
 )
+from naeural_core.business.mixins_base.semaphored_paired_plugin_mixin import _SemaphoredPairedPluginMixin
 
 from naeural_core.utils.mixins.code_executor import _CodeExecutorMixin
 
@@ -127,6 +128,14 @@ _CONFIG = {
   # default is False, set to True if we want to process empty inputs
   'ALLOW_EMPTY_INPUTS': False,
   'IS_LOOPBACK_PLUGIN': False,
+
+  # Semaphore synchronization for paired plugins (provider side)
+  # Set this to a unique key to signal readiness and expose env vars to consumer plugins
+  'SEMAPHORE': None,
+
+  # Semaphore synchronization for paired plugins (consumer side)
+  # List of semaphore keys to wait for before proceeding (e.g., CAR waiting for native plugins)
+  'SEMAPHORED_KEYS': [],
 
   'SIMPLE_WITNESS': False,  # only the simple picture is returned
 
@@ -341,6 +350,7 @@ class BasePluginExecutor(
   _BasePluginLoopMixin,
   _BasePluginAPIMixin,
   _StateMachineAPIMixin,
+  _SemaphoredPairedPluginMixin,
 ):
   CONFIG = _CONFIG
 

@@ -143,7 +143,9 @@ class ApplicationMonitor(DecentrAIObject):
           max_temp = "{} at {}°C".format(sensor, current)
           max_sensor = sensor
           if critical_temp:
-            self.P("ALERT: High temperature detected: {}".format(max_temp), color='r')
+            self.P("ALERT: High temperature detected: {}:\n{}".format(
+              max_temp, json.dumps(temperature_info, indent=4)), color='r'
+            )
             max_temp += ' ERROR/CRITICAL!'
             break
           #endif high temp

@@ -3,8 +3,8 @@
   "dockerFile" : "Dockerfile",
   // "image": "aidamian/ds101_2024",
 
-  "workspaceMount": "source=${localWorkspaceFolder},target=/edge_node,type=bind",
-  "workspaceFolder": "/edge_node",
+  // "workspaceMount": "source=${localWorkspaceFolder},target=/edge_node,type=bind",
+  // "workspaceFolder": "/edge_node",
 
   "runArgs": [
     //"--gpus=all",
@@ -17,9 +17,9 @@
     "--privileged"
   ],
 
-  "build": {
-    "context": "../",
-  },
+  // "build": {
+  //   "context": "../",
+  // },
 
   "customizations": {
     "vscode" : {

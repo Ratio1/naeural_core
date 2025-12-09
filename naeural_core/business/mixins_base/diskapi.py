@@ -115,7 +115,9 @@ class _DiskAPIMixin(object):
       # endif subfolder provided
       if folder is not None:
         assert isinstance(folder, str), f"folder not a string, got {type(folder)}"
-        current_path = os.path.join(folder, current_path)
+        target_folder = self.log.get_target_folder(folder)
+        assert isinstance(target_folder, str), f"`{folder}` -> `{target_folder}` not a string, got {type(target_folder)}"
+        current_path = os.path.join(target_folder, current_path)
       # endif folder provided
       is_safe, err_msg = self.is_path_safe(current_path, return_reason=True)
       assert is_safe, err_msg

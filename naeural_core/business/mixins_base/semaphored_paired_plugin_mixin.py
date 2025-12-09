@@ -35,8 +35,23 @@ class _SemaphoredPairedPluginMixin(object):
   """
 
   def __init__(self):
+    """
+    Initialize all semaphore-related state variables.
+
+    Consumer state (for plugins waiting on dependencies):
+      - __semaphore_wait_start: Timestamp when waiting began
+      - __semaphore_ready_logged: Set of semaphores already logged as ready
+
+    Provider state (for plugins signaling readiness):
+      - _semaphore_signaled: Flag to prevent duplicate signaling
+    """
+    # Consumer state (existing - for plugins that wait for others)
     self.__semaphore_wait_start = None
     self.__semaphore_ready_logged = set()
+
+    # Provider state (new - for plugins that signal they're ready)
+    self._semaphore_signaled = False
+
     super(_SemaphoredPairedPluginMixin, self).__init__()
     return
 
@@ -163,6 +178,212 @@ class _SemaphoredPairedPluginMixin(object):
       self.plugins_shmem[semaphore_key]['is_ready'] = False
       self.plugins_shmem[semaphore_key]['metadata']['ready_timestamp'] = None
       self._semaphore_Pd("Semaphore '{}' cleared".format(semaphore_key))
+    return
+
+
+  def _semaphore_maybe_auto_signal(self):
+    """
+    Automatically signal semaphore readiness when conditions are met.
+
+    This method is called automatically from the plugin's process loop.
+    It checks if the plugin is ready and signals the semaphore accordingly.
+
+    Readiness is determined by checking (in order):
+      1. uvicorn_server_started attribute (for FastAPI plugins)
+      2. _semaphore_ready attribute (custom readiness flag)
+      3. Immediate readiness (if no specific condition exists)
+
+    Once ready, this method:
+      1. Ensures semaphore structure exists
+      2. Calls _setup_semaphore_env() hook (if implemented)
+      3. Signals readiness via semaphore_set_ready()
+      4. Sets _semaphore_signaled flag to prevent duplicate signaling
+
+    Returns
+    -------
+    None
+    """
+    # Early exit if semaphore not configured
+    semaphore_key = getattr(self, 'cfg_semaphore', None)
+    if not semaphore_key:
+      return
+
+    # Early exit if already signaled
+    if self._semaphore_signaled:
+      return
+
+    # Check if plugin is ready using multiple patterns
+    is_ready = False
+
+    # Pattern 1: Check uvicorn_server_started (FastAPI plugins)
+    if hasattr(self, 'uvicorn_server_started'):
+      is_ready = self.uvicorn_server_started
+    # Pattern 2: Check _semaphore_ready (custom flag)
+    elif hasattr(self, '_semaphore_ready'):
+      is_ready = self._semaphore_ready
+    # Pattern 3: Immediate readiness (no wait condition)
+    else:
+      is_ready = True
+
+    # Early exit if not ready yet
+    if not is_ready:
+      return
+
+    # Plugin is ready - signal semaphore
+    try:
+      # Ensure semaphore structure exists
+      self._semaphore_ensure_structure()
+
+      # Call hook method if implemented (for plugin-specific env vars)
+      if hasattr(self, '_setup_semaphore_env') and callable(self._setup_semaphore_env):
+        self._setup_semaphore_env()
+
+      # Signal readiness
+      self.semaphore_set_ready()
+
+      # Mark as signaled to prevent duplicate signaling
+      self._semaphore_signaled = True
+
+      self._semaphore_Pd("Semaphore '{}' auto-signaled successfully".format(semaphore_key))
+    except Exception as ex:
+      self._semaphore_Pd("Error in auto-signal for '{}': {}".format(semaphore_key, ex))
+      # Reset flag to allow retry on next iteration
+      self._semaphore_signaled = False
+    return
+
+
+  def _setup_semaphore_env(self):
+    """
+    Hook method for plugins to set semaphore environment variables.
+
+    Override this method in your plugin to expose environment variables
+    to paired plugins (e.g., Container App Runners waiting for this plugin).
+
+    This method is called automatically by _semaphore_maybe_auto_signal()
+    right before signaling readiness.
+
+    Example Usage
+    -------------
+    ```python
+    def _setup_semaphore_env(self):
+      # RedMesh example - expose API connection details
+      host = getattr(self, 'cfg_host', None) or '127.0.0.1'
+      port = self.cfg_port
+      if port:
+        self.semaphore_set_env('API_HOST', host)
+        self.semaphore_set_env('API_PORT', str(port))
+        self.semaphore_set_env('API_URL', 'http://{}:{}'.format(host, port))
+
+      # Keysoft example - expose multiple endpoints
+      localhost_ip = self.log.get_localhost_ip()
+      port = getattr(self, 'cfg_port', 15033)
+      self.semaphore_set_env('PORT', str(port))
+      self.semaphore_set_env('RATIO1_AGENT_ENDPOINT',
+        'http://{}:{}/query'.format(localhost_ip, port))
+
+      # Container App Runner example - expose container details
+      self.semaphore_set_env('CONTAINER_NAME', self._container_name)
+      self.semaphore_set_env('CONTAINER_PORT', str(self._exposed_port))
+    ```
+
+    Returns
+    -------
+    None
+    """
+    # Default implementation is a no-op
+    # Plugins override this method to set their specific env vars
+    return
+
+
+  def _semaphore_auto_cleanup(self):
+    """
+    Automatically clean up semaphore on plugin shutdown.
+
+    This method is called automatically from the plugin's on_close() lifecycle.
+    It clears the semaphore to signal to waiting plugins that this dependency
+    is no longer available.
+
+    Returns
+    -------
+    None
+    """
+    semaphore_key = getattr(self, 'cfg_semaphore', None)
+    if not semaphore_key:
+      return
+
+    try:
+      self.semaphore_clear()
+      self._semaphore_Pd("Semaphore '{}' auto-cleanup completed".format(semaphore_key))
+    except Exception as ex:
+      self._semaphore_Pd("Error in semaphore auto-cleanup for '{}': {}".format(semaphore_key, ex))
+    return
+
+
+  def _semaphore_set_ready_flag(self):
+    """
+    Set the readiness flag to signal that this plugin is ready.
+
+    Use this method instead of directly setting self._semaphore_ready = True.
+    This is typically used by plugins with custom readiness conditions
+    (e.g., Container App Runner after health checks pass).
+
+    The auto-signal mechanism will detect this flag and signal the semaphore
+    automatically on the next process loop iteration.
+
+    Returns
+    -------
+    None
+
+    Example Usage
+    -------------
+    ```python
+    # Container App Runner - after health check passes
+    if probe_result:
+      self.P("Health check passed - app is ready!", color='g')
+      self._app_ready = True
+      self._semaphore_set_ready_flag()  # Signal readiness for auto-signal
+    ```
+    """
+    self._semaphore_ready = True
+    return
+
+
+  def _semaphore_reset_signal(self):
+    """
+    Reset semaphore signaling state to allow re-signaling.
+
+    This is useful for plugins that restart their services (e.g., Container App Runner
+    restarting containers) and need to signal readiness again after restart.
+
+    Calling this method will:
+    - Clear the semaphore (signal to consumers that service is down)
+    - Reset the _semaphore_signaled flag (allow re-signaling)
+    - Reset the _semaphore_ready flag (if using custom readiness)
+
+    Returns
+    -------
+    None
+
+    Example Usage
+    -------------
+    ```python
+    # Container App Runner - when stopping container before restart
+    def _stop_container_and_save_logs_to_disk(self):
+      self.P(f"Stopping container app '{self.container_id}' ...")
+      self._semaphore_reset_signal()  # Clear and reset for re-signaling
+      # ... continue with container stop logic
+    ```
+    """
+    # Clear the semaphore to signal consumers that service is down
+    self.semaphore_clear()
+
+    # Reset flags to allow re-signaling after restart
+    self._semaphore_signaled = False
+
+    # Reset custom readiness flag if it exists
+    if hasattr(self, '_semaphore_ready'):
+      self._semaphore_ready = False
+
     return
 
   # ============================================================================

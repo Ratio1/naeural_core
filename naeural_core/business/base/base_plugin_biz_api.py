@@ -62,6 +62,8 @@ class _BasePluginAPIMixin:
     Payload.
 
     """
+    # Auto-signal semaphore if configured
+    self._semaphore_maybe_auto_signal()
     return self.process()
 
   
@@ -113,6 +115,8 @@ class _BasePluginAPIMixin:
     """
     self.P("Default plugin `_on_close` called for plugin cleanup at shutdown...")
     self.maybe_archive_upload_last_files()
+    # Auto-cleanup semaphore if configured
+    self._semaphore_auto_cleanup()
     self.on_close()
     return
 

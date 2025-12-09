@@ -2,6 +2,8 @@
 import json
 import multiprocessing as mp
 import os
+import subprocess
+import tempfile
 import shutil
 import sys
 import traceback
@@ -138,7 +140,170 @@ def get_config(config_fn):
   return fn
 
 
-def main():
+def install_package_with_constraints_to_target(
+  l: Logger,
+  package_name : str,
+  destination: str,
+) -> bool:
+  """
+  Install a Python package into a specified target directory using pip,
+  while respecting the current environment's package versions via a constraints file.
+
+  Parameters
+  ----------
+  l : Logger
+    The logger instance for logging messages.
+  package_name : str
+    The name of the package to install.
+  destination
+    The target directory where the package should be installed.
+
+  Returns
+  -------
+  True if the installation was successful, False otherwise.
+  """
+  destination = os.path.abspath(destination)
+  os.makedirs(destination, exist_ok=True)
+  success = True
+
+  try:
+    with tempfile.TemporaryDirectory() as tmpdir:
+      constraints_path = os.path.join(tmpdir, "constraints.txt")
+
+      # 1) Snapshot current environment into constraints file
+      with open(constraints_path, "w", encoding="utf-8") as f:
+        subprocess.run(
+          [sys.executable, "-m", "pip", "freeze"],
+          stdout=f,
+          stderr=subprocess.PIPE,
+          check=True,  # raises CalledProcessError on non-zero exit
+        )
+
+      # 2) Install the requested package into the target directory
+      cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        package_name,
+        "-t",
+        destination,
+        "-c",
+        constraints_path,
+      ]
+      subprocess.run(cmd, check=True)
+    # endwith tempdir
+  except Exception as e:
+    l.P(f"ERROR: cannot install package '{package_name}' to '{destination}': {str(e)}", color='r', boxed=True)
+    success = False
+  return success
+
+
+def check_installed_package_in_target(
+  package_name: str,
+  target_folder: str,
+):
+  """
+  Check if a Python package is installed in a specified target directory.
+  Very simple check: does `target_folder` contain a dist-info/egg-info directory
+  for this package?
+
+  Parameters
+  ----------
+  package_name : str
+    The name of the package to check.
+  target_folder : str
+    The target directory to check for the package.
+
+  Returns
+  -------
+  True if the package is installed, False otherwise.
+  """
+  dest = os.path.abspath(target_folder)
+  if not os.path.isdir(dest):
+    return False
+
+  # normalize like pip/importlib: lower + '-' -> '_'
+  norm = package_name.lower().replace("-", "_")
+
+  for entry in os.listdir(dest):
+    entry_lower = entry.lower()
+
+    # we only care about metadata dirs
+    if not (entry_lower.endswith(".dist-info") or entry_lower.endswith(".egg-info")):
+      continue
+
+    # strip suffix and get the "name-version" part
+    base = entry_lower.rsplit(".", 1)[0]  # remove .dist-info / .egg-info
+
+    # split "name-version" -> "name"
+    name_part = base.split("-", 1)[0].replace("-", "_")
+
+    if name_part == norm:
+      return True
+
+  return False
+
+
+def add_target_path_to_sys_path(target_folder: str):
+  """
+  Add the target folder to sys.path if not already present.
+
+  Parameters
+  ----------
+  target_folder : str
+    The target directory to add to sys.path.
+  """
+  target_folder = os.path.abspath(target_folder)
+  if target_folder not in sys.path:
+    sys.path.insert(0, target_folder)
+  return
+
+
+def maybe_install_additional_packages(
+  l: Logger,
+  target_folder: str,
+  additional_packages: list
+):
+  """
+  Install additional Python packages into a specified target folder.
+
+  Parameters
+  ----------
+  l : Logger
+    The logger instance for logging messages.
+  target_folder : str
+    The target directory where packages should be installed.
+  additional_packages : list
+    A list of package names to install.
+  """
+  if not additional_packages or len(additional_packages) == 0:
+    return
+  # endif no additional packages
+  target_folder = os.path.abspath(target_folder)
+  l.P(f"Checking additional packages in '{target_folder}': {additional_packages}")
+  os.makedirs(target_folder, exist_ok=True)
+  for pkg in additional_packages:
+    if not check_installed_package_in_target(package_name=pkg, target_folder=target_folder):
+      l.P(f"Package '{pkg}' not found in target folder. Installing...")
+      success = install_package_with_constraints_to_target(
+        l=l,
+        package_name=pkg,
+        destination=target_folder,
+      )
+      if success:
+        l.P(f"Package '{pkg}' installed successfully.", color='g')
+      else:
+        l.P(f"Failed to install package '{pkg}'.", color='r', boxed=True)
+    else:
+      l.P(f"Package '{pkg}' already installed.", color='g')
+    # endif package not installed
+  # endfor additional packages
+  add_target_path_to_sys_path(target_folder)
+  return
+
+
+def main(additional_packages: list = None):
   app_base_folder = os.getcwd()
   print("Core Edge Node v{} starting in {}".format(__VER__, app_base_folder), flush=True)
   
@@ -171,7 +336,16 @@ def main():
     l.P("ERROR: local cache not properly configured. Note: This version is not able to use read-only systems...", color='r', boxed=True)
     sys.exit(ct.CODE_CONFIG_ERROR)
   #endif no folders
-  
+
+  if isinstance(additional_packages, list) and len(additional_packages) > 0:
+    additional_packages_cache_folder = os.path.join(l.app_folder, '_bin')
+    maybe_install_additional_packages(
+      l=l,
+      target_folder=additional_packages_cache_folder,
+      additional_packages=additional_packages
+    )
+  # endif additional packages
+
   if l.config_data is None or len(l.config_data) == 0:
     l.P("ERROR: config_startup.txt is not a valid json file", color='r', boxed=True)
     sys.exit(ct.CODE_CONFIG_ERROR)

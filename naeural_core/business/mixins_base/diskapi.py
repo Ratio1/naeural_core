@@ -29,29 +29,96 @@ class _DiskAPIMixin(object):
 
   # Utils section
   if True:
-    def is_path_safe(self, path, base_path=None):
+    def is_path_safe(self, path, base_path=None, return_reason: bool = False):
       """
-      Method for checking if a certain path is safe(it's inside the base_path).
+      Method for checking if a certain path is safe(it's inside the base_path and is not in restricted locations).
       If the base_path is not provided, the base_path will be the base folder of the cache.
+
       Parameters
       ----------
-      path - string, path to be checked
-      base_path - string, the base path to check against.
+      path - str, path to be checked
+      base_path - str, the base path to check against.
         If not provided, the base path will be the base folder of the cache.
+      return_reason - bool, if True, the method will return a tuple (is_safe, err_msg), where
+        err_msg is a string explaining why the path is not safe or None if the path is safe.
 
       Returns
       -------
-      bool, True if the path is safe, False otherwise
+      bool or (bool, str)
+        is_safe - bool, True if the path is safe, False otherwise
+        err_msg - str, reason why the path is not safe or None otherwise (only if return_reason is True)
       """
+      is_safe, err_msg = False, None
       if base_path is None:
         base_path = self.log.get_base_folder()
+      if not isinstance(path, str):
+        err_msg = "The path must be a string."
+        return (is_safe, err_msg) if return_reason else is_safe
+      if not isinstance(base_path, str):
+        err_msg = "The base_path must be a string."
+        return (is_safe, err_msg) if return_reason else is_safe
+
       abs_base_directory = os.path.abspath(base_path)
+
+      restricted_locations_real_paths = [
+        os.path.realpath(os.path.join(base_path, restricted_location))
+        for restricted_location in ct.RESTRICTED_LOCATIONS
+      ]
+
+      def is_path_in_base_path(_path: str, _base_path: str):
+        return os.path.commonpath([_base_path, _path]) == _base_path
 
       # This conversion is done to avoid issues with both symbolic links and "../" segments in the path.
       real_path_base = os.path.realpath(abs_base_directory)
       real_path = os.path.realpath(path)
 
-      return os.path.commonpath([real_path_base, real_path]) == real_path_base
+      for restricted_base_path in restricted_locations_real_paths:
+        if is_path_in_base_path(real_path, restricted_base_path):
+          err_msg = f"`{path}` -> `{real_path}` in restricted location!"
+          return (is_safe, err_msg) if return_reason else is_safe
+        # endif path in illegal directory
+      # endfor restricted dirs
+
+      is_safe = is_path_in_base_path(real_path, real_path_base)
+      if not is_safe:
+        err_msg = f"`{path}` -> `{real_path}` not in `{real_path_base}`!"
+      return (is_safe, err_msg) if return_reason else is_safe
+
+    def assert_legal_file_location(
+        self,
+        filename: str = None,
+        folder: str = None,
+        subfolder: str = None,
+    ):
+      """
+      Method for validating a file location is safe.
+
+      Parameters
+      ----------
+      filename - str, filename to be checked
+      folder - str, folder to be checked
+      subfolder - str, subfolder to be checked
+
+      Raises
+      ------
+      AssertionError
+        If the file location is not safe. That means one of the following:
+          - The file is not inside the base folder of the cache
+          - The file is inside a restricted location
+          - The filename, folder or subfolder are not strings
+      """
+      assert isinstance(filename, str), f"filename not a string, got {type(filename)}"
+      current_path = filename
+      if subfolder is not None:
+        assert isinstance(subfolder, str), f"subfolder not a string, got {type(subfolder)}"
+        current_path = os.path.join(subfolder, current_path)
+      # endif subfolder provided
+      if folder is not None:
+        assert isinstance(folder, str), f"folder not a string, got {type(folder)}"
+        current_path = os.path.join(folder, current_path)
+      # endif folder provided
+      is_safe, err_msg = self.is_path_safe(current_path, return_reason=True)
+      assert is_safe, err_msg
   # endif Utils
 
   # Dataframe serialization section
@@ -109,6 +176,7 @@ class _DiskAPIMixin(object):
       mode = mode.lower()
       assert mode in ['w', 'a']
       assert_folder(folder)
+      self.assert_legal_file_location(filename=filename, folder=folder)
 
       _, full_path = self.log.save_dataframe(
         df=df, fn=filename, folder=folder,
@@ -191,6 +259,7 @@ class _DiskAPIMixin(object):
       pandas.DataFrame
       """
       assert_folder(folder)
+      self.assert_legal_file_location(filename=filename, folder=folder)
       df = self.log.load_dataframe(
         fn=filename, 
         folder=folder, 
@@ -263,6 +332,9 @@ class _DiskAPIMixin(object):
         full_path to the saved object
       """
       assert_folder(folder)
+      self.assert_legal_file_location(
+        filename=filename, folder=folder, subfolder=subfolder,
+      )
 
       full_path = self.log.save_pickle(
         data=obj, fn=filename, folder=folder,
@@ -337,6 +409,9 @@ class _DiskAPIMixin(object):
       object
       """
       assert_folder(folder)
+      self.assert_legal_file_location(
+        filename=filename, folder=folder, subfolder=subfolder,
+      )
 
       obj = self.log.load_pickle(
         fn=filename, folder=folder, subfolder_path=subfolder,
@@ -409,6 +484,7 @@ class _DiskAPIMixin(object):
         full_path to the saved json
       """
       assert_folder(folder)
+      self.assert_legal_file_location(filename=filename, folder=folder)
 
       full_path = self.log.thread_safe_save(
         datafile=filename,
@@ -464,6 +540,7 @@ class _DiskAPIMixin(object):
       dict
       """
       assert_folder(folder)
+      self.assert_legal_file_location(filename=filename, folder=folder, subfolder=subfolder)
 
       dct = self.log.load_json(
         fname=filename, folder=folder, subfolder=subfolder, numeric_keys=True,
@@ -499,7 +576,8 @@ class _DiskAPIMixin(object):
       if not found:
         self.P(f"JSON load: Invalid filename location for {fn}", color='r')
         return None
-      
+
+      self.assert_legal_file_location(filename=fn)
       dct = self.log.load_json(
         fname=fn, folder=None, subfolder=None, numeric_keys=True,
         locking=True, verbose=verbose
@@ -537,6 +615,7 @@ class _DiskAPIMixin(object):
         return None
       try:
         dct = None
+        self.assert_legal_file_location(filename=fn)
         with open(fn, 'rt') as fd:
           if verbose:
             self.P("Loading yaml file: {}".format(fn))
@@ -604,6 +683,7 @@ class _DiskAPIMixin(object):
       """
       assert_folder(folder)
       video_path = os.path.join(self.log.get_target_folder(folder), filename)
+      self.assert_legal_file_location(filename=video_path)
       os.makedirs(os.path.split(video_path)[0], exist_ok=True)
 
       handler = None
@@ -756,6 +836,7 @@ class _DiskAPIMixin(object):
         filename=filename,
         extension=extension
       )
+      self.assert_legal_file_location(filename=save_path)
       os.makedirs(os.path.dirname(save_path), exist_ok=True)
       res = cv2.imwrite(img=image[:, :, ::-1], filename=save_path)  # TODO: use PIL instead of opencv
       if res:
@@ -785,6 +866,7 @@ class _DiskAPIMixin(object):
         filename=filename,
         extension=''
       )
+      self.assert_legal_file_location(filename=load_path)
       if not os.path.exists(load_path):
         self.P(f'File {load_path} does not exist')
         return None
@@ -853,6 +935,7 @@ class _DiskAPIMixin(object):
           filename=filename,
           extension=extension
         )
+        self.assert_legal_file_location(filename=save_path)
         if isinstance(data, list):
           data = '\n'.join([x for x in data])
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -911,6 +994,8 @@ class _DiskAPIMixin(object):
       if zip_path is None:
         zip_path = dir_path + '.zip'
       self.P(f'Archiving {dir_path} to {zip_path}')
+      self.assert_legal_file_location(filename=dir_path)
+      self.assert_legal_file_location(filename=zip_path)
       ziph = zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED)
       for root, dirs, files in os.walk(dir_path):
         for file in files:
@@ -936,6 +1021,8 @@ class _DiskAPIMixin(object):
       if dir_path is None:
         dir_path, ext = os.path.splitext(zip_path)
       self.P(f'Unzipping {zip_path} to {dir_path}')
+      self.assert_legal_file_location(filename=zip_path)
+      self.assert_legal_file_location(filename=dir_path)
       with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(dir_path)
       return dir_path

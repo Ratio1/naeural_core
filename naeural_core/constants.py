@@ -1365,6 +1365,14 @@ CONFIG_STARTUP_MANDATORY_KEYS = [
   PLUGINS_ON_THREADS,
 ]
 
+RESTRICTED_LOCATIONS = [
+  '_bin',
+  'config_startup.json',
+  '_data/e2.pem',
+  '_data/box_configuration/config_app.txt',
+  'whitelist_commands.json',
+]
+
 # former constants and config_startup.json HB_CONTAINS_PIPELINES and HB_CONTAINS_ACTIVE_PLUGINS 
 # are now exclusively used as environment variables
 HB_CONTAINS_PIPELINES_ENV_KEY = 'EE_HB_CONTAINS_PIPELINES'

@@ -57,13 +57,18 @@ class _PluginReadinessMixin:
     Set plugin readiness state.
 
     This single API controls readiness for all mechanisms:
-    - Chainstore response (signals orchestrator)
+    - Chainstore response (sends to chainstore)
     - Semaphore signaling (signals paired plugins)
 
     Parameters
     ----------
-    ready : bool
-        True when plugin is ready, False to defer
+    ready : bool, default True
+        True: Plugin is ready (triggers chainstore + semaphore signals)
+        False: Defer readiness (wait for async resources)
+
+    Returns
+    -------
+    None
 
     Examples
     --------
@@ -72,6 +77,9 @@ class _PluginReadinessMixin:
 
     Signal ready when async resource is available:
     >>> self.set_plugin_ready(True)
+
+    Or simply (uses default=True):
+    >>> self.set_plugin_ready()
     """
     self._is_plugin_ready = ready
     return

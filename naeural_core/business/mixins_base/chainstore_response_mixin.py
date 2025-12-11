@@ -21,7 +21,8 @@ Usage (Automatic - via BasePluginExecutor):
 This mixin is automatically included in BasePluginExecutor. For simple plugins,
 no action is required - chainstore response is sent automatically after on_init().
 
-For complex plugins that need deferred readiness (containers, APIs, etc.):
+For complex plugins that need deferred readiness (containers, APIs, etc.),
+use set_plugin_ready() from _PluginReadinessMixin:
 ```python
 class MyComplexPlugin(BasePlugin):
   def on_init(self):
@@ -30,7 +31,7 @@ class MyComplexPlugin(BasePlugin):
     # ... start async initialization ...
 
   def _after_service_ready(self):
-    self.set_plugin_ready(True)  # Triggers auto-send
+    self.set_plugin_ready(True)  # Triggers both chainstore AND semaphore
 ```
 
 For custom response data:
@@ -88,28 +89,12 @@ class _ChainstoreResponseMixin:
     Initialize chainstore response state variables.
 
     State variables:
-      - _is_plugin_ready: Flag indicating plugin readiness (default None = not set)
       - _chainstore_response_sent: Prevents duplicate sends
+
+    Note: _is_plugin_ready and set_plugin_ready() are now in _PluginReadinessMixin
     """
-    self._is_plugin_ready = None
     self._chainstore_response_sent = False
     super(_ChainstoreResponseMixin, self).__init__()
-    return
-
-
-  def set_plugin_ready(self, ready=True):
-    """
-    Set plugin readiness state for chainstore response.
-
-    Simple plugins don't need to call this - default is ready.
-    Complex plugins (containers, APIs) should:
-      1. Call set_plugin_ready(False) in on_init() to defer
-      2. Call set_plugin_ready(True) when truly ready
-
-    Args:
-        ready (bool): True when plugin is ready, False to defer.
-    """
-    self._is_plugin_ready = ready
     return
 
 
@@ -120,8 +105,8 @@ class _ChainstoreResponseMixin:
     Called from process loop (_process). Sends only once.
     This follows the same pattern as _semaphore_maybe_auto_signal().
 
-    Readiness logic:
-      - None: not set, use default (ready after init finalized)
+    Uses is_plugin_ready() from _PluginReadinessMixin which resolves:
+      - None: use default (uvicorn_server_started or _init_process_finalized)
       - False: explicitly deferred, wait for set_plugin_ready(True)
       - True: explicitly ready
     """
@@ -133,18 +118,14 @@ class _ChainstoreResponseMixin:
     if self._chainstore_response_sent:
       return
 
-    # Plugin explicitly deferred
-    if self._is_plugin_ready is False:
+    # Check unified readiness (from _PluginReadinessMixin)
+    if not self.is_plugin_ready():
       return
 
-    # Init not finalized yet
-    if not getattr(self, '_init_process_finalized', False):
-      return
-
-    # Ready - send response (None or True)
+    # Ready - send response
     if self._send_chainstore_response():
       self._chainstore_response_sent = True
-
+    return
 
   def _get_chainstore_response_key(self):
     """

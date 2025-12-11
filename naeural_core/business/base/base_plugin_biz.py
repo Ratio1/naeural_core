@@ -37,6 +37,7 @@ from naeural_core.business.mixins_base import (
   _GenericUtilsApiMixin, _DiskAPIMixin, _DeAPIMixin,
   _DatasetBuilderMixin, _StateMachineAPIMixin,
 )
+from naeural_core.business.mixins_base.plugin_readiness_mixin import _PluginReadinessMixin
 from naeural_core.business.mixins_base.semaphored_paired_plugin_mixin import _SemaphoredPairedPluginMixin
 from naeural_core.business.mixins_base.chainstore_response_mixin import _ChainstoreResponseMixin
 
@@ -351,6 +352,7 @@ class BasePluginExecutor(
   _BasePluginLoopMixin,
   _BasePluginAPIMixin,
   _StateMachineAPIMixin,
+  _PluginReadinessMixin,
   _SemaphoredPairedPluginMixin,
   _ChainstoreResponseMixin,
 ):

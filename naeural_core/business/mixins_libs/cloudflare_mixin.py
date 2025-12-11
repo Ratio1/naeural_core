@@ -19,9 +19,10 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
   if True:
     def _get_cloudflare_start_command(self):
       token = self.get_cloudflare_token()
+      protocol = self.get_cloudflare_protocol()
       if token is not None:
-        return f"cloudflared tunnel --no-autoupdate run --token {token} --url http://127.0.0.1:{self.port}"
-      return f"cloudflared tunnel --no-autoupdate --url http://127.0.0.1:{self.port}"
+        return f"cloudflared tunnel --no-autoupdate run --token {token} --url {protocol}://127.0.0.1:{self.port}"
+      return f"cloudflared tunnel --no-autoupdate --url {protocol}://127.0.0.1:{self.port}"
   """END CLOUDFLARE UTILS METHODS"""
 
   """RETRIEVE CLOUDFLARE SPECIFIC CONFIGURATION_PARAMETERS"""
@@ -35,6 +36,16 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       # endpoints. Because this method is used by the property method app_url_cloudflare it was
       # called during the search
       return self.get_tunnel_engine_parameters().get("CLOUDFLARE_TOKEN")
+    
+    def get_cloudflare_protocol(self):
+      """
+      Retrieve the Cloudflare protocol from the configuration parameters.
+      If not set, it returns "http".
+      """
+      protocol = self.get_tunnel_engine_parameters().get("CLOUDFLARE_PROTOCOL")
+      if protocol is None:
+        protocol = "http"
+      return protocol
   """END RETRIEVE CLOUDFLARE SPECIFIC CONFIGURATION_PARAMETERS"""
 
   """BASE CLASS METHODS"""

@@ -313,7 +313,10 @@ class _SemaphoredPairedPluginMixin(object):
     """
     Set the readiness flag to signal that this plugin is ready.
 
-    Use this method instead of directly setting self._semaphore_ready = True.
+    This method delegates to set_plugin_ready(True) from _PluginReadinessMixin,
+    which provides unified readiness for both semaphore and chainstore mechanisms.
+
+    Use this method instead of directly setting readiness flags.
     This is typically used by plugins with custom readiness conditions
     (e.g., Container App Runner after health checks pass).
 
@@ -334,7 +337,8 @@ class _SemaphoredPairedPluginMixin(object):
       self._semaphore_set_ready_flag()  # Signal readiness for auto-signal
     ```
     """
-    self._semaphore_ready = True
+    # Delegate to unified readiness (triggers both semaphore AND chainstore)
+    self.set_plugin_ready(True)
     return
 
 
@@ -348,7 +352,7 @@ class _SemaphoredPairedPluginMixin(object):
     Calling this method will:
     - Clear the semaphore (signal to consumers that service is down)
     - Reset the _semaphore_signaled flag (allow re-signaling)
-    - Reset the _semaphore_ready flag (if using custom readiness)
+    - Reset unified readiness to False (deferred state)
 
     Returns
     -------
@@ -370,9 +374,8 @@ class _SemaphoredPairedPluginMixin(object):
     # Reset flags to allow re-signaling after restart
     self._semaphore_signaled = False
 
-    # Reset custom readiness flag if it exists
-    if hasattr(self, '_semaphore_ready'):
-      self._semaphore_ready = False
+    # Reset unified readiness to deferred state (requires explicit set_plugin_ready(True))
+    self.set_plugin_ready(False)
 
     return
 

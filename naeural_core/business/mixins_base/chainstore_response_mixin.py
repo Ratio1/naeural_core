@@ -16,33 +16,33 @@ inheriting from multiple specialized classes. The mixin provides:
 2. Strategy Pattern: Subclasses can override _get_chainstore_response_data()
 3. Observer Pattern: Chainstore acts as the message broker for observers
 
-Usage:
-------
-1. Inherit from this mixin in your plugin class
-2. Call _reset_chainstore_response() at the START of plugin initialization
-3. Call _send_chainstore_response() at the END of successful initialization
-4. Optionally override _get_chainstore_response_data() for custom response data
-5. Configure via CHAINSTORE_RESPONSE_KEY in plugin config
+Usage (Automatic - via BasePluginExecutor):
+-------------------------------------------
+This mixin is automatically included in BasePluginExecutor. For simple plugins,
+no action is required - chainstore response is sent automatically after on_init().
 
-Example:
---------
+For complex plugins that need deferred readiness (containers, APIs, etc.):
 ```python
-class MyPlugin(BasePluginBiz, _ChainstoreResponseMixin):
-  _CONFIG = {
-    **BasePluginBiz.CONFIG,
-    'CHAINSTORE_RESPONSE_KEY': None,
-  }
-
+class MyComplexPlugin(BasePlugin):
   def on_init(self):
     super().on_init()
-    # Reset the key at start
-    self._reset_chainstore_response()
+    self.set_plugin_ready(False)  # Defer until truly ready
+    # ... start async initialization ...
 
-    # ... plugin initialization ...
+  def _after_service_ready(self):
+    self.set_plugin_ready(True)  # Triggers auto-send
+```
 
-    # Send confirmation once after successful init
-    self._send_chainstore_response()
-    return
+For custom response data:
+```python
+class MyPlugin(BasePlugin):
+  def _get_chainstore_response_data(self):
+    data = super()._get_chainstore_response_data()
+    data.update({
+      'api_port': self.cfg_port,
+      'custom_field': self.custom_value,
+    })
+    return data
 ```
 
 Architecture Benefits:
@@ -53,6 +53,7 @@ Architecture Benefits:
 4. Testability: Mixin can be tested independently
 5. Composability: Can be mixed with other functionality mixins
 6. Simplicity: Single write - no retries, no confirmations
+7. Process Loop Pattern: Like semaphore, checks readiness in _process()
 
 Configuration:
 -------------
@@ -79,8 +80,71 @@ class _ChainstoreResponseMixin:
   The mixin uses the Template Method pattern to provide a standard flow while
   allowing subclasses to customize the response data through hook methods.
 
-  Key principle: Reset at start, set once at end.
+  Key principle: Reset at start, send when ready (via process loop).
   """
+
+  def __init__(self):
+    """
+    Initialize chainstore response state variables.
+
+    State variables:
+      - _is_plugin_ready: Flag indicating plugin readiness (default None = not set)
+      - _chainstore_response_sent: Prevents duplicate sends
+    """
+    self._is_plugin_ready = None
+    self._chainstore_response_sent = False
+    super(_ChainstoreResponseMixin, self).__init__()
+    return
+
+
+  def set_plugin_ready(self, ready=True):
+    """
+    Set plugin readiness state for chainstore response.
+
+    Simple plugins don't need to call this - default is ready.
+    Complex plugins (containers, APIs) should:
+      1. Call set_plugin_ready(False) in on_init() to defer
+      2. Call set_plugin_ready(True) when truly ready
+
+    Args:
+        ready (bool): True when plugin is ready, False to defer.
+    """
+    self._is_plugin_ready = ready
+    return
+
+
+  def _chainstore_maybe_auto_send(self):
+    """
+    Automatically send chainstore response when plugin is ready.
+
+    Called from process loop (_process). Sends only once.
+    This follows the same pattern as _semaphore_maybe_auto_signal().
+
+    Readiness logic:
+      - None: not set, use default (ready after init finalized)
+      - False: explicitly deferred, wait for set_plugin_ready(True)
+      - True: explicitly ready
+    """
+    # No key configured
+    if not self._should_send_chainstore_response():
+      return
+
+    # Already sent
+    if self._chainstore_response_sent:
+      return
+
+    # Plugin explicitly deferred
+    if self._is_plugin_ready is False:
+      return
+
+    # Init not finalized yet
+    if not getattr(self, '_init_process_finalized', False):
+      return
+
+    # Ready - send response (None or True)
+    if self._send_chainstore_response():
+      self._chainstore_response_sent = True
+
 
   def _get_chainstore_response_key(self):
     """
@@ -99,8 +163,7 @@ class _ChainstoreResponseMixin:
     Template method hook: Build the response data dictionary.
 
     This method can be overridden by subclasses to provide custom response data.
-    The default implementation returns a basic structure that should be
-    extended by specialized plugins.
+    The default implementation returns base plugin information.
 
     Design Pattern: Template Method Pattern
     - This is the "hook" method that subclasses can override
@@ -124,13 +187,31 @@ class _ChainstoreResponseMixin:
         Never include sensitive data like passwords, private keys, or tokens
         in the response data. This data may be visible to multiple nodes.
     """
-    # Base implementation provides minimal structure
-    # Subclasses should override and extend this
-    return {
+    # Basic data always available
+    data = {
       'plugin_signature': self.__class__.__name__,
       'instance_id': getattr(self, 'cfg_instance_id', None),
       'timestamp': self.time_to_str(self.time()) if hasattr(self, 'time_to_str') else None,
     }
+
+    # Add base plugin fields if available (from BasePluginExecutor)
+    if hasattr(self, '_stream_id'):
+      data['stream_id'] = self._stream_id
+
+    if hasattr(self, '__version__'):
+      data['plugin_version'] = self.__version__
+
+    if hasattr(self, 'ee_id'):
+      data['node_id'] = self.ee_id
+
+    if hasattr(self, 'ee_addr'):
+      data['node_addr'] = self.ee_addr
+
+    # Default status (can be overridden by subclasses)
+    if 'status' not in data:
+      data['status'] = 'ready'
+
+    return data
 
   def _should_send_chainstore_response(self):
     """

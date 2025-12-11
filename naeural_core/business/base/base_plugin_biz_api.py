@@ -64,6 +64,8 @@ class _BasePluginAPIMixin:
     """
     # Auto-signal semaphore if configured
     self._semaphore_maybe_auto_signal()
+    # Auto-send chainstore response if configured
+    self._chainstore_maybe_auto_send()
     return self.process()
 
   

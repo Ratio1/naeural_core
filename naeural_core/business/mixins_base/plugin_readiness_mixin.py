@@ -99,10 +99,8 @@ class _PluginReadinessMixin:
     bool
         True if plugin is ready, False otherwise
     """
-    if self._is_plugin_ready is False:
-      return False
-    if self._is_plugin_ready is True:
-      return True
+    if isinstance(self._is_plugin_ready, bool):
+      return self._is_plugin_ready
     return self._get_default_readiness()
 
 

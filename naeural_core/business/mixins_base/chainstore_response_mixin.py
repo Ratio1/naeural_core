@@ -170,14 +170,13 @@ class _ChainstoreResponseMixin:
     """
     # Basic data always available
     data = {
-      'plugin_signature': self.__class__.__name__,
-      'instance_id': getattr(self, 'cfg_instance_id', None),
+      'plugin_signature': self.get_signature(),
+      'instance_id': self.get_instance_id(),
       'timestamp': self.time_to_str(self.time()) if hasattr(self, 'time_to_str') else None,
     }
 
-    # Add base plugin fields if available (from BasePluginExecutor)
-    if hasattr(self, '_stream_id'):
-      data['stream_id'] = self._stream_id
+    # Add base plugin fields (from BasePluginExecutor)
+    data['stream_id'] = self.get_stream_id()
 
     if hasattr(self, '__version__'):
       data['plugin_version'] = self.__version__
@@ -191,6 +190,7 @@ class _ChainstoreResponseMixin:
     # Default status (can be overridden by subclasses)
     if 'status' not in data:
       data['status'] = 'ready'
+      data['is_ready'] = True
 
     return data
 

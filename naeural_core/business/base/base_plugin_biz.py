@@ -1764,6 +1764,11 @@ class BasePluginExecutor(
       if self.__first_process_time is None:
         self.__first_process_time = time()
 
+      # Auto-signal semaphore if configured
+      self._semaphore_maybe_auto_signal()
+      # Auto-send chainstore response if configured
+      self._chainstore_maybe_auto_send()
+
       self._recalc_plugin_resolution()
 
       self._reset_last_process_time()  # reset time as we call it next

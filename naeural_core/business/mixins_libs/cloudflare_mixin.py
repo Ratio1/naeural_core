@@ -2,7 +2,8 @@ from naeural_core.business.mixins_base.tunnel_engine_mixin import _TunnelEngineM
 
 
 CLOUDFLARE_DEFAULT_PARAMETERS = {
-  "CLOUDFLARE_TOKEN": None
+  "CLOUDFLARE_TOKEN": None,
+  "CLOUDFLARE_PROTOCOL": "http",
 }
 
 

@@ -172,20 +172,14 @@ class _ChainstoreResponseMixin:
     data = {
       'plugin_signature': self.get_signature(),
       'instance_id': self.get_instance_id(),
-      'timestamp': self.time_to_str(self.time()) if hasattr(self, 'time_to_str') else None,
+      'timestamp': self.time_to_str(self.time()),
     }
 
     # Add base plugin fields (from BasePluginExecutor)
     data['stream_id'] = self.get_stream_id()
-
-    if hasattr(self, '__version__'):
-      data['plugin_version'] = self.__version__
-
-    if hasattr(self, 'ee_id'):
-      data['node_id'] = self.ee_id
-
-    if hasattr(self, 'ee_addr'):
-      data['node_addr'] = self.ee_addr
+    data['plugin_version'] = self.__version__
+    data['node_id'] = self.ee_id
+    data['node_addr'] = self.ee_addr
 
     # Default status (can be overridden by subclasses)
     if 'status' not in data:

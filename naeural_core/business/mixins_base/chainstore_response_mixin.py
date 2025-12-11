@@ -186,7 +186,41 @@ class _ChainstoreResponseMixin:
       data['status'] = 'ready'
       data['is_ready'] = True
 
+    # Merge optional custom fields without forcing subclasses to override this method
+    extra = {}
+    try:
+      extra = self.get_chainstore_response()
+      if extra is None:
+        extra = {}
+      elif not isinstance(extra, dict):
+        self.P(
+          f"get_chainstore_response() must return a dict, got {type(extra)}",
+          color='r'
+        )
+        extra = {}
+    except Exception as exc:
+      self.P(f"Error in get_chainstore_response(): {exc}", color='r')
+      extra = {}
+
+    data.update(extra)
     return data
+
+
+  def get_chainstore_response(self):
+    """
+    Public hook to add custom fields to chainstore response data.
+
+    Override this method to append additional JSON-serializable fields
+    without replacing the standard response keys provided by
+    _get_chainstore_response_data().
+
+    Returns
+    -------
+    dict
+        Extra fields to merge into the response (default: {}).
+    """
+    return {}
+
 
   def _should_send_chainstore_response(self):
     """
@@ -254,7 +288,7 @@ class _ChainstoreResponseMixin:
       self.P(f"Error resetting chainstore key '{response_key}': {e}", color='r')
       return False
 
-  def _send_chainstore_response(self, custom_data=None):
+  def _send_chainstore_response(self):
     """
     Send plugin response data to chainstore (single write).
 
@@ -267,10 +301,7 @@ class _ChainstoreResponseMixin:
     - Delegates data building to hook method (_get_chainstore_response_data)
 
     Args:
-        custom_data (dict, optional): Additional data to merge into response.
-            If provided, will be merged with default response data.
-            This allows callers to add context-specific information without
-            overriding _get_chainstore_response_data().
+        None
 
     Returns:
         bool: True if response was sent successfully, False otherwise.
@@ -279,12 +310,6 @@ class _ChainstoreResponseMixin:
         ```python
         # Send default response data
         self._send_chainstore_response()
-
-        # Send with additional context
-        self._send_chainstore_response(custom_data={
-          'deployment_status': 'ready',
-          'health_check_passed': True,
-        })
         ```
 
     Implementation Notes:
@@ -303,16 +328,6 @@ class _ChainstoreResponseMixin:
     # Build response data using template method hook
     try:
       response_data = self._get_chainstore_response_data()
-
-      # Merge custom data if provided
-      if custom_data is not None:
-        if not isinstance(custom_data, dict):
-          self.P(
-            f"custom_data must be a dict, got {type(custom_data)}",
-            color='r'
-          )
-        else:
-          response_data.update(custom_data)
 
     except Exception as e:
       self.P(

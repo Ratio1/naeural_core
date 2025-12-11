@@ -62,8 +62,6 @@ class _BasePluginAPIMixin:
     Payload.
 
     """
-    # Auto-signal semaphore if configured
-    self._semaphore_maybe_auto_signal()
     return self.process()
 
   

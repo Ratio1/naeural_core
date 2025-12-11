@@ -37,7 +37,9 @@ from naeural_core.business.mixins_base import (
   _GenericUtilsApiMixin, _DiskAPIMixin, _DeAPIMixin,
   _DatasetBuilderMixin, _StateMachineAPIMixin,
 )
+from naeural_core.business.mixins_base.plugin_readiness_mixin import _PluginReadinessMixin
 from naeural_core.business.mixins_base.semaphored_paired_plugin_mixin import _SemaphoredPairedPluginMixin
+from naeural_core.business.mixins_base.chainstore_response_mixin import _ChainstoreResponseMixin
 
 from naeural_core.utils.mixins.code_executor import _CodeExecutorMixin
 
@@ -66,7 +68,7 @@ _CONFIG = {
   'DISABLED': False,
   
   'CHAINSTORE_PEERS' : [], # list of peers to be used for chainstore and will enable distribution even to non-whitelisted peers
-  
+  'CHAINSTORE_RESPONSE_KEY': None,  # key for plugin lifecycle confirmations to chainstore
 
   # set this to 1 for real time processing (data will be lost and only latest data be avail)
   # when PROCESS_DELAY is used this should be either bigger than 1 if we want to have previous data
@@ -350,7 +352,9 @@ class BasePluginExecutor(
   _BasePluginLoopMixin,
   _BasePluginAPIMixin,
   _StateMachineAPIMixin,
+  _PluginReadinessMixin,
   _SemaphoredPairedPluginMixin,
+  _ChainstoreResponseMixin,
 ):
   CONFIG = _CONFIG
 
@@ -1765,6 +1769,12 @@ class BasePluginExecutor(
       self._reset_last_process_time()  # reset time as we call it next
       self.start_timer('process')
       self._payload = self._process()
+
+      # Auto-signal semaphore if configured
+      self._semaphore_maybe_auto_signal()
+      # Auto-send chainstore response if configured
+      self._chainstore_maybe_auto_send()
+
       self.stop_timer('process')
       self.stop_timer('process_wrapper')
       return

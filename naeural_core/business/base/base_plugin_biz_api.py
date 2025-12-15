@@ -405,6 +405,7 @@ class _BasePluginAPIMixin:
     chainstore_get : Retrieve a value from chain storage
     chainstore_hset : Store a value in a hash set within chain storage
     """
+    self.start_timer("chainstore_set")
     memory = self.__chainstorage_memory()
     result = False
     try:
@@ -431,19 +432,21 @@ class _BasePluginAPIMixin:
       if func is not None:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")
-        self.start_timer("chainstore_set")
         result = func(
           key, value, 
           readonly=readonly, token=token, peers=specific_peers, debug=debug
         )
         elapsed = self.end_timer("chainstore_set")        
         if debug:
-          self.P(" ====> `chainstore_set` elapsed time: {:.6f}".format(elapsed), color="green")
+          self.P(" ====> `chainstore_set`in {:.4f}s".format(elapsed), color="green")
       else:
+        elapsed = self.end_timer("chainstore_set")
         if debug:
-          self.P("No chain storage set function found", color="red")
+          self.P("No chain storage set function found in {:.4f}s".format(elapsed), color="red")
     except Exception as ex:
-      self.P("Error in chainstore_set: {}".format(ex), color="red")
+      elapsed = self.end_timer("chainstore_set")
+      msg = "Error in chainstore_set: {} after {:.4f}s".format(ex, elapsed)
+      self.P(msg, color="red")      
     return result
   
   
@@ -459,6 +462,7 @@ class _BasePluginAPIMixin:
     token : any, optional
       Token, by default None
     """
+    self.start_timer("chainstore_get")
     memory = self.__chainstorage_memory()
     self.__maybe_wait_for_chain_state_init()
     value = None
@@ -476,14 +480,17 @@ class _BasePluginAPIMixin:
       func = memory.get('__chain_storage_get')
       if func is not None:
         value = func(key, token=token, debug=debug)
+        elapsed = self.end_timer("chainstore_get")
         if debug:
-          self.P("Getting data: {} -> {}".format(key, value), color="green")
+          self.P("====> `chainstore_get`: {} -> {} in {:.4f}s".format(key, value, elapsed))
       else:
+        elapsed = self.end_timer("chainstore_get")
         if debug:
-          self.P("No chain storage get function found", color="red")
+          self.P("No chain storage get function found in {:.4f}s".format(elapsed), color="red")
     except Exception as ex:
-      msg = "Error in chainstore_get: {}".format(ex)
-      self.P("Error in chainstore_get: {}".format(ex), color="red")
+      elapsed = self.end_timer("chainstore_get")  
+      msg = "Error in chainstore_get: {} after {:.4f}s".format(ex, elapsed)
+      self.P(msg, color="red")
     return value
 
   

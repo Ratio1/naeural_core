@@ -808,6 +808,21 @@ class BCWrapper:
     """
     return self.__bc.web3_get_addresses_balances(addresses=addresses)
   
+  def get_user_escrow_details(self, address: str):
+    """
+    Get the escrow details for a wallet address.
+
+    Parameters
+    ----------
+    address : str
+        The address of the wallet
+
+    Returns
+    -------
+    dict
+        The escrow details for the provided wallet address.
+    """
+    return self.__bc.web3_get_user_escrow_details(address=address)
   
   def get_evm_net_data(self):
     evm_net = self.get_evm_network()

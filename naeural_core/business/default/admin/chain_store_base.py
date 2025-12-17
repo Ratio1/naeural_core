@@ -306,6 +306,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     
     """
+    if not isinstance(key, str) or len(key) == 0:
+      raise ValueError("Key must be a non-empty string.")
     where = "FROM_LOCAL: " if not local_sync_storage_op else "FROM_REMOTE: "
     debug = debug or self.cfg_chain_store_debug
     debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
@@ -401,6 +403,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   def _get_value(self, key, token=None, get_owner=False, debug=False):
     """ This method is called to get a value from the chain storage """
+    # TODO: Check if this constraint could break anything.
+    # if not isinstance(key, str) or len(key) == 0:
+    #   raise ValueError("Key must be a non-empty string.")
+
     debug = debug or self.cfg_chain_store_debug
     if debug:
       self.P(f" === Getting value for key {key}")

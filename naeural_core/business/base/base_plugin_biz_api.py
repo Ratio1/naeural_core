@@ -509,17 +509,30 @@ class _BasePluginAPIMixin:
     This is a basic implementation of a hash get operation in the chain storage.
     It uses a hash-based string composition to create a composed key.
     """
+    start_1 = self.time()
     composed_key = self.__hset_key(hkey, key)
-    return self.chainstore_get(composed_key, token=token, debug=debug)
-  
+    elapsed_1 = self.time() - start_1
+    start_2 = self.time()
+    result = self.chainstore_get(composed_key, token=token, debug=debug)
+    elapsed_2 = self.time() - start_2
+    if debug:
+      self.P(f"HGET: '{composed_key}' (index_time={elapsed_1:.4f}s, get_time={elapsed_2:.4f}s)")
+    return result  
 
   def chainstore_hset(self, hkey, key, value, readonly=False, token=None, debug=False, extra_peers=[]):
     """
     This is a basic implementation of a hash set operation in the chain storage.
     It uses a hash-based string composition to create a composed key.
     """
+    start_1 = self.time()
     composed_key = self.__hset_key(hkey, key)
-    return self.chainstore_set(composed_key, value, readonly=readonly, token=token, debug=debug, extra_peers=extra_peers)
+    elapsed_1 = self.time() - start_1
+    start_2 = self.time()
+    result = self.chainstore_set(composed_key, value, readonly=readonly, token=token, debug=debug, extra_peers=extra_peers)
+    elapsed_2 = self.time() - start_2
+    if debug:
+      self.P(f"HSET: '{composed_key}' (index_time={elapsed_1:.4f}s, set_time={elapsed_2:.4f}s)")
+    return result
 
   
   def chainstore_hlist(self, hkey : str, token=None, debug=False):

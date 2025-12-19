@@ -21,7 +21,7 @@ _CONFIG = {
   **BasePluginExecutor.CONFIG,
   'ALLOW_EMPTY_INPUTS': True,
   'RUN_WITHOUT_IMAGE': True,
-  'PROCESS_DELAY': 5,
+  'PROCESS_DELAY': 0,
   
   'GIT_REQUEST_DELAY': 60 * 10,  # 10 minutes
 

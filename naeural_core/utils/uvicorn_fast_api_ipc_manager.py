@@ -222,24 +222,3 @@ class UvicornPluginComms:
     )
     return
 
-  async def _read_from_plugin(self):
-    """
-    Starts the task of continuously reading messages from the business plugin.
-    When a message is recieved, the corresponding request created by
-    call_plugin will be signaled to resume and read the reply from the _commands
-    dict.
-
-    This is internal to the functioning of the communicator and should NOT be
-    directly called by users.
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    None
-    """
-    while True:
-      await asyncio.sleep(3600)
-

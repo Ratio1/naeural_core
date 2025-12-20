@@ -16,6 +16,8 @@ from naeural_core.utils.fastapi_utils import PostponedRequest
 
 __VER__ = '0.0.0'
 
+DEFAULT_REQUEST_TIMEOUT = 2 * 60  # seconds
+
 _CONFIG = {
   **BasePlugin.CONFIG,
   'TUNNEL_ENGINE_ENABLED': True,
@@ -574,11 +576,14 @@ class FastApiWebAppPlugin(BasePlugin):
 
     profile.setdefault('slice_count', 0)
     profile.setdefault('exec_total_ns', 0)
-    profile['t_slice_start_ns'] = time.perf_counter_ns()
+    t_slice_start = time.perf_counter_ns()
+    profile.setdefault('t_endpoint_start_ns', t_slice_start)
+    profile['t_slice_start_ns'] = t_slice_start
     return
 
   def _profile_slice_end(self, profile):
     slice_end = time.perf_counter_ns()
+    profile['t_endpoint_end_ns'] = slice_end
     slice_start = profile.get('t_slice_start_ns')
     if isinstance(slice_start, int) and slice_end >= slice_start:
       profile['t_slice_end_ns'] = slice_end
@@ -611,9 +616,9 @@ class FastApiWebAppPlugin(BasePlugin):
         return (target - start) / 1e6
       return None
 
-    endpoint_end = profile.get('t_slice_end_ns')
-    exec_total_ns = profile.get('exec_total_ns')
-    endpoint_start = endpoint_end - exec_total_ns if endpoint_end and exec_total_ns else None
+    endpoint_start = profile.get('t_endpoint_start_ns')
+    endpoint_end = profile.get('t_endpoint_end_ns') or profile.get('t_slice_end_ns')
+
     detailed = {
       'until_call_plugin_start': _from_start(profile.get('t_before_call_plugin_ns')),
       'until_put_start': _from_start(profile.get('t_put_start_ns')),

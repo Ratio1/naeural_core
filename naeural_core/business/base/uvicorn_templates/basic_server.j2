@@ -19,7 +19,6 @@ import tempfile
 import uuid
 import os
 import shutil
-from fastapi import UploadFile, File, Form
 import aiofiles
 
 
@@ -69,7 +68,7 @@ Clock domains
 
 Uvicorn/FastAPI-side markers
 ----------------------------
-- `t_http_start_ns` / `t_http_start_wall_ns`: captured at the very start of the route handler.
+- `t_http_start_ns`: captured at the very start of the route handler.
 - `t_before_call_plugin_ns`: right before IPC call (`eng.call_plugin(...)`).
 - `t_after_call_plugin_ns`: immediately after IPC returns.
 - `t_before_return_ns`: immediately before returning the HTTP response from the route.
@@ -136,7 +135,6 @@ def _start_profile(endpoint_name: str) -> dict | None:
     return {
         "endpoint": endpoint_name,
         "t_http_start_ns": time.perf_counter_ns(),
-        "t_http_start_wall_ns": time.time_ns(),
     }
 
 async def _profiled_call_plugin(endpoint_name: str, call_plugin_args: List, profile: dict | None):

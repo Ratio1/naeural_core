@@ -82,6 +82,15 @@ class FastApiWebAppPlugin(BasePlugin):
   def uvicorn_server_started(self):
     return self.__uvicorn_server_started
 
+  def get_request_timeout(self):
+    configured_request_timeout = self.cfg_request_timeout
+    if not isinstance(configured_request_timeout, (int, float)):
+      return None
+    numeric_timeout = float(configured_request_timeout)
+    if numeric_timeout <= 0:
+      return None
+    return numeric_timeout
+
   @staticmethod
   def endpoint(
       func=None, *,
@@ -769,7 +778,7 @@ class FastApiWebAppPlugin(BasePlugin):
       'default_route': default_route,
       'profile_rate': float(self.cfg_profile_rate or 0.0),
       'profile_log_per_request': bool(self.cfg_profile_log_per_request),
-      'request_timeout': int(self.cfg_request_timeout or DEFAULT_REQUEST_TIMEOUT),
+      'request_timeout': self.get_request_timeout(),
       **cfg_jinja_args,
     }
 

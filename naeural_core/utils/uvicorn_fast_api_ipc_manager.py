@@ -1,4 +1,8 @@
 import asyncio
+import os
+import queue
+import threading
+import time
 import uuid
 import multiprocessing
 from multiprocessing.managers import SyncManager
@@ -55,7 +59,7 @@ class UvicornPluginComms:
   FastAPI endpoints can call the call_plugin method to deliver and receive
   requests from the associated business plugin.
   """
-  def __init__(self, port, auth):
+  def __init__(self, port, auth, timeout_s=120):
     """
     Initializer for the UvicornPluginComms.
 
@@ -64,18 +68,27 @@ class UvicornPluginComms:
     port: int, port value used for commuication with the business plugin
     auth: str, string value used for authenticating and establishing
       communications with the business plugin.
+    timeout_s: float, timeout in seconds to wait for a response from the business plugin
+      before returning a timeout error.
     Returns
     -------
     None
     """
-    self.manager = get_client_manager(
-      port=port, auth=auth
-    )
+    self.manager = get_client_manager(port=port, auth=auth)
+    self._server_queue = self.manager.get_server_queue()
+    self._client_queue = self.manager.get_client_queue()
+
     self._commands = {}
     self._reads_messages = False
+    self._loop = None
+
+    self._stop_reader = threading.Event()
+    self._reader_thread = None
+
+    self._response_timeout_s = timeout_s
     return
 
-  async def call_plugin(self, *request):
+  async def call_plugin(self, *request, profile=None):
     """
     Calls the business plugin with the supplied method and arguments.
 
@@ -87,82 +100,125 @@ class UvicornPluginComms:
 
     Returns
     -------
+    tuple (Any, list[time measurements]), where:
     Any - the reply from the business plugin for this request
+    list[time measurements] - list of time measurements taken at
+      various points in the call_plugin method for performance
+      measurement purposes.
 
     Example
     -------
     await comms.call_plugin('foo', 'bar', 'baz') will call the
     business plugin method 'foo' with arguments 'bar' and 'baz'.
     """
-    # Generate a uuid for the current message and an event that can be
-    # used to signal that the request has been completed.
     event = asyncio.Event()
-    ee_uuid = uuid.uuid4()
-    ee_uuid = str(ee_uuid)[:8]
+    ee_uuid = uuid.uuid4().hex
 
     # Add an entry with the current uuid, event and a placeholder for
     # the reply ('value') so that the communication even loop can
     # signal the work being completed.
+    profile_obj = profile if isinstance(profile, dict) else None
+    if profile_obj is not None:
+      profile_obj.setdefault("req_id", ee_uuid)
+
     self._commands[ee_uuid] = {
-      'value' : None,
-      'event' : event
+      'value': None,
+      'event': event,
+      'profile_data': None,
+      'profile_obj': profile_obj,
     }
 
-    # Send the request to the business plugin.
-    self.manager.get_server_queue().put({
-      'id' : ee_uuid,
-      'value' : request
-    })
-
     if not self._reads_messages:
-      # Insert the event processing task into the current even loop if we've
-      # not already done that. This needs to be done after the event loop
-      # has already been started, which is why we need to do it here.
       self._reads_messages = True
-      loop = asyncio.get_running_loop()
-      asyncio.ensure_future(self._read_from_plugin(), loop=loop)
-    #endif maybe start even loop
+      self._loop = asyncio.get_running_loop()
+      self._start_reader_thread()
 
-    # Yield until we've received a reply back from the business plugin.
-    await event.wait()
+    t_put_wall_ns = time.time_ns() if profile_obj is not None else None
+    t_put_start_ns = time.perf_counter_ns() if profile_obj is not None else None
+    await asyncio.to_thread(
+      self._server_queue.put,
+      {
+        'id': ee_uuid,
+        'value': request,
+        'profile': profile_obj,
+        't_put_wall_ns': t_put_wall_ns,
+      }
+    )
+    t_put_end_ns = time.perf_counter_ns() if profile_obj is not None else None
+    if profile_obj is not None:
+      profile_obj["t_put_start_ns"] = t_put_start_ns
+      profile_obj["t_put_end_ns"] = t_put_end_ns
+      profile_obj["t_put_wall_ns"] = t_put_wall_ns
+      profile_obj["t_wait_start_ns"] = time.perf_counter_ns()
+
+    try:
+      await asyncio.wait_for(event.wait(), timeout=self._response_timeout_s)
+    except TimeoutError:
+      self._commands.pop(ee_uuid, None)
+      return {
+        "status_code": 504,
+        "result": "Timeout waiting for plugin response"
+      }
 
     # We now have a reply, retrieve the reply and cleanup our entry from the
     # commands dict.
-    response = self._commands[ee_uuid]['value']
+    record = self._commands[ee_uuid]
+    response = record['value']
+
+    if record.get("profile_obj") is not None:
+      record["profile_obj"]["t_wait_end_ns"] = time.perf_counter_ns()
+      response_profile = record.get("profile_data")
+      if isinstance(response_profile, dict):
+        record["profile_obj"].update(response_profile)
     del self._commands[ee_uuid]
     return response
 
-  async def _read_from_plugin(self):
-    """
-    Starts the task of continuously reading messages from the business plugin.
-    When a message is recieved, the corresponding request created by
-    call_plugin will be signaled to resume and read the reply from the _commands
-    dict.
+  def _start_reader_thread(self):
+    if self._reader_thread is not None:
+      return
 
-    This is internal to the functioning of the communicator and should NOT be
-    directly called by users.
+    def _reader():
+      while not self._stop_reader.is_set():
+        try:
+          message = self._client_queue.get(True, 0.25)
+        except queue.Empty:
+          continue
+        except Exception:
+          continue
 
-    Parameters
-    ----------
-    None
+        if self._loop is None:
+          continue
+        self._loop.call_soon_threadsafe(self._deliver_message, message)
 
-    Returns
-    -------
-    None
-    """
-    while True:
-      client_queue = self.manager.get_client_queue()
-      while not client_queue.empty():
-        message = client_queue.get()
-        ee_uuid = message['id']
-        record = self._commands[ee_uuid]
-        record['value'] = message['value']
-        record['event'].set()
-      #endwhile read all messages from the queue
+    self._reader_thread = threading.Thread(
+      target=_reader,
+      name="UvicornPluginCommsReader",
+      daemon=True
+    )
+    self._reader_thread.start()
+    return
 
-      # We've done all the work for now. Yield and look again for messages in
-      # 0.1 seconds
-      await asyncio.sleep(0.001)
-    #endwhile communicator loop
+  def _deliver_message(self, message):
+    try:
+      ee_uuid = message.get('id')
+      if ee_uuid not in self._commands:
+        return
+      record = self._commands[ee_uuid]
+      record['value'] = message.get('value')
+      record['profile_data'] = message.get('profile')
+      record['event'].set()
+    except Exception:
+      return
+
+  async def send_profile_event(self, profile):
+    if not isinstance(profile, dict):
+      return
+    await asyncio.to_thread(
+      self._server_queue.put,
+      {
+        "id": None,
+        "value": ("__profile__", profile),
+      }
+    )
     return
 

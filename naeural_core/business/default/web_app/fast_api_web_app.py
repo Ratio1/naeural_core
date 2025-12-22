@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 import inspect
+import time
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -14,6 +15,8 @@ from naeural_core.utils.fastapi_utils import PostponedRequest
 #  all responses should contain the data from __get_response
 
 __VER__ = '0.0.0'
+
+DEFAULT_REQUEST_TIMEOUT = 2 * 60  # seconds
 
 _CONFIG = {
   **BasePlugin.CONFIG,
@@ -40,7 +43,19 @@ _CONFIG = {
 
   "LOG_REQUESTS": False,
 
+  "REQUEST_TIMEOUT": DEFAULT_REQUEST_TIMEOUT,
+
   'PROCESS_DELAY': 0,
+
+  # Profiling knobs (propagated into the generated uvicorn app).
+  # `PROFILE_RATE` is the fraction of requests (0..1) that will be profiled.
+  'PROFILE_RATE': 1.0,
+  # Log aggregated timings every N seconds (0 disables periodic logs).
+  'PROFILE_LOG_INTERVAL': 10 * 60,
+  # If true, log each profiled request (high overhead).
+  'PROFILE_LOG_PER_REQUEST': True,
+  # If true, include detailed per-stage averages in periodic logs.
+  'PROFILE_LOG_DETAILED': True,
 
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES']
@@ -358,7 +373,12 @@ class FastApiWebAppPlugin(BasePlugin):
     # FIXME: move to setup_manager method
     self.manager_auth = b'abc'
     self._manager = get_server_manager(self.manager_auth)
+    self._server_queue = self._manager.get_server_queue()
+    self._client_queue = self._manager.get_client_queue()
     self.postponed_requests = self.deque()
+
+    self._profile_stats = {}
+    self._profile_last_log_ts = self.time()
 
     self.P("manager address: {}".format(self._manager.address))
     _, self.manager_port = self._manager.address
@@ -391,11 +411,12 @@ class FastApiWebAppPlugin(BasePlugin):
     return {
       'id': request_id,
       'value': request_value,
-      'endpoint_name': endpoint_name
+      'endpoint_name': endpoint_name,
+      'profile': None,
     }
 
   def parse_postponed_dict(self, request):
-    return request['id'], request['value'], request['endpoint_name']
+    return request['id'], request['value'], request['endpoint_name'], request.get('profile')
 
   def __fastapi_process_response(self, response):
     if self.cfg_response_format == 'RAW':
@@ -418,21 +439,24 @@ class FastApiWebAppPlugin(BasePlugin):
       'id': id,
       'value': self.__fastapi_process_response(value)
     }
-    self._manager.get_client_queue().put(response)
+    self._client_queue.put(response)
     return
 
   def _process(self):
-    super(FastApiWebAppPlugin, self)._process()
     new_postponed_requests = []
     while len(self.postponed_requests) > 0:
       request = self.postponed_requests.popleft()
-      id, value, endpoint_name = self.parse_postponed_dict(request)
+      id, value, endpoint_name, profile = self.parse_postponed_dict(request)
 
       method = value.get_solver_method()
       kwargs = value.get_method_kwargs()
 
       try:
+        if isinstance(profile, dict):
+          self._profile_slice_start(profile, endpoint_name, t_put_wall_ns=None)
         value = method(**kwargs)
+        if isinstance(profile, dict):
+          self._profile_slice_end(profile)
       except Exception as exc:
         self.P(
           f'Exception occurred while processing postponed request for {endpoint_name} with method {method.__name__} '
@@ -442,26 +466,48 @@ class FastApiWebAppPlugin(BasePlugin):
         value = {
           'error': str(exc)
         }
+        if isinstance(profile, dict):
+          self._profile_slice_end(profile)
 
       if isinstance(value, PostponedRequest):
-        new_postponed_requests.append(self.get_postponed_dict(
+        postponed = self.get_postponed_dict(
           request_id=id,
           request_value=value,
           endpoint_name=endpoint_name
-        ))
+        )
+        postponed['profile'] = profile
+        new_postponed_requests.append(postponed)
       else:
         if self.cfg_log_requests:
           self.P(f"Request {id} for {method} processed.")
-        self.__fastapi_handle_response(id, value)
+        response = {
+          'id': id,
+          'value': self.__fastapi_process_response(value),
+        }
+        if isinstance(profile, dict):
+          response['profile'] = profile
+        self._client_queue.put(response)
       # endif request is postponed
     # end while there are postponed requests
     for request in new_postponed_requests:
       self.postponed_requests.append(request)
     # endfor all new postponed requests
-    while not self._manager.get_server_queue().empty():
-      request = self._manager.get_server_queue().get()
-      id = request['id']
-      value = request['value']
+    while True:
+      try:
+        request = self._server_queue.get(False)
+      except Exception:
+        break
+      id = request.get('id')
+      value = request.get('value')
+      profile = request.get('profile')
+      t_put_wall_ns = request.get('t_put_wall_ns')
+
+      if isinstance(value, (list, tuple)) and len(value) > 0 and value[0] == "__profile__":
+        try:
+          self._handle_profile_event(value[1])
+        except Exception:
+          self.P(f"Failed handling profile event:\n{self.get_exception()}", color='r')
+        continue
 
       method = value[0]
       args = value[1:]
@@ -477,12 +523,15 @@ class FastApiWebAppPlugin(BasePlugin):
           for param in inspect.signature(endpoint).parameters.values()
         )
         if has_kwargs and args and isinstance(args[-1], dict):
-          # If the last argument is a dict, treat it as kwargs
           kwargs = args[-1]
           args = args[:-1]
         else:
           kwargs = {}
+        if isinstance(profile, dict):
+          self._profile_slice_start(profile, method, t_put_wall_ns=t_put_wall_ns)
         value = endpoint(*args, **kwargs)
+        if isinstance(profile, dict):
+          self._profile_slice_end(profile)
       except Exception as exc:
         self.P("Exception occured while processing\n"
                "Request: {}\nArgs: {}\nException:\n{}".format(
@@ -490,22 +539,188 @@ class FastApiWebAppPlugin(BasePlugin):
         value = {
           'error': str(exc)
         }
+        if isinstance(profile, dict):
+          self._profile_slice_end(profile)
 
       if isinstance(value, PostponedRequest):
         self.P(f"Postponing request {id} for {method}.")
-        self.postponed_requests.append(self.get_postponed_dict(
+        postponed = self.get_postponed_dict(
           request_id=id,
           request_value=value,
           endpoint_name=method
-        ))
+        )
+        postponed['profile'] = profile
+        self.postponed_requests.append(postponed)
       else:
         if self.cfg_log_requests:
           self.P(f"Request {id} for {method} processed.")
-        self.__fastapi_handle_response(id, value)
+        response = {
+          'id': id,
+          'value': self.__fastapi_process_response(value),
+        }
+        if isinstance(profile, dict):
+          response['profile'] = profile
+        self._client_queue.put(response)
       # endif request is postponed
-    # end while
+    # endwhile drain server queue
 
+    self._maybe_log_profile_stats()
+    super(FastApiWebAppPlugin, self)._process()
     return None
+
+  def _profile_slice_start(self, profile, endpoint_name, t_put_wall_ns=None):
+    profile.setdefault('endpoint', endpoint_name)
+    if isinstance(t_put_wall_ns, int):
+      profile.setdefault('t_put_wall_ns', t_put_wall_ns)
+      profile['t_plugin_dequeue_wall_ns'] = time.time_ns()
+
+    profile.setdefault('slice_count', 0)
+    profile.setdefault('exec_total_ns', 0)
+    t_slice_start = time.perf_counter_ns()
+    profile.setdefault('t_endpoint_start_ns', t_slice_start)
+    profile['t_slice_start_ns'] = t_slice_start
+    return
+
+  def _profile_slice_end(self, profile):
+    slice_end = time.perf_counter_ns()
+    profile['t_endpoint_end_ns'] = slice_end
+    slice_start = profile.get('t_slice_start_ns')
+    if isinstance(slice_start, int) and slice_end >= slice_start:
+      profile['t_slice_end_ns'] = slice_end
+      profile['slice_count'] = int(profile.get('slice_count', 0)) + 1
+      profile['exec_total_ns'] = int(profile.get('exec_total_ns', 0)) + (slice_end - slice_start)
+    return
+
+  def _handle_profile_event(self, profile):
+    if not isinstance(profile, dict):
+      return
+    if self.cfg_profile_rate <= 0:
+      return
+
+    endpoint = profile.get('endpoint') or 'unknown'
+    def _delta_ms(a, b):
+      if isinstance(a, int) and isinstance(b, int) and b >= a:
+        return (b - a) / 1e6
+      return None
+
+    total_ms = _delta_ms(profile.get('t_http_start_ns'), profile.get('t_before_return_ns'))
+    wait_ms = _delta_ms(profile.get('t_wait_start_ns'), profile.get('t_wait_end_ns'))
+    queue_ms = _delta_ms(profile.get('t_put_wall_ns'), profile.get('t_plugin_dequeue_wall_ns'))
+    exec_ms = None
+    if isinstance(profile.get('exec_total_ns'), int):
+      exec_ms = profile['exec_total_ns'] / 1e6
+
+    def _from_start(target):
+      start = profile.get('t_http_start_ns')
+      if isinstance(start, int) and isinstance(target, int) and target >= start:
+        return (target - start) / 1e6
+      return None
+
+    endpoint_start = profile.get('t_endpoint_start_ns')
+    endpoint_end = profile.get('t_endpoint_end_ns') or profile.get('t_slice_end_ns')
+
+    detailed = {
+      'until_call_plugin_start': _from_start(profile.get('t_before_call_plugin_ns')),
+      'until_put_start': _from_start(profile.get('t_put_start_ns')),
+      'until_put_end': _from_start(profile.get('t_put_end_ns')),
+      'until_wait_start': _from_start(profile.get('t_wait_start_ns')),
+      'until_endpoint_start': _from_start(endpoint_start),
+      # Here we use the slice end since the value should be from the last slice
+      'until_endpoint_end': _from_start(endpoint_end),
+      'until_wait_end': _from_start(profile.get('t_wait_end_ns')),
+      'until_call_plugin_end': _from_start(profile.get('t_after_call_plugin_ns')),
+      'until_return': _from_start(profile.get('t_before_return_ns')),
+    }
+
+    stats = self._profile_stats.get(endpoint)
+    if stats is None:
+      stats = {
+        'n': 0,
+        # short section
+        'sum_total_ms': 0.0,
+        'sum_wait_ms': 0.0,
+        'sum_queue_ms': 0.0,
+        'sum_exec_ms': 0.0,
+        'max_total_ms': 0.0,
+        # detailed section
+        'sum_until_call_plugin_start': 0.0,
+        'sum_until_put_start': 0.0,
+        'sum_until_put_end': 0.0,
+        'sum_until_wait_start': 0.0,
+        'sum_until_endpoint_start': 0.0,
+        'sum_until_endpoint_end': 0.0,
+        'sum_until_wait_end': 0.0,
+        'sum_until_call_plugin_end': 0.0,
+        'sum_until_return': 0.0
+      }
+      self._profile_stats[endpoint] = stats
+
+    stats['n'] += 1
+    if total_ms is not None:
+      stats['sum_total_ms'] += total_ms
+      if total_ms > stats['max_total_ms']:
+        stats['max_total_ms'] = total_ms
+    if wait_ms is not None:
+      stats['sum_wait_ms'] += wait_ms
+    if queue_ms is not None:
+      stats['sum_queue_ms'] += queue_ms
+    if exec_ms is not None:
+      stats['sum_exec_ms'] += exec_ms
+    for key, val in detailed.items():
+      sum_key = f"sum_{key}"
+      if val is not None and sum_key in stats:
+        stats[sum_key] += val
+
+    if self.cfg_profile_log_per_request:
+      base = f"<{endpoint}> timings(ms): t {total_ms:.2f} | w {wait_ms:.2f} | q {queue_ms:.2f} | e {exec_ms:.2f} | steps {profile.get('slice_count')}"
+      if self.cfg_profile_log_detailed:
+        detail = (
+          f" | detail call_start={detailed.get('until_call_plugin_start') or 0:.2f} "
+          f"put_s={detailed.get('until_put_start') or 0:.2f} put_e={detailed.get('until_put_end') or 0:.2f} "
+          f"wait_s={detailed.get('until_wait_start') or 0:.2f} ep_s={detailed.get('until_endpoint_start') or 0:.2f} "
+          f"ep_e={detailed.get('until_endpoint_end') or 0:.2f} wait_e={detailed.get('until_wait_end') or 0:.2f} "
+          f"call_e={detailed.get('until_call_plugin_end') or 0:.2f} ret={detailed.get('until_return') or 0:.2f}"
+        )
+        self.P(base + detail)
+      else:
+        self.P(base)
+    return
+
+  def _maybe_log_profile_stats(self):
+    if self.cfg_profile_rate <= 0:
+      return
+    interval = self.cfg_profile_log_interval
+    if not isinstance(interval, (int, float)) or interval <= 0:
+      return
+    now = self.time()
+    if now - self._profile_last_log_ts < interval:
+      return
+    self._profile_last_log_ts = now
+
+    if not self._profile_stats:
+      return
+
+    parts = []
+    for endpoint, stats in sorted(self._profile_stats.items()):
+      n = max(int(stats.get('n', 0)), 1)
+      avg_total = stats['sum_total_ms'] / n
+      avg_wait = stats['sum_wait_ms'] / n
+      avg_queue = stats['sum_queue_ms'] / n
+      avg_exec = stats['sum_exec_ms'] / n
+      max_total = stats.get('max_total_ms', 0.0)
+      parts.append(f"{endpoint}: n {n} | t {avg_total:.2f} | w {avg_wait:.2f} | q {avg_queue:.2f} | e {avg_exec:.2f} | max_t {max_total:.2f}")
+      if self.cfg_profile_log_detailed:
+        def _avg(name):
+          return stats.get(name, 0.0) / n
+        parts.append(
+          f"  detail: call_start={_avg('sum_until_call_plugin_start'):.2f} "
+          f"put_s={_avg('sum_until_put_start'):.2f} put_e={_avg('sum_until_put_end'):.2f} "
+          f"wait_s={_avg('sum_until_wait_start'):.2f} ep_s={_avg('sum_until_endpoint_start'):.2f} "
+          f"ep_e={_avg('sum_until_endpoint_end'):.2f} wait_e={_avg('sum_until_wait_end'):.2f} "
+          f"call_e={_avg('sum_until_call_plugin_end'):.2f} ret={_avg('sum_until_return'):.2f}"
+        )
+    self.P("FastAPI timings:\n" + "\n".join(parts))
+    return
 
   def on_close(self):
     self._manager.shutdown()
@@ -552,6 +767,9 @@ class FastApiWebAppPlugin(BasePlugin):
       'node_comm_params': self._node_comms_jinja_args,
       'debug_web_app': self.cfg_debug_web_app,
       'default_route': default_route,
+      'profile_rate': float(self.cfg_profile_rate or 0.0),
+      'profile_log_per_request': bool(self.cfg_profile_log_per_request),
+      'request_timeout': int(self.cfg_request_timeout or DEFAULT_REQUEST_TIMEOUT),
       **cfg_jinja_args,
     }
 

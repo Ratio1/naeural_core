@@ -65,17 +65,18 @@ class TRTServingLogger(trt.ILogger):
   A TensorRT-compatible wrapper around the EE logger so that TensorRT
   can provide logs.
   """
-  def __init__(self, logger):
+  def __init__(self, logger, allow_verbose : bool = False):
     trt.ILogger.__init__(self)
     self._logger = logger
+    self._allow_verbose = allow_verbose
     return
 
   def log(self, severity : trt.ILogger.Severity, msg : str):
-    if severity == trt.ILogger.VERBOSE:
-      # Skip verbose messages.
+    if severity == trt.ILogger.VERBOSE and not self._allow_verbose:
+      # Skip verbose messages unless explicitly enabled.
       return
     color = ct.COLORS.SERVING
-    self._logger.P('[TRT] ' + msg, color=color)
+    self._logger.P("[TRT] " + msg, color=color)
     return
 
   def get_base_logger(self):
@@ -603,7 +604,10 @@ class TensorRTModel(ModelBackendWrapper):
     import hashlib
     from google.protobuf.json_format import MessageToDict
 
-    trt_logger = TRTServingLogger(log)
+    trt_logger = TRTServingLogger(log, allow_verbose=True)
+    def _diag(msg, color=ct.COLORS.SERVING):
+      log.P(msg, color=color)
+      return
 
     path, config_path = TensorRTModel._get_engine_and_config_path(
       onnx_path,
@@ -615,10 +619,15 @@ class TensorRTModel(ModelBackendWrapper):
 
     # Load the ONNX model from disk just to get the input/output names
     # in the correct order.
+    onnx_source_path = onnx_path
     model_onnx = onnx.load(onnx_path)
 
     with open(onnx_path,'rb') as f:
       onnx_md5 = hashlib.md5(f.read()).hexdigest()
+    try:
+      onnx_size_bytes = os.path.getsize(onnx_path)
+    except OSError:
+      onnx_size_bytes = None
 
     # Gather input and output names from the onnx model.
     # We need to save these in order in the TensorRT engine
@@ -657,6 +666,65 @@ class TensorRTModel(ModelBackendWrapper):
           raise RuntimeError('Incompatible precision in ONNX model')
     #endif check onnx precision
 
+    device_index = device.index if isinstance(device, th.device) else device
+    if device_index is None and th.cuda.is_available():
+      try:
+        device_index = th.cuda.current_device()
+      except Exception:
+        device_index = None
+
+    device_props = None
+    if th.cuda.is_available() and device_index is not None:
+      try:
+        device_props = th.cuda.get_device_properties(device_index)
+      except Exception:
+        device_props = None
+
+    driver_version = None
+    if hasattr(th, "_C") and hasattr(th._C, "_cuda_getDriverVersion"):
+      try:
+        driver_version = th._C._cuda_getDriverVersion()
+      except Exception:
+        driver_version = None
+
+    diag_lines = ["TensorRT build diagnostics (setup)"]
+    diag_lines.append("  ONNX source: {}".format(onnx_source_path))
+    if onnx_source_path != onnx_path:
+      diag_lines.append("  ONNX build path: {}".format(onnx_path))
+    if onnx_size_bytes is not None:
+      diag_lines.append("  ONNX size: {:.03f} MB".format(onnx_size_bytes / 1024 / 1024))
+    diag_lines.append("  ONNX md5: {}".format(onnx_md5))
+    diag_lines.append("  Requested precision: {}".format("fp16" if half else "fp32"))
+    if model_precision is not None:
+      diag_lines.append("  ONNX metadata precision: {}".format(model_precision))
+    diag_lines.append("  Torch: {}, CUDA: {}, TensorRT: {}".format(
+      th.__version__,
+      th.version.cuda,
+      trt.__version__
+    ))
+    diag_lines.append("  CUDA available: {}, device_count: {}".format(
+      th.cuda.is_available(),
+      th.cuda.device_count() if th.cuda.is_available() else 0
+    ))
+    diag_lines.append("  CUDA driver version: {}".format(driver_version))
+    if device_props is not None:
+      diag_lines.append("  Device index: {}".format(device_index))
+      diag_lines.append("  Device name: {}".format(device_props.name))
+      diag_lines.append("  Device capability: {}.{}".format(
+        device_props.major,
+        device_props.minor
+      ))
+      diag_lines.append("  Device total memory: {:.01f} MB".format(
+        device_props.total_memory / 1024 / 1024
+      ))
+      diag_lines.append("  Device multiprocessors: {}".format(
+        device_props.multi_processor_count
+      ))
+    else:
+      diag_lines.append("  Device index: {}".format(device_index))
+      diag_lines.append("  Device properties: unavailable")
+    _diag("\n".join(diag_lines))
+
     metadata = {
       TensorRTModel.METADATA_ONNX_MD5 : onnx_md5,
       TensorRTModel.METADATA_INPUTS_KEY : input_names,
@@ -673,6 +741,16 @@ class TensorRTModel(ModelBackendWrapper):
     # Set up the tensor-rt framework boilerplate.
     builder = trt.Builder(trt_logger)
     config = builder.create_builder_config()
+    builder_lines = ["TensorRT builder platform"]
+    builder_lines.append("  fast_fp16: {}".format(
+      getattr(builder, "platform_has_fast_fp16", None)
+    ))
+    builder_lines.append("  fast_int8: {}".format(
+      getattr(builder, "platform_has_fast_int8", None)
+    ))
+    if hasattr(builder, "platform_has_tf32"):
+      builder_lines.append("  tf32: {}".format(getattr(builder, "platform_has_tf32")))
+    _diag("\n".join(builder_lines))
 
     # Set the workspace scratch memory size. Note that this is only
     # for one layer and the engine can use much more overall in an
@@ -691,15 +769,60 @@ class TensorRTModel(ModelBackendWrapper):
     network = builder.create_network(flag_mask)
     parser = trt.OnnxParser(network, trt_logger)
     if not parser.parse_from_file(onnx_path):
-      raise RuntimeError(f'Failed to load ONNX file: {onnx_path}')
+      parser_errors = []
+      for idx in range(parser.num_errors):
+        parser_errors.append(str(parser.get_error(idx)))
+      if parser_errors:
+        _diag("TensorRT ONNX parser errors:\n{}".format("\n".join(parser_errors)), color="r")
+      raise RuntimeError("Failed to load ONNX file: {}".format(onnx_path))
+    if parser.num_errors > 0:
+      parser_errors = []
+      for idx in range(parser.num_errors):
+        parser_errors.append(str(parser.get_error(idx)))
+      _diag("TensorRT ONNX parser warnings:\n{}".format("\n".join(parser_errors)))
     if half:
       config.set_flag(trt.BuilderFlag.FP16)
     for config_flag in builder_flags:
       config.set_flag(config_flag)
 
+    config_lines = ["TensorRT build config"]
+    config_lines.append("  Workspace size: {} GB".format(workspace_size))
+    config_lines.append("  Network flags: {}".format([str(flag) for flag in flags]))
+    config_flags = []
+    if half:
+      config_flags.append("FP16")
+    for config_flag in builder_flags:
+      config_flags.append(str(config_flag))
+    if hasattr(trt.BuilderFlag, "TF32") and config.get_flag(trt.BuilderFlag.TF32):
+      config_flags.append("TF32")
+    if config_flags:
+      config_lines.append("  Builder flags: {}".format(config_flags))
+    else:
+      config_lines.append("  Builder flags: []")
+    _diag("\n".join(config_lines))
+
     # Add the optimization profile.
     profile = builder.create_optimization_profile()
     inputs = [network.get_input(i) for i in range(network.num_inputs)]
+    io_lines = ["TensorRT network IO"]
+    io_lines.append("  Inputs: {}".format(network.num_inputs))
+    for input in inputs:
+      io_lines.append("    input: name={}, dtype={}, shape={}".format(
+        input.name,
+        input.dtype,
+        tuple(input.shape)
+      ))
+    io_lines.append("  Outputs: {}".format(network.num_outputs))
+    for i in range(network.num_outputs):
+      output = network.get_output(i)
+      io_lines.append("    output: name={}, dtype={}, shape={}".format(
+        output.name,
+        output.dtype,
+        tuple(output.shape)
+      ))
+    _diag("\n".join(io_lines))
+
+    profile_shapes = []
     for input in inputs:
       if input.shape[0] != -1:
         # Tensor doesn't have a dynamic batch dimension, ignore.
@@ -715,8 +838,21 @@ class TensorRTModel(ModelBackendWrapper):
         opt=opt_shape,
         max=max_shape
       )
+      profile_shapes.append((input.name, min_shape, opt_shape, max_shape))
     #endfor all inputs
     config.add_optimization_profile(profile)
+    if profile_shapes:
+      profile_lines = ["TensorRT optimization profiles"]
+      for name, min_shape, opt_shape, max_shape in profile_shapes:
+        profile_lines.append("  {}: min={}, opt={}, max={}".format(
+          name,
+          min_shape,
+          opt_shape,
+          max_shape
+        ))
+      _diag("\n".join(profile_lines))
+    else:
+      _diag("TensorRT optimization profiles: none (no dynamic batch inputs)")
 
     # Empty cache before building the engine.
     gc.collect()
@@ -728,18 +864,38 @@ class TensorRTModel(ModelBackendWrapper):
     try:
       if not hasattr(builder, 'build_engine'):
         # This is the TensorRT 10.0 API case where we don't have a build_engine
-        with builder.build_serialized_network(network, config) as engine, open(path, "wb") as t:
-          t.write(engine)
+        serialized_engine = builder.build_serialized_network(network, config)
+        if serialized_engine is None:
+          raise RuntimeError("TensorRT build_serialized_network returned None")
+        with open(path, "wb") as t:
+          t.write(serialized_engine)
+        _diag("TensorRT serialized engine size: {} bytes".format(
+          len(serialized_engine) if hasattr(serialized_engine, "__len__") else "unknown"
+        ))
       else:
         # This is the base case for TensorRT 8.6.1
-        with builder.build_engine(network, config) as engine, open(path, 'wb') as t:
+        engine = builder.build_engine(network, config)
+        if engine is None:
+          raise RuntimeError("TensorRT build_engine returned None")
+        serialized_engine = engine.serialize()
+        if serialized_engine is None:
+          raise RuntimeError("TensorRT engine serialization returned None")
+        with open(path, "wb") as t:
           # Write the serialized TensorRT engine.
-          t.write(engine.serialize())
+          t.write(serialized_engine)
+        _diag("TensorRT serialized engine size: {} bytes".format(
+          len(serialized_engine) if hasattr(serialized_engine, "__len__") else "unknown"
+        ))
       log.stop_timer(timer_build_id)
       log.P("TensorRT model build took {}".format(log.get_timer_mean(timer_build_id)))
     except Exception as e:
       log.stop_timer(timer_build_id)
-      raise RuntimeError(f"Failed to build TensorRT engine: {e}")
+      _diag(
+        "TensorRT build failed. If you see smVerHex2Dig assertions, verify GPU "
+        "compute capability and driver compatibility with this TensorRT build.",
+        color="r"
+      )
+      raise RuntimeError("Failed to build TensorRT engine: {}".format(e))
 
     with open(path,'rb') as f:
       engine_md5 = hashlib.md5(f.read()).hexdigest()

@@ -649,6 +649,7 @@ class UnifiedFirstStage(
       except Exception as exc:
         last_error = exc
         if strict_backend or not allow_fallback:
+          self.P("No fallback allowed, raising exception from backend {}: {}".format(backend, exc), color='error')
           raise
         next_backend = backend_order[idx + 1] if idx + 1 < len(backend_order) else None
         if next_backend is not None:

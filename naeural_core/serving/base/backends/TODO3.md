@@ -1,5 +1,7 @@
 # ThYf8s TRT failure fallback to TorchScript
 
+Main target source code directory: `naeural_core/serving/` with its subdirectories.
+
 ## Observations
 - `TensorRT build_engine returned None` after `smVerHex2Dig` assertion; RESULT1 shows `Device capability: 12.0` (RTX 5060) with TRT 8.6.1, which does not support SM 12.x and likely triggers the assertion before returning a valid engine.
 - `prepare_model` does not catch backend load exceptions, so a TRT failure aborts startup before `ths` can be tried even when the default backend order is `['trt', 'ths']`.

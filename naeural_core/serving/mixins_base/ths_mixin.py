@@ -61,6 +61,7 @@ class TorchscriptMixin:
     )
     model, config = self._load_torchscript(fn_path, device=self.dev)
     if self.cfg_fp16:
+      self.P("  Converting model to FP16...")
       model.half()
     err_keys = ['torch']
     env_versions = {

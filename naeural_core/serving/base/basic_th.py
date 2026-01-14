@@ -1,4 +1,5 @@
 import platform
+import re
 import torch as th
 import torchvision as tv
 
@@ -181,6 +182,83 @@ class UnifiedFirstStage(
       )
     )
 
+  def _parse_torch_cuda_arch_list(self, arch_list):
+    parsed = set()
+    normalized = []
+    for arch in arch_list:
+      if not isinstance(arch, str):
+        continue
+      normalized.append(arch)
+      match = re.match(r"^(sm|compute)_(\d+)[a-zA-Z]*$", arch)
+      if match is None:
+        continue
+      value = int(match.group(2))
+      major = value // 10
+      minor = value % 10
+      parsed.add((major, minor))
+    return parsed, normalized
+
+  def _torch_cuda_arch_preflight(self):
+    if self.dev is None or self.dev.type != "cuda":
+      return
+    try:
+      arch_list = th.cuda.get_arch_list()
+    except Exception as exc:
+      self.P(
+        "Torch CUDA arch preflight: unable to read torch.cuda.get_arch_list(): {}".format(exc),
+        color='y'
+      )
+      return
+
+    if not arch_list:
+      self.P(
+        "Torch CUDA arch preflight: torch.cuda.get_arch_list() returned empty; "
+        "unable to validate GPU compatibility.",
+        color='y'
+      )
+      return
+
+    parsed_arches, normalized_arches = self._parse_torch_cuda_arch_list(arch_list)
+    device_index = self.dev.index
+    if device_index is None:
+      try:
+        device_index = th.cuda.current_device()
+      except Exception:
+        device_index = None
+
+    if device_index is None:
+      self.P(
+        "Torch CUDA arch preflight: unable to determine CUDA device index for {}".format(self.dev),
+        color='y'
+      )
+      return
+
+    try:
+      props = th.cuda.get_device_properties(device_index)
+    except Exception as exc:
+      self.P(
+        "Torch CUDA arch preflight: unable to read device properties: {}".format(exc),
+        color='y'
+      )
+      return
+
+    device_cc = "{}.{}".format(props.major, props.minor)
+    device_sm = "sm_{}{}".format(props.major, props.minor)
+    self.P(
+      "Torch CUDA arch preflight: device='{}', cc={}, torch={}, arch_list={}".format(
+        props.name, device_cc, self.th.__version__, normalized_arches
+      )
+    )
+
+    if parsed_arches and (props.major, props.minor) not in parsed_arches:
+      msg = (
+        "Torch build lacks {} (device compute capability {} not in torch.cuda.get_arch_list()). "
+        "Install a build that includes {} or set DEFAULT_DEVICE=cpu."
+      ).format(device_sm, device_cc, device_sm)
+      self.P(msg, color='error')
+      # raise RuntimeError(msg)
+    return
+
   def get_device_string(self):
     """
     Get the device string for the torch device used by this serving.
@@ -295,6 +373,8 @@ class UnifiedFirstStage(
     if not self.has_device(dev):
       raise ValueError('Current machine does not have compute device {}'.format(dev))
     self.dev = dev
+
+    self._torch_cuda_arch_preflight()
 
     if self.cfg_use_amp and self.cfg_fp16:
       self.P('Using both AMP and FP16 is not usually recommended.', color='r')
@@ -633,7 +713,9 @@ class UnifiedFirstStage(
           continue
       #endif check for non-default backend model map
 
-      self.P("Loading for backend {}".format(backend))
+      self.P("Loading for backend {} with loader: {}".format(
+        backend, load_method.__name__
+      ))
       setattr(self, "_last_backend_error", None)
       try:
         model, config = load_method(
@@ -646,6 +728,7 @@ class UnifiedFirstStage(
           backend_name=backend,
           **kwargs
         )
+        self.P("Backend {} loaded successfully".format(backend))
       except Exception as exc:
         last_error = exc
         if strict_backend or not allow_fallback:

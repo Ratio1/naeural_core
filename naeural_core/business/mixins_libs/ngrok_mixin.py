@@ -42,7 +42,10 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       if edge_label is not None:
         return f"ngrok tunnel {self.port} --label edge={edge_label}"
       elif domain is not None:
-        return f"ngrok http {self.port} --domain={domain}"
+        if domain.endswith(".internal"):
+          return f"ngrok http {self.port} --url https://{domain}"  # internal Agent Endpoint
+        else:
+          return f"ngrok http {self.port} --domain={domain}"  # public Agent Endpoint
       # endif
       raise RuntimeError("No domain/edge specified. Please check your configuration.")
 
@@ -116,13 +119,17 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       """
       Retrieve the ngrok edge label from the configuration.
       """
+      # Since edge labels have been deprecated this will be disabled.
+      return None
       return self.get_tunnel_engine_parameters()["NGROK_EDGE_LABEL"]
 
     def get_ngrok_domain(self):
       """
       Retrieve the ngrok domain from the configuration.
       """
-      return self.get_tunnel_engine_parameters()["NGROK_DOMAIN"]
+      domain = self.get_tunnel_engine_parameters()["NGROK_DOMAIN"]
+      edge_label = self.get_tunnel_engine_parameters()["NGROK_EDGE_LABEL"]
+      return domain or edge_label
 
     def get_ngrok_use_api(self):
       """
@@ -251,9 +258,10 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
         msg = "Ngrok authentication token is not set. Please set the environment variable `EE_NGROK_AUTH_TOKEN`."
       # endif auth token
       edge_label = self.get_ngrok_edge_label()
-      if edge_label is None or edge_label == '':
+      domain = self.get_ngrok_domain()
+      if (edge_label in [None, '']) or domain in [None, '']:
         is_valid = False
-        msg = "Ngrok edge label is not set. Please set the `NGROK_EDGE_LABEL` parameter in your configuration."
+        msg = "Provide either NGROK_EDGE_LABEL (legacy) or NGROK_DOMAIN (public or .internal) in your configuration."
       # endif edge label
       return is_valid, msg
 

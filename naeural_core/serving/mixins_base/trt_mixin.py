@@ -14,9 +14,50 @@ class TensortRTMixin:
     #   <models-folder>/{backend_name}/model_name{no_prefix}/<precision>/<batch_size>/{model_name}.engine
     #   <models-folder>/{backend_name}/model_name{no_prefix}/<precision>/<batch_size>/{model_name}.json
 
+    allow_fallback = kwargs.pop("allow_backend_fallback", True)
+    strict_backend = kwargs.pop("strict_backend", False)
+
     if not th.cuda.is_available() or th.cuda.device_count() == 0:
       # No CUDA device is available.
-      raise RuntimeError('Trying to create TensorRT model without cuda')
+      raise RuntimeError("Trying to create TensorRT model without cuda")
+
+    self._last_backend_error = None
+    trt_version = None
+    trt_major = None
+    try:
+      import tensorrt as trt
+      trt_version = getattr(trt, "__version__", None)
+      if trt_version:
+        trt_major = int(str(trt_version).split(".")[0])
+    except Exception as exc:
+      self._last_backend_error = "TensorRT import failed: {}".format(exc)
+      if strict_backend or not allow_fallback:
+        raise RuntimeError(self._last_backend_error)
+      return (None, None) if return_config else None
+
+    device_index = self.dev
+    if isinstance(self.dev, th.device):
+      device_index = self.dev.index
+    if device_index is None and th.cuda.is_available():
+      try:
+        device_index = th.cuda.current_device()
+      except Exception:
+        device_index = None
+
+    device_props = None
+    if th.cuda.is_available() and device_index is not None:
+      try:
+        device_props = th.cuda.get_device_properties(device_index)
+      except Exception:
+        device_props = None
+
+    if device_props is not None and trt_major is not None and device_props.major >= 10 and trt_major < 10:
+      self._last_backend_error = "TensorRT {} does not support SM {}.{}".format(
+        trt_version, device_props.major, device_props.minor
+      )
+      if strict_backend or not allow_fallback:
+        raise RuntimeError(self._last_backend_error)
+      return (None, None) if return_config else None
 
     from naeural_core.serving.base.backends.trt import TensorRTModel
     if 'batch_size' not in kwargs.keys():
@@ -58,7 +99,13 @@ class TensortRTMixin:
     engine_folder = os.path.join(model_dir, precision, 'bs' + str(max_batch_size))
     os.makedirs(engine_folder, exist_ok=True)
 
-    model.load_or_rebuild_model(fn_path, half, max_batch_size, self.dev)
+    try:
+      model.load_or_rebuild_model(fn_path, half, max_batch_size, self.dev)
+    except RuntimeError as exc:
+      self._last_backend_error = str(exc)
+      if strict_backend or not allow_fallback:
+        raise
+      return (None, None) if return_config else None
     config = model._metadata[TensorRTModel.ONNX_METADATA_KEY]
 
     err_keys = ['torch']

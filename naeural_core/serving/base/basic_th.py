@@ -43,6 +43,8 @@ _CONFIG = {
   "MODEL_TRT_FILENAME"          : None,
   "TRT_URL"                     : None,
   "BACKEND"                     : None,
+  "ALLOW_BACKEND_FALLBACK"      : True,
+  "STRICT_BACKEND"              : False,
 
   "SECOND_STAGE_MODEL_WEIGHTS_FILENAME" : None,
   "SECOND_STAGE_MODEL_CLASSES_FILENAME" : None,
@@ -133,6 +135,51 @@ class UnifiedFirstStage(
   @property
   def get_url(self):
     return self.cfg_url
+
+  def _get_config_key_sources(self, key):
+    sources = []
+    if isinstance(self._environment_variables, dict) and key in self._environment_variables:
+      sources.append("SERVING_ENVIRONMENT")
+    if isinstance(self._upstream_config, dict) and key in self._upstream_config:
+      sources.append("STARTUP_AI_ENGINE_PARAMS")
+    return sources
+
+  def _get_backend_fallback_flags(self, forced_backend=None):
+    allow_fallback = bool(self.cfg_allow_backend_fallback)
+    strict_backend = bool(self.cfg_strict_backend)
+    strict_sources = self._get_config_key_sources("STRICT_BACKEND")
+    if forced_backend is not None and not strict_sources:
+      strict_backend = True
+      strict_sources = ["BACKEND default"]
+    if not strict_sources:
+      strict_sources = ["default"]
+    if strict_backend:
+      allow_fallback = False
+    return allow_fallback, strict_backend, strict_sources
+
+  def _log_backend_resolution(self, forced_backend=None):
+    backend_order = self._platform_backend_priority
+    resolved_order = backend_order
+    if forced_backend is not None:
+      resolved_order = [forced_backend]
+    backend_sources = self._get_config_key_sources("BACKEND")
+    if not backend_sources:
+      backend_sources = ["default"]
+    allow_fallback, strict_backend, strict_sources = self._get_backend_fallback_flags(
+      forced_backend=forced_backend
+    )
+    self.P(
+      "Backend resolution: cfg_backend={}, sources={}, platform_order={}, resolved_order={}, "
+      "allow_fallback={}, strict_backend={}, strict_sources={}".format(
+        forced_backend,
+        backend_sources,
+        backend_order,
+        resolved_order,
+        allow_fallback,
+        strict_backend,
+        strict_sources,
+      )
+    )
 
   def get_device_string(self):
     """
@@ -255,6 +302,7 @@ class UnifiedFirstStage(
     # Now that we've chosen the device we can determine the default
     # backend order for this platform.
     self._platform_backend_priority = self._get_platform_backend_order()
+    self._log_backend_resolution(forced_backend=self.cfg_backend)
 
     # record gpu info status pre-loading
     lst_gpu_status_pre = None
@@ -555,7 +603,12 @@ class UnifiedFirstStage(
     if forced_backend is not None:
       backend_order = [forced_backend]
 
-    for backend in backend_order:
+    allow_fallback, strict_backend, _ = self._get_backend_fallback_flags(
+      forced_backend=forced_backend
+    )
+    last_error = None
+
+    for idx, backend in enumerate(backend_order):
       if backend == 'trt':
         load_method = self._prepare_trt_model
       if backend == 'onnx':
@@ -581,19 +634,53 @@ class UnifiedFirstStage(
       #endif check for non-default backend model map
 
       self.P("Loading for backend {}".format(backend))
-      model, config = load_method(
-        url=fn_url,
-        fn_model=fn_model,
-        post_process_classes=post_process_classes,
-        return_config=True,
-        **kwargs
-      )
+      setattr(self, "_last_backend_error", None)
+      try:
+        model, config = load_method(
+          url=fn_url,
+          fn_model=fn_model,
+          post_process_classes=post_process_classes,
+          return_config=True,
+          allow_backend_fallback=allow_fallback,
+          strict_backend=strict_backend,
+          backend_name=backend,
+          **kwargs
+        )
+      except Exception as exc:
+        last_error = exc
+        if strict_backend or not allow_fallback:
+          raise
+        next_backend = backend_order[idx + 1] if idx + 1 < len(backend_order) else None
+        if next_backend is not None:
+          self.P(
+            "{} failed ({}), falling back to {}. model={}, backend_order={}, "
+            "allow_fallback={}, strict_backend={}".format(
+              backend.upper(), exc, next_backend, self.server_name, backend_order, allow_fallback, strict_backend
+            ),
+            color='r'
+          )
+        continue
 
       if model is not None:
         return (model, config, fn_model) if return_config else model
       #endif check if model loaded
+      last_error = getattr(self, "_last_backend_error", None) or "Backend returned None"
+      if strict_backend or not allow_fallback:
+        raise RuntimeError(last_error)
+      next_backend = backend_order[idx + 1] if idx + 1 < len(backend_order) else None
+      if next_backend is not None:
+        self.P(
+          "{} failed ({}), falling back to {}. model={}, backend_order={}, "
+          "allow_fallback={}, strict_backend={}".format(
+            backend.upper(), last_error, next_backend, self.server_name, backend_order, allow_fallback, strict_backend
+          ),
+          color='r'
+        )
+      #endif fallback possible
     #endfor backends in order
 
+    if last_error is not None:
+      raise RuntimeError("Could not prepare model: {}".format(last_error))
     raise RuntimeError("Could not prepare model")
     return
 

@@ -12,6 +12,8 @@ NGROK_DEFAULT_PARAMETERS = {
   "NGROK_DOMAIN": None,
   "NGROK_EDGE_LABEL": None,
   "NGROK_AUTH_TOKEN": None,
+  "NGROK_PROTOCOL": None,
+  "NGROK_PORT": None,
 }
 
 
@@ -39,13 +41,24 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
     def _get_ngrok_start_command(self):
       edge_label = self.get_ngrok_edge_label()
       domain = self.get_ngrok_domain()
+      proto = self.get_ngrok_protocol()
+      domain_port = self.get_ngrok_port()
       if edge_label is not None:
         return f"ngrok tunnel {self.port} --label edge={edge_label}"
-      elif domain is not None:
-        if domain.endswith(".internal"):
-          return f"ngrok http {self.port} --url https://{domain}"  # internal Agent Endpoint
+      if domain is not None:
+        if proto == "tcp":
+          if domain.endswith(".internal"):
+            # Internal TCP endpoint: port in URL is required by ngrok for tcp internal.
+            # If the user didn't put a port in NGROK_DOMAIN, fall back to the local port.
+            return f"ngrok {proto} {self.port} --url {proto}://{domain}:{domain_port or self.port}"  # internal Agent Endpoint
+          else:
+            # Public TCP on reserved address
+            if domain_port:
+              # Bind a fixed public TCP address you reserved: tcp://<host>:<port>
+              return f"ngrok tcp {self.port} --url tcp://{domain}:{domain_port}"
+            return f"ngrok {proto} {self.port}"
         else:
-          return f"ngrok http {self.port} --domain={domain}"  # public Agent Endpoint
+          return f"ngrok http {self.port} --domain={domain}"
       # endif
       raise RuntimeError("No domain/edge specified. Please check your configuration.")
 
@@ -72,34 +85,52 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
 
     def get_ngrok_tunnel_kwargs(self):
       """
-      TODO:
-        - in the case of container in container we will need to add `addr` parameter to the
-          tunnel_kwargs as we might have a local network within the Edge Node.
+      Build kwargs for ngrok.forward(**kwargs) using only NGROK_DOMAIN.
+      Accepted NGROK_DOMAIN forms:
+        - "tcp://postgres.internal:5432"        -> internal TCP Agent Endpoint
+        - "tcp://3.tcp.ngrok.io:26135"          -> public TCP on reserved address
+        - "https://api.ngrok.app" or "api.ngrok.app" -> HTTP/S Agent Endpoint
       """
-      # Make the ngrok tunnel kwargs
       tunnel_kwargs = {}
       valid = True
-      edge_label = self.get_ngrok_edge_label()
-      domain = self.get_ngrok_domain()
-      if edge_label in [None, '']:
-        self.P("WARNING: ngrok edge label is not set. Please make sure this is the intended behavior.", color='r')
-      # endif edge label
-      if edge_label is not None:
-        # In case of using edge label, the domain is not needed and the protocol is "labeled".
-        tunnel_kwargs['labels'] = f'edge:{edge_label}'
-        tunnel_kwargs['proto'] = "labeled"
-      # endif edge label
-      elif domain is not None:
-        # In case of using domain, the domain is needed and the protocol is "http"(the default value).
-        tunnel_kwargs['domain'] = domain
-      # endif domain
-      # Specify the address and the authtoken
-      tunnel_kwargs['addr'] = self.port
+
+      # Extract host, optional scheme, and optional port from NGROK_DOMAIN
+      # e.g. "tcp://3.tcp.ngrok.io:26135" -> ("3.tcp.ngrok.io", "tcp", "26135")
+      domain_host, extracted_proto, extracted_port = self.get_ngrok_domain(with_protocol=True, with_port=True)
+
+      # Compute final proto: explicit config wins; else derive from domain; default tcp
+      proto = (self.get_tunnel_engine_parameters().get("NGROK_PROTOCOL") or extracted_proto or "tcp").lower()
+
+      if domain_host:
+        if proto == "tcp":
+          # Case A: INTERNAL TCP endpoint (host ends with .internal)
+          if domain_host.endswith(".internal"):
+            tunnel_kwargs["proto"] = "tcp"
+            tunnel_kwargs["domain"] = domain_host  # internal binding inferred by .internal
+          else:
+            # Case B: PUBLIC TCP endpoint on a fixed/reserved address
+            tunnel_kwargs["proto"] = "tcp"
+            # If a port was provided in NGROK_DOMAIN, bind that exact reserved address.
+            # If not, omit remote_addr and ngrok will allocate a random tcp host:port.
+            if extracted_port:
+              tunnel_kwargs["remote_addr"] = f"{domain_host}:{extracted_port}"
+        else:
+          # Case C: HTTP/S Agent Endpoint on a domain (public)
+          tunnel_kwargs["domain"] = domain_host
+          # For HTTP/S you don't need to pass proto; SDK handles http/https endpoints.
+      else:
+        # No domain provided: allow ad-hoc TCP if explicitly requested
+        if proto == "tcp":
+          tunnel_kwargs["proto"] = "tcp"
+
+      # Always set the upstream (LOCAL) address and the authtoken
+      tunnel_kwargs["addr"] = self.port  # forward to local service, e.g., 80 or 5432
       ng_token = self.__get_ng_token()
-      if ng_token is None:
+      if not ng_token:
         valid = False
         self.report_missing_authtoken()
-      tunnel_kwargs['authtoken'] = ng_token
+      tunnel_kwargs["authtoken"] = ng_token
+
       return tunnel_kwargs, valid
 
     async def __maybe_async_stop_ngrok(self):
@@ -123,13 +154,40 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       return None
       return self.get_tunnel_engine_parameters()["NGROK_EDGE_LABEL"]
 
-    def get_ngrok_domain(self):
+    def get_ngrok_domain(self, with_protocol=False, with_port=False):
       """
       Retrieve the ngrok domain from the configuration.
       """
       domain = self.get_tunnel_engine_parameters()["NGROK_DOMAIN"]
       edge_label = self.get_tunnel_engine_parameters()["NGROK_EDGE_LABEL"]
-      return domain or edge_label
+      res = domain or edge_label
+      proto = None
+      domain_port = None
+      if isinstance(res, str) and "://" in res:
+        proto = res.split("://")[0]
+        res = res.split("://")[1]
+      # endif
+      if isinstance(res, str) and ":" in res:
+        domain_port = res.split(":")[1]
+        res = res.split(":")[0]
+      # endif
+      final_result = [res]
+      if with_protocol:
+        final_result.append(proto)
+      if with_port:
+        final_result.append(domain_port)
+      return final_result[0] if len(final_result) == 1 else tuple(final_result)
+
+    def get_ngrok_protocol(self):
+      """
+      Retrieve the ngrok protocol from the configuration.
+      """
+      domain, extracted_protocol = self.get_ngrok_domain(with_protocol=True)
+      return self.get_tunnel_engine_parameters()["NGROK_PROTOCOL"] or extracted_protocol
+
+    def get_ngrok_port(self):
+      domain, extracted_port = self.get_ngrok_domain(with_port=True)
+      return self.get_tunnel_engine_parameters().get("NGROK_PORT") or extracted_port
 
     def get_ngrok_use_api(self):
       """

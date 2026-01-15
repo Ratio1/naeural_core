@@ -101,27 +101,22 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       # Compute final proto: explicit config wins; else derive from domain; default tcp
       proto = (self.get_tunnel_engine_parameters().get("NGROK_PROTOCOL") or extracted_proto or "tcp").lower()
 
+      if proto:
+        tunnel_kwargs["proto"] = proto
       if domain_host:
         if proto == "tcp":
-          # Case A: INTERNAL TCP endpoint (host ends with .internal)
-          if domain_host.endswith(".internal"):
-            tunnel_kwargs["proto"] = "tcp"
-            tunnel_kwargs["domain"] = domain_host  # internal binding inferred by .internal
+          if extracted_port:
+            # Case A: TCP endpoint with port specified in NGROK_DOMAIN
+            tunnel_kwargs["remote_addr"] = f"{domain_host}:{extracted_port}"
           else:
-            # Case B: PUBLIC TCP endpoint on a fixed/reserved address
-            tunnel_kwargs["proto"] = "tcp"
-            # If a port was provided in NGROK_DOMAIN, bind that exact reserved address.
-            # If not, omit remote_addr and ngrok will allocate a random tcp host:port.
-            if extracted_port:
-              tunnel_kwargs["remote_addr"] = f"{domain_host}:{extracted_port}"
+            tunnel_kwargs["domain"] = domain_host
+          # endif port specified
         else:
           # Case C: HTTP/S Agent Endpoint on a domain (public)
           tunnel_kwargs["domain"] = domain_host
           # For HTTP/S you don't need to pass proto; SDK handles http/https endpoints.
-      else:
-        # No domain provided: allow ad-hoc TCP if explicitly requested
-        if proto == "tcp":
-          tunnel_kwargs["proto"] = "tcp"
+        # endif tcp protocol
+      # endif domain_host specified
 
       # Always set the upstream (LOCAL) address and the authtoken
       tunnel_kwargs["addr"] = self.port  # forward to local service, e.g., 80 or 5432

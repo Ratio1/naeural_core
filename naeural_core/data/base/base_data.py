@@ -24,6 +24,8 @@ _CONFIG = {
   'INITIATOR_ID'            : None,
   
   'USE_LOCAL_COMMS_ONLY'     : False,
+
+  "DEBUG_LOGGING_ENABLED": False,
   
   'VALIDATION_RULES' : {
     'IS_THREAD' : {'TYPE' : 'bool'},
@@ -79,7 +81,23 @@ class BaseDataCapture(DecentrAIObject, _ConfigHandlerMixin):
       color = ct.COLORS.DCT
     super().P(s, prefix=True, color=color, **kwargs)
     return
-  
+
+  def check_debug_logging_enabled(self):
+    """
+    Hook method to check if debug logging is enabled in case
+    the user already has implemented own debug logging switch.
+
+    Returns
+    -------
+    bool
+      True if debug logging is enabled, False otherwise.
+    """
+    return self.cfg_debug_logging_enabled
+
+  def Pd(self, *args, **kwargs):
+    if self.check_debug_logging_enabled():
+      self.P(*args, **kwargs)
+    return
   
   @property 
   def is_idle_alert(self):

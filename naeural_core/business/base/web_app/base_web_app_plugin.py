@@ -382,17 +382,23 @@ class BaseWebAppPlugin(
         logs = logs_reader.get_next_characters()
         if len(logs) > 0:
           self.on_log_handler(logs, key)
-          if isinstance(self.cfg_supress_logs_after_interval, int) and self.cfg_supress_logs_after_interval > 0:
+          need_to_print_logs = False
+          if self.cfg_supress_logs_after_interval is None:
+            need_to_print_logs = True
+          elif isinstance(self.cfg_supress_logs_after_interval, int) and self.cfg_supress_logs_after_interval > 0:
             time_since_first_log = 0 if self.__first_log_displayed is None else (self.time() - self.__first_log_displayed)
             if time_since_first_log > self.cfg_supress_logs_after_interval and len(logs) > 0:
               # only print logs if the first log was displayed less than `supress_logs_after_interval` seconds ago
-              indented_logs = self.indent_strings(logs, indent=indent)
-              self.P(f"Showing stdout logs [{key}]:\n{indented_logs}")
-              self.logs.append(f"[{key}]: {logs}")
-              if self.__first_log_displayed is None:
-                self.__first_log_displayed = self.time()
-            #end if time_since_first_log
-          #end if supress_logs_after_interval
+              need_to_print_logs = True
+            # end if time_since_first_log
+          # end if supress_logs_after_interval
+          if need_to_print_logs:
+            indented_logs = self.indent_strings(logs, indent=indent)
+            self.P(f"Showing stdout logs [{key}]:\n{indented_logs}")
+            self.logs.append(f"[{key}]: {logs}")
+            if self.__first_log_displayed is None:
+              self.__first_log_displayed = self.time()
+          # endif need_to_print_logs
         # endif logs
       #end if logs_reader
     #endfor all logs readers

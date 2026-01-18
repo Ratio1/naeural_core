@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 import multiprocessing
+import traceback
 from multiprocessing.managers import SyncManager
 
 # The following need to be global due to the multiprocessing
@@ -59,7 +60,7 @@ class UvicornPluginComms:
   FastAPI endpoints can call the call_plugin method to deliver and receive
   requests from the associated business plugin.
   """
-  def __init__(self, port, auth, timeout_s=120):
+  def __init__(self, port, auth, timeout_s=120, additional_fastapi_data: dict = None):
     """
     Initializer for the UvicornPluginComms.
 
@@ -70,6 +71,7 @@ class UvicornPluginComms:
       communications with the business plugin.
     timeout_s: float, timeout in seconds to wait for a response from the business plugin
       before returning a timeout error.
+    additional_fastapi_data: dict, additional data to be added to response
     Returns
     -------
     None
@@ -86,6 +88,7 @@ class UvicornPluginComms:
     self._reader_thread = None
 
     self._response_timeout_s = timeout_s
+    self._additional_fastapi_data = additional_fastapi_data or {}
     return
 
   async def call_plugin(self, *request, profile=None):
@@ -153,11 +156,19 @@ class UvicornPluginComms:
 
     try:
       await asyncio.wait_for(event.wait(), timeout=self._response_timeout_s)
-    except TimeoutError:
+    except Exception as e:
+      print(f"[ipc-timeout] req_id={ee_uuid} timeout_s={self._response_timeout_s} exc={type(e).__name__}: {e}")
       self._commands.pop(ee_uuid, None)
       return {
         "status_code": 504,
-        "result": "Timeout waiting for plugin response"
+        "logged": True,
+        **self._additional_fastapi_data,
+        "result": f"Error waiting for plugin response: {e}",
+        "exception_metadata": {
+          "exception": str(e),
+          "trace": traceback.format_exc(),
+          "logged": True,
+        }
       }
 
     # We now have a reply, retrieve the reply and cleanup our entry from the
@@ -183,7 +194,8 @@ class UvicornPluginComms:
           message = self._client_queue.get(True, 0.25)
         except queue.Empty:
           continue
-        except Exception:
+        except Exception as exc:
+          print(f"[ipc-reader-error] exc={exc}")
           continue
 
         if self._loop is None:
@@ -207,7 +219,8 @@ class UvicornPluginComms:
       record['value'] = message.get('value')
       record['profile_data'] = message.get('profile')
       record['event'].set()
-    except Exception:
+    except Exception as exc:
+      print(f"[ipc-deliver-error] req_id={message.get('id')} exc={exc}")
       return
 
   async def send_profile_event(self, profile):
@@ -221,4 +234,3 @@ class UvicornPluginComms:
       }
     )
     return
-

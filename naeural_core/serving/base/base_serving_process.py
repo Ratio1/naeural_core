@@ -46,7 +46,8 @@ _CONFIG = {
   'LOAD_PREVIOUS_SERIALIZATION'   : False,
   'SERIALIZATION_SIGNATURE'       : None,
   ## END SERIALIZATION & PERSISTENCE
-  
+
+  "DEBUG_LOGGING_ENABLED": False,
   
   
   'VALIDATION_RULES' : {
@@ -555,7 +556,24 @@ class ModelServingProcess(
       color = ct.COLORS.SERVING
     self.log.P(prefix + msg, color=color, **kwargs)
     return
-  
+
+  def check_debug_logging_enabled(self):
+    """
+    Hook method to check if debug logging is enabled in case
+    the user already has implemented own debug logging switch.
+
+    Returns
+    -------
+    bool
+      True if debug logging is enabled, False otherwise.
+    """
+    return self.cfg_debug_logging_enabled
+
+  def Pd(self, *args, **kwargs):
+    if self.check_debug_logging_enabled():
+      self.P(*args, **kwargs)
+    return
+
   def _predict_iter_debug_handle(self, curr_iter, n_thr=100):
     TEST = None # sleep, crash or None
     if curr_iter >= n_thr and isinstance(TEST, str):

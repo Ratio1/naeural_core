@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from os import path as file_path
 import time
 
+import traceback
 import asyncio
 import tempfile
 import uuid
@@ -24,7 +25,32 @@ import aiofiles
 
 from naeural_core.utils.uvicorn_fast_api_ipc_manager import UvicornPluginComms
 
-eng = UvicornPluginComms(port={{ manager_port }}, auth={{ manager_auth }}, timeout_s={{ request_timeout }})
+
+ADDITIONAL_FASTAPI_DATA = {{ additional_fastapi_data }}
+BLOB_RESPONSE_TYPES = (FileResponse, StreamingResponse, Response)
+
+def _with_additional_data(payload: Any):
+  if isinstance(payload, BLOB_RESPONSE_TYPES):
+    return payload
+  merged = dict(ADDITIONAL_FASTAPI_DATA)
+  if isinstance(payload, dict):
+    merged.update(payload)
+    return merged
+  return {
+    'result': payload,
+    **ADDITIONAL_FASTAPI_DATA
+  }
+
+def _http_error(status_code: int, detail: Any):
+  payload = detail if isinstance(detail, dict) else {"detail": detail}
+  raise HTTPException(status_code=status_code, detail=_with_additional_data(payload))
+
+eng = UvicornPluginComms(
+  port={{ manager_port }},
+  auth={{ manager_auth }},
+  timeout_s={{ request_timeout }},
+  additional_fastapi_data=ADDITIONAL_FASTAPI_DATA
+)
 
 app = FastAPI(
   title={{ api_title }},
@@ -116,9 +142,9 @@ def get_bearer_token(credentials: HTTPAuthorizationCredentials = Depends(securit
     if DEBUG:
         print(f"Received authorization credentials: {credentials}")
     if not credentials:
-        raise HTTPException(status_code=401, detail="Authorization credentials are missing. Please provide a Bearer token.")
+        _http_error(401, "Authorization credentials are missing. Please provide a Bearer token.")
     if credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail=f"Invalid authorization scheme '{credentials.scheme}'. Expected 'Bearer'.")
+        _http_error(401, f"Invalid authorization scheme '{credentials.scheme}'. Expected 'Bearer'.")
     return credentials.credentials
 
 def _should_profile() -> bool:
@@ -140,11 +166,47 @@ def _start_profile(endpoint_name: str) -> dict | None:
 async def _profiled_call_plugin(endpoint_name: str, call_plugin_args: List, profile: dict | None):
     if isinstance(profile, dict):
         profile["t_before_call_plugin_ns"] = time.perf_counter_ns()
-    result = await eng.call_plugin(
-        endpoint_name,
-        *call_plugin_args,
-        profile=profile,
-    )
+    result = None
+    status_code = None
+    detail = None
+    handled_exception = False
+    try:
+        result = await eng.call_plugin(
+            endpoint_name,
+            *call_plugin_args,
+            profile=profile,
+        )
+        if isinstance(result, dict):
+            exception_metadata = result.get("exception_metadata")
+            status_code = result.get("status_code")
+            if isinstance(exception_metadata, dict):
+                exc = exception_metadata.get("exception")
+                trace = exception_metadata.get("trace")
+                detail = exception_metadata.get("detail")
+                if not exception_metadata.get("logged"):
+                    print(f"[ipc-error] endpoint={endpoint_name} req_id={profile.get('req_id') if isinstance(profile, dict) else ''} exc={exc}\n{trace}")
+                handled_exception = True
+                if isinstance(profile, dict):
+                    profile["t_after_call_plugin_ns"] = time.perf_counter_ns()
+                    _finalize_profile(profile, result)
+                detail_payload = result.get("result") or "Internal plugin communication error"
+                if result.get("logged") or exception_metadata.get("logged"):
+                    detail_payload = {"detail": detail_payload, "logged": True}
+                _http_error(status_code or 500, detail_payload)
+            # endif exception metadata existent
+        # endif result is dictionary
+    except Exception as e:
+        if not handled_exception:
+            # Optionally log the exception or wrap it in an HTTPException
+            log_str = f"[ipc-error] endpoint={endpoint_name} req_id={profile.get('req_id') if isinstance(profile, dict) else ''} exc={e}"
+            log_str += traceback.format_exc()
+            print(log_str)
+            status_code = status_code or 500
+            if isinstance(profile, dict):
+                profile["t_after_call_plugin_ns"] = time.perf_counter_ns()
+                _finalize_profile(profile, {"status_code": status_code, "result": str(e)})
+            _http_error(status_code, f"Internal server error during plugin call: {e}")
+        raise e  # re-raise if already handled
     if isinstance(profile, dict):
         profile["t_after_call_plugin_ns"] = time.perf_counter_ns()
     return result
@@ -159,6 +221,29 @@ def _finalize_profile(profile: dict | None, result: Any = None) -> None:
             profile["status_code"] = status_code
     asyncio.create_task(eng.send_profile_event(profile))
     return
+
+def _handle_plugin_result(endpoint_name: str, result: Any, profile: dict | None):
+    if not isinstance(result, dict):
+        return result
+    req_id = profile.get("req_id") if isinstance(profile, dict) else ""
+    status_code = result.get("status_code")
+    detail = result.get("result") or result.get("error") or result
+    already_logged = result.get("logged")
+    if status_code is not None:
+        if not isinstance(status_code, int) or status_code < 200 or status_code > 299:
+            if not already_logged:
+                print(f"[plugin-status] endpoint={endpoint_name} req_id={req_id} status={status_code} detail={detail}")
+            if not isinstance(detail, dict) and already_logged:
+                detail = {"detail": detail, "logged": True}
+            _http_error(int(status_code), detail)
+    if "error" in result:
+        if not already_logged:
+            print(f"[plugin-error] endpoint={endpoint_name} req_id={req_id} detail={result.get('error')}")
+        error_detail = result.get("error")
+        if already_logged:
+            error_detail = {"detail": error_detail, "logged": True}
+        _http_error(500, error_detail)
+    return result
 
 
 {% for item in node_comm_params %}
@@ -179,7 +264,7 @@ async def {{ item['name'] }}_upload(
         try:
             body_json = json.loads(body)
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON in form field 'body'")
+            _http_error(400, "Invalid JSON in form field 'body'")
 
     {% if item['has_kwargs'] %}
         extras_dict: Dict[str, Any] = {}
@@ -187,8 +272,7 @@ async def {{ item['name'] }}_upload(
             try:
                 extras_dict = json.loads(extras)
             except Exception:
-                raise HTTPException(status_code=400,
-                                    detail="Invalid JSON in form field 'extras'")
+                _http_error(400, "Invalid JSON in form field 'extras'")
     {% endif %}
 
     temp_dir = None
@@ -197,13 +281,20 @@ async def {{ item['name'] }}_upload(
     try:
         # Create a unique temp directory and file path
         temp_dir = tempfile.mkdtemp(prefix="upload_", dir="/tmp")
-        file_name = f"{file.filename}"
-        file_path = os.path.join(temp_dir, file_name)
+        safe_name = os.path.basename(file.filename or "")
+        if not safe_name:
+            safe_name = f"upload_{uuid.uuid4().hex}"
+        base_dir = os.path.realpath(temp_dir)
+        candidate_path = os.path.realpath(os.path.join(base_dir, safe_name))
+        if os.path.commonpath([base_dir, candidate_path]) != base_dir:
+            _http_error(400, "Invalid filename.")
+        file_path = candidate_path
 
         # Save uploaded file stream chunk by chunk to disk
+        chunk_size = {{ item['chunk_size'] }}
         with open(file_path, "wb") as f:
             while True:
-                chunk = await file.read(1024 * 1024)
+                chunk = await file.read(chunk_size)
                 if not chunk:
                     break
                 f.write(chunk)
@@ -223,14 +314,16 @@ async def {{ item['name'] }}_upload(
         result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile)
 
         _finalize_profile(profile, result)
-        return result
+        _handle_plugin_result("{{ item['name'] }}", result, profile)
+        return _with_additional_data(result)
 
     except Exception as e:
         # Optionally log the exception or wrap it in an HTTPException
-        import traceback
         print(f"Error during file upload endpoint: {e}")
         print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+        if isinstance(profile, dict):
+            _finalize_profile(profile, {"status_code": 500, "result": str(e)})
+        _http_error(500, f"Internal server error: {e}")
 
     finally:
         # Cleanup: remove temp file and directory if they exist
@@ -261,7 +354,7 @@ async def {{ item['name'] }}_download(
         try:
             kwargs_dict = json.loads(extras)
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON in query param 'extras'")
+            _http_error(400, "Invalid JSON in query param 'extras'")
     {% endif %}
 
     call_plugin_args: List = []
@@ -272,6 +365,8 @@ async def {{ item['name'] }}_download(
     {% if item['has_kwargs'] %}call_plugin_args.append(kwargs_dict){% endif %}
 
     response = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile)
+    _finalize_profile(profile, response)
+    _handle_plugin_result("{{ item['name'] }}", response, profile)
 
     file_path = ''
     meta = {}
@@ -282,15 +377,15 @@ async def {{ item['name'] }}_download(
         file_path = result.get("file_path", "")
         meta = result.get("meta", {})
 
-    if not (isinstance(file_path, str) and os.path.isfile(file_path)):
-        a = f"File not found!"
-        raise HTTPException(status_code=404, detail=a)
+    resolved_path = os.path.realpath(file_path) if isinstance(file_path, str) else ""
+    if not (isinstance(resolved_path, str) and os.path.isfile(resolved_path)):
+        _http_error(404, "File not found!")
 
     meta_str = json.dumps(meta)
 
     async def file_generator():
-        chunk_size = 1024 * 1024  # 1 MB chunks
-        async with aiofiles.open(file_path, 'rb') as f:
+        chunk_size = {{ item['chunk_size'] }}
+        async with aiofiles.open(resolved_path, 'rb') as f:
             while True:
                 chunk = await f.read(chunk_size)
                 if not chunk:
@@ -301,7 +396,6 @@ async def {{ item['name'] }}_download(
         "x-meta": meta_str
     }
 
-    _finalize_profile(profile, response)
     return StreamingResponse(file_generator(), media_type='application/octet-stream', headers=headers)
 
 {% else %}
@@ -345,12 +439,13 @@ async def {{ item['name'] }}(
 
     result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile)
 
-    {% if item['require_token'] %}
-    if result.get("result") == "Unauthorized token" or result.get("status_code") == 401:
-        raise HTTPException(status_code=401, detail=result.get("result", result))
-    {% endif %}
     _finalize_profile(profile, result)
-    return result
+    _handle_plugin_result("{{ item['name'] }}", result, profile)
+    {% if item['require_token'] %}
+    if isinstance(result, dict) and (result.get("result") == "Unauthorized token" or result.get("status_code") == 401):
+        _http_error(401, result.get("result", result))
+    {% endif %}
+    return _with_additional_data(result)
 {% else %}
 {% if item['method'] is not none %}@app.{{ item['method'] }}("/{{ item['name'] }}"){% endif %}
 async def {{ item['name'] }}(
@@ -368,7 +463,7 @@ async def {{ item['name'] }}(
         try:
             kwargs_dict = json.loads(extras)
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON in query param 'extras'")
+            _http_error(400, "Invalid JSON in query param 'extras'")
     {% endif %}
 
     # ---- build call arguments once, no nested ifs ----
@@ -384,12 +479,13 @@ async def {{ item['name'] }}(
 
     result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile)
 
-    {% if item['require_token'] %}
-    if result.get("result") == "Unauthorized token" or result.get("status_code") == 401:
-        raise HTTPException(status_code=401, detail=result.get("result", result))
-    {% endif %}
     _finalize_profile(profile, result)
-    return result
+    _handle_plugin_result("{{ item['name'] }}", result, profile)
+    {% if item['require_token'] %}
+    if isinstance(result, dict) and (result.get("result") == "Unauthorized token" or result.get("status_code") == 401):
+        _http_error(401, result.get("result", result))
+    {% endif %}
+    return _with_additional_data(result)
 {% endif %}
 {% endif %} # endif item['streaming_type'] %}
 {% endfor %}
@@ -426,7 +522,13 @@ async def custom_404_handler(request: Request, exc: StarletteHTTPException):
         return RedirectResponse(url=DEFAULT_ROUTE, status_code=307)
     # endif DEFAULT_ROUTE defined
 
-    print(f"StarletteHTTPException during request for {request.url}:\n{exc}")
+    should_log = True
+    if isinstance(exc.detail, dict) and exc.detail.get("logged"):
+        should_log = False
+    if exc.status_code < 500:
+        should_log = False
+    if should_log:
+        print(f"StarletteHTTPException during request for {request.url}:\n{exc}")
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail or "An error occurred."},

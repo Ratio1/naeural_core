@@ -64,25 +64,28 @@ class _NetworkProcessorMixin:
           if self.cfg_full_debug_payloads:
             self.P(f"Received non dict payload: {data} from {datas}", color="red")           
           continue
-        varified = False
-        verify_msg = None
-        try:
-          verify_results = self.bc.verify(
-            dct_data=data, 
-            str_signature=None, sender_address=None,
-            return_full_info=True,
-          )
-          verified = verify_results.valid
-          verify_msg = verify_results.message
-        except Exception as e:
-          self.P(f"{e}: {data}", color="red")
-          continue
-        if not verified:
-          self.P(
-            f"Payload signature verification FAILED with '{verify_msg}': {data}", 
-            color="red"
-          )
-          continue
+        # In case the verification is not needed (maybe it was already done in the DCT)
+        if self.cfg_skip_message_verify:
+          verified = False
+          verify_msg = None
+          try:
+            verify_results = self.bc.verify(
+              dct_data=data,
+              str_signature=None, sender_address=None,
+              return_full_info=True,
+            )
+            verified = verify_results.valid
+            verify_msg = verify_results.message
+          except Exception as e:
+            self.P(f"{e}: {data}", color="red")
+            continue
+          if not verified:
+            self.P(
+              f"Payload signature verification FAILED with '{verify_msg}': {data}",
+              color="red"
+            )
+            continue
+        # endif skip message verification
         payload_path = data.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])        
         is_self = payload_path == self.get_instance_path()
         if is_self and not self.cfg_accept_self:

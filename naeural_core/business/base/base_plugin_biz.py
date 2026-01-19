@@ -158,6 +158,7 @@ _CONFIG = {
   'DEBUG_PAYLOADS': False,  # TO BE CLARIFIED
 
   'DEBUG_MODE': False,
+  "DEBUG_LOGGING_ENABLED": False,
 
 
   'DEBUG_SAVE_IMG': False,  # saves in _output/[STREAM]__[SIGN]__[INST] the witness & originals
@@ -201,6 +202,7 @@ _CONFIG = {
   # Network Processor
   'ACCEPT_SELF' : False,  
   'FULL_DEBUG_PAYLOADS' : False,
+  'SKIP_MESSAGE_VERIFY': False,
   # END Network Processor  
 
 
@@ -608,6 +610,23 @@ class BasePluginExecutor(
     if color is None or (isinstance(color, str) and color[0] not in ['e', 'r']):
       color = ct.COLORS.BIZ
     super().P(s, prefix=True, color=color, **kwargs)
+    return
+
+  def check_debug_logging_enabled(self):
+    """
+    Hook method to check if debug logging is enabled in case
+    the user already has implemented own debug logging switch.
+
+    Returns
+    -------
+    bool
+      True if debug logging is enabled, False otherwise.
+    """
+    return self.cfg_debug_logging_enabled
+
+  def Pd(self, *args, **kwargs):
+    if self.check_debug_logging_enabled():
+      self.P(*args, **kwargs)
     return
 
   def __set_loop_stage(self, s, prefix='2.bm.refresh._chkinst.'):

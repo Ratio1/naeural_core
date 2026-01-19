@@ -57,6 +57,9 @@ _CONFIG = {
   # If true, include detailed per-stage averages in periodic logs.
   'PROFILE_LOG_DETAILED': True,
 
+  # No suppression of logs after interval
+  "SUPRESS_LOGS_AFTER_INTERVAL": None,
+
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES']
   },
@@ -90,6 +93,20 @@ class FastApiWebAppPlugin(BasePlugin):
     if numeric_timeout <= 0:
       return None
     return numeric_timeout
+
+  @staticmethod
+  def cap_chunk_size(chunk_size):
+    min_chunk_size = 128 * 1024
+    default_chunk_size = 1024 * 1024
+    max_chunk_size = 8 * 1024 * 1024
+    if not isinstance(chunk_size, (int, float)):
+      return default_chunk_size
+    int_chunk_size = int(chunk_size)
+    if int_chunk_size < min_chunk_size:
+      return min_chunk_size
+    if int_chunk_size > max_chunk_size:
+      return max_chunk_size
+    return int_chunk_size
 
   @staticmethod
   def endpoint(
@@ -128,7 +145,7 @@ class FastApiWebAppPlugin(BasePlugin):
     func.__http_method__ = method
     func.__require_token__ = require_token
     func.__streaming_type__ = streaming_type
-    func.__chunk_size__ = chunk_size
+    func.__chunk_size__ = FastApiWebAppPlugin.cap_chunk_size(chunk_size)
     return func
 
 
@@ -427,20 +444,38 @@ class FastApiWebAppPlugin(BasePlugin):
   def parse_postponed_dict(self, request):
     return request['id'], request['value'], request['endpoint_name'], request.get('profile')
 
-  def __fastapi_process_response(self, response):
-    if self.cfg_response_format == 'RAW':
-      return response
-    additional_data = self.get_additional_env_vars()
-    additional_data = {
-      (k.lower() if isinstance(k, str) else k): v for k, v in additional_data.items()
+  def get_additional_fastapi_data(self):
+    """
+    Get additional data to be included in the FastAPI response.
+
+    Returns
+    -------
+    dict - additional data to be included in the FastAPI response.
+    """
+    additional_env_vars = self.get_additional_env_vars()
+    additional_env_vars = {
+      (k.lower() if isinstance(k, str) else k): v for k, v in additional_env_vars.items()
     }
     return {
-      'result': response,
       # TO BE REMOVED maybe (they are also in the additional_data, but maybe the client expects these keys)
       'server_node_addr': self.e2_addr,
       'evm_network' : self.evm_network,
-      **additional_data
+      **additional_env_vars
     }
+
+  def __fastapi_process_response(self, response):
+    if self.cfg_response_format == 'RAW':
+      return response
+    fastapi_additional = self.get_additional_fastapi_data()
+    envelope = {
+      'result': response,
+      **fastapi_additional
+    }
+    if isinstance(response, dict):
+      status_code = response.get('status_code')
+      if status_code is not None:
+        envelope['status_code'] = status_code
+    return envelope
 
   def __fastapi_handle_response(self, id, value):
     # TODO: add here message signing
@@ -473,7 +508,9 @@ class FastApiWebAppPlugin(BasePlugin):
           color='r'
         )
         value = {
-          'error': str(exc)
+          'error': str(exc),
+          'status_code': 500,
+          'logged': True,
         }
         if isinstance(profile, dict):
           self._profile_slice_end(profile)
@@ -545,8 +582,13 @@ class FastApiWebAppPlugin(BasePlugin):
         self.P("Exception occured while processing\n"
                "Request: {}\nArgs: {}\nException:\n{}".format(
                    method, args, self.get_exception()), color='r')
+        status_code = 500
+        if isinstance(exc, ValueError) and "not found" in str(exc):
+          status_code = 404
         value = {
-          'error': str(exc)
+          'error': str(exc),
+          'status_code': status_code,
+          'logged': True,
         }
         if isinstance(profile, dict):
           self._profile_slice_end(profile)
@@ -681,6 +723,10 @@ class FastApiWebAppPlugin(BasePlugin):
         stats[sum_key] += val
 
     if self.cfg_profile_log_per_request:
+      total_ms = total_ms or 0.0
+      wait_ms = wait_ms or 0.0
+      queue_ms = queue_ms or 0.0
+      exec_ms = exec_ms or 0.0
       base = f"<{endpoint}> timings(ms): t {total_ms:.2f} | w {wait_ms:.2f} | q {queue_ms:.2f} | e {exec_ms:.2f} | steps {profile.get('slice_count')}"
       if self.cfg_profile_log_detailed:
         detail = (
@@ -779,6 +825,7 @@ class FastApiWebAppPlugin(BasePlugin):
       'profile_rate': float(self.cfg_profile_rate or 0.0),
       'profile_log_per_request': bool(self.cfg_profile_log_per_request),
       'request_timeout': self.get_request_timeout(),
+      'additional_fastapi_data': self.get_additional_fastapi_data(),
       **cfg_jinja_args,
     }
 

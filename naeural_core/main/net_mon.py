@@ -366,14 +366,15 @@ class NetworkMonitor(DecentrAIObject):
         return []
 
       nodes_addrs = list(self.all_heartbeats.keys())
-      if from_hb:          
-        nodes_addrs = []
-        for key in self.all_heartbeats:
-          hb = self.all_heartbeats[key][-1]
+      if from_hb:
+        collected_addrs = []
+        for key in nodes_addrs:
+          hb = self.all_heartbeats.get(key, [{}])[-1]
           addr = hb.get(ct.HB.EE_ADDR, None)
           if addr is not None:
-            nodes_addrs.append(addr)
+            collected_addrs.append(addr)
         # end for
+        nodes_addrs = collected_addrs
       # endif from_hb
 
       return nodes_addrs
@@ -2241,6 +2242,7 @@ class NetworkMonitor(DecentrAIObject):
       hb = self.__network_node_last_heartbeat(node_address)
       # get tags from HB.
       if isinstance(hb, dict):
+        hb = deepcopy(hb)
         tags = {k: v for k, v in hb.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
         for tag_key in tags.keys():
           tag_key_clean = tag_key.replace(ct.HB.PREFIX_EE_NODETAG, '')

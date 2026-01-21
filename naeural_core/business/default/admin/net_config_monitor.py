@@ -71,17 +71,10 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   
   CT_PIPELINE = "PIPELINES"
   CT_PLG_STATUSES = "PLUGIN_STATUSES"
-  
-  
-  def Pd(self, *args, **kwargs):
-    """
-    This function will print the debug messages.
-    """
-    if self.cfg_verbose_netconfig_logs:
-      self.P(*args, **kwargs)
-    return
-  
-  
+
+  def check_debug_logging_enabled(self):
+    return super(NetConfigMonitorPlugin, self).check_debug_logging_enabled() or self.cfg_verbose_netconfig_logs
+
   def on_init(self):   
     self.P("Network fleet peer configuration monitor initializing...")
     self.__last_data_time = 0
@@ -109,8 +102,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     """ This is a debug function that checks the metadata of the dataapi stream. """
     stream_metadata = self.dataapi_stream_metadata()
     if stream_metadata is not None:
-      if self.cfg_verbose_netconfig_logs:
-        self.P(f"Stream metadata:\n {self.json_dumps(stream_metadata, indent=2)}")
+      self.Pd(f"Stream metadata:\n {self.json_dumps(stream_metadata, indent=2)}")
     return
   
   
@@ -226,8 +218,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
       node_ee_id = self.netmon.network_node_eeid(node_addr)
 
-    if self.cfg_verbose_netconfig_logs:
-      self.P(f"Sending {self.const.NET_CONFIG.REQUEST_COMMAND} to '{node_ee_id}' <{node_addr}>...")    
+    self.Pd(f"Sending {self.const.NET_CONFIG.REQUEST_COMMAND} to '{node_ee_id}' <{node_addr}>...")
     payload = {
       self.const.NET_CONFIG.NET_CONFIG_DATA : {
         self.const.NET_CONFIG.OPERATION   : self.const.NET_CONFIG.REQUEST_COMMAND,
@@ -248,8 +239,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
 
     my_pipelines = self.node_pipelines
     
-    if self.cfg_verbose_netconfig_logs:
-      self.P(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{node_ee_id}' <{node_addr}>...")
+    self.Pd(f"Sending {self.const.NET_CONFIG.STORE_COMMAND}:{len(my_pipelines)} to requester '{node_ee_id}' <{node_addr}>...")
       
     statuses = []
     if self._get_active_plugins_instances is not None and callable(self._get_active_plugins_instances):
@@ -361,16 +351,14 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       receiver = [receiver]
     
     if self.ee_addr not in receiver:
-      if self.cfg_verbose_netconfig_logs:
-        payload_path = payload.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
-        is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
-        self.P("Received {}payload for <{}> but I am <{}>: {}'".format(
-        "ENCRYPTED " if is_encrypted else "", receiver, self.ee_addr, payload_path), color='r'
-        )
+      payload_path = payload.get(self.const.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
+      is_encrypted = payload.get(self.const.PAYLOAD_DATA.EE_IS_ENCRYPTED, False)
+      self.Pd("Received {}payload for <{}> but I am <{}>: {}'".format(
+      "ENCRYPTED " if is_encrypted else "", receiver, self.ee_addr, payload_path), color='r'
+      )
       return
     else:
-      if self.cfg_verbose_netconfig_logs:
-        self.P(f"Received request from <{sender}>")
+      self.Pd(f"Received request from <{sender}>")
     
     sender_no_prefix = self.bc.maybe_remove_prefix(sender)
     sender_id = self.netmon.network_node_eeid(sender_no_prefix)
@@ -385,18 +373,17 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
         if op == self.const.NET_CONFIG.STORE_COMMAND:
           received_pipelines = net_config_data.get(self.CT_PIPELINE, [])    
           received_plugins_statuses = net_config_data.get(self.CT_PLG_STATUSES, [])
-          if self.cfg_verbose_netconfig_logs:            
-            self.P("Received {} data from '{}' <{}>'.\n  - Pipelines: {}\n  - Plugins: {}".format(
-              self.const.NET_CONFIG.STORE_COMMAND, sender_id, sender, 
-              len(received_pipelines), len(received_plugins_statuses)
-            ))
+          self.Pd("Received {} data from '{}' <{}>'.\n  - Pipelines: {}\n  - Plugins: {}".format(
+            self.const.NET_CONFIG.STORE_COMMAND, sender_id, sender,
+            len(received_pipelines), len(received_plugins_statuses)
+          ))
           # process in local cache
           self.__update_allowed_nodes(sender_no_prefix, received_pipelines)
           # now we can add the pipelines to the netmon cache
           self.netmon.register_node_pipelines(
             addr=sender_no_prefix, pipelines=received_pipelines,
             plugins_statuses=received_plugins_statuses,
-            verbose=self.cfg_verbose_netconfig_logs
+            verbose=self.check_debug_logging_enabled()
           )
         #finished SET_CONFIG
         

@@ -2285,7 +2285,7 @@ class _UtilsBaseMixin(
         if not isinstance(dest, list):
           dest = [dest]
         # now we check if the data is addressed to us
-        if self.e2_addr not in dest:
+        if self.bc.address not in dest:
           # TODO: maybe still return the encrypted data for logging purposes
           if verbose > 0:
             self.P(f"Payload not for local, dest: {dest}. Ignoring.")

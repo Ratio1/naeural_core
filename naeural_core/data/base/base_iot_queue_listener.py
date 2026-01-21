@@ -75,6 +75,10 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
       ret = self.cfg_stream_config_metadata['PROTOCOL'].lower()
     return ret
 
+  def check_debug_logging_enabled(self):
+    return super(BaseIoTQueueListenerDataCapture, self).check_debug_logging_enabled() or self.cfg_debug_iot_payloads
+
+
   def __get_stream_config_metadata_property(self, property):
     """Get the specific connection property from STREAM_CONFIG_METADATA. If it is not explicitly defined, consider the default value.
     The default value is the one specified in the communication layer.
@@ -223,9 +227,8 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     if processed_message is None:
       return
     
-    if self.cfg_debug_iot_payloads:
-      _path = processed_message.get(self.ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
-      self.P(f"Accepted message of type {message_type} from {_path}")
+    _path = processed_message.get(self.ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, [None, None, None, None])
+    self.Pd(f"Accepted message of type {message_type} from {_path}")
     
     if message_type == "struct_data":
       self._add_struct_data_input(processed_message)
@@ -320,8 +323,7 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
             _path_filter = [_path_filter]
           _path_filter = [x.upper() if isinstance(x, str) else x for x in _path_filter]
           if path[i] not in _path_filter:
-            if self.cfg_debug_iot_payloads:
-              self.P(f"Path filter {path_filter} dropped {path}")
+            self.Pd(f"Path filter {path_filter} dropped {path}")
             result = None
             break
     return result

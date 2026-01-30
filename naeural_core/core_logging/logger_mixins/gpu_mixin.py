@@ -1,7 +1,6 @@
 import gc
 import traceback
 import platform
-import atexit
 
 class _GPUMixin(object):
   """
@@ -117,7 +116,6 @@ class _GPUMixin(object):
         if not self._nvml_initialized:
           pynvml.nvmlInit()
           self._nvml_initialized = True
-          atexit.register(lambda: (pynvml.nvmlShutdown() if getattr(self, "_nvml_initialized", False) else None))
         pynvml_avail = True
       except Exception:
         pynvml_avail = False

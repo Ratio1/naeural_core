@@ -1,5 +1,7 @@
 import abc
 import json
+import traceback
+
 import numpy as np
 import uuid
 
@@ -414,8 +416,9 @@ class BaseCommThread(
         is_ok = 1 # we return 1 to signal that the message was dropped and should not be preserved
     except Exception as exc:
       self.has_send_conn = False
-      msg = "`send_wrapper` error on payload {} -> {}".format(
-        data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>"), exc
+      msg = "`send_wrapper` error on payload {} -> {}\n{}".format(
+        data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>"), exc,
+        traceback.format_exc()
       )
       self.P(msg, color='r')
       self._create_notification(

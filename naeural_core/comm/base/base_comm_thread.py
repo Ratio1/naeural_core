@@ -406,11 +406,6 @@ class BaseCommThread(
         stage='post_sign_pre_jsonify'
       )
       message = self._jsonify(signed_data)
-      self.maybe_debug_save_message_stage(
-        data=message,
-        stage='post_jsonify'
-      )
-
       # now use custom send
       if self.cfg_debug_log_payloads_revalidate:
         # debug area for revalidation

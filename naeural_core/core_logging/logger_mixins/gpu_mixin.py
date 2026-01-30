@@ -1,6 +1,7 @@
 import gc
 import traceback
 import platform
+import atexit
 
 class _GPUMixin(object):
   """
@@ -25,6 +26,7 @@ class _GPUMixin(object):
       raise ModuleNotFoundError("Cannot use _GPUMixin without having _MachineMixin")
 
     self._done_first_smi_error = False
+    self._nvml_initialized = False
     return
 
   @staticmethod
@@ -83,7 +85,7 @@ class _GPUMixin(object):
     current_pid: bool, optional
       return data only for GPUs used by current process or all if current process does
     not use GPU
-    
+
 
     Returns
     -------
@@ -108,16 +110,19 @@ class _GPUMixin(object):
         return None
 
       nvsmires, device_props, dct_proc_info = None, None, None
+      pynvml = None
+
       try:
-        from pynvml_utils import nvidia_smi
-        import pynvml
-        nvsmi = nvidia_smi.getInstance()
-        nvsmires = nvsmi.DeviceQuery('memory.free, memory.total, memory.used, utilization.gpu, temperature.gpu, fan.speed')
+        import pynvml  # provided by nvidia-ml-py
+        if not self._nvml_initialized:
+          pynvml.nvmlInit()
+          self._nvml_initialized = True
+          atexit.register(lambda: (pynvml.nvmlShutdown() if getattr(self, "_nvml_initialized", False) else None))
         pynvml_avail = True
-      except:
+      except Exception:
         pynvml_avail = False
 
-      if not pynvml_avail or len(nvsmires) == 0:
+      if not pynvml_avail:
         self.__no_gpu_avail = True
 
       lst_inf = []
@@ -144,42 +149,98 @@ class _GPUMixin(object):
           gpu_temp = None
           gpu_temp_max = None
           fan_speed, fan_speed_unit = -1, "N/A"
-          if pynvml_avail and nvsmires is not None and 'gpu' in nvsmires:
-            dct_gpu = nvsmires['gpu'][device_id]
-            mem_total = round(
-              dct_gpu['fb_memory_usage']['total'] / (1 if mb else 1024),
-              2
-            )  # already from th
-            mem_allocated = round(
-              dct_gpu['fb_memory_usage']['used'] / (1 if mb else 1024),
-              2
-            )
-            gpu_used = dct_gpu['utilization']['gpu_util']
-            if isinstance(gpu_used, str):
-              gpu_used = -1
-            gpu_temp = dct_gpu['temperature']['gpu_temp']
-            gpu_temp_max = dct_gpu['temperature']['gpu_temp_max_threshold']
+          if pynvml_avail:
+            # --- get an NVML handle that matches torch's CUDA device ordering when possible ---
+            handle = None
+            try:
+              # This helps when CUDA_VISIBLE_DEVICES remaps indices:
+              # torch device 0 may not be NVML index 0.
+              pci_bus_id = getattr(device_props, "pci_bus_id", None)
+              if pci_bus_id:
+                if hasattr(pynvml, "nvmlDeviceGetHandleByPciBusId_v2"):
+                  handle = pynvml.nvmlDeviceGetHandleByPciBusId_v2(pci_bus_id)
+                elif hasattr(pynvml, "nvmlDeviceGetHandleByPciBusId"):
+                  handle = pynvml.nvmlDeviceGetHandleByPciBusId(pci_bus_id)
+            except Exception:
+              handle = None
 
-            fan_speed = dct_gpu.get('fan_speed', -1)
-            fan_speed = -1 if fan_speed == 'N/A' else fan_speed
-            fan_speed_unit = dct_gpu.get('fan_speed_unit', "N/A")
+            if handle is None:
+              handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
 
-            handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-            processes = []
-            for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
-              dct_proc_info = {k.upper(): v for k,v in proc.__dict__.items()}
-              used_mem = dct_proc_info.pop('USEDGPUMEMORY', None)
-              dct_proc_info['ALLOCATED_MEM'] = round(
-                used_mem / 1024 ** (2 if mb else 3) if used_mem is not None else 0.0,
-                2
-              )
-              processes.append(dct_proc_info)
-              if dct_proc_info['PID'] == os.getpid():
-                current_pid_has_usage = True
-                current_pid_gpus.append(device_id)
-            #endfor
-            dct_device['PROCESSES'] = processes
-            dct_device['USED_BY_PROCESS'] = device_id in current_pid_gpus
+            # --- memory (NVML returns bytes) ---
+            if True:
+              mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+              mem_total = round(mem.total / 1024 ** (2 if mb else 3), 2)
+              mem_allocated = round(mem.used / 1024 ** (2 if mb else 3), 2)
+            # endif mem
+
+            # --- utilization ---
+            if True:
+              util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+              gpu_used = util.gpu  # int percent
+            # endif gpu_used
+
+            # --- temperature ---
+            if True:
+              gpu_temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            # endif gpu_temp
+
+            # mimic DeviceQuery's gpu_temp_max_threshold (commonly shutdown threshold)
+            if True:
+              gpu_temp_max = None
+              try:
+                if hasattr(pynvml, "NVML_TEMPERATURE_THRESHOLD_SHUTDOWN"):
+                  gpu_temp_max = pynvml.nvmlDeviceGetTemperatureThreshold(
+                    handle, pynvml.NVML_TEMPERATURE_THRESHOLD_SHUTDOWN
+                  )
+                elif hasattr(pynvml, "NVML_TEMPERATURE_THRESHOLD_SLOWDOWN"):
+                  # fallback if shutdown isn't exposed in older wrappers
+                  gpu_temp_max = pynvml.nvmlDeviceGetTemperatureThreshold(
+                    handle, pynvml.NVML_TEMPERATURE_THRESHOLD_SLOWDOWN
+                  )
+              except Exception:
+                gpu_temp_max = None
+            # endif gpu_temp_max
+
+            # --- fan ---
+            if True:
+              fan_speed, fan_speed_unit = -1, "N/A"
+              try:
+                fan_speed = pynvml.nvmlDeviceGetFanSpeed(handle)  # percent
+                fan_speed_unit = "%"
+              except Exception:
+                fan_speed, fan_speed_unit = -1, "N/A"
+            # endif fan
+
+            # --- processes (keep your existing shape) ---
+            if True:
+              processes = []
+              try:
+                nvml_na = getattr(pynvml, "NVML_VALUE_NOT_AVAILABLE", None)
+                for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
+                  dct_proc_info = {k.upper(): v for k, v in proc.__dict__.items()}
+                  used_mem = dct_proc_info.pop("USEDGPUMEMORY", None)
+
+                  if used_mem in (None, nvml_na) or (isinstance(used_mem, int) and used_mem < 0):
+                    used_mem = None
+
+                  dct_proc_info["ALLOCATED_MEM"] = round(
+                    used_mem / 1024 ** (2 if mb else 3) if used_mem is not None else 0.0,
+                    2
+                  )
+                  processes.append(dct_proc_info)
+
+                  if dct_proc_info.get("PID") == os.getpid():
+                    current_pid_has_usage = True
+                    current_pid_gpus.append(device_id)
+              except Exception:
+                # if this fails, keep empty list like before
+                processes = []
+              # endtry processes
+            # endif processes
+
+            dct_device["PROCESSES"] = processes
+            dct_device["USED_BY_PROCESS"] = device_id in current_pid_gpus
           else:
             str_os = platform.platform()
             ## check if platform is Tegra and record
@@ -236,7 +297,7 @@ class _GPUMixin(object):
       res = _main_func()
     # endwith lock
     return res
-  
+
   
   def get_gpu_info(self, device_id=0, mb=False):
     """

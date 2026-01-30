@@ -1,6 +1,8 @@
 import gc
 import traceback
 import platform
+import subprocess
+import shutil
 
 class _GPUMixin(object):
   """
@@ -71,6 +73,69 @@ class _GPUMixin(object):
   def skip_gpu_info_check(self):
     return vars(self).get('_GPUMixin__no_gpu_avail', False)
 
+  def _get_processes_by_uuid_via_nvidia_smi(self, mb: bool):
+    """
+    Returns:
+      processes_by_uuid: dict[str, list[dict]]   # uuid -> [{'PID':..., 'ALLOCATED_MEM':...}, ...]
+    Notes:
+      nvidia-smi used_gpu_memory is in MiB when nounits is used in CSV output (common behavior).
+    """
+    processes_by_uuid = {}
+
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+      return processes_by_uuid  # keep behavior: processes empty if unavailable
+
+    try:
+      cmd = [
+        smi,
+        "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
+        "--format=csv,noheader,nounits",
+      ]
+      out = subprocess.run(cmd, capture_output=True, text=True, timeout=1.5)
+      if out.returncode != 0:
+        return processes_by_uuid
+
+      for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line:
+          continue
+        # Expect: "<uuid>, <pid>, <used_gpu_memory>"
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+          continue
+
+        uuid = parts[0]
+        try:
+          pid = int(parts[1])
+        except Exception:
+          continue
+
+        used_mib = None
+        try:
+          # used_gpu_memory in MiB, nounits -> numeric
+          used_mib = float(parts[2])
+        except Exception:
+          used_mib = None
+
+        # Convert to bytes to reuse your existing MB/GB conversion logic
+        used_bytes = None if used_mib is None else int(used_mib * 1024 * 1024)
+
+        dct_proc_info = {"PID": pid}
+        dct_proc_info["ALLOCATED_MEM"] = round(
+          (used_bytes / 1024 ** (2 if mb else 3)) if used_bytes is not None else 0.0,
+          2
+        )
+
+        processes_by_uuid.setdefault(uuid, []).append(dct_proc_info)
+      # endfor lines
+
+    except Exception:
+      # Any failure here should degrade gracefully to empty processes
+      return {}
+
+    return processes_by_uuid
+
   def gpu_info(self, show=False, mb=False, current_pid=False):
     """
     Collects GPU info. Must have torch installed & non-mandatory nvidia-smi
@@ -101,6 +166,7 @@ class _GPUMixin(object):
         # first get name
         import torch as th
         import os
+        processes_by_uuid = self._get_processes_by_uuid_via_nvidia_smi(mb=mb)
       except:
         self.P("ERROR: `gpu_info` call failed - PyTorch probably is not installed:\n{}".format(
           traceback.format_exc())
@@ -214,25 +280,22 @@ class _GPUMixin(object):
             if True:
               processes = []
               try:
-                nvml_na = getattr(pynvml, "NVML_VALUE_NOT_AVAILABLE", None)
-                for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
-                  dct_proc_info = {k.upper(): v for k, v in proc.__dict__.items()}
-                  used_mem = dct_proc_info.pop("USEDGPUMEMORY", None)
+                # Use NVML only to get the UUID for this device, then map from nvidia-smi results.
+                uuid = None
+                try:
+                  uuid = pynvml.nvmlDeviceGetUUID(handle)
+                except Exception:
+                  uuid = None
 
-                  if used_mem in (None, nvml_na) or (isinstance(used_mem, int) and used_mem < 0):
-                    used_mem = None
+                if uuid and uuid in processes_by_uuid:
+                  processes = processes_by_uuid[uuid]
 
-                  dct_proc_info["ALLOCATED_MEM"] = round(
-                    used_mem / 1024 ** (2 if mb else 3) if used_mem is not None else 0.0,
-                    2
-                  )
-                  processes.append(dct_proc_info)
-
-                  if dct_proc_info.get("PID") == os.getpid():
-                    current_pid_has_usage = True
-                    current_pid_gpus.append(device_id)
+                  # Preserve your existing "current pid GPU usage" behavior
+                  for p in processes:
+                    if p.get("PID") == os.getpid():
+                      current_pid_has_usage = True
+                      current_pid_gpus.append(device_id)
               except Exception:
-                # if this fails, keep empty list like before
                 processes = []
               # endtry processes
             # endif processes

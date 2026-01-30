@@ -47,6 +47,8 @@ _CONFIG = {
 
   'DEBUG_COMM_ERRORS': False,
 
+  'DEBUG_SAVE_MESSAGE_STAGES': False,
+
   'VALIDATION_RULES': {
 
   }
@@ -230,7 +232,15 @@ class BaseCommThread(
     if self.bc_engine is not None:
       self.start_timer('bc_sign')
       # if inplace=True, it will modify the original data and SAVE deepcopy time
+      self.maybe_debug_save_message_stage(
+        data=data,
+        stage='before_replace_nan'
+      )
       prepared_data = self.log.replace_nan(data, inplace=True)
+      self.maybe_debug_save_message_stage(
+        data=prepared_data,
+        stage='after_replace_nan_before_bc_sign'
+      )
       # TODO: should serialize sets
       # prepared_data = self.log.serialize_sets(prepared_data)
       signature = self.bc_engine.sign(prepared_data, add_data=True, use_digest=True)
@@ -348,7 +358,18 @@ class BaseCommThread(
       return False
     return True
     
-    
+  def maybe_debug_save_message_stage(self, data, stage: str, str_identifier: str = None):
+    if self.cfg_debug_save_message_stages:
+      if str_identifier is None:
+        str_identifier = str(data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH))
+      self.log.save_pickle(
+        data=data,
+        fn=f'{stage}.pickle',
+        folder='output',
+        subfolder_path=f'debug_message_stages/{str_identifier}'
+      )
+    # endif cfg_debug_save_message_stages
+    return
 
   def send_wrapper(self, data, send_to: str = None):
     """
@@ -374,10 +395,22 @@ class BaseCommThread(
     is_ok = 0
     try:
       # next step will add the signature, hash, addr and also cleanup the payload
+      self.maybe_debug_save_message_stage(
+        data=data,
+        stage='pre_sign'
+      )
       signed_data = self.__sign(data)
       # transform to json
+      self.maybe_debug_save_message_stage(
+        data=signed_data,
+        stage='post_sign_pre_jsonify'
+      )
       message = self._jsonify(signed_data)
-      
+      self.maybe_debug_save_message_stage(
+        data=message,
+        stage='post_jsonify'
+      )
+
       # now use custom send
       if self.cfg_debug_log_payloads_revalidate:
         # debug area for revalidation

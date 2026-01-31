@@ -136,6 +136,28 @@ class _GPUMixin(object):
 
     return processes_by_uuid
 
+  def _get_uuid_by_index(self, timeout=1.5):
+    import subprocess, shutil
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+      return {}
+
+    out = subprocess.run(
+      [smi, "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+      capture_output=True, text=True, timeout=timeout
+    )
+    if out.returncode != 0:
+      return {}
+
+    d = {}
+    for line in out.stdout.splitlines():
+      line = line.strip()
+      if not line:
+        continue
+      idx_s, uuid = [p.strip() for p in line.split(",", 1)]
+      d[int(idx_s)] = uuid
+    return d
+
   def gpu_info(self, show=False, mb=False, current_pid=False):
     """
     Collects GPU info. Must have torch installed & non-mandatory nvidia-smi
@@ -215,20 +237,12 @@ class _GPUMixin(object):
           fan_speed, fan_speed_unit = -1, "N/A"
           if pynvml_avail:
             # --- get an NVML handle that matches torch's CUDA device ordering when possible ---
-            handle = None
-            try:
-              # This helps when CUDA_VISIBLE_DEVICES remaps indices:
-              # torch device 0 may not be NVML index 0.
-              pci_bus_id = getattr(device_props, "pci_bus_id", None)
-              if pci_bus_id:
-                if hasattr(pynvml, "nvmlDeviceGetHandleByPciBusId_v2"):
-                  handle = pynvml.nvmlDeviceGetHandleByPciBusId_v2(pci_bus_id)
-                elif hasattr(pynvml, "nvmlDeviceGetHandleByPciBusId"):
-                  handle = pynvml.nvmlDeviceGetHandleByPciBusId(pci_bus_id)
-            except Exception:
-              handle = None
-
-            if handle is None:
+            uuid_by_index = self._get_uuid_by_index()
+            # inside your for device_id in range(n_gpus):
+            uuid = uuid_by_index.get(device_id)
+            if uuid:
+              handle = pynvml.nvmlDeviceGetHandleByUUID(uuid)
+            else:
               handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
 
             # --- memory (NVML returns bytes) ---

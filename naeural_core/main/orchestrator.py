@@ -121,6 +121,7 @@ class Orchestrator(DecentrAIObject,
     self._current_dct_config_streams = {}
     self._should_send_initial_log = False
     self._initial_log_sent = False
+    self._last_offline_log = 0
     self.loop_timings = deque(maxlen=3600)
     self._reset_timers = False
     self.__is_mlstop_dangerous = False
@@ -708,6 +709,10 @@ class Orchestrator(DecentrAIObject,
   @property
   def cfg_main_loop_resolution(self):
     return self.config_data.get('MAIN_LOOP_RESOLUTION', 20)
+
+  @property
+  def cfg_work_offline(self):
+    return self.config_data.get('WORK_OFFLINE', False)
 
   @property
   def cfg_sequential_streams(self):
@@ -1613,6 +1618,27 @@ class Orchestrator(DecentrAIObject,
     self._comm_manager.maybe_show_info()    
     return
 
+  def _maybe_log_offline_status(self):
+    if not self.cfg_work_offline or self._comm_manager is None or not self._comm_manager._has_failed_comms():
+      return
+    now = time()
+    if (now - self._last_offline_log) < ct.COMMS.COMM_SECS_SHOW_INFO:
+      return
+    self._last_offline_log = now
+
+    comm_attempts = [
+      "{}:try={} fails={}".format(
+        name,
+        getattr(comm, "_nr_conn_retry_iters", None),
+        getattr(comm, "_total_conn_fails", None),
+      )
+      for name, comm in self._comm_manager._dct_comm_plugins.items()
+      if comm is not None
+    ]
+    attempts_str = "; ".join(comm_attempts) if len(comm_attempts) > 0 else "no comm plugins"
+    self.P(f"WORK_OFFLINE enabled; reconnect attempts: {attempts_str}", color='r')
+    return
+
   def _save_exception_main_loop_state(self, txt, **save_kwargs):
     fn = '{}_main_loop_exception'.format(self.log.now_str())
     self.log.save_pickle_to_output(data=save_kwargs, fn=fn + '.pickle', subfolder_path='main_loop_exceptions')
@@ -1829,6 +1855,7 @@ class Orchestrator(DecentrAIObject,
         #9. Comm info, timers, ... - later we gonna check for total comm failures
         self.__loop_stage = '9.logs'
         self.comm_manager_show_info()
+        self._maybe_log_offline_status()
 
 
         self.log.stop_timer(self._main_loop_timer_name)
@@ -1844,7 +1871,7 @@ class Orchestrator(DecentrAIObject,
         return_code = self._return_code
 
         self.__loop_stage = '10.checks'
-        if self.comm_manager.has_failed_comms:
+        if (not self.cfg_work_offline) and self.comm_manager.has_failed_comms:
           self.P("Shutdown initiated due to multiple failure in communication!", color='r')
           return_code = ct.CODE_EXCEPTION
 

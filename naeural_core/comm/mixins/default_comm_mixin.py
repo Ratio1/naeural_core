@@ -80,4 +80,3 @@ class _DefaultCommMixin(object):
     self.P('`run_thread` finished')
     self._thread_stopped = True
     return
-

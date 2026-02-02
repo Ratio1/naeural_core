@@ -1,4 +1,5 @@
 # Repository Guidelines
+This file is "alive." When you discover horizontal insights during prompts (cross-cutting behavior, gotchas, performance hotspots, shared workflows), append a brief note at the end so future agents can reuse it. Keep entries short, dated, and specific.
 
 ## Project Structure & Module Organization
 `naeural_core/` houses the runtime: `main/` orchestrates startup, `business/` contains pipeline plugins and the testing harness, `comm/` handles transports, and `serving/` wraps model execution. Runtime artifacts land in `_local_cache/`, created on demand. Optional packages live under `extensions/`, docs under `docs/`, and hardware spikes stay in `xperimental/`. Use `start_nen.py` as the launcher when embedding the core into Edge Node deployments.
@@ -21,3 +22,12 @@ Follow the Conventional Commit voice observed in history (`feat:`, `fix:`, `chor
 
 ## Configuration & Security Notes
 Runtime configuration resolves from `config_startup.json`, `EE_CONFIG`, and `EE_ID`; keep secrets outside the repo and feed them through `.env`. Validate external payloads using the filters defined in `naeural_core.constants` when extending comms modules, and avoid embedding credential defaults inside plugin code.
+
+## Living Notes (append-only)
+Format:
+- `YYYY-MM-DD`: one-sentence insight (include file/path or subsystem if relevant).
+
+Latest:
+- `2026-02-02`: Initialized living notes; append new cross-cutting insights here.
+- `2026-02-02`: Comms send/recv queues are bounded deques (1000); when MQTT is down, one message is popped and retried while queues fill/drop, and the main loop will shut down once retries exceed `CONN_MAX_RETRY_ITERS` unless bypassed (see `naeural_core/comm` + `naeural_core/main/orchestrator.py`).
+- `2026-02-02`: Correction: comm send loops pop from `_send_buff` even when disconnected, so messages may be dropped while offline; buffering is best-effort (see `naeural_core/comm/mixins`).

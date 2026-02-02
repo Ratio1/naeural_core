@@ -74,13 +74,18 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     _id = self.log.config_data.get(ct.CONFIG_STARTUP_v2.K_EE_ID, '')[:ct.EE_ALIAS_MAX_SIZE]
     return _id  
 
+  def _has_failed_comms(self):
+    for comm in self._dct_comm_plugins.values():
+      if comm.comm_failed_after_retries:
+        return comm
+    return None
 
   @property
   def has_failed_comms(self):
-    for comm in self._dct_comm_plugins.values():
-      if comm.comm_failed_after_retries:
-        self.P("Detected total communication failure on comm {}. This may generate shutdown/restart.".format(comm.__class__.__name__), color='error')
-        return True
+    comm = self._has_failed_comms()
+    if comm is not None:
+      self.P("Detected total communication failure on comm {}. This may generate shutdown/restart.".format(comm.__class__.__name__), color='error')
+      return True
     return False  
 
 

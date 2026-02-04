@@ -406,24 +406,28 @@ class BusinessManager(Manager):
           #endif
         #endif
       finally:
-        iter_total_s = perf_counter() - iter_start
-        total_elapsed_s = perf_counter() - total_start
-        self.P(
-          " START Plugin {}/{} {}:{} new={} total={:.2f}s get_class={:.2f}s init={:.2f}s start_thread={:.2f}s update_cfg={:.2f}s (ALL={:.2f}s)".format(
-            idx_job + 1,
-            n_all_jobs,
-            signature,
-            instance_id,
-            is_new_instance,
-            iter_total_s,
-            get_class_s,
-            instantiate_s,
-            start_thread_s,
-            update_config_s,
-            total_elapsed_s,
-          ),
-          boxed=True
-        )
+        # Done to avoid spam logs - only log new instances
+        if is_new_instance:
+          iter_total_s = perf_counter() - iter_start
+          total_elapsed_s = perf_counter() - total_start
+          self.P(
+            " START Plugin {}/{} {}:{} new={} total={:.2f}s get_class={:.2f}s init={:.2f}s start_thread={:.2f}s update_cfg={:.2f}s (ALL={:.2f}s)".format(
+              idx_job + 1,
+              n_all_jobs,
+              signature,
+              instance_id,
+              is_new_instance,
+              iter_total_s,
+              get_class_s,
+              instantiate_s,
+              start_thread_s,
+              update_config_s,
+              total_elapsed_s,
+            ),
+            boxed=True
+          )
+        # endif is new instance
+      # end try-finally
 
     return current_instances
 

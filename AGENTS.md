@@ -31,3 +31,4 @@ Latest:
 - `2026-02-02`: Initialized living notes; append new cross-cutting insights here.
 - `2026-02-02`: Comms send/recv queues are bounded deques (1000); when MQTT is down, one message is popped and retried while queues fill/drop, and the main loop will shut down once retries exceed `CONN_MAX_RETRY_ITERS` unless bypassed (see `naeural_core/comm` + `naeural_core/main/orchestrator.py`).
 - `2026-02-02`: Correction: comm send loops pop from `_send_buff` even when disconnected, so messages may be dropped while offline; buffering is best-effort (see `naeural_core/comm/mixins`).
+- `2026-02-04`: Business plugin instantiation runs inside the main loop (`naeural_core/business/business_manager.py` `_check_instances`), so `_get_module_name_and_class` plus plugin config/validation/inspect checks can stall the loop; heavy imports or safety checks show up as startup latency.

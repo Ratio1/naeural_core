@@ -6,7 +6,7 @@ import traceback
 
 from collections import OrderedDict
 
-from time import time, sleep
+from time import time, sleep, perf_counter
 from naeural_core import constants as ct
 from naeural_core import Logger
 from naeural_core.manager import Manager
@@ -245,142 +245,189 @@ class BusinessManager(Manager):
     current_instances = []
     self.set_loop_stage('2.bm.refresh._check_instances.get_current_jobs')
     all_jobs = self.get_current_jobs()
+    n_all_jobs = len(all_jobs)
+    self.P("Checking {} business plugin instances...".format(n_all_jobs))
+    total_start = perf_counter()
     for idx_job, (initiator_addr, initiator_id, modified_by_addr, modified_by_id, session_id, stream_name, signature, instance_id, upstream_config) in enumerate(all_jobs):
-      obj_identification = (stream_name, signature, instance_id)
-      instance_hash = self.log.hash_object(obj_identification, size=5)
-      self._dct_hash_mappings[instance_hash] = obj_identification
-      current_instances.append(instance_hash)
-      if instance_hash not in self._dct_current_instances:
-        self._dct_instance_hash_log[instance_hash] = {
-          ct.PAYLOAD_DATA.INITIATOR_ID  : initiator_id,
-          ct.PAYLOAD_DATA.SESSION_ID    : session_id,
-          ct.PAYLOAD_DATA.SIGNATURE     : signature,
-          ct.PAYLOAD_DATA.STREAM_NAME   : stream_name,
-          ct.PAYLOAD_DATA.INSTANCE_ID   : instance_id,
-        }
+      iter_start = perf_counter()
+      get_class_s = 0.0
+      instantiate_s = 0.0
+      start_thread_s = 0.0
+      update_config_s = 0.0
+      is_new_instance = False
+      try:
+        obj_identification = (stream_name, signature, instance_id)
+        instance_hash = self.log.hash_object(obj_identification, size=5)
+        self._dct_hash_mappings[instance_hash] = obj_identification
+        current_instances.append(instance_hash)
+        if instance_hash not in self._dct_current_instances:
+          is_new_instance = True
+          self._dct_instance_hash_log[instance_hash] = {
+            ct.PAYLOAD_DATA.INITIATOR_ID  : initiator_id,
+            ct.PAYLOAD_DATA.SESSION_ID    : session_id,
+            ct.PAYLOAD_DATA.SIGNATURE     : signature,
+            ct.PAYLOAD_DATA.STREAM_NAME   : stream_name,
+            ct.PAYLOAD_DATA.INSTANCE_ID   : instance_id,
+          }
 
-        self.P(" * * * * Init biz plugin {}:{} * * * *".format(signature, instance_id), color='b')
-        self.set_loop_stage('2.bm.refresh.get_class.{}:{}'.format(signature,instance_id))
-        if 'update_monitor' in signature.lower():
-          print('debug')
-        _module_name, _class_name, _cls_def, _config_dict = self._get_module_name_and_class(
-          locations=ct.PLUGIN_SEARCH.LOC_BIZ_PLUGINS,
-          name=signature,
-          suffix=ct.PLUGIN_SEARCH.SUFFIX_BIZ_PLUGINS,
-          verbose=0,
-          safety_check=True,  # perform safety check on custom biz plugins
-          safe_locations=ct.PLUGIN_SEARCH.SAFE_BIZ_PLUGINS,
-          safe_imports=ct.PLUGIN_SEARCH.SAFE_BIZ_IMPORTS
-        )
-
-        self.set_loop_stage('2.bm.refresh.check_class.{}:{}'.format(signature,instance_id))
-        
-        if _cls_def is None:
-          self._dct_current_instances[instance_hash] = None
-          msg = "Error loading business plugin <{}:{}> - No code/script defined.".format(signature, instance_id)
-          self.P(msg + " on stream {}".format(stream_name), color='r')
-          self._create_notification(
-            notif=ct.STATUS_TYPE.STATUS_EXCEPTION,
-            msg=msg,
-            stream_name=stream_name,
-            info="No code/script defined for business plugin '{}' in {} or plugin is invalid (node {})".format(
-              signature, ct.PLUGIN_SEARCH.LOC_BIZ_PLUGINS, "is currently SECURED" if self.owner.is_secured else "is currently UNSECURED!"
-            )
+          self.P(
+            " * * * * Init biz plugin #{}/{} {}:{} * * * *".format(
+              idx_job + 1, n_all_jobs, signature, instance_id
+            ),
+            color='b'
           )
-          continue
-        #endif
-
-        self.comm_shared_memory['payloads'][instance_hash] = deque(maxlen=1000)
-        self.comm_shared_memory['commands'][instance_hash] = deque(maxlen=1000)
-
-        try:
-          self.set_loop_stage('2.bm.refresh.call_class.{}:{}:{}'.format(stream_name, signature, instance_id))
-          self.shmem['__set_loop_stage_func'] = self.set_loop_stage
-          # debug when configuring a plugin
-          debug_config_changes = self.config_data.get('PLUGINS_DEBUG_CONFIG_CHANGES', False) # Ugly but needed
-          # end debug
-          
-          _module_version = _config_dict.get('MODULE_VERSION', '0.0.0')
-          
-          plugin = _cls_def(
-            log=self.log,
-            global_shmem=self.shmem, # this SHOULD NOT be used for inter-plugin mem access
-            plugins_shmem=self.plugins_shmem,
-            stream_id=stream_name,
-            signature=signature,
-            default_config=_config_dict,
-            upstream_config=upstream_config,
-            environment_variables=self._environment_variables,
-            initiator_id=initiator_id,
-            initiator_addr=initiator_addr,
-            session_id=session_id,
-            threaded_execution_chain=self._run_on_threads,
-            payloads_deque=self.comm_shared_memory['payloads'][instance_hash],
-            commands_deque=self.comm_shared_memory['commands'][instance_hash],
-            ee_ver=self.owner.__version__,
-            runs_in_docker=self.owner.runs_in_docker,
-            docker_branch=self.owner.docker_source,
-            debug_config_changes=debug_config_changes,
-            version=_module_version,
-            pipelines_view_function=self.owner.get_pipelines_view,
-            pipeline_use_local_comms_only=self._dct_config_streams[stream_name].get(ct.CONFIG_STREAM.K_USE_LOCAL_COMMS_ONLY, False),
+          self.set_loop_stage('2.bm.refresh.get_class.{}:{}'.format(signature,instance_id))
+          if 'update_monitor' in signature.lower():
+            print('debug')
+          get_class_start = perf_counter()
+          _module_name, _class_name, _cls_def, _config_dict = self._get_module_name_and_class(
+            locations=ct.PLUGIN_SEARCH.LOC_BIZ_PLUGINS,
+            name=signature,
+            suffix=ct.PLUGIN_SEARCH.SUFFIX_BIZ_PLUGINS,
+            verbose=0,
+            safety_check=True,  # perform safety check on custom biz plugins
+            safe_locations=ct.PLUGIN_SEARCH.SAFE_BIZ_PLUGINS,
+            safe_imports=ct.PLUGIN_SEARCH.SAFE_BIZ_IMPORTS
           )
-          if plugin.cfg_runs_only_on_supervisor_node:
-            if not self.is_supervisor_node:
-              self.P(
-                "Plugin {}:{} runs ONLY on supervisor node. Skipping.".format(signature, instance_id), 
-                color='r', boxed=True,
+          get_class_s = perf_counter() - get_class_start
+
+          self.set_loop_stage('2.bm.refresh.check_class.{}:{}'.format(signature,instance_id))
+          
+          if _cls_def is None:
+            self._dct_current_instances[instance_hash] = None
+            msg = "Error loading business plugin <{}:{}> - No code/script defined.".format(signature, instance_id)
+            self.P(msg + " on stream {}".format(stream_name), color='r')
+            self._create_notification(
+              notif=ct.STATUS_TYPE.STATUS_EXCEPTION,
+              msg=msg,
+              stream_name=stream_name,
+              info="No code/script defined for business plugin '{}' in {} or plugin is invalid (node {})".format(
+                signature, ct.PLUGIN_SEARCH.LOC_BIZ_PLUGINS, "is currently SECURED" if self.owner.is_secured else "is currently UNSECURED!"
               )
-              plugin = None
-              # continue
-            else:
-              self.P("Plugin {}:{} runs only on supervisor node. Running.".format(signature, instance_id), color='g')
-          # endif runs only on supervisor node
-          self.set_loop_stage('2.bm.refresh.new_instance_done: {}:{}:{}'.format(stream_name, signature, instance_id))
-        except Exception as exc:
-          plugin = None
-          trace = traceback.format_exc()
-          msg = "Plugin init FAILED for business plugin {} instance {}".format(signature, instance_id)
-          info = str(exc)
-          if "validating" not in info:
-            info += '\n' + trace
-          self.P(msg + ': ' + info, color='r')
-          self._create_notification(
-            notif=ct.STATUS_TYPE.STATUS_EXCEPTION,
-            msg=msg,
-            signature=signature,
-            instance_id=instance_id,
-            stream_name=stream_name,
-            info=info,
-            displayed=True,
-          )
-        #end try-except
+            )
+            continue
+          #endif
 
-        self._dct_current_instances[instance_hash] = plugin
-        self.__maybe_register_special_plugin_instance_hash(instance_hash=instance_hash, signature=signature)
+          self.comm_shared_memory['payloads'][instance_hash] = deque(maxlen=1000)
+          self.comm_shared_memory['commands'][instance_hash] = deque(maxlen=1000)
 
-        if plugin is None:
-          continue
+          try:
+            self.set_loop_stage('2.bm.refresh.call_class.{}:{}:{}'.format(stream_name, signature, instance_id))
+            self.shmem['__set_loop_stage_func'] = self.set_loop_stage
+            # debug when configuring a plugin
+            debug_config_changes = self.config_data.get('PLUGINS_DEBUG_CONFIG_CHANGES', False) # Ugly but needed
+            # end debug
+            
+            _module_version = _config_dict.get('MODULE_VERSION', '0.0.0')
+            
+            instantiate_start = perf_counter()
+            plugin = _cls_def(
+              log=self.log,
+              global_shmem=self.shmem, # this SHOULD NOT be used for inter-plugin mem access
+              plugins_shmem=self.plugins_shmem,
+              stream_id=stream_name,
+              signature=signature,
+              default_config=_config_dict,
+              upstream_config=upstream_config,
+              environment_variables=self._environment_variables,
+              initiator_id=initiator_id,
+              initiator_addr=initiator_addr,
+              session_id=session_id,
+              threaded_execution_chain=self._run_on_threads,
+              payloads_deque=self.comm_shared_memory['payloads'][instance_hash],
+              commands_deque=self.comm_shared_memory['commands'][instance_hash],
+              ee_ver=self.owner.__version__,
+              runs_in_docker=self.owner.runs_in_docker,
+              docker_branch=self.owner.docker_source,
+              debug_config_changes=debug_config_changes,
+              version=_module_version,
+              pipelines_view_function=self.owner.get_pipelines_view,
+              pipeline_use_local_comms_only=self._dct_config_streams[stream_name].get(ct.CONFIG_STREAM.K_USE_LOCAL_COMMS_ONLY, False),
+            )
+            instantiate_s = perf_counter() - instantiate_start
+            if plugin.cfg_runs_only_on_supervisor_node:
+              if not self.is_supervisor_node:
+                self.P(
+                  "Plugin {}:{} runs ONLY on supervisor node. Skipping.".format(signature, instance_id), 
+                  color='r', boxed=True,
+                )
+                plugin = None
+                # continue
+              else:
+                self.P("Plugin {}:{} runs only on supervisor node. Running.".format(signature, instance_id), color='g')
+            # endif runs only on supervisor node
+            self.set_loop_stage('2.bm.refresh.new_instance_done: {}:{}:{}'.format(stream_name, signature, instance_id))
+          except Exception as exc:
+            plugin = None
+            trace = traceback.format_exc()
+            msg = "Plugin init FAILED for business plugin {} instance {}".format(signature, instance_id)
+            info = str(exc)
+            if "validating" not in info:
+              info += '\n' + trace
+            self.P(msg + ': ' + info, color='r')
+            self._create_notification(
+              notif=ct.STATUS_TYPE.STATUS_EXCEPTION,
+              msg=msg,
+              signature=signature,
+              instance_id=instance_id,
+              stream_name=stream_name,
+              info=info,
+              displayed=True,
+            )
+          #end try-except
 
-        self.P("New plugin instance {} added for exec.".format(plugin), color='g')
-        if self._run_on_threads:
-          plugin.start_thread()
-      #endif new instance
-      else:
-        # I do have the instance, I just need to modify the config
-        plugin = self._dct_current_instances[instance_hash]
-        if plugin is not None:
-          # next we need to check if the config has changed and handle also the particular
-          # case when the plugin just received a INSTANCE_COMMAND
-          plugin.maybe_update_instance_config(
-            upstream_config=upstream_config,
-            session_id=session_id,
-            modified_by_addr=modified_by_addr,
-            modified_by_id=modified_by_id,
-          )
-          self.set_loop_stage('2.bm.refresh.maybe_update_instance_config.DONE: {}:{}:{}'.format(stream_name, signature, instance_id))
+          self._dct_current_instances[instance_hash] = plugin
+          self.__maybe_register_special_plugin_instance_hash(instance_hash=instance_hash, signature=signature)
+
+          if plugin is None:
+            continue
+
+          self.P("New plugin instance {} added for exec.".format(plugin), color='g')
+          if self._run_on_threads:
+            start_thread_start = perf_counter()
+            plugin.start_thread()
+            start_thread_s = perf_counter() - start_thread_start
+        #endif new instance
+        else:
+          # I do have the instance, I just need to modify the config
+          plugin = self._dct_current_instances[instance_hash]
+          if plugin is not None:
+            # next we need to check if the config has changed and handle also the particular
+            # case when the plugin just received a INSTANCE_COMMAND
+            update_config_start = perf_counter()
+            plugin.maybe_update_instance_config(
+              upstream_config=upstream_config,
+              session_id=session_id,
+              modified_by_addr=modified_by_addr,
+              modified_by_id=modified_by_id,
+            )
+            update_config_s = perf_counter() - update_config_start
+            self.set_loop_stage('2.bm.refresh.maybe_update_instance_config.DONE: {}:{}:{}'.format(stream_name, signature, instance_id))
+          #endif
         #endif
-      #endif
+      finally:
+        # Done to avoid spam logs - only log new instances
+        if is_new_instance:
+          iter_total_s = perf_counter() - iter_start
+          total_elapsed_s = perf_counter() - total_start
+          self.P(
+            " START Plugin {}/{} {}:{} new={} total={:.2f}s get_class={:.2f}s init={:.2f}s start_thread={:.2f}s update_cfg={:.2f}s (ALL={:.2f}s)".format(
+              idx_job + 1,
+              n_all_jobs,
+              signature,
+              instance_id,
+              is_new_instance,
+              iter_total_s,
+              get_class_s,
+              instantiate_s,
+              start_thread_s,
+              update_config_s,
+              total_elapsed_s,
+            ),
+            boxed=True
+          )
+        # endif is new instance
+      # end try-finally
 
     return current_instances
 
@@ -653,4 +700,3 @@ class BusinessManager(Manager):
     #endfor
     self.log.stop_timer('execute_all_business_plugins', skip_first_timing=False)
     return
-

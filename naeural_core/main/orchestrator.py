@@ -160,8 +160,14 @@ class Orchestrator(DecentrAIObject,
 
 
   def startup(self):
-    super().startup()
-    self.P("Starting Execution Engine '{}' core v.{}".format(self.cfg_eeid, self.__version__))
+    super().startup()    
+    self.P(
+      "Starting Execution Engine '{}' v.{}, core {}, (WORK_OFFLINE={})".format(
+        self.cfg_eeid, self.__version__, self.core_version,
+        self.cfg_work_offline,
+      ),
+      boxed=True
+    )
     if self.runs_in_docker:
       self.P("Running in Docker container detected.")
     self._maybe_env_and_docker_setup()

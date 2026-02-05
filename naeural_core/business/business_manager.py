@@ -1,6 +1,7 @@
 import json
 import gc
 import os
+import sys
 
 import traceback
 
@@ -67,6 +68,15 @@ class BusinessManager(Manager):
   def startup(self):
     super().startup()
     self._dct_current_instances = self._dct_subalterns # this allows usage of `self.get_subaltern(instance_hash)`
+    if self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False):
+      self.P(
+        "Plugin timing env: python={} dont_write_bytecode={} env_PYTHONDONTWRITEBYTECODE={}".format(
+          sys.version.split()[0],
+          getattr(sys, 'dont_write_bytecode', None),
+          os.environ.get('PYTHONDONTWRITEBYTECODE'),
+        ),
+        color='b',
+      )
     return
 
   @property
@@ -246,14 +256,17 @@ class BusinessManager(Manager):
     self.set_loop_stage('2.bm.refresh._check_instances.get_current_jobs')
     all_jobs = self.get_current_jobs()
     n_all_jobs = len(all_jobs)
-    self.P("Checking {} business plugin instances...".format(n_all_jobs))
-    total_start = perf_counter()
+    debug_load_timings = self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False)
+    if debug_load_timings:
+      self.P("Checking {} business plugin instances...".format(n_all_jobs))
+      total_start = perf_counter()
     for idx_job, (initiator_addr, initiator_id, modified_by_addr, modified_by_id, session_id, stream_name, signature, instance_id, upstream_config) in enumerate(all_jobs):
-      iter_start = perf_counter()
-      get_class_s = 0.0
-      instantiate_s = 0.0
-      start_thread_s = 0.0
-      update_config_s = 0.0
+      if debug_load_timings:
+        iter_start = perf_counter()
+        get_class_s = 0.0
+        instantiate_s = 0.0
+        start_thread_s = 0.0
+        update_config_s = 0.0
       is_new_instance = False
       try:
         obj_identification = (stream_name, signature, instance_id)
@@ -279,7 +292,8 @@ class BusinessManager(Manager):
           self.set_loop_stage('2.bm.refresh.get_class.{}:{}'.format(signature,instance_id))
           if 'update_monitor' in signature.lower():
             print('debug')
-          get_class_start = perf_counter()
+          if debug_load_timings:
+            get_class_start = perf_counter()
           _module_name, _class_name, _cls_def, _config_dict = self._get_module_name_and_class(
             locations=ct.PLUGIN_SEARCH.LOC_BIZ_PLUGINS,
             name=signature,
@@ -289,7 +303,8 @@ class BusinessManager(Manager):
             safe_locations=ct.PLUGIN_SEARCH.SAFE_BIZ_PLUGINS,
             safe_imports=ct.PLUGIN_SEARCH.SAFE_BIZ_IMPORTS
           )
-          get_class_s = perf_counter() - get_class_start
+          if debug_load_timings:
+            get_class_s = perf_counter() - get_class_start
 
           self.set_loop_stage('2.bm.refresh.check_class.{}:{}'.format(signature,instance_id))
           
@@ -320,7 +335,8 @@ class BusinessManager(Manager):
             
             _module_version = _config_dict.get('MODULE_VERSION', '0.0.0')
             
-            instantiate_start = perf_counter()
+            if debug_load_timings:
+              instantiate_start = perf_counter()
             plugin = _cls_def(
               log=self.log,
               global_shmem=self.shmem, # this SHOULD NOT be used for inter-plugin mem access
@@ -344,7 +360,8 @@ class BusinessManager(Manager):
               pipelines_view_function=self.owner.get_pipelines_view,
               pipeline_use_local_comms_only=self._dct_config_streams[stream_name].get(ct.CONFIG_STREAM.K_USE_LOCAL_COMMS_ONLY, False),
             )
-            instantiate_s = perf_counter() - instantiate_start
+            if debug_load_timings:
+              instantiate_s = perf_counter() - instantiate_start
             if plugin.cfg_runs_only_on_supervisor_node:
               if not self.is_supervisor_node:
                 self.P(
@@ -384,40 +401,45 @@ class BusinessManager(Manager):
 
           self.P("New plugin instance {} added for exec.".format(plugin), color='g')
           if self._run_on_threads:
-            start_thread_start = perf_counter()
+            if debug_load_timings:
+              start_thread_start = perf_counter()
             plugin.start_thread()
-            start_thread_s = perf_counter() - start_thread_start
-        #endif new instance
+            if debug_load_timings:
+              start_thread_s = perf_counter() - start_thread_start
+          #endif new instance
         else:
           # I do have the instance, I just need to modify the config
           plugin = self._dct_current_instances[instance_hash]
           if plugin is not None:
             # next we need to check if the config has changed and handle also the particular
             # case when the plugin just received a INSTANCE_COMMAND
-            update_config_start = perf_counter()
+            if debug_load_timings:
+              update_config_start = perf_counter()
             plugin.maybe_update_instance_config(
               upstream_config=upstream_config,
               session_id=session_id,
               modified_by_addr=modified_by_addr,
               modified_by_id=modified_by_id,
             )
-            update_config_s = perf_counter() - update_config_start
+            if debug_load_timings:
+              update_config_s = perf_counter() - update_config_start
             self.set_loop_stage('2.bm.refresh.maybe_update_instance_config.DONE: {}:{}:{}'.format(stream_name, signature, instance_id))
           #endif
         #endif
       finally:
-        # Done to avoid spam logs - only log new instances
-        if is_new_instance:
+        if is_new_instance and debug_load_timings:
           iter_total_s = perf_counter() - iter_start
           total_elapsed_s = perf_counter() - total_start
+          other_s = iter_total_s - (get_class_s + instantiate_s + start_thread_s + update_config_s)
           self.P(
-            " START Plugin {}/{} {}:{} new={} total={:.2f}s get_class={:.2f}s init={:.2f}s start_thread={:.2f}s update_cfg={:.2f}s (ALL={:.2f}s)".format(
+            " START Plugin {}/{} {}:{} new={} total={:.2f}s other={:.2f}s get_class={:.2f}s init={:.2f}s start_thread={:.2f}s update_cfg={:.2f}s (ALL={:.2f}s)".format(
               idx_job + 1,
               n_all_jobs,
               signature,
               instance_id,
               is_new_instance,
               iter_total_s,
+              other_s,
               get_class_s,
               instantiate_s,
               start_thread_s,
@@ -426,7 +448,7 @@ class BusinessManager(Manager):
             ),
             boxed=True
           )
-        # endif is new instance
+        # endif debug_load_timings
       # end try-finally
 
     return current_instances

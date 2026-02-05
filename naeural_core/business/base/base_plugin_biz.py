@@ -5,7 +5,7 @@ import numpy as np
 import traceback
 import json
 
-from time import time, sleep
+from time import time, sleep, perf_counter
 from copy import deepcopy
 from collections import deque, OrderedDict
 from functools import partial
@@ -1933,6 +1933,16 @@ class BasePluginExecutor(
       return updates
 
     def _update_instance_config(self):
+      debug_load_timings = self.log.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False)
+      if debug_load_timings:
+        cfg_start = perf_counter()
+        env_merge_s = 0.0
+        default_merge_s = 0.0
+        validate_s = 0.0
+        warnings_s = 0.0
+        alerters_s = 0.0
+        timebins_s = 0.0
+        shmem_s = 0.0
       if self._instance_config is not None:
         reconfig = True
         self.P("* * * * Reconfiguring plugin {} * *".format(self), color='b')
@@ -1946,30 +1956,46 @@ class BasePluginExecutor(
         # initially this call did not have `default_config = self._instance_config` that led
         # to wrongly using at each update the _default_config
         self.__set_loop_stage('_update_instance_config._environment_variables')
+        if debug_load_timings:
+          env_start = perf_counter()
         self._instance_config = self._merge_prepare_config(
           default_config=self._instance_config,
           delta_config=self._environment_variables,
           debug=self.__debug_config_changes,
         )
+        if debug_load_timings:
+          env_merge_s = perf_counter() - env_start
       # now normal delta config from upstream
       self.__set_loop_stage('_update_instance_config._default_config')
 
       updates = self._check_delta_config(self._upstream_config)  # check if there are any updates
       is_instance_command_only = len(updates) == 1 and 'INSTANCE_COMMAND' in updates
 
+      if debug_load_timings:
+        default_merge_start = perf_counter()
       self._instance_config = self._merge_prepare_config(
         default_config=self._instance_config,
         debug=self.__debug_config_changes,
       )
+      if debug_load_timings:
+        default_merge_s = perf_counter() - default_merge_start
 
       self.__set_loop_stage('_update_instance_config.setup_config_and_validate')
 
       # if we do not run the next line then the config will not be updated for each of the cfg_* handlers
       # as they will point to the old config_data dict
+      if debug_load_timings:
+        validate_start = perf_counter()
       self.setup_config_and_validate(self._instance_config)  # here _instance_config will be copyed to config_data
+      if debug_load_timings:
+        validate_s = perf_counter() - validate_start
 
       self.__set_loop_stage('_update_instance_config._print_warnings')
+      if debug_load_timings:
+        warnings_start = perf_counter()
       self._print_warnings()
+      if debug_load_timings:
+        warnings_s = perf_counter() - warnings_start
 
       # now for the second part of the config: reset/set stuff
       if is_instance_command_only:
@@ -1981,24 +2007,54 @@ class BasePluginExecutor(
           # TODO: make sure you set RESTART_ALERTERS_ON_CONFIG to False for plugins
           #       that should NOT restart alerters
           self.__set_loop_stage('_update_instance_config._create_alert_state_machine')
+          if debug_load_timings:
+            alerters_start = perf_counter()
           self._create_alert_state_machine()
+          if debug_load_timings:
+            alerters_s = perf_counter() - alerters_start
 
         # Create time bins mixin default # TODO: refactor similar with alerters
         self.__set_loop_stage('_update_instance_config.timebins_create_bin')
+        if debug_load_timings:
+          timebins_start = perf_counter()
         self.timebins_create_bin()
+        if debug_load_timings:
+          timebins_s = perf_counter() - timebins_start
 
         # now maybe re-init plugin shmem if uptate or new initialization
         if (self.cfg_restart_shmem_on_config and reconfig) or not reconfig:
           # `global_shmem` here is WRONG: we should NOT allow  plugins to access global shmem!
           #  so instead we use `plugins_shmem` initiated by the BizMgr
           self.__set_loop_stage('_update_instance_config.init_plugins_shared_memory')
+          if debug_load_timings:
+            shmem_start = perf_counter()
           self.init_plugins_shared_memory(self.plugins_shmem)
+          if debug_load_timings:
+            shmem_s = perf_counter() - shmem_start
 
       self.last_config_timestamp = self.log.now_str(nice_print=True, short=False)
       if self.is_plugin_stopped:
         self._create_notification(
           msg='Plugin configured while being stopped',
           notif_code=ct.NOTIFICATION_CODES.PLUGIN_CONFIG_IN_PAUSE_OK,
+        )
+      if debug_load_timings:
+        total_s = perf_counter() - cfg_start
+        other_s = total_s - (env_merge_s + default_merge_s + validate_s + warnings_s + alerters_s + timebins_s + shmem_s)
+        self.P(
+          "CONFIG_TIMING {} total={:.3f}s other={:.3f}s env_merge={:.3f}s default_merge={:.3f}s validate={:.3f}s warnings={:.3f}s alerters={:.3f}s timebins={:.3f}s shmem={:.3f}s".format(
+            self,
+            total_s,
+            other_s,
+            env_merge_s,
+            default_merge_s,
+            validate_s,
+            warnings_s,
+            alerters_s,
+            timebins_s,
+            shmem_s,
+          ),
+          color='b',
         )
       self.__set_loop_stage('_update_instance_config.EXIT_update_instance_config')
       return

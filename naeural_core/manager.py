@@ -1,5 +1,6 @@
 from naeural_core import constants as ct
 
+from time import perf_counter
 from naeural_core import Logger
 from ratio1 import _PluginsManagerMixin
 from naeural_core import DecentrAIObject
@@ -75,13 +76,21 @@ class Manager(DecentrAIObject, _PluginsManagerMixin):
   def _get_module_name_and_class(self, locations, name, suffix=None, verbose=1, safety_check=True, safe_locations=None, safe_imports=None):
     if safe_locations is None:
       self.P("  Warning: no safe location provided", color='r')
+    debug_load_timings = self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False)
+    cache_key = name.lower()
+    cache_hit = cache_key in self.plugin_locations_cache
+    if debug_load_timings:
+      load_start = perf_counter()
+      lookup_s = 0.0
     self.P("Attempting to load {} plugin '{}'".format(
       self.__class__.__name__, name,
     ))
-    if name.lower() in self.plugin_locations_cache:
-      _module_name, _class_name, _cls_def, _config_dict = self.plugin_locations_cache[name.lower()]
+    if cache_hit:
+      _module_name, _class_name, _cls_def, _config_dict = self.plugin_locations_cache[cache_key]
       self.P(f'Attempting to load plugin {name} from cache.')
     else:
+      if debug_load_timings:
+        lookup_start = perf_counter()
       _module_name, _class_name, _cls_def, _config_dict = super()._get_module_name_and_class(
         locations=locations,
         name=name,
@@ -92,8 +101,24 @@ class Manager(DecentrAIObject, _PluginsManagerMixin):
         search_in_packages=ct.PLUGIN_SEARCH.SEARCH_IN_PACKAGES,
         safe_imports=safe_imports,
       )
-      self.plugin_locations_cache[name.lower()] = _module_name, _class_name, _cls_def, _config_dict
+      if debug_load_timings:
+        lookup_s = perf_counter() - lookup_start
+      self.plugin_locations_cache[cache_key] = _module_name, _class_name, _cls_def, _config_dict
     # endif name in cache
+
+    if debug_load_timings:
+      total_s = perf_counter() - load_start
+      self.P(
+        "Plugin load timing name='{}' cache_hit={} lookup={:.3f}s total={:.3f}s module={} class={}".format(
+          name,
+          cache_hit,
+          lookup_s,
+          total_s,
+          _module_name,
+          _class_name,
+        ),
+        color='b',
+      )
 
     if _cls_def is None and verbose >= 1:
       self._create_notification(

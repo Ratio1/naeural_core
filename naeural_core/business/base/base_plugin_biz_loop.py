@@ -1,7 +1,7 @@
 import traceback
 import numpy as np
 
-from time import time, sleep
+from time import time, sleep, perf_counter
 from collections import deque
 
 from naeural_core import constants as ct
@@ -387,6 +387,9 @@ class _BasePluginLoopMixin(object):
   
   def __on_init(self):
     self.P("Running build-in & custom on_init events...")
+    debug_load_timings = self.log.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False)
+    if debug_load_timings:
+      init_start = perf_counter()
     if self.cfg_disabled:
       self.P(f"WARNING: This plugin instance of `{self.__class__.__name__}` is DISABLED", boxed=True, color='r')
       return
@@ -400,7 +403,13 @@ class _BasePluginLoopMixin(object):
         msg=f"Custom on_init event failed: {e}",
         displayed=True,
       )
+      if debug_load_timings:
+        init_s = perf_counter() - init_start
+        self.P("PLUGIN_INIT_TIMING {} status=error on_init={:.3f}s".format(self, init_s), color='r')
       raise e
+    if debug_load_timings:
+      init_s = perf_counter() - init_start
+      self.P("PLUGIN_INIT_TIMING {} status=ok on_init={:.3f}s".format(self, init_s), color='b')
     self._init_process_finalized = True
     return
   
@@ -537,4 +546,3 @@ class _BasePluginLoopMixin(object):
     #### del self.__upstream_inputs_deque ### this should NOT be called here - please do not ADD/DECOMMENT
     self._on_close()
     return
-

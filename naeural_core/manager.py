@@ -76,7 +76,7 @@ class Manager(DecentrAIObject, _PluginsManagerMixin):
   def _get_module_name_and_class(self, locations, name, suffix=None, verbose=1, safety_check=True, safe_locations=None, safe_imports=None):
     if safe_locations is None:
       self.P("  Warning: no safe location provided", color='r')
-    debug_load_timings = self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False)
+    debug_load_timings = self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True)
     cache_key = name.lower()
     cache_hit = cache_key in self.plugin_locations_cache
     if debug_load_timings:

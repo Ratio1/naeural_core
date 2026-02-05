@@ -387,7 +387,7 @@ class _BasePluginLoopMixin(object):
   
   def __on_init(self):
     self.P("Running build-in & custom on_init events...")
-    debug_load_timings = self.log.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False)
+    debug_load_timings = self.log.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True)
     if debug_load_timings:
       init_start = perf_counter()
     if self.cfg_disabled:

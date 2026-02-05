@@ -1933,7 +1933,7 @@ class BasePluginExecutor(
       return updates
 
     def _update_instance_config(self):
-      debug_load_timings = self.log.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False)
+      debug_load_timings = self.log.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True)
       if debug_load_timings:
         cfg_start = perf_counter()
         env_merge_s = 0.0

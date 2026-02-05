@@ -68,7 +68,7 @@ class BusinessManager(Manager):
   def startup(self):
     super().startup()
     self._dct_current_instances = self._dct_subalterns # this allows usage of `self.get_subaltern(instance_hash)`
-    if self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False):
+    if self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True):
       self.P(
         "Plugin timing env: python={} dont_write_bytecode={} env_PYTHONDONTWRITEBYTECODE={}".format(
           sys.version.split()[0],
@@ -256,7 +256,7 @@ class BusinessManager(Manager):
     self.set_loop_stage('2.bm.refresh._check_instances.get_current_jobs')
     all_jobs = self.get_current_jobs()
     n_all_jobs = len(all_jobs)
-    debug_load_timings = self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', False)
+    debug_load_timings = self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True)
     if debug_load_timings:
       self.P("Checking {} business plugin instances...".format(n_all_jobs))
       total_start = perf_counter()

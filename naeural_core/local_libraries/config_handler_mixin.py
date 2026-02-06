@@ -208,8 +208,58 @@ class _ConfigHandlerMixin(object):
 
   
   def create_config_handlers(self, verbose=0):    
-    if hasattr(self, 'config_data') and isinstance(self.config_data, dict) and len(self.config_data) > 0:
-      res = []
+    if not (hasattr(self, 'config_data') and isinstance(self.config_data, dict) and len(self.config_data) > 0):
+      return
+
+    cache_enabled = False
+    if hasattr(self, 'log') and hasattr(self.log, 'config_data'):
+      cache_enabled = self.log.config_data.get('BM_CACHE_CONFIG_HANDLERS', False)
+
+    res = []
+    cls = type(self)
+
+    if cache_enabled:
+      # 1) Ensure BasePluginExecutor base keys are created once (no import)
+      base_cls = next((c for c in cls.mro() if c.__name__ == "BasePluginExecutor"), None)
+      if base_cls is not None:
+        base_created = getattr(base_cls, '_cfg_keys_created', None)
+        if base_created is None:
+          base_created = set()
+          setattr(base_cls, '_cfg_keys_created', base_created)
+
+        base_cfg = getattr(base_cls, 'CONFIG', {}) or {}
+        base_keys = set(base_cfg.keys())
+        missing_base = base_keys - base_created
+
+        for k in missing_base:
+          func_name = self._get_prop(k)
+          if not hasattr(base_cls, func_name):
+            fnc = partial(getter, key=k) # create the func
+            fnc_prop = property(fget=fnc, doc="Get '{}' from config_data".format(k)) # create prop from func 
+            setattr(base_cls, func_name, fnc_prop) # set the prop of the class
+          base_created.add(k)
+
+      # 2) Per-subclass cache for extra keys
+      created_keys = getattr(cls, '_cfg_keys_created', None)
+      if created_keys is None:
+        created_keys = set()
+        setattr(cls, '_cfg_keys_created', created_keys)
+
+      current_keys = set(self.config_data.keys())
+      missing_keys = current_keys - created_keys
+
+      for k in missing_keys:
+        func_name = self._get_prop(k)
+        if not hasattr(cls, func_name):
+          # below is a bit tricky: using a lambda generates a non-deterministic abnormal behavior
+          # the ideea is to create a global func instance that wil be then loaded on the class (not instance)
+          # as a descriptor object - ie a `property`. "many Bothans died to bring the plans of the Death Star..."
+          fnc = partial(getter, key=k) # create the func
+          fnc_prop = property(fget=fnc, doc="Get '{}' from config_data".format(k)) # create prop from func 
+          setattr(cls, func_name, fnc_prop) # set the prop of the class
+          res.append(func_name)
+        created_keys.add(k)
+    else:
       for k in self.config_data:
         func_name = self._get_prop(k)
         if not hasattr(self, func_name):
@@ -217,13 +267,13 @@ class _ConfigHandlerMixin(object):
           # the ideea is to create a global func instance that wil be then loaded on the class (not instance)
           # as a descriptor object - ie a `property`. "many Bothans died to bring the plans of the Death Star..."
           fnc = partial(getter, key=k) # create the func
-          cls = type(self) # get the class
           fnc_prop = property(fget=fnc, doc="Get '{}' from config_data".format(k)) # create prop from func 
           setattr(cls, func_name, fnc_prop) # set the prop of the class
           res.append(func_name)
-      if len(res) > 0 and verbose > 1:
-        self.P("Created '{}' config_data handlers: {}".format(self.__class__.__name__, res), color='b')
-      self.__cfg_ready = True
+
+    if len(res) > 0 and verbose > 1:
+      self.P("Created '{}' config_data handlers: {}".format(self.__class__.__name__, res), color='b')
+    self.__cfg_ready = True
     return
   
   
@@ -480,12 +530,34 @@ class _ConfigHandlerMixin(object):
     for msg in fail_msgs:
       self.add_error(msg)
 
-    for method_name, func in self.log.get_class_methods(self.__class__, include_parent=True):
-      if method_name.startswith('validate_'):
+    cache_enabled = False
+    if hasattr(self, 'log') and hasattr(self.log, 'config_data'):
+      cache_enabled = self.log.config_data.get('BM_CACHE_VALIDATORS', False)
+
+    if cache_enabled:
+      cls = self.__class__
+      validators = getattr(cls, "_cfg_validators", None)
+      if validators is None:
+        validators = []
+        for method_name, func in self.log.get_class_methods(cls, include_parent=True):
+          if method_name.startswith('validate_'):
+            validators.append(func)
+        setattr(cls, "_cfg_validators", validators)
+
+      for func in validators:
         try:
           func(self)
         except:
-          self.add_error("Programming error in validation method '{}'.\n{}".format(method_name, traceback.format_exc()))
+          self.add_error("Programming error in validation method '{}'.\n{}".format(
+            func.__name__, traceback.format_exc()))
+    else:
+      for method_name, func in self.log.get_class_methods(self.__class__, include_parent=True):
+        if method_name.startswith('validate_'):
+          try:
+            func(self)
+          except:
+            self.add_error("Programming error in validation method '{}'.\n{}".format(
+              method_name, traceback.format_exc()))
 
     lst_errors = self.get_errors()
     lst_warnings = self.get_warnings()

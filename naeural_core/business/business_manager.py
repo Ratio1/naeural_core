@@ -257,9 +257,7 @@ class BusinessManager(Manager):
     all_jobs = self.get_current_jobs()
     n_all_jobs = len(all_jobs)
     debug_load_timings = self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True)
-    if debug_load_timings:
-      self.P("Checking {} business plugin instances...".format(n_all_jobs))
-      total_start = perf_counter()
+    total_start = perf_counter()
     for idx_job, (initiator_addr, initiator_id, modified_by_addr, modified_by_id, session_id, stream_name, signature, instance_id, upstream_config) in enumerate(all_jobs):
       if debug_load_timings:
         iter_start = perf_counter()

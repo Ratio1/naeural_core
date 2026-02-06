@@ -1130,7 +1130,7 @@ class Orchestrator(DecentrAIObject,
     wait_time = 1 / self.cfg_main_loop_resolution # max wait time
     current_cycle_time = perf_counter() - self._last_main_loop_pass_time # cycle time since last pass
     avg_comm_loop_timings = self._comm_manager.avg_comm_loop_timings
-    if avg_comm_loop_timings is not None and avg_comm_loop_timings > wait_time:
+    if avg_comm_loop_timings is not None and avg_comm_loop_timings > wait_time and not self.cfg_work_offline:
       # increase wait time if need be
       wait_time = avg_comm_loop_timings 
 

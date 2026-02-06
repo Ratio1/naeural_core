@@ -432,8 +432,9 @@ class Orchestrator(DecentrAIObject,
   
   
   def _maybe_save_local_info(self):
-    if (time() - self.__last_local_info_save) >= 2:
+    if (time() - self.__last_local_info_save) >= 10: # save local info every 10 seconds
       self.save_local_address()
+      self.__last_local_info_save = time()      
     return
 
 
@@ -481,7 +482,6 @@ class Orchestrator(DecentrAIObject,
         self.P(f"Failed to get local info: {exc}", color='r')
       with open(addr_file, 'w') as f:
         f.write(json.dumps(data, indent=2))
-      self.__last_local_info_save = time()
     except Exception as e:
       if not self.__save_local_address_error_logged:
         self.P(f"Error saving local info: {e}\n{traceback.format_exc()}", color='r')
@@ -1809,7 +1809,9 @@ class Orchestrator(DecentrAIObject,
         
         self.__loop_stage = "0"
         self.log.start_timer(self._main_loop_timer_name)
+        self.__loop_stage = "0.maybe_delay"
         self._maybe_delay_main_loop()
+        self.__loop_stage = "0.save_info"
         self._maybe_save_local_info()
         self._main_loop_counts['ITER'] += 1
         

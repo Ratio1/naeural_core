@@ -13,7 +13,8 @@ from naeural_core.comm.base import BaseCommThread
 _CONFIG = {
   **BaseCommThread.CONFIG,
 
-  "CONNECTION_FAIL_SLEEP_TIME": 10,
+  "CONNECTION_FAIL_SLEEP_TIME": 50,
+  "BURST_RECONNECTS" : 2,
 
   'VALIDATION_RULES': {
     **BaseCommThread.CONFIG['VALIDATION_RULES'],
@@ -83,7 +84,9 @@ class MQTTCommThread(BaseCommThread):
     if self.connection is None or not self.has_server_conn:
       self.has_send_conn = False
       self.has_recv_conn = False
-      dct_ret = self._controller.server_connect()
+      dct_ret = self._controller.server_connect(
+        max_retries=self.cfg_burst_reconnects
+      )
       self.has_server_conn = dct_ret['has_connection']
       msg = dct_ret['msg']
       msg_type = dct_ret['msg_type']

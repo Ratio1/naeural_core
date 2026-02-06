@@ -84,7 +84,12 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
   def has_failed_comms(self):
     comm = self._has_failed_comms()
     if comm is not None:
-      self.P("Detected total communication failure on comm {}. This may generate shutdown/restart.".format(comm.__class__.__name__), color='error')
+      retries = comm._nr_conn_retry_iters
+      self.P("Detected {} comm failures on comm {}. This may generate shutdown/restart.".format(
+          retries, comm.__class__.__name__
+        ), 
+        color='error'
+      )
       return True
     return False  
 

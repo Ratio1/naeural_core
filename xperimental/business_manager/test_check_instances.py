@@ -398,6 +398,8 @@ def main() -> int:
       ct.CALLBACKS.INSTANCE_CONFIG_SAVER_CALLBACK: _dummy_save_config,
       "network_monitor": _DummyNetMon(),
     }
+    log.config_data['BM_CACHE_VALIDATORS'] = True
+    log.config_data['BM_CACHE_CONFIG_HANDLERS'] = True
     bm = BusinessManager(log=log, owner=owner, shmem=shmem, run_on_threads=True)
 
     if args.include_real_plugins:

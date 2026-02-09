@@ -221,6 +221,7 @@ class _ConfigHandlerMixin(object):
     if cache_enabled:
       # 1) Ensure BasePluginExecutor base keys are created once (no import)
       base_cls = next((c for c in cls.mro() if c.__name__ == "BasePluginExecutor"), None)
+      base_keys = set()
       if base_cls is not None:
         base_created = getattr(base_cls, '_cfg_keys_created', None)
         if base_created is None:
@@ -237,16 +238,17 @@ class _ConfigHandlerMixin(object):
             fnc = partial(getter, key=k) # create the func
             fnc_prop = property(fget=fnc, doc="Get '{}' from config_data".format(k)) # create prop from func 
             setattr(base_cls, func_name, fnc_prop) # set the prop of the class
+          res.append(func_name)
           base_created.add(k)
 
-      # 2) Per-subclass cache for extra keys
-      created_keys = getattr(cls, '_cfg_keys_created', None)
+      # 2) Per-subclass cache for extra keys (do not inherit base cache)
+      created_keys = cls.__dict__.get('_cfg_keys_created', None)
       if created_keys is None:
         created_keys = set()
         setattr(cls, '_cfg_keys_created', created_keys)
 
       current_keys = set(self.config_data.keys())
-      missing_keys = current_keys - created_keys
+      missing_keys = current_keys - base_keys - created_keys
 
       for k in missing_keys:
         func_name = self._get_prop(k)

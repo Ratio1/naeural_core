@@ -222,6 +222,33 @@ class _ChainstoreResponseMixin:
     return {}
 
 
+  def reset_chainstore_response(self):
+    """
+    Reset chainstore response state for plugin restart/recycle.
+
+    Call this when preparing for a restart to:
+    1. Clear the chainstore key (signals "restarting" to orchestrators)
+    2. Allow a new response to be sent when ready again
+
+    Typically paired with set_plugin_ready(False).
+
+    Returns
+    -------
+    bool
+        True if reset was performed, False if key not configured.
+
+    Example
+    -------
+    ```python
+    def _restart_container(self):
+        self.reset_chainstore_response()
+        self.set_plugin_ready(False)
+        # ... perform restart ...
+    ```
+    """
+    return self._reset_chainstore_response()
+
+
   def _should_send_chainstore_response(self):
     """
     Determine if a chainstore response should be sent.
@@ -274,6 +301,9 @@ class _ChainstoreResponseMixin:
 
     response_key = self._get_chainstore_response_key()
     self.P(f"Resetting chainstore response key '{response_key}'")
+
+    # Reset the sent flag to allow re-sending after reset
+    self._chainstore_response_sent = False
 
     try:
       # Set to None to signal "initializing" state

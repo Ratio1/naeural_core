@@ -757,6 +757,77 @@ class BCWrapper:
     """
     return self.__bc.web3_submit_node_update(job_id=job_id, nodes=nodes)
 
+  def submit_test_attestation(
+    self,
+    app_id: str,
+    test_mode: int,
+    node_count: int,
+    vulnerability_score: int,
+    ip_obfuscated: str,
+    cid_obfuscated: str,
+    content_hash: str,
+    node_signature: str,
+    tx_private_key: str = None,
+    contract_address: str = None,
+  ):
+    """
+    Submit a test attestation to the on-chain registry.
+
+    Parameters
+    ----------
+    app_id : str
+        bytes32 app identifier as 0x-prefixed hex.
+    test_mode : int
+        0 for SINGLE, 1 for CONTINUOUS.
+    node_count : int
+        Number of nodes used for the run.
+    vulnerability_score : int
+        Score in [0, 100].
+    ip_obfuscated : str
+        bytes2 hex with first/last IPv4 octet.
+    cid_obfuscated : str
+        bytes10 hex with first/last 5 chars.
+    content_hash : str
+        bytes32 hex (e.g. hash of CID/report).
+    node_signature : str
+        Signature produced with node private key.
+    tx_private_key : str, optional
+        Optional private key used to sign the transaction (tenant wallet).
+    contract_address : str, optional
+        Optional registry contract address override.
+    """
+    return self.__bc.web3_submit_test_attestation(
+      app_id=app_id,
+      test_mode=test_mode,
+      node_count=node_count,
+      vulnerability_score=vulnerability_score,
+      ip_obfuscated=ip_obfuscated,
+      cid_obfuscated=cid_obfuscated,
+      content_hash=content_hash,
+      node_signature=node_signature,
+      tx_private_key=tx_private_key,
+      contract_address=contract_address,
+    )
+
+  def get_test_attestation_count(self, app_id: str, contract_address: str = None):
+    """
+    Retrieve the attestation count for an app id.
+    """
+    return self.__bc.web3_get_test_attestation_count(
+      app_id=app_id,
+      contract_address=contract_address,
+    )
+
+  def get_test_attestation(self, app_id: str, index: int, contract_address: str = None):
+    """
+    Retrieve a test attestation entry by index.
+    """
+    return self.__bc.web3_get_test_attestation(
+      app_id=app_id,
+      index=index,
+      contract_address=contract_address,
+    )
+
   def allocate_rewards_across_all_escrows(self):
     """
     Allocate rewards across all escrows.

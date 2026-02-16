@@ -757,7 +757,7 @@ class BCWrapper:
     """
     return self.__bc.web3_submit_node_update(job_id=job_id, nodes=nodes)
 
-  def submit_test_attestation(
+  def submit_attestation(
     self,
     app_id: str,
     test_mode: int,
@@ -771,7 +771,7 @@ class BCWrapper:
     contract_address: str = None,
   ):
     """
-    Submit a test attestation to the on-chain registry.
+    Submit an attestation to the on-chain registry.
 
     Parameters
     ----------
@@ -796,7 +796,7 @@ class BCWrapper:
     contract_address : str, optional
         Optional registry contract address override.
     """
-    return self.__bc.web3_submit_test_attestation(
+    return self.__bc.web3_submit_attestation(
       app_id=app_id,
       test_mode=test_mode,
       node_count=node_count,
@@ -809,20 +809,20 @@ class BCWrapper:
       contract_address=contract_address,
     )
 
-  def get_test_attestation_count(self, app_id: str, contract_address: str = None):
+  def get_attestation_count(self, app_id: str, contract_address: str = None):
     """
     Retrieve the attestation count for an app id.
     """
-    return self.__bc.web3_get_test_attestation_count(
+    return self.__bc.web3_get_attestation_count(
       app_id=app_id,
       contract_address=contract_address,
     )
 
-  def get_test_attestation(self, app_id: str, index: int, contract_address: str = None):
+  def get_attestation(self, app_id: str, index: int, contract_address: str = None):
     """
-    Retrieve a test attestation entry by index.
+    Retrieve an attestation entry by index.
     """
-    return self.__bc.web3_get_test_attestation(
+    return self.__bc.web3_get_attestation(
       app_id=app_id,
       index=index,
       contract_address=contract_address,

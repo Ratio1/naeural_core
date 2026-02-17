@@ -767,7 +767,6 @@ class BCWrapper:
     content_hash: str,
     node_signature: str,
     tx_private_key: str,
-    contract_address: str = None,
   ):
     """
     Submit an attestation to the on-chain registry.
@@ -790,8 +789,6 @@ class BCWrapper:
         Signature produced with node private key.
     tx_private_key : str
         Private key used to sign the transaction (tenant wallet).
-    contract_address : str, optional
-        Optional registry contract address override.
     """
     return self.__bc.web3_submit_redmesh_attestation(
       test_mode=test_mode,
@@ -802,7 +799,6 @@ class BCWrapper:
       content_hash=content_hash,
       node_signature=node_signature,
       tx_private_key=tx_private_key,
-      contract_address=contract_address,
     )
 
   def allocate_rewards_across_all_escrows(self):

@@ -766,7 +766,7 @@ class BCWrapper:
     cid_obfuscated: str,
     content_hash: str,
     node_signature: str,
-    tx_private_key: str = None,
+    tx_private_key: str,
     contract_address: str = None,
   ):
     """
@@ -788,8 +788,8 @@ class BCWrapper:
         bytes32 hex (e.g. hash of CID/report).
     node_signature : str
         Signature produced with node private key.
-    tx_private_key : str, optional
-        Optional private key used to sign the transaction (tenant wallet).
+    tx_private_key : str
+        Private key used to sign the transaction (tenant wallet).
     contract_address : str, optional
         Optional registry contract address override.
     """

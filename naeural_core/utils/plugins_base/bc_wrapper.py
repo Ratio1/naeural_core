@@ -757,7 +757,7 @@ class BCWrapper:
     """
     return self.__bc.web3_submit_node_update(job_id=job_id, nodes=nodes)
 
-  def submit_attestation(
+  def submit_redmesh_attestation(
     self,
     test_mode: int,
     node_count: int,
@@ -793,7 +793,7 @@ class BCWrapper:
     contract_address : str, optional
         Optional registry contract address override.
     """
-    return self.__bc.web3_submit_attestation(
+    return self.__bc.web3_submit_redmesh_attestation(
       test_mode=test_mode,
       node_count=node_count,
       vulnerability_score=vulnerability_score,

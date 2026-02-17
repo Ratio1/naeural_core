@@ -782,8 +782,7 @@ class BCWrapper:
     tx_private_key : str
         Private key used to sign the transaction (tenant wallet).
     report_cid : str, optional
-        CID used to derive obfuscated CID bytes and content hash.
-        If missing, content hash is set to zero bytes.
+        CID used to derive obfuscated CID bytes.
     """
     return self.__bc.web3_submit_redmesh_attestation(
       test_mode=test_mode,

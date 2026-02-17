@@ -765,7 +765,6 @@ class BCWrapper:
     target: str,
     tx_private_key: str,
     report_cid: str = None,
-    report=None,
   ):
     """
     Submit an attestation to the on-chain registry.
@@ -784,8 +783,7 @@ class BCWrapper:
         Private key used to sign the transaction (tenant wallet).
     report_cid : str, optional
         CID used to derive obfuscated CID bytes and content hash.
-    report : Any, optional
-        Fallback content when CID is missing, used for content hash.
+        If missing, content hash is set to zero bytes.
     """
     return self.__bc.web3_submit_redmesh_attestation(
       test_mode=test_mode,
@@ -794,7 +792,6 @@ class BCWrapper:
       target=target,
       tx_private_key=tx_private_key,
       report_cid=report_cid,
-      report=report,
     )
 
   def allocate_rewards_across_all_escrows(self):

@@ -762,11 +762,10 @@ class BCWrapper:
     test_mode: int,
     node_count: int,
     vulnerability_score: int,
-    ip_obfuscated: str,
-    cid_obfuscated: str,
-    content_hash: str,
-    node_signature: str,
+    target: str,
     tx_private_key: str,
+    report_cid: str = None,
+    report=None,
   ):
     """
     Submit an attestation to the on-chain registry.
@@ -779,26 +778,23 @@ class BCWrapper:
         Number of nodes used for the run.
     vulnerability_score : int
         Score in [0, 100].
-    ip_obfuscated : str
-        bytes2 hex with first/last IPv4 octet.
-    cid_obfuscated : str
-        bytes10 hex with first/last 5 chars.
-    content_hash : str
-        bytes32 hex (e.g. hash of CID/report).
-    node_signature : str
-        Signature produced with node private key.
+    target : str
+        Target host/IP used to derive obfuscated IP bytes for the attestation.
     tx_private_key : str
         Private key used to sign the transaction (tenant wallet).
+    report_cid : str, optional
+        CID used to derive obfuscated CID bytes and content hash.
+    report : Any, optional
+        Fallback content when CID is missing, used for content hash.
     """
     return self.__bc.web3_submit_redmesh_attestation(
       test_mode=test_mode,
       node_count=node_count,
       vulnerability_score=vulnerability_score,
-      ip_obfuscated=ip_obfuscated,
-      cid_obfuscated=cid_obfuscated,
-      content_hash=content_hash,
-      node_signature=node_signature,
+      target=target,
       tx_private_key=tx_private_key,
+      report_cid=report_cid,
+      report=report,
     )
 
   def allocate_rewards_across_all_escrows(self):

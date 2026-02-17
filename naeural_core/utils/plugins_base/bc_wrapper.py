@@ -759,7 +759,6 @@ class BCWrapper:
 
   def submit_attestation(
     self,
-    app_id: str,
     test_mode: int,
     node_count: int,
     vulnerability_score: int,
@@ -775,8 +774,6 @@ class BCWrapper:
 
     Parameters
     ----------
-    app_id : str
-        bytes32 app identifier as 0x-prefixed hex.
     test_mode : int
         0 for SINGLE, 1 for CONTINUOUS.
     node_count : int
@@ -797,7 +794,6 @@ class BCWrapper:
         Optional registry contract address override.
     """
     return self.__bc.web3_submit_attestation(
-      app_id=app_id,
       test_mode=test_mode,
       node_count=node_count,
       vulnerability_score=vulnerability_score,

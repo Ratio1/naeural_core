@@ -809,16 +809,6 @@ class BCWrapper:
       contract_address=contract_address,
     )
 
-  def get_attestation(self, app_id: str, index: int, contract_address: str = None):
-    """
-    Retrieve an attestation entry by index.
-    """
-    return self.__bc.web3_get_attestation(
-      app_id=app_id,
-      index=index,
-      contract_address=contract_address,
-    )
-
   def allocate_rewards_across_all_escrows(self):
     """
     Allocate rewards across all escrows.

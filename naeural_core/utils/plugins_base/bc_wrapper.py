@@ -809,15 +809,6 @@ class BCWrapper:
       contract_address=contract_address,
     )
 
-  def get_attestation_count(self, app_id: str, contract_address: str = None):
-    """
-    Retrieve the attestation count for an app id.
-    """
-    return self.__bc.web3_get_attestation_count(
-      app_id=app_id,
-      contract_address=contract_address,
-    )
-
   def get_attestation(self, app_id: str, index: int, contract_address: str = None):
     """
     Retrieve an attestation entry by index.

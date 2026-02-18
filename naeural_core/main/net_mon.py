@@ -282,7 +282,7 @@ class NetworkMonitor(DecentrAIObject):
     hb_deque = self.__network_heartbeats[__addr_no_prefix]
     if len(hb_deque) < 2:
       return
-    hb_copy = self.deepcopy(hb_deque[-2])
+    hb_copy = deepcopy(hb_deque[-2])
     self.__pop_repeating_info_from_heartbeat(hb_copy)
     hb_deque[-2] = hb_copy
     return
@@ -341,7 +341,7 @@ class NetworkMonitor(DecentrAIObject):
         self.__network_heartbeats[__addr_no_prefix] = deque(maxlen=self.HB_HISTORY)
       #endif
       # Work on a copy to avoid mutating the stored heartbeat after append.
-      hb_work = self.deepcopy(data)
+      hb_work = deepcopy(data)
       # now register pipelines if avail (will pop from hb_work)
       self.__maybe_register_hb_pipelines(addr, hb_work)
       self.__network_heartbeats[__addr_no_prefix].append(hb_work)
@@ -445,7 +445,7 @@ class NetworkMonitor(DecentrAIObject):
           return {}
         #endif raise or return
       res = self.all_heartbeats[__addr_no_prefix][-1]
-      return self.deepcopy(res) if return_copy else res
+      return deepcopy(res) if return_copy else res
 
     def __network_node_last_valid_heartbeat(self, addr, minutes=3):
       past_heartbeats = self.__network_node_past_heartbeats_by_interval(addr=addr, minutes=minutes, )

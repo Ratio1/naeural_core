@@ -122,7 +122,6 @@ def test_race_repro_old_behavior():
     node_addr="aixp_test_node",
     epoch_manager=DummyEpochManager(),
   )
-  netmon.deepcopy = deepcopy
   addr = "aixp_test_node"
 
   # seed with one heartbeat
@@ -151,7 +150,6 @@ def test_race_fixed_behavior():
     node_addr="aixp_test_node",
     epoch_manager=DummyEpochManager(),
   )
-  netmon.deepcopy = deepcopy
   addr = "aixp_test_node"
 
   # seed with one heartbeat

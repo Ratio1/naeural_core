@@ -282,7 +282,9 @@ class NetworkMonitor(DecentrAIObject):
     hb_deque = self.__network_heartbeats[__addr_no_prefix]
     if len(hb_deque) < 2:
       return
-    self.__pop_repeating_info_from_heartbeat(hb_deque[-2])
+    hb_copy = self.deepcopy(hb_deque[-2])
+    self.__pop_repeating_info_from_heartbeat(hb_copy)
+    hb_deque[-2] = hb_copy
     return
   
   
@@ -338,9 +340,11 @@ class NetworkMonitor(DecentrAIObject):
         self.P("Box alive: {}:{}.".format(addr, __eeid), color='y')
         self.__network_heartbeats[__addr_no_prefix] = deque(maxlen=self.HB_HISTORY)
       #endif
-      self.__network_heartbeats[__addr_no_prefix].append(data)
-      # now register pipelines if avail
-      self.__maybe_register_hb_pipelines(addr, data)
+      # Work on a copy to avoid mutating the stored heartbeat after append.
+      hb_work = self.deepcopy(data)
+      # now register pipelines if avail (will pop from hb_work)
+      self.__maybe_register_hb_pipelines(addr, hb_work)
+      self.__network_heartbeats[__addr_no_prefix].append(hb_work)
       # now remove the extra info from the previous heartbeat
       # this is done to avoid having the same info in multiple sequential heartbeats
       self.__pop_repeating_info_from_previous_heartbeat(addr)
@@ -424,7 +428,12 @@ class NetworkMonitor(DecentrAIObject):
         lst_heartbeats = list(reversed(lst_heartbeats))
       return lst_heartbeats
 
-    def __network_node_last_heartbeat(self, addr, return_empty_dict=False, debug_unavailable=False):
+    def __network_node_last_heartbeat(
+        self, addr,
+        return_empty_dict=False,
+        debug_unavailable=False,
+        return_copy: bool = False
+    ):
       __addr_no_prefix = self.__remove_address_prefix(addr) 
       if __addr_no_prefix not in self.__network_nodes_list():
         msg = "`_network_node_last_heartbeat`: ADDR '{}' not available".format(addr)
@@ -435,7 +444,8 @@ class NetworkMonitor(DecentrAIObject):
             self.P(msg, color='r')
           return {}
         #endif raise or return
-      return self.all_heartbeats[__addr_no_prefix][-1]
+      res = self.all_heartbeats[__addr_no_prefix][-1]
+      return self.deepcopy(res) if return_copy else res
 
     def __network_node_last_valid_heartbeat(self, addr, minutes=3):
       past_heartbeats = self.__network_node_past_heartbeats_by_interval(addr=addr, minutes=minutes, )
@@ -1942,7 +1952,9 @@ class NetworkMonitor(DecentrAIObject):
   
     
     def network_node_status(self, addr, min_uptime=60, dt_now=None):
+      node_initial_last_timestamp, node_final_last_timestamp = None, None
       try:
+        node_initial_last_timestamp = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True).get(ct.HB.CURRENT_TIME)
         eeid = self.network_node_eeid(addr)
         avail_disk = self.__network_node_last_available_disk(addr=addr, norm=False)
         avail_disk_prc = round(self.__network_node_last_available_disk(addr=addr, norm=True),3)
@@ -2087,8 +2099,14 @@ class NetworkMonitor(DecentrAIObject):
           #end comms
           tags=self.get_network_node_tags(addr),
         )
+        node_final_last_timestamp = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True).get(ct.HB.CURRENT_TIME)
       except Exception as e:
-        self.P(f"Error in network_node_status for '{eeid}' <{addr}>: {e}", color='r')
+        try:
+          node_final_last_timestamp = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True).get(ct.HB.CURRENT_TIME)
+        except Exception as e2:
+          pass
+        debug_ts_str = f"initial_ts: {node_initial_last_timestamp}, final_ts: {node_final_last_timestamp}"
+        self.P(f"Error in network_node_status for '{eeid}' <{addr}>[{debug_ts_str}]: {e}", color='r')
         raise
       return dct_result    
     
@@ -2239,10 +2257,9 @@ class NetworkMonitor(DecentrAIObject):
       """
 
       result = []
-      hb = self.__network_node_last_heartbeat(node_address)
+      hb = self.__network_node_last_heartbeat(node_address, return_copy=True)
       # get tags from HB.
       if isinstance(hb, dict):
-        hb = deepcopy(hb)
         tags = {k: v for k, v in hb.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
         for tag_key in tags.keys():
           tag_key_clean = tag_key.replace(ct.HB.PREFIX_EE_NODETAG, '')

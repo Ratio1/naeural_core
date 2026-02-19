@@ -4,6 +4,8 @@ import shutil
 import tempfile
 import inspect
 import time
+import threading
+import queue
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -17,6 +19,11 @@ from naeural_core.utils.fastapi_utils import PostponedRequest
 __VER__ = '0.0.0'
 
 DEFAULT_REQUEST_TIMEOUT = 2 * 60  # seconds
+DEFAULT_MAX_INCOMING_REQUESTS = 1000
+REQUEST_MONITOR_RESTART_MIN_BACKOFF_S = 0.5
+REQUEST_MONITOR_RESTART_MAX_BACKOFF_S = 30.0
+INCOMING_DROP_LOG_INTERVAL_S = 5.0
+DEFAULT_MAX_REQUEST_MONITOR_RESTART_RETRIES = 10
 
 _CONFIG = {
   **BasePlugin.CONFIG,
@@ -44,6 +51,8 @@ _CONFIG = {
   "LOG_REQUESTS": False,
 
   "REQUEST_TIMEOUT": DEFAULT_REQUEST_TIMEOUT,
+  "MAX_INCOMING_REQUESTS": DEFAULT_MAX_INCOMING_REQUESTS,
+  "MAX_REQUEST_MONITOR_RESTART_RETRIES": DEFAULT_MAX_REQUEST_MONITOR_RESTART_RETRIES,
 
   'PROCESS_DELAY': 0,
 
@@ -93,6 +102,22 @@ class FastApiWebAppPlugin(BasePlugin):
     if numeric_timeout <= 0:
       return None
     return numeric_timeout
+  
+  def get_max_incoming_requests(self):
+    configured_value = self.cfg_max_incoming_requests
+    if not isinstance(configured_value, int):
+      return DEFAULT_MAX_INCOMING_REQUESTS
+    if configured_value < 1:
+      return 1
+    return configured_value
+  
+  def get_max_request_monitor_restart_retries(self):
+    configured_value = self.cfg_max_request_monitor_restart_retries
+    if not isinstance(configured_value, int):
+      return DEFAULT_MAX_REQUEST_MONITOR_RESTART_RETRIES
+    if configured_value < 0:
+      return 0
+    return configured_value
 
   @staticmethod
   def cap_chunk_size(chunk_size):
@@ -402,6 +427,14 @@ class FastApiWebAppPlugin(BasePlugin):
     self._server_queue = self._manager.get_server_queue()
     self._client_queue = self._manager.get_client_queue()
     self.postponed_requests = self.deque()
+    self._incoming_requests = self.deque()
+    self._incoming_lock = threading.Lock()
+    self._stop_request_monitor = threading.Event()
+    self._request_monitor_thread = None
+    self._request_monitor_last_restart_ts = 0.0
+    self._request_monitor_backoff_s = 0.0
+    self._request_monitor_restart_failures = 0
+    self._last_incoming_drop_log_ts = 0.0
 
     self._profile_stats = {}
     self._profile_last_log_ts = self.time()
@@ -412,6 +445,73 @@ class FastApiWebAppPlugin(BasePlugin):
     # Start the FastAPI app
     self.P('Starting FastAPI app...')
     super(FastApiWebAppPlugin, self).on_init()
+    self._start_request_monitor_thread()
+    return
+  
+  def on_request(self, request):
+    """
+    Hook called when a new request arrives from the FastAPI side.
+
+    Parameters
+    ----------
+    request : dict
+        Raw request payload pulled from the server queue.
+    """
+    return
+
+  def _start_request_monitor_thread(self):
+    if self._request_monitor_thread is not None and self._request_monitor_thread.is_alive():
+      return
+
+    def _monitor():
+      try:
+        while not self._stop_request_monitor.is_set():
+          try:
+            request = self._server_queue.get(True, 0.25)
+          except queue.Empty:
+            continue
+          except Exception as exc:
+            self.P(f"Request monitor error: {exc}", color='r')
+            continue
+          try:
+            value = request.get('value')
+            is_profile_event = (
+              isinstance(value, (list, tuple)) and len(value) > 0 and value[0] == "__profile__"
+            )
+            if not is_profile_event:
+              t_start = time.perf_counter()
+              self.on_request(request)
+              timeout_s = self.get_request_timeout()
+              if isinstance(timeout_s, (int, float)) and timeout_s > 0:
+                elapsed = time.perf_counter() - t_start
+                if elapsed > timeout_s:
+                  self.P(
+                    f"on_request exceeded timeout: {elapsed:.3f}s > {timeout_s:.3f}s",
+                    color='y'
+                  )
+          except Exception:
+            self.P(f"Exception in on_request:\n{self.get_exception()}", color='r')
+          with self._incoming_lock:
+            if len(self._incoming_requests) >= self.get_max_incoming_requests():
+              now = time.time()
+              if now - self._last_incoming_drop_log_ts >= INCOMING_DROP_LOG_INTERVAL_S:
+                self._last_incoming_drop_log_ts = now
+                self.P(
+                  "Dropping incoming request: incoming queue is full.",
+                  color='y'
+                )
+            else:
+              self._incoming_requests.append(request)
+      except Exception:
+        self.P(f"Request monitor crashed:\n{self.get_exception()}", color='r')
+        return
+
+    self._request_monitor_thread = threading.Thread(
+      target=_monitor,
+      name="FastApiWebAppRequestMonitor",
+      daemon=True
+    )
+    self._request_monitor_thread.start()
     return
 
   def create_postponed_request(self, solver_method, method_kwargs={}):
@@ -487,6 +587,35 @@ class FastApiWebAppPlugin(BasePlugin):
     return
 
   def _process(self):
+    if not self._stop_request_monitor.is_set():
+      if self._request_monitor_thread is None or not self._request_monitor_thread.is_alive():
+        now = self.time()
+        if self._request_monitor_backoff_s <= 0:
+          self._request_monitor_backoff_s = REQUEST_MONITOR_RESTART_MIN_BACKOFF_S
+        next_allowed = self._request_monitor_last_restart_ts + self._request_monitor_backoff_s
+        if now >= next_allowed:
+          max_retries = self.get_max_request_monitor_restart_retries()
+          if self._request_monitor_restart_failures >= max_retries:
+            msg = (
+              "Request monitor thread failed to start after "
+              f"{self._request_monitor_restart_failures} retries."
+            )
+            self.P(msg, color='r')
+            raise RuntimeError(msg)
+          self.P("Request monitor thread not running; restarting.", color='y')
+          self._start_request_monitor_thread()
+          self._request_monitor_last_restart_ts = now
+          self._request_monitor_backoff_s = min(
+            REQUEST_MONITOR_RESTART_MAX_BACKOFF_S,
+            self._request_monitor_backoff_s * 2
+          )
+          self._request_monitor_restart_failures += 1
+      else:
+        self._request_monitor_backoff_s = 0.0
+        self._request_monitor_restart_failures = 0
+      # endif request monitor needs (re)starting
+    # endif request monitor is not stopped
+
     new_postponed_requests = []
     while len(self.postponed_requests) > 0:
       request = self.postponed_requests.popleft()
@@ -539,10 +668,10 @@ class FastApiWebAppPlugin(BasePlugin):
       self.postponed_requests.append(request)
     # endfor all new postponed requests
     while True:
-      try:
-        request = self._server_queue.get(False)
-      except Exception:
-        break
+      with self._incoming_lock:
+        if len(self._incoming_requests) == 0:
+          break
+        request = self._incoming_requests.popleft()
       id = request.get('id')
       value = request.get('value')
       profile = request.get('profile')
@@ -778,6 +907,9 @@ class FastApiWebAppPlugin(BasePlugin):
     return
 
   def on_close(self):
+    self._stop_request_monitor.set()
+    if self._request_monitor_thread is not None:
+      self._request_monitor_thread.join(timeout=1.0)
     self._manager.shutdown()
     super(FastApiWebAppPlugin, self).on_close()
     return

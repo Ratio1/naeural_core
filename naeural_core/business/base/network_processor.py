@@ -11,7 +11,7 @@ _CONFIG = {
   
   'ALLOW_EMPTY_INPUTS' : False,
 
-  'MAX_INPUTS_QUEUE_SIZE' : 100,
+  'MAX_INPUTS_QUEUE_SIZE' : 1024,
 
   "PROCESS_DELAY" : 0,  # seconds, how often to process the network
   

@@ -37,7 +37,7 @@ _CONFIG = {
   'ALLOW_EMPTY_INPUTS' : True,
   
   'PLUGIN_LOOP_RESOLUTION' : 50, # we force this to be 50 Hz from the standard 20 Hz  
-  'MAX_INPUTS_QUEUE_SIZE' : 128, # increase the queue size to 128 from std 1
+  'MAX_INPUTS_QUEUE_SIZE' : 1024, # increase the queue size to 128 from std 1
   
 
   # DEBUGGING

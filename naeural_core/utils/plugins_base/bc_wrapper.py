@@ -757,6 +757,42 @@ class BCWrapper:
     """
     return self.__bc.web3_submit_node_update(job_id=job_id, nodes=nodes)
 
+  def submit_redmesh_attestation(
+    self,
+    test_mode: int,
+    node_count: int,
+    vulnerability_score: int,
+    target: str,
+    tx_private_key: str,
+    report_cid: str = None,
+  ):
+    """
+    Submit an attestation to the on-chain registry.
+
+    Parameters
+    ----------
+    test_mode : int
+        0 for SINGLE, 1 for CONTINUOUS.
+    node_count : int
+        Number of nodes used for the run.
+    vulnerability_score : int
+        Score in [0, 100].
+    target : str
+        Target host/IP used to derive obfuscated IP bytes for the attestation.
+    tx_private_key : str
+        Private key used to sign the transaction (tenant wallet).
+    report_cid : str, optional
+        CID used to derive obfuscated CID bytes.
+    """
+    return self.__bc.web3_submit_redmesh_attestation(
+      test_mode=test_mode,
+      node_count=node_count,
+      vulnerability_score=vulnerability_score,
+      target=target,
+      tx_private_key=tx_private_key,
+      report_cid=report_cid,
+    )
+
   def allocate_rewards_across_all_escrows(self):
     """
     Allocate rewards across all escrows.

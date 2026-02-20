@@ -606,6 +606,7 @@ class FastApiWebAppPlugin(BasePlugin):
     }
     if isinstance(profile, dict):
       response['profile'] = profile
+    self.on_response(method, response)
     self._client_queue.put(response)
     return
 

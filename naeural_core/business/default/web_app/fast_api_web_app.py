@@ -450,12 +450,31 @@ class FastApiWebAppPlugin(BasePlugin):
   
   def on_request(self, request):
     """
-    Hook called when a new request arrives from the FastAPI side.
+    Hook called when a new request arrives from the FastAPI side on the server_queue.
 
     Parameters
     ----------
     request : dict
-        Raw request payload pulled from the server queue.
+      Object containing the following keys:
+      - id: str - ID of the request
+      - value: tuple - Method name and args for the endpoint handler
+      - profile: dict or None - Profiling object
+      - t_put_wall_ns: int or None - Wall-clock time when the request was enqueued
+    """
+    return
+
+  def on_response(self, method: str, response: dict):
+    """
+    Hook method called before putting the response on the client_queue.
+
+    Parameters
+    ----------
+    method : str
+      Name of the HTTP method
+    response : dict
+      Object containing the following keys:
+      - id: str - ID of the request
+      - value: Any - Actual result of the endpoint handler
     """
     return
 
@@ -577,12 +596,16 @@ class FastApiWebAppPlugin(BasePlugin):
         envelope['status_code'] = status_code
     return envelope
 
-  def __fastapi_handle_response(self, id, value):
+  def __fastapi_handle_response(self, id, value, profile, method):
     # TODO: add here message signing
+    if self.cfg_log_requests:
+      self.P(f"Request {id} for {method} processed.")
     response = {
       'id': id,
       'value': self.__fastapi_process_response(value)
     }
+    if isinstance(profile, dict):
+      response['profile'] = profile
     self._client_queue.put(response)
     return
 
@@ -653,15 +676,12 @@ class FastApiWebAppPlugin(BasePlugin):
         postponed['profile'] = profile
         new_postponed_requests.append(postponed)
       else:
-        if self.cfg_log_requests:
-          self.P(f"Request {id} for {method} processed.")
-        response = {
-          'id': id,
-          'value': self.__fastapi_process_response(value),
-        }
-        if isinstance(profile, dict):
-          response['profile'] = profile
-        self._client_queue.put(response)
+        self.__fastapi_handle_response(
+          id=id,
+          value=value,
+          profile=profile,
+          method=method,
+        )
       # endif request is postponed
     # end while there are postponed requests
     for request in new_postponed_requests:
@@ -732,15 +752,12 @@ class FastApiWebAppPlugin(BasePlugin):
         postponed['profile'] = profile
         self.postponed_requests.append(postponed)
       else:
-        if self.cfg_log_requests:
-          self.P(f"Request {id} for {method} processed.")
-        response = {
-          'id': id,
-          'value': self.__fastapi_process_response(value),
-        }
-        if isinstance(profile, dict):
-          response['profile'] = profile
-        self._client_queue.put(response)
+        self.__fastapi_handle_response(
+          id=id,
+          value=value,
+          profile=profile,
+          method=method
+        )
       # endif request is postponed
     # endwhile drain server queue
 

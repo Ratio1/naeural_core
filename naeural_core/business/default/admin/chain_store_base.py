@@ -240,13 +240,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # so if two chainstore apps are running on the same node, they will not overwrite each other
     # also this way we can implement chaistore app allow-listing
     chain_key = key
+    if value is None:
+      # Delete the key from chain storage when value is None
+      self.__chain_storage.pop(chain_key, None)
+      self.__save_chain_storage()
+      return
     self.__chain_storage[chain_key] = {
       self.CS_KEY       : key,
       self.CS_VALUE     : value,
       self.CS_OWNER     : owner,
       self.CS_READONLY  : readonly,
       self.CS_TOKEN     : token,
-    }    
+    }
     self.__reset_confirmations(key)
     if local_sync_storage_op:
       # set the confirmations to -1 to indicate that the key is remote synced on this node
@@ -325,6 +330,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if debug:
           self.P(f" === Key {key} has a different token {existing_token} from {existing_owner} than the one provided {token} from {owner}", color='r')
         need_store = False
+      elif value is None:
+        # Always allow delete (set to None) regardless of current value
+        if debug:
+          self.P(f" === Key {key} will be deleted (value=None)")
+        need_store = True
       elif existing_value == value:
         if debug:
           self.P(f" === Key {key} stored by {existing_owner} has the same value")
@@ -336,8 +346,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # end if key in chain storage
     if need_store:
       if debug:
-        set_or_overwrite = "overwriting" if existing_owner not in [None, owner] else "setting"        
-        self.P(f" === {where}{set_or_overwrite} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
+        if value is None:
+          action_str = "deleting"
+        elif existing_owner not in [None, owner]:
+          action_str = "overwriting"
+        else:
+          action_str = "setting"
+        self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
       self.__set_key_value(
         key=key, value=value, owner=owner, 
         local_sync_storage_op=local_sync_storage_op, 
@@ -498,7 +513,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     local_value = self.__get_key_value(key)
     if self.cfg_chain_store_debug:
       self.P(f" === LOCAL: Received {op} from {confirm_by} for  {key}={value}, owner{owner}")
-    if owner == local_owner and value == local_value:
+    if value is None and key not in self.__chain_storage:
+      # Deletion confirmed — key already removed locally, nothing to increment
+      if self.cfg_chain_store_debug:
+        self.P(f" === LOCAL: Key {key} deletion confirmed by {confirm_by}")
+    elif owner == local_owner and value == local_value:
       self.__increment_confirmations(key)
       if self.cfg_chain_store_debug:
         self.P(f" === LOCAL: Key {key} confirmed by {confirm_by}")

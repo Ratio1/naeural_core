@@ -371,7 +371,7 @@ class _ChainstoreResponseMixin:
       self.P(f"Setting '{response_key}' to: {self.json_dumps(response_data)}")
 
       # Single write - no retries, no confirmations
-      result = self.chainstore_set(response_key, response_data)
+      result = self.chainstore_set(response_key, response_data, debug=True)
 
       if result:
         self.P(f"Successfully sent chainstore response to '{response_key}'", color='g')

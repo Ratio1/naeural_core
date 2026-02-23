@@ -17,6 +17,12 @@ _CONFIG = {
   
   'VALIDATION_RULES' : {
     **BaseClass.CONFIG['VALIDATION_RULES'],
+    'MAX_INPUTS_QUEUE_SIZE': {
+      'DESCRIPTION': "Advanced setting: Controls the queue size of the plugin instance. In the case of NetworkProcessor plugins this queue should be allowed to be much larger due to the reduced size of the messages and the fast-paced nature of them.",
+      'TYPE': 'int',
+      'MIN_VAL': 1,
+      'MAX_VAL': 4096,
+    },
   },  
 }
 

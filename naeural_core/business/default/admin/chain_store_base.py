@@ -241,7 +241,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # also this way we can implement chaistore app allow-listing
     chain_key = key
     if value is None:
-      # Delete the key from chain storage when value is None
+      # Delete the key from chain storage when value is None.
+      # TRADE-OFF: This piggybacks on the existing CS_STORE operation (broadcast with value=None)
+      # rather than using a dedicated CS_DELETE operation. As a result, the originator does NOT
+      # wait for peer confirmations on deletes — the confirmation wait loop in _set_value exits
+      # immediately (0 >= 0) because the key is already gone from local storage. The broadcast
+      # still happens asynchronously via __maybe_broadcast(), so peers DO receive and process the
+      # delete. If confirmed-deletes are needed in the future, introduce a dedicated CS_DELETE
+      # operation with its own confirmation tracking (e.g. a __pending_deletes dict).
       self.__chain_storage.pop(chain_key, None)
       self.__save_chain_storage()
       return

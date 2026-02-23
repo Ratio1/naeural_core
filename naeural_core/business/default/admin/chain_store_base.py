@@ -343,9 +343,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           self.P(f" === Key {key} will be deleted (value=None)")
         need_store = True
       elif existing_value == value:
+        # Value already matches — no need to re-store or broadcast, but this is
+        # a success (the desired state is already achieved), not a failure.
         if debug:
           self.P(f" === Key {key} stored by {existing_owner} has the same value")
-        need_store = False
+        return True
       elif is_readonly and existing_owner != owner:
         if debug:
           self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')

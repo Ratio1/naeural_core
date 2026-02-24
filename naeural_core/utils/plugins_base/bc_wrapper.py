@@ -757,6 +757,27 @@ class BCWrapper:
     """
     return self.__bc.web3_submit_node_update(job_id=job_id, nodes=nodes)
 
+  def submit_attestation(
+    self,
+    function_name: str,
+    function_args: list,
+    signature_types: list,
+    signature_values: list,
+    tx_private_key: str,
+    network: str = None,
+  ):
+    """
+    Submit a generic attestation transaction to the AttestationRegistry.
+    """
+    return self.__bc.web3_submit_attestation(
+      function_name=function_name,
+      function_args=function_args,
+      signature_types=signature_types,
+      signature_values=signature_values,
+      tx_private_key=tx_private_key,
+      network=network,
+    )
+
   def allocate_rewards_across_all_escrows(self):
     """
     Allocate rewards across all escrows.

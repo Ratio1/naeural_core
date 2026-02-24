@@ -24,6 +24,9 @@ REQUEST_MONITOR_RESTART_MIN_BACKOFF_S = 0.5
 REQUEST_MONITOR_RESTART_MAX_BACKOFF_S = 30.0
 INCOMING_DROP_LOG_INTERVAL_S = 5.0
 DEFAULT_MAX_REQUEST_MONITOR_RESTART_RETRIES = 10
+DEFAULT_PROCESS_BUDGET_MS = 20
+DEFAULT_MAX_INCOMING_PER_LOOP = 10
+DEFAULT_MAX_POSTPONED_PER_LOOP = 10
 
 _CONFIG = {
   **BasePlugin.CONFIG,
@@ -53,6 +56,12 @@ _CONFIG = {
   "REQUEST_TIMEOUT": DEFAULT_REQUEST_TIMEOUT,
   "MAX_INCOMING_REQUESTS": DEFAULT_MAX_INCOMING_REQUESTS,
   "MAX_REQUEST_MONITOR_RESTART_RETRIES": DEFAULT_MAX_REQUEST_MONITOR_RESTART_RETRIES,
+
+  # Main-loop request budgeting. Set to 0 to disable.
+  "PROCESS_BUDGET_MS": DEFAULT_PROCESS_BUDGET_MS,
+  "MAX_INCOMING_PER_LOOP": DEFAULT_MAX_INCOMING_PER_LOOP,
+  "MAX_POSTPONED_PER_LOOP": DEFAULT_MAX_POSTPONED_PER_LOOP,
+  "FAIR_SCHEDULING": True,
 
   'PROCESS_DELAY': 0,
 
@@ -117,6 +126,30 @@ class FastApiWebAppPlugin(BasePlugin):
       return DEFAULT_MAX_REQUEST_MONITOR_RESTART_RETRIES
     if configured_value < 0:
       return 0
+    return configured_value
+
+  def get_process_budget_s(self):
+    configured_value = self.cfg_process_budget_ms
+    if not isinstance(configured_value, (int, float)):
+      return None
+    if configured_value <= 0:
+      return None
+    return float(configured_value) / 1000.0
+
+  def get_max_incoming_per_loop(self):
+    configured_value = self.cfg_max_incoming_per_loop
+    if not isinstance(configured_value, int):
+      return None
+    if configured_value <= 0:
+      return None
+    return configured_value
+
+  def get_max_postponed_per_loop(self):
+    configured_value = self.cfg_max_postponed_per_loop
+    if not isinstance(configured_value, int):
+      return None
+    if configured_value <= 0:
+      return None
     return configured_value
 
   @staticmethod
@@ -447,7 +480,14 @@ class FastApiWebAppPlugin(BasePlugin):
     super(FastApiWebAppPlugin, self).on_init()
     self._start_request_monitor_thread()
     return
-  
+
+  def get_deques_stats_str(self):
+    with self._incoming_lock:
+      incoming_len = len(self._incoming_requests)
+    postponed_len = len(self.postponed_requests)
+    server_queue_len = self._server_queue.qsize()
+    return f"s:{server_queue_len} i:{incoming_len} p:{postponed_len}"
+
   def on_request(self, request):
     """
     Hook called when a new request arrives from the FastAPI side on the server_queue.
@@ -599,7 +639,7 @@ class FastApiWebAppPlugin(BasePlugin):
   def __fastapi_handle_response(self, id, value, profile, method):
     # TODO: add here message signing
     if self.cfg_log_requests:
-      self.P(f"Request {id} for {method} processed.")
+      self.P(f"Request {id} for {method} processed.[{self.get_deques_stats_str()}]")
     response = {
       'id': id,
       'value': self.__fastapi_process_response(value)
@@ -609,6 +649,118 @@ class FastApiWebAppPlugin(BasePlugin):
     self.on_response(method, response)
     self._client_queue.put(response)
     return
+
+  def _process_postponed_request(self, request):
+    id, value, endpoint_name, profile = self.parse_postponed_dict(request)
+
+    method = value.get_solver_method()
+    kwargs = value.get_method_kwargs()
+
+    try:
+      if isinstance(profile, dict):
+        self._profile_slice_start(profile, endpoint_name, t_put_wall_ns=None)
+      value = method(**kwargs)
+      if isinstance(profile, dict):
+        self._profile_slice_end(profile)
+    except Exception as exc:
+      self.P(
+        f'Exception occurred while processing postponed request for {endpoint_name} with method {method.__name__} '
+        f'and args:\n{kwargs}\nException:\n{self.get_exception()}',
+        color='r'
+      )
+      value = {
+        'error': str(exc),
+        'status_code': 500,
+        'logged': True,
+      }
+      if isinstance(profile, dict):
+        self._profile_slice_end(profile)
+
+    if isinstance(value, PostponedRequest):
+      postponed = self.get_postponed_dict(
+        request_id=id,
+        request_value=value,
+        endpoint_name=endpoint_name
+      )
+      postponed['profile'] = profile
+      return postponed
+
+    self.__fastapi_handle_response(
+      id=id,
+      value=value,
+      profile=profile,
+      method=method,
+    )
+    return None
+
+  def _process_incoming_request(self, request):
+    id = request.get('id')
+    value = request.get('value')
+    profile = request.get('profile')
+    t_put_wall_ns = request.get('t_put_wall_ns')
+
+    if isinstance(value, (list, tuple)) and len(value) > 0 and value[0] == "__profile__":
+      try:
+        self._handle_profile_event(value[1])
+      except Exception:
+        self.P(f"Failed handling profile event:\n{self.get_exception()}", color='r')
+      return None
+
+    method = value[0]
+    args = value[1:]
+
+    try:
+      if self.cfg_log_requests:
+        self.P(f"Received request {id} for {method}.[{self.get_deques_stats_str()}]")
+      endpoint = self._endpoints.get(method)
+      if endpoint is None:
+        raise ValueError(f"Endpoint '{method}' not found in registered endpoints.")
+      has_kwargs = any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in inspect.signature(endpoint).parameters.values()
+      )
+      if has_kwargs and args and isinstance(args[-1], dict):
+        kwargs = args[-1]
+        args = args[:-1]
+      else:
+        kwargs = {}
+      if isinstance(profile, dict):
+        self._profile_slice_start(profile, method, t_put_wall_ns=t_put_wall_ns)
+      value = endpoint(*args, **kwargs)
+      if isinstance(profile, dict):
+        self._profile_slice_end(profile)
+    except Exception as exc:
+      self.P("Exception occured while processing\n"
+             "Request: {}\nArgs: {}\nException:\n{}".format(
+                 method, args, self.get_exception()), color='r')
+      status_code = 500
+      if isinstance(exc, ValueError) and "not found" in str(exc):
+        status_code = 404
+      value = {
+        'error': str(exc),
+        'status_code': status_code,
+        'logged': True,
+      }
+      if isinstance(profile, dict):
+        self._profile_slice_end(profile)
+
+    if isinstance(value, PostponedRequest):
+      self.P(f"Postponing request {id} for {method}.")
+      postponed = self.get_postponed_dict(
+        request_id=id,
+        request_value=value,
+        endpoint_name=method
+      )
+      postponed['profile'] = profile
+      return postponed
+
+    self.__fastapi_handle_response(
+      id=id,
+      value=value,
+      profile=profile,
+      method=method
+    )
+    return None
 
   def _process(self):
     if not self._stop_request_monitor.is_set():
@@ -641,126 +793,115 @@ class FastApiWebAppPlugin(BasePlugin):
     # endif request monitor is not stopped
 
     new_postponed_requests = []
-    while len(self.postponed_requests) > 0:
-      request = self.postponed_requests.popleft()
-      id, value, endpoint_name, profile = self.parse_postponed_dict(request)
+    process_budget_s = self.get_process_budget_s()
+    deadline = None
+    if isinstance(process_budget_s, (int, float)):
+      deadline = time.perf_counter() + process_budget_s
 
-      method = value.get_solver_method()
-      kwargs = value.get_method_kwargs()
+    max_incoming = self.get_max_incoming_per_loop()
+    max_postponed = self.get_max_postponed_per_loop()
+    remaining_incoming = max_incoming
+    remaining_postponed = max_postponed
 
-      try:
-        if isinstance(profile, dict):
-          self._profile_slice_start(profile, endpoint_name, t_put_wall_ns=None)
-        value = method(**kwargs)
-        if isinstance(profile, dict):
-          self._profile_slice_end(profile)
-      except Exception as exc:
-        self.P(
-          f'Exception occurred while processing postponed request for {endpoint_name} with method {method.__name__} '
-          f'and args:\n{kwargs}\nException:\n{self.get_exception()}',
-          color='r'
-        )
-        value = {
-          'error': str(exc),
-          'status_code': 500,
-          'logged': True,
-        }
-        if isinstance(profile, dict):
-          self._profile_slice_end(profile)
+    def _budget_exceeded():
+      if deadline is None:
+        return False
+      return time.perf_counter() >= deadline
 
-      if isinstance(value, PostponedRequest):
-        postponed = self.get_postponed_dict(
-          request_id=id,
-          request_value=value,
-          endpoint_name=endpoint_name
-        )
-        postponed['profile'] = profile
+    def _can_take(remaining):
+      return remaining is None or remaining > 0
+
+    def _mark_incoming():
+      nonlocal remaining_incoming
+      if remaining_incoming is not None:
+        remaining_incoming -= 1
+
+    def _mark_postponed():
+      nonlocal remaining_postponed
+      if remaining_postponed is not None:
+        remaining_postponed -= 1
+
+    def _popleft_incoming():
+      with self._incoming_lock:
+        if not self._incoming_requests:
+          return None
+        return self._incoming_requests.popleft()
+
+    def _popleft_postponed():
+      if not self.postponed_requests:
+        return None
+      return self.postponed_requests.popleft()
+
+    def _try_postponed():
+      nonlocal remaining_postponed
+      if not _can_take(remaining_postponed):
+        return False
+      request = _popleft_postponed()
+      if request is None:
+        return False
+      postponed = self._process_postponed_request(request)
+      if postponed is not None:
         new_postponed_requests.append(postponed)
-      else:
-        self.__fastapi_handle_response(
-          id=id,
-          value=value,
-          profile=profile,
-          method=method,
-        )
-      # endif request is postponed
-    # end while there are postponed requests
+      _mark_postponed()
+      return True
+
+    def _try_incoming():
+      nonlocal remaining_incoming
+      if not _can_take(remaining_incoming):
+        return False
+      request = _popleft_incoming()
+      if request is None:
+        return False
+      postponed = self._process_incoming_request(request)
+      if postponed is not None:
+        self.postponed_requests.append(postponed)
+      _mark_incoming()
+      return True
+
+    if self.cfg_fair_scheduling:
+      next_is_postponed = True
+      while True:
+        if _budget_exceeded():
+          break
+        if (not _can_take(remaining_postponed)) and (
+          not _can_take(remaining_incoming)
+        ):
+          break
+
+        if next_is_postponed:
+          processed = _try_postponed() or _try_incoming()
+        else:
+          processed = _try_incoming() or _try_postponed()
+
+        if not processed:
+          break
+        next_is_postponed = not next_is_postponed
+    else:
+      while True:
+        if _budget_exceeded() or (not _can_take(remaining_postponed)):
+          break
+        request = _popleft_postponed()
+        if request is None:
+          break
+        postponed = self._process_postponed_request(request)
+        if postponed is not None:
+          new_postponed_requests.append(postponed)
+        _mark_postponed()
+
+      while True:
+        if _budget_exceeded() or (not _can_take(remaining_incoming)):
+          break
+        request = _popleft_incoming()
+        if request is None:
+          break
+        postponed = self._process_incoming_request(request)
+        if postponed is not None:
+          self.postponed_requests.append(postponed)
+        _mark_incoming()
+    # endif fair scheduling
+
     for request in new_postponed_requests:
       self.postponed_requests.append(request)
-    # endfor all new postponed requests
-    while True:
-      with self._incoming_lock:
-        if len(self._incoming_requests) == 0:
-          break
-        request = self._incoming_requests.popleft()
-      id = request.get('id')
-      value = request.get('value')
-      profile = request.get('profile')
-      t_put_wall_ns = request.get('t_put_wall_ns')
-
-      if isinstance(value, (list, tuple)) and len(value) > 0 and value[0] == "__profile__":
-        try:
-          self._handle_profile_event(value[1])
-        except Exception:
-          self.P(f"Failed handling profile event:\n{self.get_exception()}", color='r')
-        continue
-
-      method = value[0]
-      args = value[1:]
-
-      try:
-        if self.cfg_log_requests:
-          self.P(f"Received request {id} for {method}.")
-        endpoint = self._endpoints.get(method)
-        if endpoint is None:
-          raise ValueError(f"Endpoint '{method}' not found in registered endpoints.")
-        has_kwargs = any(
-          param.kind is inspect.Parameter.VAR_KEYWORD
-          for param in inspect.signature(endpoint).parameters.values()
-        )
-        if has_kwargs and args and isinstance(args[-1], dict):
-          kwargs = args[-1]
-          args = args[:-1]
-        else:
-          kwargs = {}
-        if isinstance(profile, dict):
-          self._profile_slice_start(profile, method, t_put_wall_ns=t_put_wall_ns)
-        value = endpoint(*args, **kwargs)
-        if isinstance(profile, dict):
-          self._profile_slice_end(profile)
-      except Exception as exc:
-        self.P("Exception occured while processing\n"
-               "Request: {}\nArgs: {}\nException:\n{}".format(
-                   method, args, self.get_exception()), color='r')
-        status_code = 500
-        if isinstance(exc, ValueError) and "not found" in str(exc):
-          status_code = 404
-        value = {
-          'error': str(exc),
-          'status_code': status_code,
-          'logged': True,
-        }
-        if isinstance(profile, dict):
-          self._profile_slice_end(profile)
-
-      if isinstance(value, PostponedRequest):
-        self.P(f"Postponing request {id} for {method}.")
-        postponed = self.get_postponed_dict(
-          request_id=id,
-          request_value=value,
-          endpoint_name=method
-        )
-        postponed['profile'] = profile
-        self.postponed_requests.append(postponed)
-      else:
-        self.__fastapi_handle_response(
-          id=id,
-          value=value,
-          profile=profile,
-          method=method
-        )
-      # endif request is postponed
-    # endwhile drain server queue
 
     self._maybe_log_profile_stats()
     super(FastApiWebAppPlugin, self)._process()

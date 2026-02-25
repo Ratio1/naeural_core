@@ -320,108 +320,112 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     if not isinstance(key, str) or len(key) == 0:
       raise ValueError("Key must be a non-empty string.")
-    where = "FROM_LOCAL: " if not local_sync_storage_op else "FROM_REMOTE: "
-    debug = debug or self.cfg_chain_store_debug
-    debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
-    if owner is None:
-      owner = self.get_instance_path()
-    need_store = True
-    existing_owner = None
-    existing_value = None
-    if key in self.__chain_storage:
-      existing_value = self.__get_key_value(key)
-      existing_owner = self.__get_key_owner(key)
-      is_readonly = self.__get_key_readonly(key)
-      existing_token = self.__get_key_token(key)
-      if token != existing_token:
+    try:
+      where = "FROM_LOCAL: " if not local_sync_storage_op else "FROM_REMOTE: "
+      debug = debug or self.cfg_chain_store_debug
+      debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
+      if owner is None:
+        owner = self.get_instance_path()
+      need_store = True
+      existing_owner = None
+      existing_value = None
+      if key in self.__chain_storage:
+        existing_value = self.__get_key_value(key)
+        existing_owner = self.__get_key_owner(key)
+        is_readonly = self.__get_key_readonly(key)
+        existing_token = self.__get_key_token(key)
+        if token != existing_token:
+          if debug:
+            self.P(f" === Key {key} has a different token {existing_token} from {existing_owner} than the one provided {token} from {owner}", color='r')
+          need_store = False
+        elif value is None:
+          # Always allow delete (set to None) regardless of current value
+          if debug:
+            self.P(f" === Key {key} will be deleted (value=None)")
+          need_store = True
+        elif existing_value == value:
+          # Value already matches — no need to re-store or broadcast, but this is
+          # a success (the desired state is already achieved), not a failure.
+          if debug:
+            self.P(f" === Key {key} stored by {existing_owner} has the same value")
+          return True
+        elif is_readonly and existing_owner != owner:
+          if debug:
+            self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')
+          need_store = False
+      # end if key in chain storage
+      if need_store:
         if debug:
-          self.P(f" === Key {key} has a different token {existing_token} from {existing_owner} than the one provided {token} from {owner}", color='r')
-        need_store = False
-      elif value is None:
-        # Always allow delete (set to None) regardless of current value
-        if debug:
-          self.P(f" === Key {key} will be deleted (value=None)")
-        need_store = True
-      elif existing_value == value:
-        # Value already matches — no need to re-store or broadcast, but this is
-        # a success (the desired state is already achieved), not a failure.
-        if debug:
-          self.P(f" === Key {key} stored by {existing_owner} has the same value")
-        return True
-      elif is_readonly and existing_owner != owner:
-        if debug:
-          self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')
-        need_store = False
-    # end if key in chain storage
-    if need_store:
-      if debug:
-        if value is None:
-          action_str = "deleting"
-        elif existing_owner not in [None, owner]:
-          action_str = "overwriting"
-        else:
-          action_str = "setting"
-        self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
-      self.__set_key_value(
-        key=key, value=value, owner=owner, 
-        local_sync_storage_op=local_sync_storage_op, 
-        readonly=readonly, token=token,
-      )
-      if not local_sync_storage_op:      
-        # now send set-value (including confirmation request) to all
-        op = {      
-            self.CS_OP        : self.CS_STORE,
-            self.CS_KEY       : key,        
-            self.CS_VALUE     : value,   
-            self.CS_OWNER     : owner,
-            self.CS_TOKEN     : token,
-            self.CS_READONLY  : readonly, # if the key is readonly, it will not be overwritten by other owners
-            self.CS_PEERS     : peers,
-        }
-        self.__ops.append(op)
-        if debug:
-          self.P(f" === {where} key {key} locally stored for {owner}. Now waiting for confirmations...")
-        # at this point we can wait until we have enough confirmations
-        _timeout = self.time() + 10
-        _done = False
-        _prev_confirm = 0
-        _max_retries = 2
-        _retries = 0
-        while not _done: # this LOCKS the calling thread set_value
-          recv_confirm = self.__get_key_confirmations(key)
-          if recv_confirm > _prev_confirm:
-            _prev_confirm = recv_confirm
-            if debug:
-              self.P(f" === {where}Key received '{key}' has {recv_confirm} confirmations")
-          if recv_confirm >= self.__get_key_min_confirmations(key):
-            if debug:
-              self.P(f" === {where}KEY CONFIRMED '{key}': has enough ({recv_confirm}) confirmations")
-            _done = True
-            need_store = True
-            continue
-          elif self.time() > _timeout:
-            if debug:
-              self.P(f" === {where}Key '{key}' has not enough confirmations after timeout", color='r')
-            _retries += 1
-            if _retries > _max_retries:
+          if value is None:
+            action_str = "deleting"
+          elif existing_owner not in [None, owner]:
+            action_str = "overwriting"
+          else:
+            action_str = "setting"
+          self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
+        self.__set_key_value(
+          key=key, value=value, owner=owner,
+          local_sync_storage_op=local_sync_storage_op,
+          readonly=readonly, token=token,
+        )
+        if not local_sync_storage_op:
+          # now send set-value (including confirmation request) to all
+          op = {
+              self.CS_OP        : self.CS_STORE,
+              self.CS_KEY       : key,
+              self.CS_VALUE     : value,
+              self.CS_OWNER     : owner,
+              self.CS_TOKEN     : token,
+              self.CS_READONLY  : readonly, # if the key is readonly, it will not be overwritten by other owners
+              self.CS_PEERS     : peers,
+          }
+          self.__ops.append(op)
+          if debug:
+            self.P(f" === {where} key {key} locally stored for {owner}. Now waiting for confirmations...")
+          # at this point we can wait until we have enough confirmations
+          _timeout = self.time() + 10
+          _done = False
+          _prev_confirm = 0
+          _max_retries = 2
+          _retries = 0
+          while not _done: # this LOCKS the calling thread set_value
+            recv_confirm = self.__get_key_confirmations(key)
+            if recv_confirm > _prev_confirm:
+              _prev_confirm = recv_confirm
               if debug:
-                self.P(f" === {where}Key '{key}' has not enough confirmations after {_max_retries} retries", color='r')
+                self.P(f" === {where}Key received '{key}' has {recv_confirm} confirmations")
+            if recv_confirm >= self.__get_key_min_confirmations(key):
+              if debug:
+                self.P(f" === {where}KEY CONFIRMED '{key}': has enough ({recv_confirm}) confirmations")
               _done = True
-              need_store = False
-            else:
+              need_store = True
+              continue
+            elif self.time() > _timeout:
               if debug:
-                self.P(f" === {where}Retrying key '{key}' with timeout...", color='r')
-              self.__ops.append(op)
-              _timeout = self.time() + 10
-            # end if retries
-          # end if timeout
-          self.sleep(0.100)  # sleep for 100ms to give protocol sync time
-        # end while not done
-      else:
-        if debug:
-          self.P(f" === {where}{key} locally sync-stored for remote {owner}")
-      # end if not sync_storage
-    # end if need_store
+                self.P(f" === {where}Key '{key}' has not enough confirmations after timeout. [Q:{self.input_queue_size}/{self.cfg_max_inputs_queue_size}]", color='r')
+              _retries += 1
+              if _retries > _max_retries:
+                if debug:
+                  self.P(f" === {where}Key '{key}' has not enough confirmations after {_max_retries} retries", color='r')
+                _done = True
+                need_store = False
+              else:
+                if debug:
+                  self.P(f" === {where}Retrying key '{key}' with timeout...", color='r')
+                self.__ops.append(op)
+                _timeout = self.time() + 10
+              # end if retries
+            # end if timeout
+            self.sleep(0.100)  # sleep for 100ms to give protocol sync time
+          # end while not done
+        else:
+          if debug:
+            self.P(f" === {where}{key} locally sync-stored for remote {owner}")
+        # end if not sync_storage
+      # end if need_store
+    except Exception as e:
+      err_msg = f" === Error in _set_value for key {key}[Q:{self.input_queue_size}/{self.cfg_max_inputs_queue_size}]: {e}\n{self.trace_info()}"
+      raise ValueError(err_msg)
     return need_store
 
 

@@ -845,6 +845,23 @@ class BCWrapper:
     """
     return self.__bc.web3_get_user_escrow_details(address=address)
 
+  def get_escrow_active_jobs(self, address: str):
+    """
+    Get active jobs for a specific escrow contract address.
+
+    Parameters
+    ----------
+    address : str
+        Escrow contract address.
+
+    Returns
+    -------
+    list[dict]
+        Active jobs from the escrow smart contract.
+    """
+    assert self.__bc.is_valid_eth_address(address), "Invalid escrow address"
+    return self.__bc.web3_get_escrow_active_jobs(escrow_address=address)
+
   def get_escrow_active_job_ids(self, address: str):
     """
     Get active job IDs for a specific escrow contract address.
@@ -862,23 +879,6 @@ class BCWrapper:
     assert self.__bc.is_valid_eth_address(address), "Invalid escrow address"
     return self.__bc.web3_get_escrow_active_job_ids(escrow_address=address)
 
-  def get_escrow_active_jobs(self, address: str):
-    """
-    Get active jobs for a specific escrow contract address.
-
-    Parameters
-    ----------
-    address : str
-        Escrow contract address.
-
-    Returns
-    -------
-    list[dict]
-        Active jobs from the escrow smart contract.
-    """
-    assert self.__bc.is_valid_eth_address(address), "Invalid escrow address"
-    return self.__bc.web3_get_escrow_active_jobs(escrow_address=address)
-  
   def get_evm_net_data(self):
     evm_net = self.get_evm_network()
     evm_net_data = EVM_NET_DATA.get(evm_net, {})

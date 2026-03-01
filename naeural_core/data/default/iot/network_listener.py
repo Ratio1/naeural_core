@@ -16,6 +16,7 @@ _CONFIG = {
   'ONE_AT_A_TIME'   : True,
   
   'DEBUG_IOT_PAYLOADS' : False,
+  "FILTER_BY_DESTINATION": True,
   
   
 

@@ -33,6 +33,7 @@ _CONFIG = {
   
   "MESSAGE_FILTER": {},
   "PATH_FILTER": [None, None, None, None],
+  "FILTER_BY_DESTINATION": False,
 
   "URL": None,
   "STREAM_CONFIG_METADATA": {
@@ -48,6 +49,10 @@ _CONFIG = {
 
   'VALIDATION_RULES': {
     **DataCaptureThread.CONFIG['VALIDATION_RULES'],
+    "FILTER_BY_DESTINATION": {
+      "DESCRIPTION": "When true, drop payloads not addressed to this node (missing destination is treated as broadcast).",
+      "TYPE": "bool",
+    },
   },
 }
 
@@ -331,19 +336,41 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
 
 
   def __filter_message(self, unfiltered_message):
-    """Filter messages that get passed forward
-
-    Args:
-        unfiltered_message (dict): message received from the queue server, possibly formatted if it was in a format supported by the Execution Engine
-
-    Returns:
-        dict: the message that satisfies certain conditions or None if it does not satisfy them
     """
-    # first filter by path
-    result = self.__filter_message_by_path(unfiltered_message)
+    Filter messages that get passed forward.
+
+    Parameters
+    ----------
+    unfiltered_message : dict
+        Message received from the queue server, possibly formatted if it was in a
+        format supported by the Execution Engine.
+
+    Returns
+    -------
+    dict or None
+        The message that satisfies certain conditions, or None if it does not.
+    """
+    result = unfiltered_message
+    if result is not None and self.cfg_filter_by_destination:
+      destination = None
+      if isinstance(result, dict):
+        destination = result.get(self.ct.PAYLOAD_DATA.EE_DESTINATION, None)
+      # Empty lists will also be considered for everyone
+      if destination:
+        if not isinstance(destination, list):
+          destination = [destination]
+        destination = [x.lower() for x in destination if isinstance(x, str)]
+        if self.ee_addr.lower() not in destination:
+          result = None
+      # endif destination specified
+    # endif filter by destination
+    if result is not None:
+      # then filter by path
+      result = self.__filter_message_by_path(result)
     if result is not None:
       # then filter by message filter dict
       dct_filter = self.cfg_message_filter
+      is_valid = True
       if dct_filter is not None:
         is_valid = self.dict_in_dict(dct_filter, result)
       if is_valid:

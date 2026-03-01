@@ -203,6 +203,7 @@ _CONFIG = {
   'ACCEPT_SELF' : False,  
   'FULL_DEBUG_PAYLOADS' : False,
   'SKIP_MESSAGE_VERIFY': False,
+  'NETWORK_ROUTE_BY_HANDLER': False,
   # END Network Processor  
 
 
@@ -277,6 +278,10 @@ _CONFIG = {
     'STARTUP_AI_ENGINE_PARAMS': {
       'TYPE': 'dict',
       'DESCRIPTION': 'This configuration dict will be send as startup params during Serving Process creation, thus can overwrite various things such as "DEFAULT_DEVICE"',
+    },
+    'NETWORK_ROUTE_BY_HANDLER': {
+      'DESCRIPTION': 'When true, network processors may drop payloads without registered handlers.',
+      'TYPE': 'bool',
     },
 
     'INFERENCE_AI_ENGINE_PARAMS': {

@@ -14,6 +14,9 @@ _CONFIG = {
   'MAX_INPUTS_QUEUE_SIZE' : 1024,
 
   "PROCESS_DELAY" : 0,  # seconds, how often to process the network
+  "LOG_STATS_PERIOD": 5 * 60,  # seconds, how often to log how many messages were processed from each signature
+
+  "NETWORK_ROUTE_BY_HANDLER": True,
   
   'VALIDATION_RULES' : {
     **BaseClass.CONFIG['VALIDATION_RULES'],
@@ -22,6 +25,10 @@ _CONFIG = {
       'TYPE': 'int',
       'MIN_VAL': 1,
       'MAX_VAL': 4096,
+    },
+    'NETWORK_ROUTE_BY_HANDLER': {
+      'DESCRIPTION': "When true, drop payloads that do not have a registered handler before verification/dispatch.",
+      'TYPE': 'bool',
     },
   },  
 }

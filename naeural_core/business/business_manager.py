@@ -707,16 +707,103 @@ class BusinessManager(Manager):
           # and if it runs in parallel the loop will check this
           continue
         # end postponing stuff
-        
+        if inputs is not None and self._should_filter_network_inputs(plugin, inputs):
+          inputs = self._filter_network_inputs(plugin, inputs)
+          if inputs is None:
+            continue
         plugin.add_inputs(inputs)
 
         plugin.execute()
       else:
         # if the process is running (default) on thread we just need to add
         # data to its inputs queue
+        if inputs is not None and self._should_filter_network_inputs(plugin, inputs):
+          inputs = self._filter_network_inputs(plugin, inputs)
+          if inputs is None:
+            continue
         plugin.add_inputs(inputs)
       #endif
 
     #endfor
     self.log.stop_timer('execute_all_business_plugins', skip_first_timing=False)
     return
+
+  def _should_filter_network_inputs(self, plugin, inputs):
+    """
+    Determine whether handler-based routing should filter the incoming inputs.
+
+    Parameters
+    ----------
+    plugin : BasePluginExecutor
+        Plugin instance considered for routing.
+    inputs : dict
+        Input payload dict produced by the data handler.
+
+    Returns
+    -------
+    bool
+        True if filtering should be applied, False otherwise.
+    """
+    if not plugin.cfg_network_route_by_handler:
+      return False
+    if not hasattr(plugin, "get_registered_payload_signatures"):
+      return False
+    if not isinstance(inputs, dict):
+      return False
+    if "INPUTS" not in inputs:
+      return False
+    if not isinstance(inputs["INPUTS"], list):
+      return False
+    return True
+
+  def _filter_network_inputs(self, plugin, inputs):
+    """
+    Filter structured payloads by handler signature.
+
+    Parameters
+    ----------
+    plugin : BasePluginExecutor
+        Plugin instance that owns the handlers.
+    inputs : dict
+        Input payload dict with an `INPUTS` list.
+
+    Returns
+    -------
+    dict or None
+        A filtered inputs dict, or None if nothing remains after filtering.
+    """
+    dct_inputs = inputs
+    lst_inputs = dct_inputs.get("INPUTS", [])
+    if not lst_inputs:
+      return None
+
+    handlers = plugin.get_registered_payload_signatures()
+    if not handlers:
+      return None
+
+    filtered = []
+    for item in lst_inputs:
+      if not isinstance(item, dict):
+        filtered.append(item)
+        continue
+      if item.get("TYPE") != "STRUCT_DATA":
+        filtered.append(item)
+        continue
+      payload = item.get("STRUCT_DATA")
+      if not isinstance(payload, dict):
+        filtered.append(item)
+        continue
+      payload_path = payload.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, None)
+      if not isinstance(payload_path, list) or len(payload_path) < 3:
+        continue
+      signature = payload_path[2]
+      if isinstance(signature, str) and signature.upper() in handlers:
+        filtered.append(item)
+        continue
+    if len(filtered) == 0:
+      return None
+    if len(filtered) == len(lst_inputs):
+      return dct_inputs
+    dct_inputs = dict(dct_inputs)
+    dct_inputs["INPUTS"] = filtered
+    return dct_inputs

@@ -360,7 +360,7 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
         if not isinstance(destination, list):
           destination = [destination]
         destination = [x.lower() for x in destination if isinstance(x, str)]
-        if self.ee_addr.lower() not in destination:
+        if self.bc.address.lower() not in destination:
           result = None
       # endif destination specified
     # endif filter by destination

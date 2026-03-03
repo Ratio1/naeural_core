@@ -61,6 +61,11 @@ class _SemaphoredPairedPluginMixin(object):
       self.Pd(msg)
     return
 
+  @staticmethod
+  def _semaphore_prefixed_key(semaphore_key, env_key):
+    """Build a prefixed env key from semaphore key and env key."""
+    return "{}_{}".format(semaphore_key, env_key)
+
   # ============================================================================
   # Provider Methods (for native plugins that signal readiness)
   # ============================================================================
@@ -130,7 +135,7 @@ class _SemaphoredPairedPluginMixin(object):
 
     # Store both prefixed and raw variants for flexibility
     value_str = str(value)
-    prefixed_key = "{}_{}".format(semaphore_key, key)
+    prefixed_key = self._semaphore_prefixed_key(semaphore_key, key)
     semaphore_data['env'][prefixed_key] = value_str
     semaphore_data['env'][key] = value_str
     self._semaphore_Pd(
@@ -445,6 +450,62 @@ class _SemaphoredPairedPluginMixin(object):
         self._semaphore_Pd("Semaphore '{}' not ready, skipping env retrieval".format(key))
 
     return result
+
+
+  def semaphore_get_env_value(self, semaphore_key, env_key, default=""):
+    """
+    Get a specific environment variable value from a specific semaphore.
+
+    Parameters
+    ----------
+    semaphore_key : str
+        The semaphore key to look up
+    env_key : str
+        The environment variable name
+    default : str
+        Default value if not found
+
+    Returns
+    -------
+    str
+        The value of the environment variable, or default if not found
+    """
+    shmem_data = self.plugins_shmem.get(semaphore_key, {})
+    value = shmem_data.get('env', {}).get(env_key, default)
+    return str(value) if value is not None else default
+
+
+  def semaphore_get_env_value_by_path(self, full_key, default=""):
+    """
+    Get env value by full path string.
+
+    Iterates through all configured semaphore keys and their env vars,
+    constructing {semaphore_key}_{env_key} for each and comparing against
+    the provided full_key.
+
+    Parameters
+    ----------
+    full_key : str
+        The complete key to look up (e.g. "MY_SEMAPHORE_CONTAINER_IP")
+    default : str
+        Default value if not found
+
+    Returns
+    -------
+    str
+        The env value, or default if not found
+    """
+    for semaphore_key in self._semaphore_get_keys():
+      shmem_data = self.plugins_shmem.get(semaphore_key, {})
+      if not shmem_data.get('is_ready', False):
+        continue
+      env_vars = shmem_data.get('env', {})
+      for env_key, env_value in env_vars.items():
+        constructed_key = self._semaphore_prefixed_key(semaphore_key, env_key)
+        if constructed_key == full_key:
+          return str(env_value)
+    return default
+
 
   def semaphore_get_missing(self):
     """

@@ -337,6 +337,21 @@ class BCWrapper:
     """
     return self.__bc.eth_sign_message(types=types, values=values)  
 
+  def eth_hash_message(self, types: list, values: list, as_hex: bool = False):
+    """
+    Hash a typed EVM payload using solidity keccak.
+
+    Parameters
+    ----------
+    types : list
+        The types of the values to hash.
+    values : list
+        The values to hash.
+    as_hex : bool, optional
+        If True, returns the hash as hex string.
+    """
+    return self.__bc.eth_hash_message(types=types, values=values, as_hex=as_hex)
+
   def eth_verify_message_signature(
     self, 
     types: list, 

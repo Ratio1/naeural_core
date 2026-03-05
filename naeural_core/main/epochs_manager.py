@@ -117,11 +117,13 @@ _FULL_DATA_INFO_KEYS = [
 ]
 
 SYNC_HISTORY_SIZE = 10
+CURR_GAP_ERRORS_MAXLEN = 100
 
 class EPCT:
   NAME = 'name'
   ID = 'id'
   EPOCHS = 'epochs'
+  LOCAL_EPOCHS = 'local_epochs'
   ALERTS = 'alerts'
   LAST_ALERT_TS = 'last_alert_ts'
   CURRENT_EPOCH = 'current_epoch'
@@ -135,16 +137,30 @@ class EPCT:
 
   SIGNATURES = 'signatures'
   
+  CURR_AVAIL_SECONDS = 'current_avail_seconds'
+  CURR_SEGMENT_START = 'current_segment_start'
+  CURR_LAST_HB = 'current_last_hb'
+  CURR_BAD_GAPS = 'current_bad_gaps'
+  CURR_GAP_ERRORS = 'current_gap_errors'
+  CURR_NEEDS_RECALC = 'current_needs_recalc'
+  
 
 _NODE_TEMPLATE = {
   EPCT.NAME           : None,
   EPCT.EPOCHS         : defaultdict(int),
+  EPCT.LOCAL_EPOCHS   : defaultdict(int),
   EPCT.ALERTS         : 0,
   EPCT.LAST_ALERT_TS  : 0,
   EPCT.FIRST_SEEN     : None,    
   EPCT.LAST_SEEN      : None,
   
   EPCT.LAST_EPOCH_RESTARTS : [], # this will not function without a save-reload mechanism
+  EPCT.CURR_AVAIL_SECONDS : 0,
+  EPCT.CURR_SEGMENT_START : None,
+  EPCT.CURR_LAST_HB : None,
+  EPCT.CURR_BAD_GAPS : 0,
+  EPCT.CURR_GAP_ERRORS : deque(maxlen=CURR_GAP_ERRORS_MAXLEN),
+  EPCT.CURR_NEEDS_RECALC : False,
   
   EPCT.CURRENT_EPOCH  : {
     EPCT.ID               : None,
@@ -515,15 +531,19 @@ class EpochsManager(Singleton):
 
   def __add_empty_fields(self):
     """
-    Use this method to add missing fields to the loaded data structure.
+    Add missing fields to the loaded data structure.
 
+    This method backfills per-node fields using deep copies of template values
+    to avoid sharing mutable state across nodes.
+
+    Returns
+    -------
+    None
     """
-      
-    template = deepcopy(_NODE_TEMPLATE)
     for node_addr in self.__data:
-      for key in template:
+      for key in _NODE_TEMPLATE:
         if key not in self.__data[node_addr]:
-          self.__data[node_addr][key] = template[key]
+          self.__data[node_addr][key] = deepcopy(_NODE_TEMPLATE[key])
 
     if SYNC_NODES not in self.__full_data:
       self.__full_data[SYNC_NODES] = self.__data
@@ -659,6 +679,12 @@ class EpochsManager(Singleton):
     self.__data[node_addr][EPCT.LAST_EPOCH] = deepcopy(self.__data[node_addr][EPCT.CURRENT_EPOCH])
     self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS] = set()
     self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.ID] = self.get_time_epoch()
+    self.__data[node_addr][EPCT.CURR_AVAIL_SECONDS] = 0
+    self.__data[node_addr][EPCT.CURR_SEGMENT_START] = None
+    self.__data[node_addr][EPCT.CURR_LAST_HB] = None
+    self.__data[node_addr][EPCT.CURR_BAD_GAPS] = 0
+    self.__data[node_addr][EPCT.CURR_GAP_ERRORS] = deque(maxlen=CURR_GAP_ERRORS_MAXLEN)
+    self.__data[node_addr][EPCT.CURR_NEEDS_RECALC] = False
     return
 
 
@@ -673,24 +699,23 @@ class EpochsManager(Singleton):
     time_between_heartbeats=10, extra_logs=False,
   ):
     """
-    This method calculates the availability of a node in the current epoch 
-    based on the timestamps.
+    Calculate availability in seconds based on heartbeat timestamps.
 
     Parameters
     ----------
-    timestamps : set
-      The set of timestamps for the current epoch.
+    timestamps : list of datetime
+      Sorted timestamps for the current epoch.
 
-    time_between_heartbeats: int
-      Mandatory time between heartbeats in seconds.
+    time_between_heartbeats : int
+      Expected time between heartbeats in seconds.
 
-    extra_logs: bool
+    extra_logs : bool
       If True, additional logging is performed.
 
     Returns
     -------
     int
-      The availability seconds interval.
+      Availability duration in seconds.
     """
     avail_seconds = 0
     nr_timestamps = len(timestamps)
@@ -738,6 +763,81 @@ class EpochsManager(Singleton):
         total, len(errors), 
         json.dumps(lst_str_errors, indent=2)
       ))
+    return avail_seconds
+
+
+  def __update_availability_accumulator(
+    self, node_addr, hb_timestamp,
+    time_between_heartbeats=10,
+  ):
+    """
+    Incrementally update the current-epoch availability accumulator.
+
+    This mirrors the thresholds used in `__calculate_avail_seconds` for compatibility.
+    NOTE: we keep the same time_between_heartbeats default (10s) to preserve behavior;
+    a per-node heartbeat interval (e.g., owner.network_node_hb_interval) could be used
+    in the future but is intentionally not introduced here to avoid behavior changes.
+
+    Parameters
+    ----------
+    node_addr : str
+      Node address.
+    hb_timestamp : datetime
+      Heartbeat timestamp (UTC).
+    time_between_heartbeats : int
+      Expected time between heartbeats in seconds.
+
+    Returns
+    -------
+    None
+    """
+    node_data = self.__data[node_addr]
+    last_hb = node_data.get(EPCT.CURR_LAST_HB)
+    if last_hb is None:
+      node_data[EPCT.CURR_SEGMENT_START] = hb_timestamp
+      node_data[EPCT.CURR_LAST_HB] = hb_timestamp
+      return
+
+    if hb_timestamp < last_hb:
+      # Out-of-order heartbeat; keep timestamps for later recompute.
+      node_data[EPCT.CURR_NEEDS_RECALC] = True
+      return
+
+    delta = (hb_timestamp - last_hb).total_seconds()
+    if delta > (time_between_heartbeats + 5) or delta < (time_between_heartbeats / 2):
+      segment_start = node_data.get(EPCT.CURR_SEGMENT_START)
+      if segment_start is not None:
+        node_data[EPCT.CURR_AVAIL_SECONDS] += (last_hb - segment_start).total_seconds()
+      node_data[EPCT.CURR_SEGMENT_START] = hb_timestamp
+      node_data[EPCT.CURR_BAD_GAPS] += 1
+      node_data[EPCT.CURR_GAP_ERRORS].append((last_hb, hb_timestamp))
+
+    node_data[EPCT.CURR_LAST_HB] = hb_timestamp
+    return
+
+
+  def __get_accumulated_avail_seconds(self, node_addr):
+    """
+    Return availability seconds from the accumulator for the current epoch.
+
+    This finalizes the last open segment if present.
+
+    Parameters
+    ----------
+    node_addr : str
+      Node address.
+
+    Returns
+    -------
+    float
+      Availability duration in seconds.
+    """
+    node_data = self.__data[node_addr]
+    avail_seconds = node_data.get(EPCT.CURR_AVAIL_SECONDS, 0)
+    segment_start = node_data.get(EPCT.CURR_SEGMENT_START)
+    last_hb = node_data.get(EPCT.CURR_LAST_HB)
+    if segment_start is not None and last_hb is not None and last_hb >= segment_start:
+      avail_seconds += (last_hb - segment_start).total_seconds()
     return avail_seconds
 
 
@@ -862,22 +962,45 @@ class EpochsManager(Singleton):
     extra_logs=False,
   ):
     """
-    This method recalculates the current epoch availability for a node. 
-    It should be used when the epoch changes just before resetting the timestamps.
+    Recalculate current-epoch availability for a node.
+
+    Uses the accumulator when safe; falls back to timestamp recompute when
+    out-of-order heartbeats are detected.
 
     Parameters
     ----------
     node_addr : str
-      The node address.
+      Node address.
+    time_between_heartbeats : int
+      Expected time between heartbeats in seconds.
+    return_msg : bool
+      If True, also return a formatted log message.
+    extra_logs : bool
+      If True, emit extra diagnostic logs.
+
+    Returns
+    -------
+    tuple
+      (availability_ratio, epoch_id) or (availability_ratio, epoch_id, msg, msg_color)
+      when return_msg is True.
     """
-    avail_seconds, lst_timestamps, current_epoch = self.__calc_node_avail_seconds(
-      node_addr, time_between_heartbeats=time_between_heartbeats,
-      return_timestamps=True, extra_logs=extra_logs,
-    )
+    if (
+      not self.__data[node_addr].get(EPCT.CURR_NEEDS_RECALC, False) and
+      self.__data[node_addr].get(EPCT.CURR_LAST_HB) is not None
+    ):
+      avail_seconds = self.__get_accumulated_avail_seconds(node_addr)
+      current_epoch = self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.ID]
+      lst_timestamps = sorted(list(self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS]))
+    else:
+      avail_seconds, lst_timestamps, current_epoch = self.__calc_node_avail_seconds(
+        node_addr, time_between_heartbeats=time_between_heartbeats,
+        return_timestamps=True, extra_logs=extra_logs,
+      )
     max_possible = self.epoch_length
     prc_available = round(avail_seconds / max_possible, 4) # DO NOT USE 100% but 1.0 
     record_value = round(prc_available * EPOCH_MAX_VALUE)
     self.__data[node_addr][EPCT.EPOCHS][current_epoch] = record_value
+    self.__data[node_addr][EPCT.LOCAL_EPOCHS][current_epoch] = record_value
     log_msg = None
     log_msg_color = None
 
@@ -1032,15 +1155,19 @@ class EpochsManager(Singleton):
 
   def register_data(self, node_addr, hb):
     """
-    This method registers a heartbeat for a node in the current epoch.
-    
+    Register a heartbeat for a node in the current epoch.
+
     Parameters
     ----------
     node_addr : str
-      The node address.
+      Node address.
       
     hb : dict
-      The heartbeat dict.
+      Heartbeat payload dictionary.
+
+    Returns
+    -------
+    None
       
     """
     start_proc = time()
@@ -1063,6 +1190,11 @@ class EpochsManager(Singleton):
         # add the heartbeat timestamp for the current epoch
         self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS].add(dt_remote_utc)
         self.__data[node_addr][EPCT.LAST_SEEN] = str_date
+        self.__update_availability_accumulator(
+          node_addr=node_addr,
+          hb_timestamp=dt_remote_utc,
+          time_between_heartbeats=10,
+        )
       # endwith lock
     else:
       self.P("Received invalid epoch {} from node {} on epoch {}".format(
@@ -1152,35 +1284,107 @@ class EpochsManager(Singleton):
     return result
   
   
-  def get_node_last_n_epochs(self, node_addr, n=5, autocomplete=True, as_list=False):
-    last_epoch = self.get_time_epoch() - 1
-    dct_epochs = self.get_node_epochs(node_addr, autocomplete=autocomplete, as_list=False) or {}
-    start = max(1, last_epoch - n + 1)
-    lst_epochs = list(range(start, last_epoch + 1))
-    result = {x : dct_epochs.get(x, 0) for x in lst_epochs}
-    if as_list:
-      result = [result[x] for x in lst_epochs]
-    return result
-  
-  
-  
-  def get_node_epoch(self, node_addr, epoch_id=None, as_percentage=False):
+  def get_node_epochs_range(
+    self, node_addr,
+    start_epoch, end_epoch,
+    as_list=False, autocomplete=False,
+  ):
     """
-    This method returns the percentage a node was alive in a given epoch.
-    The data is returned from already calculated values.
+    Return epochs availability for a node in a bounded range without mutating history.
 
     Parameters
     ----------
     node_addr : str
-      The node address.
-      
-    epoch_id : int
-      The epoch id. Defaults to the last epoch
+      Node address.
+    start_epoch : int
+      Start epoch (inclusive).
+    end_epoch : int
+      End epoch (inclusive).
+    as_list : bool
+      If True, return a list ordered by epoch.
+    autocomplete : bool
+      If True, fill missing epochs with 0 within the range.
 
     Returns
     -------
-    float
-      The value between 0 and 1 representing the percentage of the epoch the node was alive.
+    dict or list
+      Epoch availability map or list for the requested range.
+    """
+    if start_epoch is None or end_epoch is None:
+      return None
+    if start_epoch < 1 or end_epoch < start_epoch:
+      raise ValueError(f"Invalid epoch range: {start_epoch}..{end_epoch}")
+    dct_state = self.get_node_state(node_addr)
+    if dct_state is None:
+      return None
+    dct_epochs = dct_state[EPCT.EPOCHS] or defaultdict(int)
+    lst_epochs = list(range(start_epoch, end_epoch + 1))
+    if autocomplete:
+      result = {x: dct_epochs.get(x, 0) for x in lst_epochs}
+    else:
+      result = {x: dct_epochs[x] for x in lst_epochs if x in dct_epochs}
+
+    lst_faulty_epochs = self.get_faulty_epochs()
+    epoch_of_licensing = self.get_epoch_of_licensing(node_addr=node_addr)
+    lst_faulty_epochs = [x for x in lst_faulty_epochs if x >= epoch_of_licensing]
+    for faulty_epoch in lst_faulty_epochs:
+      if start_epoch <= faulty_epoch <= end_epoch:
+        result[faulty_epoch] = EPOCH_MAX_VALUE
+
+    if as_list:
+      return [result[x] for x in lst_epochs]
+    return result
+
+
+  def get_node_last_n_epochs(self, node_addr, n=5, autocomplete=True, as_list=False):
+    """
+    Return availability for the last N completed epochs.
+
+    Parameters
+    ----------
+    node_addr : str
+      Node address.
+    n : int
+      Number of epochs.
+    autocomplete : bool
+      If True, fill missing epochs with 0 within the range.
+    as_list : bool
+      If True, return a list ordered by epoch.
+
+    Returns
+    -------
+    dict or list
+      Epoch availability for the last N epochs.
+    """
+    last_epoch = self.get_time_epoch() - 1
+    start = max(1, last_epoch - n + 1)
+    return self.get_node_epochs_range(
+      node_addr=node_addr,
+      start_epoch=start,
+      end_epoch=last_epoch,
+      autocomplete=autocomplete,
+      as_list=as_list
+    )
+  
+  
+  def get_node_epoch(self, node_addr, epoch_id=None, as_percentage=False):
+    """
+    Return a node's availability for a given epoch.
+
+    Parameters
+    ----------
+    node_addr : str
+      Node address.
+      
+    epoch_id : int
+      Epoch id. Defaults to the last epoch.
+    as_percentage : bool
+      If True, return a 0..1 float instead of uint8.
+
+    Returns
+    -------
+    int or float
+      Availability for the epoch as uint8 or 0..1 float when as_percentage is True.
     """
     if node_addr not in self.__data:
       return 0
@@ -1189,9 +1393,13 @@ class EpochsManager(Singleton):
     if epoch_id < 1 or epoch_id >= self.get_time_epoch():
       raise ValueError("Invalid epoch requested: {}".format(epoch_id))
     # get the epochs data
-    epochs = self.get_node_epochs(node_addr)
+    epochs = self.get_node_epochs_range(
+      node_addr=node_addr,
+      start_epoch=epoch_id, end_epoch=epoch_id,
+      autocomplete=True
+    )
     if epochs is None:
-      return 0    
+      return 0
     if as_percentage:
       return round(epochs[epoch_id] / EPOCH_MAX_VALUE, 4)
     return epochs[epoch_id]
@@ -1238,12 +1446,17 @@ class EpochsManager(Singleton):
       
     
     """
-    epochs = self.get_node_epochs(self.owner.node_addr) or defaultdict(int)
-    
     start_epoch = start_epoch if isinstance(start_epoch, int) else 1
     end_epoch = end_epoch if isinstance(end_epoch, int) else self.get_time_epoch() - 1
     
     lst_epochs = list(range(start_epoch, end_epoch + 1))
+    epochs = self.get_node_epochs_range(
+      self.owner.node_addr,
+      start_epoch=start_epoch,
+      end_epoch=end_epoch,
+      as_list=False,
+      autocomplete=True,
+    ) or defaultdict(int)
 
     epoch_certainty_scores = {
       # If the epoch availability was obtained through the consensus mechanism, we
@@ -1264,20 +1477,23 @@ class EpochsManager(Singleton):
   # TODO: maybe replace this with `get_epoch_of_licensing` after implementing
   def get_node_first_epoch(self, node_addr):
     """
-    Returns the first epoch the node was seen as alive by the current oracle.
+    Return the first epoch the node was seen as alive by the current oracle.
 
     Parameters
     ----------
     node_addr : str
-      The node address.
+      Node address.
+
+    Returns
+    -------
+    int
+      First epoch id, or -1 if not available.
     """
     if node_addr not in self.__data:
       return -1
-    epochs_data = self.get_node_epochs(node_addr) or defaultdict(int)
-    epochs = list(epochs_data.keys())
-    min_epoch = min(epochs)
-    return min_epoch
-  
+    dct_state = self.get_node_state(node_addr)
+    epochs_keys = dct_state[EPCT.EPOCHS].keys() if dct_state else []
+    return min(epochs_keys) if epochs_keys else -1
   
 
   def get_era_specs(self):
@@ -1368,6 +1584,28 @@ class EpochsManager(Singleton):
     if display:
       self.P("Overall statistics:\n{}".format(json.dumps(stats, indent=2)))
     return stats
+  
+  
+  def get_stats_light(self, display=False, online_only=False):
+    """
+    Return a lightweight statistics payload to avoid expensive per-node lookups.
+
+    Parameters
+    ----------
+    display : bool
+      If True, display the statistics.
+    online_only : bool
+      If True, include only online nodes.
+
+    Returns
+    -------
+    dict
+      Lightweight statistics payload.
+    """
+    stats = self.__get_stats(display=False, online_only=online_only, light=True)
+    if display:
+      self.P("Overall light statistics:\n{}".format(json.dumps(stats, indent=2)))
+    return stats
 
 
   def _maybe_calculate_stats(self, force_refresh=False):
@@ -1376,7 +1614,7 @@ class EpochsManager(Singleton):
       with self.log.managed_lock_resource(NETWORK_STATS_MUTEX):
         self.P(f"Calculating overall statistics for all nodes ...")
         # Maybe calculate must allways calculate for ALL the nodes not just the online ones
-        self.__current_stats = self.__get_stats(display=False, online_only=False)
+        self.__current_stats = self.__get_stats(display=False, online_only=False, light=False)
         self.__current_stats_timestamp = time()
         self.P("Overall statistics calculated.")
       # endwith lock
@@ -1384,9 +1622,23 @@ class EpochsManager(Singleton):
     return self.__current_stats
 
 
-  def __get_stats(self, display=False, online_only=False):
+  def __get_stats(self, display=False, online_only=False, light=False):
     """
-    Returns the overall statistics for all nodes.
+    Return overall statistics for all nodes.
+
+    Parameters
+    ----------
+    display : bool
+      If True, display the statistics.
+    online_only : bool
+      If True, include only online nodes.
+    light : bool
+      If True, skip expensive per-node fields.
+
+    Returns
+    -------
+    dict
+      Statistics payload.
     """
     stats = {'error' : None}
     best_avail = 0
@@ -1399,7 +1651,7 @@ class EpochsManager(Singleton):
       current_epoch = self.get_current_epoch()
       start_epoch = max(1, current_epoch - NR_HIST)
       certainty = self.get_self_supervisor_capacity(as_float=True, start_epoch=start_epoch)
-      oracle_state = self.get_oracle_state()      
+      oracle_state = None if light else self.get_oracle_state()
       for node_addr in self.data:        
         try:
           is_online = self.owner.network_node_is_online(
@@ -1418,6 +1670,19 @@ class EpochsManager(Singleton):
             dt_now=self.get_current_date(),
             as_sec=True
           )
+          if light:
+            netmon_last_seen = self.date_to_str(dt_netmon_last_seen) if dt_netmon_last_seen is not None else 'N/A'
+            node_name = self.get_node_name(node_addr)
+            eth_addr = self.owner.node_address_to_eth_address(node_addr)
+            stats[node_addr] = {
+              'eth_addr' : eth_addr,
+              'alias' : node_name,
+              'ver' : node_version,
+              'last_state' : netmon_last_seen,
+              'last_seen_ago' : self.log.elapsed_to_str(last_seen_ago),
+              'is_online' : is_online,
+            }
+            continue
           
           mem_total = self.owner.network_node_total_mem(node_addr)
           mem_avail = self.owner.network_node_avail_mem(node_addr)
@@ -1463,9 +1728,8 @@ class EpochsManager(Singleton):
           node_current_epoch_data = self.data[node_addr][EPCT.CURRENT_EPOCH]
           node_current_epoch_id = node_current_epoch_data[EPCT.ID]
           node_current_epoch_hb_timestamps = node_current_epoch_data[EPCT.HB_TIMESTAMPS]
-          node_current_epoch_hb_timestamps = sorted(list(node_current_epoch_hb_timestamps))
-          node_current_epoch_1st_hb = node_current_epoch_hb_timestamps[0] if len(node_current_epoch_hb_timestamps) > 0 else None
-          node_current_epoch_last_hb = node_current_epoch_hb_timestamps[-1] if len(node_current_epoch_hb_timestamps) > 0 else None
+          node_current_epoch_1st_hb = min(node_current_epoch_hb_timestamps) if len(node_current_epoch_hb_timestamps) > 0 else None
+          node_current_epoch_last_hb = max(node_current_epoch_hb_timestamps) if len(node_current_epoch_hb_timestamps) > 0 else None
           node_current_epoch_nr_hb = len(node_current_epoch_hb_timestamps)
         except:
           pass
@@ -1475,18 +1739,23 @@ class EpochsManager(Singleton):
         node_last_epoch_data = self.data[node_addr][EPCT.LAST_EPOCH]
         node_last_epoch_id = node_last_epoch_data[EPCT.ID]
         node_last_epoch_hb_timestamps = node_last_epoch_data[EPCT.HB_TIMESTAMPS]
-        node_last_epoch_hb_timestamps = sorted(list(node_last_epoch_hb_timestamps))
-        node_last_epoch_1st_hb = node_last_epoch_hb_timestamps[0] if len(node_last_epoch_hb_timestamps) > 0 else None
+        node_last_epoch_1st_hb = min(node_last_epoch_hb_timestamps) if len(node_last_epoch_hb_timestamps) > 0 else None
         node_last_epoch_1st_hb = self.date_to_str(node_last_epoch_1st_hb)
-        node_last_epoch_last_hb = node_last_epoch_hb_timestamps[-1] if len(node_last_epoch_hb_timestamps) > 0 else None
+        node_last_epoch_last_hb = max(node_last_epoch_hb_timestamps) if len(node_last_epoch_hb_timestamps) > 0 else None
         node_last_epoch_last_hb = self.date_to_str(node_last_epoch_last_hb)
         node_last_epoch_nr_hb = len(node_last_epoch_hb_timestamps)
 
         node_last_epoch_avail = self.get_node_previous_epoch(node_addr)
-
-        node_last_epoch_avail_local = round(
-          self.__calculate_avail_seconds(node_last_epoch_hb_timestamps) / self.epoch_length, 4
-        )
+        if node_last_epoch_id in self.__data[node_addr][EPCT.LOCAL_EPOCHS]:
+          node_last_epoch_avail_local = round(
+            self.__data[node_addr][EPCT.LOCAL_EPOCHS][node_last_epoch_id] / EPOCH_MAX_VALUE, 4
+          )
+        else:
+          node_last_epoch_hb_timestamps = sorted(node_last_epoch_hb_timestamps)
+          node_last_epoch_avail_local = round(
+            self.__calculate_avail_seconds(node_last_epoch_hb_timestamps) / self.epoch_length, 4
+          )
+        # endif last epoch is in the local cache
         
         epochs_ids = sorted(list(dct_epochs.keys()))
         epochs = [dct_epochs[x] for x in epochs_ids]
@@ -1563,7 +1832,7 @@ class EpochsManager(Singleton):
             'last_epoch_avail' : node_last_epoch_avail,
           }
         }
-        if node_addr == self.owner.node_addr:
+        if node_addr == self.owner.node_addr and oracle_state is not None:
           stats[node_addr]['oracle'] = oracle_state
         #endif node is current node
       #endfor each node
@@ -1657,8 +1926,7 @@ class EpochsManager(Singleton):
 
     if self.is_epoch_valid(epoch):
       for node_addr in self.__data:
-        epochs: defaultdict = self.get_node_epochs(node_addr, as_list=False) or defaultdict(int)
-        availability_table[node_addr] = epochs.get(epoch, 0)
+        availability_table[node_addr] = self.get_node_epoch(node_addr=node_addr, epoch_id=epoch)
       # end for each node
       # self.__data[EPCT.SIGNATURES] is a defaultdict(dict), thus there is no need for .get() here
       epoch_signatures = self.__full_data[SYNC_SIGNATURES][epoch]

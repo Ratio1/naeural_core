@@ -331,6 +331,7 @@ class Orchestrator(DecentrAIObject,
 
     if self._app_monitor is not None:
       self._app_monitor.configure_location(self.__evm_network)
+      self._app_shmem['location_data'] = self._app_monitor.location_data
 
     self.save_local_address()
 

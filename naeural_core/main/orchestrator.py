@@ -6,7 +6,7 @@ import numpy as np
 
 from collections import deque
 from time import perf_counter, sleep, time
-from threading import Thread
+from threading import Lock, Thread
 from copy import deepcopy
 
 #local dependencies
@@ -44,6 +44,7 @@ from naeural_core.serving.ai_engines.utils import (
 from naeural_core import DecentrAIObject
 from naeural_core import Logger
 from naeural_core.local_libraries import _ConfigHandlerMixin
+from naeural_core.utils.plugins_base.bc_wrapper import BCWrapper
 
 from naeural_core.main.ver import __VER__ as __CORE_VER__
 
@@ -57,6 +58,8 @@ SHUTDOWN_DELAY = 5
 CHECK_AND_COMPLETE_ITERATIONS = 30 # how many iterations to wait for the dAuth completion
 CHECK_AND_COMPLETE_SLEEP_PERIOD = 30 # how many seconds to wait between iterations
 CHECK_AND_COMPLETE_TIMEOUT = CHECK_AND_COMPLETE_ITERATIONS * CHECK_AND_COMPLETE_SLEEP_PERIOD
+CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle checks
+NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
 
 
 SHUTDOWN_RESET_FILE = "/shutdown_reset"
@@ -104,6 +107,7 @@ class Orchestrator(DecentrAIObject,
     self._blockchain_manager : DefaultBlockEngine       = None
     
     self._r1fs_engine : R1FSEngine                      = None
+    self._bc : BCWrapper                               = None
 
     self._data_handler : MainLoopDataHandler = None
 
@@ -127,6 +131,7 @@ class Orchestrator(DecentrAIObject,
     self.__is_mlstop_dangerous = False
     self._last_timers_dump = time()
     self._last_node_status_warning = None
+    self._last_oracle_update = 0
 
     self._payloads_count_queue = deque(maxlen=1000)
     self._payloads_count_queue.append(0)
@@ -134,8 +139,13 @@ class Orchestrator(DecentrAIObject,
 
     self._return_code = None
     self._thread_async_comm = None
+    self._thread_node_oracle_refresh = None
     self._in_shutdown = False
     self._non_business_payloads = deque(maxlen=100)
+    self.__node_oracle_refresh_lock = Lock()
+    self.__cached_node_oracles = []
+    self.__node_oracle_refresh_version = 0
+    self.__node_oracle_apply_version = 0
 
     super(Orchestrator, self).__init__(log=log, prefix_log='[MAIN]', **kwargs)
     return
@@ -377,6 +387,14 @@ class Orchestrator(DecentrAIObject,
 
     self._thread_async_comm.start()
 
+    self._thread_node_oracle_refresh = Thread(
+      target=self.node_oracle_refresh_loop,
+      args=(),
+      name=ct.THREADS_PREFIX + 'node_oracle_refresh',
+      daemon=True,
+    )
+    self._thread_node_oracle_refresh.start()
+
     if False:
       self._thread_logger_debugger = Thread(
         target=self.logger_debugger,
@@ -567,6 +585,20 @@ class Orchestrator(DecentrAIObject,
   @property
   def r1fs(self):
     return self._r1fs_engine
+
+  @property
+  def network_monitor(self):
+    return self._network_monitor
+
+  @property
+  def netmon(self):
+    return self.network_monitor
+
+  @property
+  def bc(self):
+    if self._bc is None and self._blockchain_manager is not None:
+      self._bc = BCWrapper(self._blockchain_manager, owner=self)
+    return self._bc
   
   
   @property
@@ -813,6 +845,10 @@ class Orchestrator(DecentrAIObject,
     if _thread_async_comm is not None and _thread_async_comm.is_alive():
       _thread_async_comm.join()
       self.P("Asynchronous communication thread joined.", color='y')
+    _thread_node_oracle_refresh = vars(self).get('_thread_node_oracle_refresh')
+    if _thread_node_oracle_refresh is not None and _thread_node_oracle_refresh.is_alive():
+      _thread_node_oracle_refresh.join()
+      self.P("Node oracle refresh thread joined.", color='y')
     return
 
   def _maybe_gracefull_stop(self):
@@ -1562,7 +1598,7 @@ class Orchestrator(DecentrAIObject,
   def maybe_show_timers(self):
     threshold_no_show = 0.0001
     
-    self.__loop_stage = "9.1.1"
+    self.__loop_stage = "10.1.1"
     
     if False and not self._recorded_first_object_tree: # DISABLED for the moment
       sleep(5)
@@ -1573,7 +1609,7 @@ class Orchestrator(DecentrAIObject,
         top=100,
       )
         
-    self.__loop_stage = "9.1.2"
+    self.__loop_stage = "10.1.2"
         
     if (time() - self._last_timers_dump) > self.cfg_timers_dump_interval:
       self.P("Timer dump interval of {}s reached.".format(self.cfg_timers_dump_interval))
@@ -1587,12 +1623,12 @@ class Orchestrator(DecentrAIObject,
       )
       
       if self.cfg_extended_timers_dump:        
-        self.__loop_stage = "9.1.3"
+        self.__loop_stage = "10.1.3"
         self._app_monitor.log_sys_mon_info(color=ct.COLORS.STATUS)        
-        self.__loop_stage = "9.1.4"
+        self.__loop_stage = "10.1.4"
         self._serving_manager.get_active_servers(show=True, color='d')
   
-      self.__loop_stage = "9.1.5"
+      self.__loop_stage = "10.1.5"
       if False:
         # just for debug purposes -> set to True in order to save timers (together with the timers graph)
         # then investigate them a separate process by instantiating a Logger object and then setting
@@ -1609,7 +1645,7 @@ class Orchestrator(DecentrAIObject,
         )
       #endif
     #endif
-    self.__loop_stage = "9.1.5.1"
+    self.__loop_stage = "10.1.5.1"
     
     if self._reset_timers:
       self.log.show_timers(threshold_no_show=threshold_no_show, obsolete_section_time=3*60) 
@@ -1618,7 +1654,7 @@ class Orchestrator(DecentrAIObject,
       self._reset_timers = False
     #endif
     
-    self.__loop_stage = "9.1.6"
+    self.__loop_stage = "10.1.6"
     return
 
   def comm_manager_show_info(self):
@@ -1782,6 +1818,76 @@ class Orchestrator(DecentrAIObject,
     return
 
 
+  def apply_cached_node_oracles_to_whitelist(self):
+    if self.blockchain_manager is None:
+      # If not blockchain_manager exists that may be
+      # due to VPN fleet so we don't log to avoid spamming
+      return 0
+    with self.__node_oracle_refresh_lock:
+      oracles = list(self.__cached_node_oracles)
+      version = self.__node_oracle_refresh_version
+    if version == 0 or version == self.__node_oracle_apply_version:
+      return 0
+    try:
+      # Due to the implementation of refresh_node_oracles_cache()
+      # here oracles should be a non-empty list.
+      existing = set(self.whitelist_full)
+      missing_oracles = []
+      for oracle_addr in oracles:
+        if not oracle_addr:
+          continue
+        prefixed_addr = self.blockchain_manager.maybe_add_prefix(oracle_addr)
+        if prefixed_addr in existing:
+          continue
+        existing.add(prefixed_addr)
+        missing_oracles.append(oracle_addr)
+      #endfor
+
+      if len(missing_oracles) == 0:
+        self.__node_oracle_apply_version = version
+        self.P("All blockchain oracle nodes are already whitelisted.", color='g')
+        return 0
+
+      self.blockchain_manager.add_address_to_allowed(missing_oracles)
+      self.__node_oracle_apply_version = version
+      self.P("Added {} missing blockchain oracle node(s) to whitelist.".format(len(missing_oracles)), color='g')
+      return len(missing_oracles)
+    except Exception as exc:
+      self.P("Failed to apply cached node oracles to whitelist: {}\n{}".format(exc, traceback.format_exc()), color='r')
+      return 0
+
+
+  def refresh_node_oracles_cache(self):
+    if self.blockchain_manager is None:
+      # If not blockchain_manager exists that may be
+      # due to VPN fleet so we don't log to avoid spamming
+      return 0
+    try:
+      oracles, _ = self.bc.get_oracles(wait_interval=0)
+      if len(oracles) == 0:
+        self.P("No blockchain oracle nodes found. Skipping whitelist update.", color='y')
+        return 0
+      with self.__node_oracle_refresh_lock:
+        self.__cached_node_oracles = list(oracles)
+        self.__node_oracle_refresh_version += 1
+      return len(oracles)
+    except Exception as exc:
+      self.P("Failed to refresh node oracles: {}\n{}".format(exc, traceback.format_exc()), color='r')
+      return 0
+
+
+  def node_oracle_refresh_loop(self):
+    while not self.__done:
+      now = time()
+      if now - self._last_oracle_update >= CHECK_NODE_ORACLES_EVERY:
+        # The timestamp is updated before the actual refresh since the actual update
+        # can wait further if it failed.
+        self._last_oracle_update = now
+        self.refresh_node_oracles_cache()
+      sleep(NODE_ORACLE_REFRESH_THREAD_SLEEP)
+    return
+
+
   def main_loop(self):
     """
     This is the main loop that orchestrates all the processes, managers and their worker threads.
@@ -1861,25 +1967,29 @@ class Orchestrator(DecentrAIObject,
         self.__loop_stage = '8.bp.run'
         self.run_business_manager(dct_business_inputs=dct_business_inputs)
 
-        #9. Comm info, timers, ... - later we gonna check for total comm failures
-        self.__loop_stage = '9.logs'
+        #9. Apply any refreshed blockchain oracle nodes to local whitelist
+        self.__loop_stage = '9.node.oracles'
+        self.apply_cached_node_oracles_to_whitelist()
+
+        #10. Comm info, timers, ... - later we gonna check for total comm failures
+        self.__loop_stage = '10.logs'
         self.comm_manager_show_info()
         self._maybe_log_offline_status()
 
 
         self.log.stop_timer(self._main_loop_timer_name)
         
-        self.__loop_stage = '9.1.log.tm'
+        self.__loop_stage = '10.1.log.tm'
         self.maybe_show_timers() # show timers after main timer is closed
         # now we signal we should send the startup log
         
-        self.__loop_stage = '9.2.sendlog'
+        self.__loop_stage = '10.2.sendlog'
         self._maybe_send_startup_log()
         self.__is_mlstop_dangerous = True # first iter surely done
 
         return_code = self._return_code
 
-        self.__loop_stage = '10.checks'
+        self.__loop_stage = '11.checks'
         if (not self.cfg_work_offline) and self.comm_manager.has_failed_comms:
           self.P("Shutdown initiated due to multiple failure in communication!", color='r')
           return_code = ct.CODE_EXCEPTION
@@ -1905,7 +2015,7 @@ class Orchestrator(DecentrAIObject,
         #endif critical alert
         
         if return_code is not None:
-          self.__loop_stage = '11.break'
+          self.__loop_stage = '12.break'
           self.P("WARNING: Exiting MLOOP({}).".format(return_code), color='r')
           self.__is_mlstop_dangerous = False 
           break

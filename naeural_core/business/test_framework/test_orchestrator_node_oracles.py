@@ -9,6 +9,10 @@ class _FakeBCWrapper:
     self._oracles = oracles
 
   def get_oracles(self, **kwargs):
+    if len(self._oracles) == 0:
+      return [], []
+    if isinstance(self._oracles[0], (list, tuple)):
+      return [item[0] for item in self._oracles], [item[1] for item in self._oracles]
     return list(self._oracles), []
 
 
@@ -28,8 +32,9 @@ class _FakeBlockchainManager:
       addresses = [addresses]
     self.added_batches.append(list(addresses))
     for addr in addresses:
-      if addr not in self.whitelist:
-        self.whitelist.append(addr)
+      addr_no_alias = addr.split()[0]
+      if addr_no_alias not in self.whitelist:
+        self.whitelist.append(addr_no_alias)
     return True
 
 
@@ -47,7 +52,7 @@ class _FakeThread:
     return
 
 
-class TestOrchestratorUpdateNodeOracles(unittest.TestCase):
+class TestOrchestratorNodeOracleRefresh(unittest.TestCase):
   CACHED_ATTR = "_Orchestrator__cached_node_oracles"
   REFRESH_VERSION_ATTR = "_Orchestrator__node_oracle_refresh_version"
   APPLY_VERSION_ATTR = "_Orchestrator__node_oracle_apply_version"
@@ -69,30 +74,34 @@ class TestOrchestratorUpdateNodeOracles(unittest.TestCase):
   def test_refresh_node_oracles_caches_latest_results(self):
     orchestrator = self._make_orchestrator(
       whitelist=[],
-      oracles=["oracle_1", "oracle_2"],
+      oracles=[("oracle_1", "oracle_a"), ("oracle_2", "oracle_b")],
     )
 
     refreshed_count = orchestrator.refresh_node_oracles_cache()
 
     self.assertEqual(refreshed_count, 2)
-    self.assertEqual(getattr(orchestrator, self.CACHED_ATTR), ["oracle_1", "oracle_2"])
+    self.assertEqual(getattr(orchestrator, self.CACHED_ATTR), [("oracle_1", "oracle_a"), ("oracle_2", "oracle_b")])
     self.assertEqual(getattr(orchestrator, self.REFRESH_VERSION_ATTR), 1)
 
   def test_appends_only_missing_oracles(self):
     orchestrator = self._make_orchestrator(whitelist=["existing_node"])
-    setattr(orchestrator, self.CACHED_ATTR, ["existing_node", "oracle_1", "oracle_1", "oracle_2"])
+    setattr(
+      orchestrator,
+      self.CACHED_ATTR,
+      [("existing_node", "existing_alias"), ("oracle_1", "oracle_a"), ("oracle_1", "oracle_dup"), ("oracle_2", "oracle_b")],
+    )
     setattr(orchestrator, self.REFRESH_VERSION_ATTR, 1)
 
     added_count = orchestrator.apply_cached_node_oracles_to_whitelist()
 
     self.assertEqual(added_count, 2)
-    self.assertEqual(orchestrator.blockchain_manager.added_batches, [["oracle_1", "oracle_2"]])
+    self.assertEqual(orchestrator.blockchain_manager.added_batches, [["oracle_1 oracle_a", "oracle_2 oracle_b"]])
     self.assertEqual(orchestrator.blockchain_manager.whitelist, ["existing_node", "oracle_1", "oracle_2"])
     self.assertEqual(getattr(orchestrator, self.APPLY_VERSION_ATTR), 1)
 
   def test_noop_when_all_oracles_already_whitelisted(self):
     orchestrator = self._make_orchestrator(whitelist=["oracle_1", "oracle_2"])
-    setattr(orchestrator, self.CACHED_ATTR, ["oracle_1", "oracle_2"])
+    setattr(orchestrator, self.CACHED_ATTR, [("oracle_1", "oracle_a"), ("oracle_2", "oracle_b")])
     setattr(orchestrator, self.REFRESH_VERSION_ATTR, 1)
 
     added_count = orchestrator.apply_cached_node_oracles_to_whitelist()
@@ -111,19 +120,19 @@ class TestOrchestratorUpdateNodeOracles(unittest.TestCase):
 
   def test_apply_cached_node_oracles_applies_each_refresh_once(self):
     orchestrator = self._make_orchestrator(whitelist=[])
-    setattr(orchestrator, self.CACHED_ATTR, ["oracle_1"])
+    setattr(orchestrator, self.CACHED_ATTR, [("oracle_1", "oracle_a")])
     setattr(orchestrator, self.REFRESH_VERSION_ATTR, 1)
 
     self.assertEqual(orchestrator.apply_cached_node_oracles_to_whitelist(), 1)
     self.assertEqual(orchestrator.apply_cached_node_oracles_to_whitelist(), 0)
-    self.assertEqual(orchestrator.blockchain_manager.added_batches, [["oracle_1"]])
+    self.assertEqual(orchestrator.blockchain_manager.added_batches, [["oracle_1 oracle_a"]])
 
-    setattr(orchestrator, self.CACHED_ATTR, ["oracle_1", "oracle_2"])
+    setattr(orchestrator, self.CACHED_ATTR, [("oracle_1", "oracle_a"), ("oracle_2", "oracle_b")])
     setattr(orchestrator, self.REFRESH_VERSION_ATTR, 2)
     self.assertEqual(orchestrator.apply_cached_node_oracles_to_whitelist(), 1)
     self.assertEqual(
       orchestrator.blockchain_manager.added_batches,
-      [["oracle_1"], ["oracle_2"]],
+      [["oracle_1 oracle_a"], ["oracle_2 oracle_b"]],
     )
 
   def test_stop_joins_node_oracle_refresh_thread(self):

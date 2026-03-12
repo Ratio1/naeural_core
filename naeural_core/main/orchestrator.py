@@ -1830,17 +1830,24 @@ class Orchestrator(DecentrAIObject,
       return 0
     try:
       # Due to the implementation of refresh_node_oracles_cache()
-      # here oracles should be a non-empty list.
+      # here oracles should be a non-empty list of (address, alias) pairs.
       existing = set(self.whitelist_full)
       missing_oracles = []
-      for oracle_addr in oracles:
+      for oracle_data in oracles:
+        if isinstance(oracle_data, (list, tuple)):
+          oracle_addr = oracle_data[0] if len(oracle_data) > 0 else None
+          oracle_alias = oracle_data[1] if len(oracle_data) > 1 else ""
+        else:
+          oracle_addr = oracle_data
+          oracle_alias = ""
         if not oracle_addr:
           continue
         prefixed_addr = self.blockchain_manager.maybe_add_prefix(oracle_addr)
         if prefixed_addr in existing:
           continue
         existing.add(prefixed_addr)
-        missing_oracles.append(oracle_addr)
+        oracle_entry = oracle_addr if not oracle_alias else "{} {}".format(oracle_addr, oracle_alias)
+        missing_oracles.append(oracle_entry)
       #endfor
 
       if len(missing_oracles) == 0:
@@ -1863,12 +1870,16 @@ class Orchestrator(DecentrAIObject,
       # due to VPN fleet so we don't log to avoid spamming
       return 0
     try:
-      oracles, _ = self.bc.get_oracles(wait_interval=0)
+      oracles, aliases = self.bc.get_oracles(wait_interval=0)
       if len(oracles) == 0:
-        self.P("No blockchain oracle nodes found. Skipping whitelist update.", color='y')
+        self.P("No blockchain oracle nodes found. Nothing new to cache.", color='y')
         return 0
+      cached_oracles = []
+      for idx, oracle_addr in enumerate(oracles):
+        oracle_alias = aliases[idx] if idx < len(aliases) else ""
+        cached_oracles.append((oracle_addr, oracle_alias))
       with self.__node_oracle_refresh_lock:
-        self.__cached_node_oracles = list(oracles)
+        self.__cached_node_oracles = cached_oracles
         self.__node_oracle_refresh_version += 1
       return len(oracles)
     except Exception as exc:
@@ -1880,8 +1891,8 @@ class Orchestrator(DecentrAIObject,
     while not self.__done:
       now = time()
       if now - self._last_oracle_update >= CHECK_NODE_ORACLES_EVERY:
-        # The timestamp is updated before the actual refresh since the actual update
-        # can wait further if it failed.
+        # The timestamp is updated before the refresh attempt, so failed refreshes
+        # are retried only after the next configured interval.
         self._last_oracle_update = now
         self.refresh_node_oracles_cache()
       sleep(NODE_ORACLE_REFRESH_THREAD_SLEEP)

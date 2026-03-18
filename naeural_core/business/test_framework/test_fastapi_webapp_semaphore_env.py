@@ -31,11 +31,13 @@ class TestFastApiWebAppSemaphoreEnv(unittest.TestCase):
     self.assertIn("port = self.port", segment)
     self.assertNotIn("port = self.cfg_port", segment)
 
-  def test_fastapi_webapp_exports_host_port_and_url_keys(self):
+  def test_fastapi_webapp_exports_host_and_runtime_port_keys(self):
     method = self._get_setup_semaphore_env()
     segment = ast.get_source_segment(self.source, method) or ""
     self.assertIn("self.semaphore_set_env('HOST', localhost_ip)", segment)
+    self.assertIn("self.semaphore_set_env('HOST_IP', localhost_ip)", segment)
     self.assertIn("self.semaphore_set_env('PORT', str(port))", segment)
+    self.assertIn("self.semaphore_set_env('HOST_PORT', str(port))", segment)
     self.assertIn("self.semaphore_set_env('URL', 'http://{}:{}'.format(localhost_ip, port))", segment)
 
 

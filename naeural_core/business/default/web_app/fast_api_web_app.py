@@ -1100,8 +1100,10 @@ class FastApiWebAppPlugin(BasePlugin):
     localhost_ip = self.log.get_localhost_ip()
     port = self.port
     self.semaphore_set_env('HOST', localhost_ip)
+    self.semaphore_set_env('HOST_IP', localhost_ip)
     if port:
       self.semaphore_set_env('PORT', str(port))
+      self.semaphore_set_env('HOST_PORT', str(port))
       self.semaphore_set_env('URL', 'http://{}:{}'.format(localhost_ip, port))
     return
 

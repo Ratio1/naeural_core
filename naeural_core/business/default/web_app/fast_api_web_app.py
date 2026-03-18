@@ -1090,6 +1090,21 @@ class FastApiWebAppPlugin(BasePlugin):
       self.P(f"Server {self.api_title} started on {found}", boxed=True)
     return
 
+  def _setup_semaphore_env(self):
+    """
+    Expose the runtime FastAPI endpoint via semaphore for paired plugins.
+
+    Uses the allocated runtime port (`self.port`), not the configured fallback
+    (`self.cfg_port`), because web-app plugins may be rebound dynamically.
+    """
+    localhost_ip = self.log.get_localhost_ip()
+    port = self.port
+    self.semaphore_set_env('HOST', localhost_ip)
+    if port:
+      self.semaphore_set_env('PORT', str(port))
+      self.semaphore_set_env('URL', 'http://{}:{}'.format(localhost_ip, port))
+    return
+
   @property
   def jinja_args(self):
     cfg_jinja_args = self.deepcopy(self.cfg_jinja_args)

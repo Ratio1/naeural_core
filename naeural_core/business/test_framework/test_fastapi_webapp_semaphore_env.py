@@ -40,6 +40,15 @@ class TestFastApiWebAppSemaphoreEnv(unittest.TestCase):
     self.assertIn("self.semaphore_set_env('HOST_PORT', str(port))", segment)
     self.assertIn("self.semaphore_set_env('URL', 'http://{}:{}'.format(localhost_ip, port))", segment)
 
+  def test_fastapi_webapp_guards_host_resolution_failures(self):
+    method = self._get_setup_semaphore_env()
+    segment = ast.get_source_segment(self.source, method) or ""
+    self.assertIn("try:", segment)
+    self.assertIn("localhost_ip = self.log.get_localhost_ip()", segment)
+    self.assertIn("except Exception as ex:", segment)
+    self.assertIn("Skipping HOST/HOST_IP semaphore export", segment)
+    self.assertIn("Skipping URL semaphore export", segment)
+
 
 if __name__ == "__main__":
   unittest.main()

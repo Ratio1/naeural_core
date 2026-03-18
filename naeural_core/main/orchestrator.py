@@ -1823,6 +1823,10 @@ class Orchestrator(DecentrAIObject,
       # If not blockchain_manager exists that may be
       # due to VPN fleet so we don't log to avoid spamming
       return 0
+    if self.blockchain_manager.evm_network == "VPN":
+      # In VPN fleet there is no blockchain manager and no oracles to refresh, so we just return
+      # without logging to avoid spamming the logs with failed refresh attempts.
+      return 0
     with self.__node_oracle_refresh_lock:
       oracles = list(self.__cached_node_oracles)
       version = self.__node_oracle_refresh_version
@@ -1868,6 +1872,10 @@ class Orchestrator(DecentrAIObject,
     if self.blockchain_manager is None:
       # If not blockchain_manager exists that may be
       # due to VPN fleet so we don't log to avoid spamming
+      return 0
+    # In VPN fleet there is no blockchain manager and no oracles to refresh, so we just return
+    # without logging to avoid spamming the logs with failed refresh attempts.
+    if self.blockchain_manager.evm_network == "VPN":
       return 0
     try:
       oracles, aliases = self.bc.get_oracles(wait_interval=0)

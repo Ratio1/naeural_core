@@ -183,3 +183,7 @@ blur_debugger/blur_debugger_draw__BLUR_DEBUGGER_DRAW_STEP__Tracking/
 xperimental/_art/
 
 temp.py
+
+xperimental/payloads_tests/evidence/raw_bandwidth/
+
+xperimental/payloads_tests/evidence/netmon_compression/

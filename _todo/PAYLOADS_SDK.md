@@ -2,7 +2,7 @@
 This document is planning-only. It is intended to be copied into the `ratio1_sdk` repository and executed there by an agent. The goal is to produce an evidence-backed `PAYLOADS_SDK_RESULTS.md` from passive mainnet listening so the SDK-side view can be compared with core-side findings in this repo's `PAYLOADS.md`.
 
 ## Goal
-Build a minimal SDK tutorial that listens to mainnet traffic in read-only mode for a meaningful window, records bounded payload samples, analyzes wire-size and content composition, and writes a reusable `PAYLOADS_SDK_RESULTS.md` with concrete low-hanging-fruit optimization candidates plus measured bandwidth-driver inference.
+Build a minimal SDK tutorial that listens to mainnet traffic in read-only mode for a meaningful window, records bounded payload samples, analyzes raw MQTT-payload bandwidth plus decoded content composition, and writes a reusable `PAYLOADS_SDK_RESULTS.md` with concrete low-hanging-fruit optimization candidates plus measured bandwidth-driver inference.
 
 ## Why This Exists
 `PAYLOADS.md` in the core repo is mostly code-path analysis. It needs a companion measurement pass from the SDK edge:
@@ -16,6 +16,7 @@ Build a minimal SDK tutorial that listens to mainnet traffic in read-only mode f
 - Work inside the `ratio1_sdk` repository only.
 - Prefer the repo's existing tutorial or examples structure. Do not invent a new layout if the repo already has one.
 - Use passive, read-only listening only. Do not send payloads, commands, or configuration changes to mainnet.
+- If the default SDK session would auto-request peer configs or emit other discovery traffic, disable that behavior for this test or use a local subclass/wrapper that keeps the run passive.
 - Do not require committing secrets, private keys, or raw sensitive data into the repo.
 - Run the primary capture for at least `10` minutes (`600s`) unless blocked by auth, connectivity, or other environmental issues.
 - Keep capture bounded by both time and message count, but size the message cap high enough that the intended `10`-minute wall-clock window is usually the stopping condition.
@@ -27,7 +28,7 @@ Build a minimal SDK tutorial that listens to mainnet traffic in read-only mode f
    - connects to mainnet using the SDK's normal public-listening path
    - listens for payload traffic
    - records bounded per-message measurements needed for analysis
-   - writes local capture artifacts ignored by git
+   - writes persistent evidence under `xperimental/payloads_tests/evidence/raw_bandwidth` by default
 2. A generated `PAYLOADS_SDK_RESULTS.md` in the SDK repo root.
 3. Any tiny helper module needed for aggregation or sanitization.
 4. A short run command in the tutorial doc or script header.
@@ -44,6 +45,8 @@ Build a minimal SDK tutorial that listens to mainnet traffic in read-only mode f
 - The tutorial produces enough structured data to rank the heaviest payload classes, fields, senders, streams, and signatures with better confidence than a short burst sample.
 - `PAYLOADS_SDK_RESULTS.md` contains measured findings, not guesses.
 - The results clearly separate:
+  - raw MQTT payload bandwidth facts
+  - decoded heartbeat-body composition facts
   - observed mainnet facts
   - SDK-local parsing limitations
   - likely core-runtime bloat sources
@@ -67,7 +70,7 @@ constraints:
   - no committed raw payload archives
 expected_artifacts:
   - runnable tutorial
-  - local capture artifact path
+  - persistent evidence path
   - PAYLOADS_SDK_RESULTS.md
 success_criteria:
   - tutorial runs or reports a precise blocker
@@ -106,12 +109,19 @@ terminal_state: submitted|working|input-required|auth-required|completed|cancele
   - whether the partial sample is still representative enough for any conclusions
 - If feasible, the analysis should compare the first half and second half of the run to detect whether the traffic mix is stable enough for hourly or daily extrapolation.
 
+## Measurement Rules
+- Primary bandwidth metric must be the raw MQTT payload length captured before SDK parsing, decryption, formatter decoding, or heartbeat `ENCODED_DATA` decompression. In practice this should be `len(message.payload)` or the nearest equivalent available at the communicator boundary.
+- If the SDK later exposes a decoded heartbeat dict, that decoded-body size must be reported separately as diagnostic composition. Do not add decoded heartbeat-body bytes to raw-bandwidth totals.
+- If only the MQTT payload bytes are available, state explicitly that MQTT topic/header overhead is still excluded.
+- If both raw and decoded views are available, keep them in separate columns, tables, and narrative claims.
+
 ## What To Capture Per Message
 At minimum, collect these fields when available:
 - local receive timestamp
 - SDK event class or callback type
-- total serialized size in bytes
-- uncompressed size if both compressed and decoded views are available
+- raw MQTT payload size in bytes captured before SDK parsing
+- decoded JSON size only as a secondary field when available
+- heartbeat decoded-body size only as a secondary field when available
 - sender node or address
 - destination if present
 - stream name
@@ -128,18 +138,19 @@ At minimum, collect these fields when available:
 - presence of `IMG`, `IMG_ORIG`, `HISTORY`, `DCT_STATS`, `COMM_STATS`, `ACTIVE_PLUGINS`, `CONFIG_STREAMS`, `EE_WHITELIST`, `TAGS`, `ID_TAGS`
 - whether fields are empty or default-like
 
-If the SDK exposes the decoded message only, measure the decoded JSON representation consistently and say so in the results.
+If the SDK exposes the decoded message only, say clearly that raw-bandwidth measurement is blocked and do not present decoded heartbeat-body totals as network bandwidth.
 
 ## Required Aggregations
 The analysis must compute:
-- total messages and total bytes
-- bytes per minute across the capture window
-- bytes by message class
-- bytes by sender
-- bytes by stream and signature when available
+- total messages and total raw MQTT payload bytes
+- raw bytes per minute across the capture window
+- raw bytes by message class
+- raw bytes by sender
+- raw bytes by stream and signature when available
 - bytes by stream or signature over time when available
 - top 20 largest messages
-- top 20 largest fields across all messages
+- top 20 largest raw-wire-visible fields across all messages
+- top heartbeat decoded-body fields reported separately from raw-wire-visible fields
 - field presence frequency
 - empty-field frequency
 - `_C_*` and `_P_*` contribution estimates
@@ -152,11 +163,11 @@ The analysis must compute:
 ## Required Questions To Answer
 `PAYLOADS_SDK_RESULTS.md` must answer these:
 1. What message classes dominate total bytes on mainnet from the SDK listener perspective?
-2. Are the largest payloads dominated by images, metadata, histories, heartbeat diagnostics, or something else?
+2. On the raw MQTT payload, are the largest payloads dominated by compressed heartbeat envelopes, netmon snapshots, encrypted envelopes, images, metadata, histories, or something else?
 3. Which top-level fields are the clearest low-hanging-fruit candidates for reduction?
 4. How much apparent bloat comes from repeated empty/default fields?
 5. How much apparent bloat comes from `_C_*` and `_P_*` metadata expansion?
-6. Do heartbeat-like messages still expose heavy sections in practice from the SDK side?
+6. Which heavy sections are inside compressed heartbeat bodies after decode, and how should those be discussed without double-counting them as raw bandwidth?
 7. Which findings clearly map back to core repo candidates already listed in `PAYLOADS.md`?
 8. Which findings suggest new SDK-side guidance, helpers, or defaults?
 9. Who are the sustained top senders by bytes over the full `10`-minute run, and is traffic concentrated or fleet-wide?
@@ -205,6 +216,12 @@ Generate `PAYLOADS_SDK_RESULTS.md` with this structure:
 ## Executive Summary
 - 3 to 7 short findings with measured numbers
 
+## Measurement Basis
+- primary raw-bandwidth metric:
+- secondary decoded-body metric:
+- passive-listening safeguards:
+- what is explicitly excluded from the raw metric:
+
 ## Stability Check
 - first half message count / bytes:
 - second half message count / bytes:
@@ -212,10 +229,10 @@ Generate `PAYLOADS_SDK_RESULTS.md` with this structure:
 - extrapolation confidence: low | medium | high
 
 ## Byte Distribution
-- table: message class | count | total bytes | avg bytes | p95 bytes | max bytes
-- table: top senders or sources by bytes
-- table: top streams/signatures by bytes when available
-- table: bytes per minute by major message class
+- table: message class | count | total raw bytes | avg bytes | p95 bytes | max bytes
+- table: top senders or sources by raw bytes
+- table: top streams/signatures by raw bytes when available
+- table: raw bytes per minute by major message class
 
 ## Traffic Drivers
 ### Who
@@ -229,13 +246,16 @@ Generate `PAYLOADS_SDK_RESULTS.md` with this structure:
 - whether traffic is concentrated in admin/control-plane or business flows
 
 ## Top Heavy Fields
-- table: field | messages present | total estimated bytes | avg bytes when present | notes
+- table: field | messages present | total estimated raw bytes | avg bytes when present | notes
+
+## Heartbeat Decoded Composition
+- table: field | messages present | total decoded bytes | avg bytes when present | notes
 
 ## Field Families
 ### `_C_*` metadata
 ### `_P_*` runtime/debug fields
 ### image fields
-### heartbeat-style diagnostic sections
+### heartbeat-style diagnostic sections inside decoded compressed bodies
 ### history/result fields
 ### empty/default fields
 

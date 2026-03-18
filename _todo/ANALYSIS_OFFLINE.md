@@ -113,4 +113,3 @@
 - To keep DCT telemetry and plugin processing alive with external MQTT down, `WORK_OFFLINE` must be `true`.
 - In that mode, local DCT->plugin flow is preserved by design.
 - Remaining practical bottlenecks are plugin queue overload, serving latency, and bounded outgoing comm buffering (delivery loss, not processing loss).
-

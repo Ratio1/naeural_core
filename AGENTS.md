@@ -22,11 +22,11 @@ This file is "alive." `AGENTS.md` is the authoritative source for repository pur
 | Area | Default owner role | Write scope | Notes |
 | --- | --- | --- | --- |
 | `naeural_core/main/`, `naeural_core/config/`, `start_nen.py` | `runtime-owner` | orchestrator, entrypoint, startup config | `start_nen.py` is read-only unless explicitly requested; startup semantics affect deployment safety |
-| `naeural_core/comm/`, `naeural_core/remote_file_system/`, `naeural_core/ipfs/`, `COMMS.md` | `comm-owner` | transports, queues, ingress/egress, protocol notes | protocol or queue semantic changes require explicit verification notes |
+| `naeural_core/comm/`, `naeural_core/remote_file_system/`, `naeural_core/ipfs/`, `_todo/COMMS.md` | `comm-owner` | transports, queues, ingress/egress, protocol notes | protocol or queue semantic changes require explicit verification notes |
 | `naeural_core/business/`, `naeural_core/data/`, `extensions/` | `pipeline-owner` | plugins, data capture, business logic, plugin tests | watch queue pressure, plugin cache, and startup latency effects |
 | `naeural_core/serving/`, `naeural_core/heavy_ops/`, `naeural_core/local_libraries/model_server*`, `naeural_core/utils/tracing/` | `serving-owner` | inference backends, serving harnesses, model tooling | GPU and external artifact services may be required to verify |
 | `naeural_core/constants.py`, `naeural_core/core_logging/`, `naeural_core/utils/`, `pyproject.toml`, `requirements.txt` | `platform-owner` | shared constants, logging, utilities, packaging | cross-cutting changes require broader review and usually more than one verification row |
-| `docs/`, `README.md`, `AGENTS.md`, `ANALYSIS_OFFLINE.md`, `PLUGIN_CACHING.md` | `docs-owner` | repo docs, runbooks, guidance | docs must move with code, commands, and operator behavior |
+| `docs/`, `_todo/`, `README.md`, `AGENTS.md` | `docs-owner` | repo docs, runbooks, guidance | root planning docs live under `_todo/`; docs must move with code, commands, and operator behavior |
 | `xperimental/` | `platform-owner` | isolated experiments only | do not cite as production proof unless the task explicitly targets experiments |
 
 ## Safe-Edit Boundaries
@@ -48,7 +48,7 @@ This file is "alive." `AGENTS.md` is the authoritative source for repository pur
 ## Required Verification Commands
 | Change scope | Minimum verification | Notes |
 | --- | --- | --- |
-| Docs-only (`README.md`, `docs/`, `AGENTS.md`, runbooks) | manual diff review and link/path sanity check | no code command required unless the doc changes executable commands or config semantics |
+| Docs-only (`README.md`, `AGENTS.md`, `docs/`, `_todo/`, runbooks) | manual diff review and link/path sanity check | no code command required unless the doc changes executable commands or config semantics |
 | Any Python file change | `python -m compileall <touched_paths>` | substitute the real touched files or directories |
 | `naeural_core/business/`, `naeural_core/data/`, `extensions/` | `python -m compileall <touched_paths>` and `python -m unittest discover naeural_core/business/test_framework -p 'test_*.py'` when relevant | if discovery is not relevant, state why |
 | `naeural_core/main/`, `naeural_core/config/`, `naeural_core/comm/` | `python -m compileall <touched_paths>` and a targeted reproducer or sanitized startup check | if `python start_nen.py` is blocked by secrets, brokers, or unsafe side effects, record the blocker explicitly |
@@ -100,7 +100,7 @@ These are repo-local role cards inspired by current A2A agent-card practice. The
 
 ### `comm-owner`
 - Objective: maintain transport correctness, queue behavior, ingress/egress semantics, and comm observability.
-- Owned files / write scope: `naeural_core/comm/`, `naeural_core/remote_file_system/`, `naeural_core/ipfs/`, `COMMS.md`.
+- Owned files / write scope: `naeural_core/comm/`, `naeural_core/remote_file_system/`, `naeural_core/ipfs/`, `_todo/COMMS.md`.
 - Required inputs and context: payload examples, queue/retry semantics, broker assumptions, backward-compatibility constraints.
 - Expected outputs / artifacts: transport patch, protocol notes, verification evidence, open risk note if live infra is unavailable.
 - Allowed tools: repo search, targeted edits, compile checks, local repro scripts, protocol/source review.
@@ -124,7 +124,7 @@ These are repo-local role cards inspired by current A2A agent-card practice. The
 
 ### `docs-owner`
 - Objective: keep repository docs, runbooks, and guidance synchronized with actual code and operator workflows.
-- Owned files / write scope: `docs/`, `README.md`, `AGENTS.md`, `ANALYSIS_OFFLINE.md`, `PLUGIN_CACHING.md`.
+- Owned files / write scope: `docs/`, `_todo/`, `README.md`, `AGENTS.md`.
 - Required inputs and context: implemented behavior, exact commands, changed boundaries, operator impact, source references when policy changes.
 - Expected outputs / artifacts: doc patch, worked examples, updated commands, reference list.
 - Allowed tools: repo search, targeted edits, diff review, link/path sanity checks, web review for external guidance.
@@ -350,3 +350,10 @@ Latest:
 - `2026-03-17`: Current comm `IN_KB` stats are measured when `_recv_buff` is drained in `get_message()`, not when MQTT traffic first arrives, so broker-side ingress pressure and app-side consumption pressure are currently conflated (`naeural_core/comm/base/base_comm_thread.py`).
 - `2026-03-17`: Correction: command/heartbeat ingress attribution is split and naming is misleading; `maybe_process_incoming()` drains the `HEARTBEATS` communicator, but the `COMMANDCONTROL` thread also consumes its own recv path and even registers heartbeats, while the SDK `MqttSession` “heartbeats” communicator is wired to config send + control recv channels (`naeural_core/comm/communication_manager.py`, `naeural_core/comm/mixins/commandcontrol_comm_mixin.py`, `/usr/local/lib/python3.10/dist-packages/ratio1/default/session/mqtt_session.py`).
 - `2026-03-17`: `start_nen.py` is an intentionally frozen launcher boundary, sets multiprocessing start method to `spawn`, and exits via `os._exit`, so startup-path fixes should usually land in `naeural_core/main/entrypoint.py` or deeper runtime modules instead of the launcher.
+- `2026-03-17`: Periodic heartbeats with `HEARTBEAT_TIMERS=false` still include broad summary sections such as `ACTIVE_PLUGINS`, `CONFIG_STREAMS`, `DCT_STATS`, `COMM_STATS`, and whitelist data; the regular/non-full heartbeat path omits timers and logs, not most diagnostic summaries (`naeural_core/main/app_monitor.py`, `naeural_core/main/orchestrator.py`).
+- `2026-03-17`: `GeneralPayload` copies most capture metadata into `_C_*` fields for every payload and also adds tags plus multiple `_P_*` runtime fields, so capture-metadata growth directly increases wire payload size (`naeural_core/data_structures.py`).
+- `2026-03-17`: Correction: the prior heartbeat-size note overstated `ACTIVE_PLUGINS` and `CONFIG_STREAMS`; those sections are gated by `EE_HB_CONTAINS_ACTIVE_PLUGINS` and `EE_HB_CONTAINS_PIPELINES` (default true if unset), usually travel inside compressed `ENCODED_DATA`, and `NetworkMonitor` pipeline cache is now refreshed directly through `NET_CONFIG_MONITOR` payloads rather than depending only on heartbeat parsing (`naeural_core/main/app_monitor.py`, `naeural_core/main/orchestrator.py`, `naeural_core/business/default/admin/net_config_monitor.py`, `naeural_core/main/net_mon.py`).
+- `2026-03-18`: SDK mainnet capture (`1957` msgs / `65.7s`) was dominated by `heartbeat` (`58.1%`) and `NET_MON_01` snapshots, with `CURRENT_NETWORK` alone accounting for `8.6MB` (`27.0%`) across only `15` messages; admin/control-plane payloads can outweigh business payloads in real traffic (`PAYLOADS_SDK_RESULTS.md`, `naeural_core/business/default/admin/net_mon_01.py`).
+- `2026-03-18`: SDK callback views can expose both decoded heartbeat fields and `ENCODED_DATA`; treat `ENCODED_DATA` there as analysis and archival overhead, not proof of raw-wire duplication without lower-level transport evidence (`PAYLOADS_SDK_RESULTS.md`, `naeural_core/main/app_monitor.py`).
+- `2026-03-18`: Mainnet SDK traffic drivers in the sampled window were distributed across many `r1s-*` senders with similar totals and concentrated in `admin_pipeline` control-plane flows (`NET_MON_01`, `NET_CONFIG_MONITOR`, `CHAIN_STORE_BASE`) plus heartbeats, which suggests fleet-wide periodic admin chatter rather than one runaway business stream (`PAYLOADS_SDK_RESULTS.md`).
+- `2026-03-18`: Root planning and analysis markdown files now live under `_todo/`; keep only `README.md` and `AGENTS.md` at repo root and update path references there when moving or adding planning docs.

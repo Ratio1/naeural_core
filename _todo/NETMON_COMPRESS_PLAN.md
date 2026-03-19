@@ -276,6 +276,61 @@ Test plan:
   - set `EE_NETMON_COMPRESS=false`
   - confirm sender returns to `v1`
 
+Execution checklist:
+1. Preflight reader coverage:
+   - confirm deployed core receivers include the `net_config_monitor` decode change
+   - confirm deployed SDK listeners include the `__maybe_process_net_mon` decode change
+   - confirm sender compression remains disabled by default on the target fleet before the canary
+2. Baseline passive raw-bandwidth capture:
+   - from the `naeural_core` repo root run:
+     - `python3 xperimental/payloads_tests/sdk_bandwidth_capture.py --seconds 600 --max-messages 30000`
+   - record:
+     - capture jsonl path
+     - summary json path
+     - results md path
+     - `NET_MON_01` raw bytes from the summary
+     - total raw bytes from the summary
+3. Baseline NET_MON-specific probe:
+   - from the `naeural_core` repo root run:
+     - `python3 xperimental/payloads_tests/netmon_compression_probe.py --seconds 180 --target-count 30`
+   - record:
+     - sample count
+     - average raw NET_MON size
+     - estimated hb-style reduction
+     - results md path
+4. Canary enablement:
+   - enable `EE_NETMON_COMPRESS=true` only on the selected sender subset
+   - keep all non-canary senders on the existing behavior
+   - do not widen the rollout until the post-enable capture is reviewed
+5. Post-enable passive raw-bandwidth capture:
+   - rerun:
+     - `python3 xperimental/payloads_tests/sdk_bandwidth_capture.py --seconds 600 --max-messages 30000`
+   - compare baseline vs canary:
+     - `NET_MON_01` raw bytes
+     - total raw bytes
+     - by-sender NET_MON share if visible in the summary
+6. Post-enable semantic check:
+   - compare before/after peer and allow-list state in the updated SDK/core consumers
+   - confirm callbacks still see normalized `CURRENT_NETWORK` dicts
+   - confirm no malformed-payload crashes or repeated decode failures are observed in logs
+7. Rollback drill:
+   - revert the canary senders to `EE_NETMON_COMPRESS=false`
+   - rerun:
+     - `python3 xperimental/payloads_tests/sdk_bandwidth_capture.py --seconds 300 --max-messages 15000`
+   - confirm sender behavior returns to `v1`-like wire shape and semantic parity remains intact
+8. Promotion gate:
+   - only widen rollout if the canary shows lower raw NET_MON bytes and no peer/whitelist regression
+   - otherwise keep compression disabled and log the blocking evidence in `Phase Completion Log`
+
+Evidence to record in the completion note:
+- baseline and post-enable results md paths
+- baseline and post-enable summary json paths
+- sender subset used for the canary
+- observed `NET_MON_01` raw-byte delta
+- observed total raw-byte delta
+- semantic parity result for peer discovery and whitelist handling
+- rollback result
+
 Acceptance criteria:
 - readers already in production continue to function with sender compression disabled
 - controlled `v2` rollout shows smaller raw NET_MON payloads
@@ -296,6 +351,32 @@ Test plan:
   - `EE_NETMON_COMPRESS` unset + `EE_ETH_ENABLED=false`
 - confirm explicit override still defeats the default after rollout
 - confirm operational docs reflect the final default and rollback path
+
+Execution checklist:
+1. Default-on readiness review:
+   - confirm Phase 3 canary evidence shows lower raw NET_MON bytes with no semantic regression
+   - confirm rollback was exercised successfully during Phase 3
+2. Default behavior verification:
+   - on an ETH-enabled deployment with `EE_NETMON_COMPRESS` unset, confirm outgoing NET_MON payloads use `NETMON_VERSION="v2"`
+   - on a non-ETH deployment with `EE_NETMON_COMPRESS` unset, confirm outgoing NET_MON payloads remain uncompressed `v1`
+3. Explicit override verification:
+   - set `EE_NETMON_COMPRESS=false` on an ETH-enabled deployment and confirm sender reverts to `v1`
+   - set `EE_NETMON_COMPRESS=true` on a non-ETH deployment and confirm sender emits `v2`
+4. Operator documentation review:
+   - document the final default rule
+   - document the explicit override behavior
+   - document the rollback path
+5. Post-default passive confirmation:
+   - rerun:
+     - `python3 xperimental/payloads_tests/sdk_bandwidth_capture.py --seconds 600 --max-messages 30000`
+   - confirm the expected raw-bandwidth improvement persists after broader enablement
+
+Evidence to record in the completion note:
+- default-on verification environment(s)
+- evidence that unset behavior matches the ETH-driven rule
+- evidence that explicit override still works in both directions
+- updated doc/runbook path if one was changed
+- post-default results md path and summary json path
 
 Acceptance criteria:
 - default behavior matches the documented ETH-driven rule

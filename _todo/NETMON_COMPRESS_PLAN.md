@@ -332,16 +332,29 @@ Evidence to record in the completion note:
 - rollback result
 
 Current local status:
-- blocked for live baseline capture in the current environment
-- blocker:
-  - passive capture scripts require Ratio1 SDK connection credentials in env/config, and the current environment does not provide a network user
-- commands attempted:
-  - `MPLCONFIGDIR=/tmp/mpl python3 xperimental/payloads_tests/sdk_bandwidth_capture.py --seconds 15 --max-messages 500 --silent`
-  - `MPLCONFIGDIR=/tmp/mpl python3 xperimental/payloads_tests/netmon_compression_probe.py --seconds 15 --target-count 5 --silent`
-- observed failure:
-  - `ValueError: Error: No user specified for ratio1 Edge Protocol network connection. Please make sure you have the correct credentials in the environment variables within the .env file or provide them as params in code`
+- in progress; baseline capture evidence now exists locally
+- completed evidence:
+  - [x] baseline passive raw-bandwidth capture
+    - valid artifact set:
+      - `xperimental/payloads_tests/evidence/raw_bandwidth/20260319T195320+0000_mainnet_bandwidth.jsonl`
+      - `xperimental/payloads_tests/evidence/raw_bandwidth/20260319T195320+0000_mainnet_bandwidth_summary.json`
+      - `xperimental/payloads_tests/evidence/raw_bandwidth/20260319T195320+0000_mainnet_bandwidth_results.md`
+    - validated capture window: `2026-03-19T19:53:20+00:00` to `2026-03-19T20:03:20+00:00` (`600.098s`)
+    - key totals:
+      - total raw bytes: `3521157` (`5.7KB/s`, `343.8KB/min`)
+      - `payload:NET_MON_01` raw bytes: `841780` across `32` messages (`23.9%` of observed bytes)
+  - [x] baseline NET_MON-specific probe
+    - valid artifact:
+      - `xperimental/payloads_tests/evidence/netmon_compression/20260319T175839+0000_netmon_compression_results.md`
+    - key totals:
+      - sample count: `8`
+      - average raw NET_MON size: `25.9KB`
+      - estimated hb-style reduction: `62.7%`
+- superseded local artifact:
+  - `xperimental/payloads_tests/evidence/raw_bandwidth/20260319T175836+0000_mainnet_bandwidth_results.md`
+  - do not use it as Phase 3 baseline evidence because the reported window was inconsistent (`--seconds 600` run but results rendered `6510.1s`)
 - next requirement:
-  - provide a valid `.env` / environment configuration for the passive SDK session, then rerun the baseline capture steps above
+  - confirm deployed reader coverage, then execute canary enablement and the post-enable capture steps above
 
 Acceptance criteria:
 - readers already in production continue to function with sender compression disabled

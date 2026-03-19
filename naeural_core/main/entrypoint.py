@@ -147,7 +147,8 @@ def install_package_with_constraints_to_target(
 ) -> bool:
   """
   Install a Python package into a specified target directory using pip,
-  while respecting the current environment's package versions via a constraints file.
+  while respecting the current environment's package versions via a constraints
+  file generated from `pip freeze`.
 
   Parameters
   ----------
@@ -208,6 +209,9 @@ def check_installed_package_in_target(
   Very simple check: does `target_folder` contain a dist-info/egg-info directory
   for this package?
 
+  This is a shallow presence check only. It does not validate package version,
+  dependency health, or ABI compatibility.
+
   Parameters
   ----------
   package_name : str
@@ -260,6 +264,88 @@ def add_target_path_to_sys_path(target_folder: str):
   return
 
 
+def get_additional_packages_cache_folder(base_folder: str) -> str:
+  """
+  Return the interpreter-specific cache folder used for additional packages.
+
+  Notes
+  -----
+  Legacy flat `_bin` installs are intentionally ignored. New installs are scoped
+  by interpreter cache tag to avoid reusing packages across Python upgrades.
+  """
+  cache_tag = getattr(sys.implementation, "cache_tag", None)
+  if not cache_tag:
+    cache_tag = "py{}{}".format(sys.version_info.major, sys.version_info.minor)
+  return os.path.join(os.path.abspath(base_folder), "_bin", cache_tag)
+
+
+def get_additional_packages_manifest_path(target_folder: str) -> str:
+  """
+  Return the manifest path used to track an interpreter-specific package cache.
+  """
+  return os.path.join(os.path.abspath(target_folder), "install_manifest.json")
+
+
+def build_additional_packages_manifest(additional_packages: list) -> dict:
+  """
+  Build a normalized manifest for the current runtime and requested packages.
+
+  Package order is normalized so equivalent requests do not trigger rebuilds.
+  """
+  normalized_packages = sorted(set(additional_packages or []))
+  return {
+    "python_version": "{}.{}.{}".format(
+      sys.version_info.major,
+      sys.version_info.minor,
+      sys.version_info.micro,
+    ),
+    "cache_tag": getattr(sys.implementation, "cache_tag", None),
+    "executable": sys.executable,
+    "packages": normalized_packages,
+  }
+
+
+def load_additional_packages_manifest(target_folder: str):
+  """
+  Load the package-cache manifest for a target folder, if present.
+  """
+  manifest_path = get_additional_packages_manifest_path(target_folder)
+  if not os.path.isfile(manifest_path):
+    return None
+  with open(manifest_path, "r", encoding="utf-8") as fh:
+    return json.load(fh)
+
+
+def save_additional_packages_manifest(target_folder: str, manifest: dict):
+  """
+  Persist the package-cache manifest for a target folder.
+  """
+  manifest_path = get_additional_packages_manifest_path(target_folder)
+  with open(manifest_path, "w", encoding="utf-8") as fh:
+    json.dump(manifest, fh, indent=2, sort_keys=True)
+  return
+
+
+def additional_packages_manifest_matches(target_folder: str, additional_packages: list):
+  """
+  Compare the existing target-folder manifest with the current runtime manifest.
+
+  Returns
+  -------
+  tuple[bool, dict, dict | None]
+    A match flag, the current manifest, and the existing manifest if it could be
+    loaded.
+  """
+  current_manifest = build_additional_packages_manifest(additional_packages=additional_packages)
+  try:
+    existing_manifest = load_additional_packages_manifest(target_folder=target_folder)
+  except Exception:
+    return False, current_manifest, None
+  if existing_manifest is None:
+    return False, current_manifest, None
+  return existing_manifest == current_manifest, current_manifest, existing_manifest
+
+
 def maybe_install_additional_packages(
   l: Logger,
   target_folder: str,
@@ -267,6 +353,11 @@ def maybe_install_additional_packages(
 ):
   """
   Install additional Python packages into a specified target folder.
+
+  The target folder is an interpreter-scoped cache. If its manifest is missing,
+  unreadable, or mismatched with the current runtime and requested packages, the
+  cache is rebuilt before package checks/installations proceed. A fresh manifest
+  is written only after all requested packages are available.
 
   Parameters
   ----------
@@ -282,7 +373,26 @@ def maybe_install_additional_packages(
   # endif no additional packages
   target_folder = os.path.abspath(target_folder)
   l.P(f"Checking additional packages in '{target_folder}': {additional_packages}")
+  manifest_ok, current_manifest, existing_manifest = additional_packages_manifest_matches(
+    target_folder=target_folder,
+    additional_packages=additional_packages,
+  )
+  if not manifest_ok:
+    if existing_manifest is None:
+      l.P(
+        "Additional package cache manifest missing or unreadable. Rebuilding interpreter cache...",
+        color='y'
+      )
+    else:
+      l.P(
+        "Additional package cache manifest mismatch detected. Rebuilding interpreter cache...",
+        color='y'
+      )
+      l.P(f"Existing manifest: {json.dumps(existing_manifest, indent=2, sort_keys=True)}")
+      l.P(f"Current manifest: {json.dumps(current_manifest, indent=2, sort_keys=True)}")
+    shutil.rmtree(target_folder, ignore_errors=True)
   os.makedirs(target_folder, exist_ok=True)
+  all_packages_ok = True
   for pkg in additional_packages:
     if not check_installed_package_in_target(package_name=pkg, target_folder=target_folder):
       l.P(f"Package '{pkg}' not found in target folder. Installing...")
@@ -295,10 +405,16 @@ def maybe_install_additional_packages(
         l.P(f"Package '{pkg}' installed successfully.", color='g')
       else:
         l.P(f"Failed to install package '{pkg}'.", color='r', boxed=True)
+        all_packages_ok = False
     else:
       l.P(f"Package '{pkg}' already installed.", color='g')
     # endif package not installed
   # endfor additional packages
+  if all_packages_ok:
+    save_additional_packages_manifest(
+      target_folder=target_folder,
+      manifest=current_manifest,
+    )
   add_target_path_to_sys_path(target_folder)
   return
 
@@ -338,7 +454,9 @@ def main(additional_packages: list = None):
   #endif no folders
 
   if isinstance(additional_packages, list) and len(additional_packages) > 0:
-    additional_packages_cache_folder = os.path.join(l.app_folder, '_bin')
+    additional_packages_cache_folder = get_additional_packages_cache_folder(
+      base_folder=l.app_folder
+    )
     maybe_install_additional_packages(
       l=l,
       target_folder=additional_packages_cache_folder,
@@ -370,6 +488,8 @@ def main(additional_packages: list = None):
   #endif docker post config  
   
   config_box_id = get_id(log=l)
+  lock = None
+  eng = None
   
   try:    
     lock = l.lock_process(config_box_id)

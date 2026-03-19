@@ -331,6 +331,18 @@ Evidence to record in the completion note:
 - semantic parity result for peer discovery and whitelist handling
 - rollback result
 
+Current local status:
+- blocked for live baseline capture in the current environment
+- blocker:
+  - passive capture scripts require Ratio1 SDK connection credentials in env/config, and the current environment does not provide a network user
+- commands attempted:
+  - `MPLCONFIGDIR=/tmp/mpl python3 xperimental/payloads_tests/sdk_bandwidth_capture.py --seconds 15 --max-messages 500 --silent`
+  - `MPLCONFIGDIR=/tmp/mpl python3 xperimental/payloads_tests/netmon_compression_probe.py --seconds 15 --target-count 5 --silent`
+- observed failure:
+  - `ValueError: Error: No user specified for ratio1 Edge Protocol network connection. Please make sure you have the correct credentials in the environment variables within the .env file or provide them as params in code`
+- next requirement:
+  - provide a valid `.env` / environment configuration for the passive SDK session, then rerun the baseline capture steps above
+
 Acceptance criteria:
 - readers already in production continue to function with sender compression disabled
 - controlled `v2` rollout shows smaller raw NET_MON payloads

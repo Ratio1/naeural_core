@@ -31,14 +31,17 @@ class TestFastApiWebAppSemaphoreEnv(unittest.TestCase):
     self.assertIn("port = self.port", segment)
     self.assertNotIn("port = self.cfg_port", segment)
 
-  def test_fastapi_webapp_exports_host_and_runtime_port_keys(self):
+  def test_fastapi_webapp_exports_api_endpoint_keys(self):
     method = self._get_setup_semaphore_env()
     segment = ast.get_source_segment(self.source, method) or ""
-    self.assertIn("self.semaphore_set_env('HOST', localhost_ip)", segment)
-    self.assertIn("self.semaphore_set_env('HOST_IP', localhost_ip)", segment)
-    self.assertIn("self.semaphore_set_env('PORT', str(port))", segment)
-    self.assertIn("self.semaphore_set_env('HOST_PORT', str(port))", segment)
-    self.assertIn("self.semaphore_set_env('URL', 'http://{}:{}'.format(localhost_ip, port))", segment)
+    self.assertIn("self.semaphore_set_env('API_IP', localhost_ip)", segment)
+    self.assertIn("self.semaphore_set_env('API_PORT', str(port))", segment)
+    self.assertIn("self.semaphore_set_env('API_URL', 'http://{}:{}'.format(localhost_ip, port))", segment)
+    self.assertNotIn("self.semaphore_set_env('HOST', localhost_ip)", segment)
+    self.assertNotIn("self.semaphore_set_env('HOST_IP', localhost_ip)", segment)
+    self.assertNotIn("self.semaphore_set_env('PORT', str(port))", segment)
+    self.assertNotIn("self.semaphore_set_env('HOST_PORT', str(port))", segment)
+    self.assertNotIn("self.semaphore_set_env('URL', 'http://{}:{}'.format(localhost_ip, port))", segment)
 
   def test_fastapi_webapp_guards_host_resolution_failures(self):
     method = self._get_setup_semaphore_env()
@@ -46,8 +49,8 @@ class TestFastApiWebAppSemaphoreEnv(unittest.TestCase):
     self.assertIn("try:", segment)
     self.assertIn("localhost_ip = self.log.get_localhost_ip()", segment)
     self.assertIn("except Exception as ex:", segment)
-    self.assertIn("Skipping HOST/HOST_IP semaphore export", segment)
-    self.assertIn("Skipping URL semaphore export", segment)
+    self.assertIn("Skipping API_IP semaphore export", segment)
+    self.assertIn("Skipping API_URL semaphore export", segment)
 
 
 if __name__ == "__main__":

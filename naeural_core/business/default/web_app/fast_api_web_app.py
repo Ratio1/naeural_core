@@ -1101,22 +1101,20 @@ class FastApiWebAppPlugin(BasePlugin):
     try:
       localhost_ip = self.log.get_localhost_ip()
     except Exception as ex:
-      self.P("Failed to resolve localhost IP for semaphore export: {}".format(ex), color='y')
+      self.P("Failed to resolve localhost IP for API semaphore export: {}".format(ex), color='y')
 
     port = self.port
     if isinstance(localhost_ip, str) and localhost_ip.strip():
-      self.semaphore_set_env('HOST', localhost_ip)
-      self.semaphore_set_env('HOST_IP', localhost_ip)
+      self.semaphore_set_env('API_IP', localhost_ip)
     else:
-      self.P("Skipping HOST/HOST_IP semaphore export: localhost IP unavailable", color='y')
+      self.P("Skipping API_IP semaphore export: localhost IP unavailable", color='y')
 
     if port:
-      self.semaphore_set_env('PORT', str(port))
-      self.semaphore_set_env('HOST_PORT', str(port))
+      self.semaphore_set_env('API_PORT', str(port))
       if isinstance(localhost_ip, str) and localhost_ip.strip():
-        self.semaphore_set_env('URL', 'http://{}:{}'.format(localhost_ip, port))
+        self.semaphore_set_env('API_URL', 'http://{}:{}'.format(localhost_ip, port))
       else:
-        self.P("Skipping URL semaphore export: localhost IP unavailable", color='y')
+        self.P("Skipping API_URL semaphore export: localhost IP unavailable", color='y')
     return
 
   @property

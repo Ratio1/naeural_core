@@ -1,4 +1,5 @@
 import copy
+import json
 import unittest
 from unittest import mock
 
@@ -104,6 +105,43 @@ class TestNetmonCompressionHelpers(unittest.TestCase):
 
     self.assertEqual(decoded, payload)
     self.assertNotIn(PAYLOAD_DATA.NETMON_CURRENT_NETWORK, decoded)
+
+  def test_sender_wrapper_keeps_payload_json_serializable(self):
+    class _FakePayload:
+      def __init__(self, payload_data):
+        self.payload_data = payload_data
+
+      def to_dict(self):
+        return copy.deepcopy(self.payload_data)
+
+    class _FakePlugin:
+      compress_netmon = True
+      const = ct
+      log = _FakeLog()
+
+      @staticmethod
+      def deepcopy(obj):
+        return copy.deepcopy(obj)
+
+    payload = _FakePayload(build_v1_netmon_payload())
+    plugin = _FakePlugin()
+    original_to_dict = payload.to_dict
+    payload_dict = original_to_dict()
+    encoded_payload = plugin.const.PAYLOAD_DATA.maybe_encode_netmon_payload(
+      payload_dict,
+      log=plugin.log,
+    )
+
+    def compressed_to_dict():
+      return plugin.deepcopy(encoded_payload)
+
+    payload.to_dict = compressed_to_dict
+    encoded = payload.to_dict()
+
+    self.assertNotIn("to_dict", encoded)
+    json.dumps(encoded)
+    self.assertEqual(encoded[PAYLOAD_DATA.NETMON_VERSION], PAYLOAD_DATA.NETMON_VERSION_V2)
+    self.assertIn(HB.ENCODED_DATA, encoded)
 
 
 if __name__ == "__main__":

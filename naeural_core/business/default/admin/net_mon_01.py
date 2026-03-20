@@ -70,6 +70,27 @@ class NetMon01Plugin(
   def startup(self):
     super().startup()
     return
+
+  def _is_truthy_env_value(self, value, default=False):
+    """
+    Normalize NETMON environment toggles to a boolean value.
+
+    Parameters
+    ----------
+    value : object
+      Raw environment value read from ``os.environ``.
+    default : bool, optional
+      Value returned when the environment variable is unset.
+
+    Returns
+    -------
+    bool
+      ``True`` only for the accepted truthy textual values used by the admin
+      plugins. Unset values fall back to ``default``.
+    """
+    if value is None:
+      return default
+    return str(value).lower() in ['true', '1', 'yes']
   
   def on_init(self):
     # the following code was left here for historical reasons only
@@ -113,10 +134,13 @@ class NetMon01Plugin(
     except:
       _send_current_network_each = 0
     self.__send_current_network_each = _send_current_network_each
+    _compress_netmon = self.os_environ.get(self.const.EE_NETMON_COMPRESS_ENV_KEY, None)
+    self.__compress_netmon = self._is_truthy_env_value(_compress_netmon, default=self.const.ETH_ENABLED)
     self.__last_current_network_time = 0
     msg = f'Netmon initialised:'
     msg += f'\n  - {self.send_current_network_each=}'
     msg += f'\n  - {self.send_only_online=}'
+    msg += f'\n  - {self.compress_netmon=}'
     msg += f'\n  - {self.cfg_supervisor=}'
     msg += f'\n  - {self.is_supervisor_node=}'
     msg += f'\n  - {self.cfg_supervisor_log_time=}'
@@ -134,6 +158,51 @@ class NetMon01Plugin(
   @property 
   def send_current_network_each(self):
     return self.__send_current_network_each
+
+  @property
+  def compress_netmon(self):
+    return self.__compress_netmon
+
+  def _maybe_prepare_netmon_payload(self, payload):
+    """
+    Wrap payload serialization so NET_MON compression happens at ``to_dict`` time.
+
+    Parameters
+    ----------
+    payload : GeneralPayload or None
+      Freshly-created NET_MON payload object returned by ``_create_payload``.
+
+    Returns
+    -------
+    GeneralPayload or None
+      The same payload instance when compression is disabled, or the same
+      instance with ``to_dict`` replaced by a cached encoder that emits NETMON
+      v2 wire dictionaries.
+
+    Notes
+    -----
+    The wrapper preserves the normal payload creation path and applies the
+    compression boundary only after the payload has been materialized through
+    ``to_dict``. The encoded dictionary is cached so repeated serialization in
+    the same send cycle does not recompress the business body.
+    """
+    if payload is None or not self.compress_netmon:
+      return payload
+
+    original_to_dict = payload.to_dict
+    cached_payload = {}
+
+    def compressed_to_dict():
+      if "payload" not in cached_payload:
+        payload_dict = original_to_dict()
+        cached_payload["payload"] = self.const.PAYLOAD_DATA.maybe_encode_netmon_payload(
+          payload_dict,
+          log=self.log,
+        )
+      return self.deepcopy(cached_payload["payload"])
+
+    payload.to_dict = compressed_to_dict
+    return payload
   
 
   def _maybe_load_state(self):
@@ -343,7 +412,8 @@ class NetMon01Plugin(
         current_new=current_new,
         is_supervisor=is_supervisor,
         send_current_network_each=self.send_current_network_each,
-      )  
+      )
+      payload = self._maybe_prepare_netmon_payload(payload)
       self.__last_current_network_time = self.time()
     #endif should send 
 

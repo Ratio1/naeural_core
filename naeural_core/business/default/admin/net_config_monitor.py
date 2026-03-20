@@ -411,6 +411,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     This function will process the NET_MON_01 data and update the allowed nodes list.
     The objective is to keep track of the nodes that we are allowed to send requests to.
     """
+    data = self.const.PAYLOAD_DATA.maybe_decode_netmon_payload(data, log=self.log)
     current_network = data.get(self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK, {})
     if len(current_network) == 0:
       self.P(f"[netmon_handler] Received NET_MON_01 data without {self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK}.", color='r ')

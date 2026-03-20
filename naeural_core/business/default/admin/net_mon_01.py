@@ -190,16 +190,14 @@ class NetMon01Plugin(
       return payload
 
     original_to_dict = payload.to_dict
-    cached_payload = {}
+    payload_dict = original_to_dict()
+    encoded_payload = self.const.PAYLOAD_DATA.maybe_encode_netmon_payload(
+      payload_dict,
+      log=self.log,
+    )
 
     def compressed_to_dict():
-      if "payload" not in cached_payload:
-        payload_dict = original_to_dict()
-        cached_payload["payload"] = self.const.PAYLOAD_DATA.maybe_encode_netmon_payload(
-          payload_dict,
-          log=self.log,
-        )
-      return self.deepcopy(cached_payload["payload"])
+      return self.deepcopy(encoded_payload)
 
     payload.to_dict = compressed_to_dict
     return payload

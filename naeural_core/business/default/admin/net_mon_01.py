@@ -72,6 +72,22 @@ class NetMon01Plugin(
     return
 
   def _is_truthy_env_value(self, value, default=False):
+    """
+    Normalize NETMON environment toggles to a boolean value.
+
+    Parameters
+    ----------
+    value : object
+      Raw environment value read from ``os.environ``.
+    default : bool, optional
+      Value returned when the environment variable is unset.
+
+    Returns
+    -------
+    bool
+      ``True`` only for the accepted truthy textual values used by the admin
+      plugins. Unset values fall back to ``default``.
+    """
     if value is None:
       return default
     return str(value).lower() in ['true', '1', 'yes']
@@ -148,6 +164,28 @@ class NetMon01Plugin(
     return self.__compress_netmon
 
   def _maybe_prepare_netmon_payload(self, payload):
+    """
+    Wrap payload serialization so NET_MON compression happens at ``to_dict`` time.
+
+    Parameters
+    ----------
+    payload : GeneralPayload or None
+      Freshly-created NET_MON payload object returned by ``_create_payload``.
+
+    Returns
+    -------
+    GeneralPayload or None
+      The same payload instance when compression is disabled, or the same
+      instance with ``to_dict`` replaced by a cached encoder that emits NETMON
+      v2 wire dictionaries.
+
+    Notes
+    -----
+    The wrapper preserves the normal payload creation path and applies the
+    compression boundary only after the payload has been materialized through
+    ``to_dict``. The encoded dictionary is cached so repeated serialization in
+    the same send cycle does not recompress the business body.
+    """
     if payload is None or not self.compress_netmon:
       return payload
 

@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 
 from naeural_core import constants as ct
+from naeural_core.core_logging import Logger
 from naeural_core.main.epochs_manager import EPCT, EpochsManager
+from naeural_core.main.net_mon import NetworkMonitor
 
 N_NODES = 1000
 N_HEARTBEATS = 24 * 60 * 6
@@ -126,6 +128,29 @@ class _StubOwner:
 
   def network_node_gpu_summary(self, node_addr):  # pylint: disable=unused-argument
     return {}
+
+
+class _StubBlockEngine:
+  def maybe_remove_prefix(self, addr):
+    return addr
+
+  def maybe_remove_addr_prefix(self, addr):
+    return addr
+
+  def _add_prefix(self, addr):
+    return addr
+
+  def node_address_to_eth_address(self, addr):
+    return f"eth_{addr}"
+
+
+class _StubEpochManager:
+  def __init__(self):
+    self.calls = []
+
+  def register_data(self, addr, data):
+    self.calls.append((addr, dict(data)))
+    return
 
 
 class TestEpochsManager(unittest.TestCase):
@@ -341,3 +366,52 @@ class TestEpochsManager(unittest.TestCase):
       f"Stress timings register={register_time:.2f}s, "
       f"accum_avail={accum_time:.2f}s, legacy_avail={legacy_time:.2f}s"
     )
+
+
+class TestNetMonDuplicates(unittest.TestCase):
+  def setUp(self):
+    self.log = Logger(
+      lib_name="TEST_NMON",
+      base_folder=".",
+      app_folder="_local_cache",
+      no_folders_no_save=True,
+      DEBUG=False,
+    )
+    self.epoch_manager = _StubEpochManager()
+    self.netmon = NetworkMonitor(
+      log=self.log,
+      node_name="SELF",
+      node_addr="0xSELF",
+      epoch_manager=self.epoch_manager,
+      blockchain_manager=_StubBlockEngine(),
+    )
+
+  def _make_hb(self, ts):
+    return {
+      ct.PAYLOAD_DATA.EE_TIMESTAMP: ts.strftime(ct.HB.TIMESTAMP_FORMAT),
+      ct.PAYLOAD_DATA.EE_TIMEZONE: "UTC+0",
+      ct.HB.CURRENT_TIME: ts.strftime(ct.HB.TIMESTAMP_FORMAT),
+      ct.EE_ID: "EE_NODE",
+    }
+
+  def test_register_heartbeat_drops_recent_duplicate(self):
+    ts = datetime(2026, 1, 1, 0, 0, 0)
+    hb = self._make_hb(ts)
+    self.netmon.register_heartbeat("0xNODE1", dict(hb))
+    self.netmon.register_heartbeat("0xNODE1", dict(hb))
+
+    stored = self.netmon.get_box_heartbeats("0xNODE1")
+    self.assertEqual(len(stored), 1)
+    self.assertEqual(len(self.epoch_manager.calls), 1)
+
+  def test_replay_path_preserves_received_time(self):
+    ts = datetime(2026, 1, 1, 0, 0, 0)
+    hb = self._make_hb(ts)
+    hb[ct.HB.RECEIVED_TIME] = "2026-01-01 00:00:05"
+    accepted = self.netmon._NetworkMonitor__register_heartbeat(
+      "0xNODE2", dict(hb), update_received_time=False
+    )
+
+    self.assertTrue(accepted)
+    stored = self.netmon.get_box_heartbeats("0xNODE2")
+    self.assertEqual(stored[-1][ct.HB.RECEIVED_TIME], "2026-01-01 00:00:05")

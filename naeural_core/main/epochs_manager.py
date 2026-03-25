@@ -734,7 +734,7 @@ class EpochsManager(Singleton):
       deltas.append(delta)
       # the delta between timestamps is bigger than the max heartbeat interval
       # or less than half the heartbeat interval (ignore same heartbeat)
-      # TODO(AID): how can a heartbeat be sent more than once?
+      # TODO(AID): how can a heartbeat be sent more than once? A: It can if to QoS is 1
       # TODO: detect fraud mechanism (someone spams with heartbeats)
       if delta > (time_between_heartbeats + 5) or delta < (time_between_heartbeats / 2):
         # this gets triggered when the delta is too big or too small so last interval 
@@ -742,7 +742,11 @@ class EpochsManager(Singleton):
         # (ended with the last set of end_timestamp as end of interval
         avail_seconds += (end_timestamp - start_timestamp).total_seconds()
         start_timestamp = timestamps[i]
-        errors.append((timestamps[i-1], timestamps[i]))
+        # Check if a heartbeat was duplicated or if there is a gap, and log it as an error for later analysis.
+        # Should not be necessary due to the duplicate check in register_data, but is kept for safety.
+        if delta > 0:
+          errors.append((timestamps[i-1], timestamps[i]))
+        # endif heartbeat not duplicated
       # endif delta
 
       # change the end of the current interval
@@ -809,8 +813,14 @@ class EpochsManager(Singleton):
       if segment_start is not None:
         node_data[EPCT.CURR_AVAIL_SECONDS] += (last_hb - segment_start).total_seconds()
       node_data[EPCT.CURR_SEGMENT_START] = hb_timestamp
-      node_data[EPCT.CURR_BAD_GAPS] += 1
-      node_data[EPCT.CURR_GAP_ERRORS].append((last_hb, hb_timestamp))
+      # Check if a heartbeat was duplicated or if there is a gap, and log it as an error for later analysis.
+      # In case of duplication there is no need to log the error as it does not impact availability,
+      # but in case of a gap it is important to log it for later analysis and debugging.
+      # Should not be necessary due to the duplicate check in register_data, but is kept for safety.
+      if delta > 0:
+        node_data[EPCT.CURR_BAD_GAPS] += 1
+        node_data[EPCT.CURR_GAP_ERRORS].append((last_hb, hb_timestamp))
+      # endif delta
 
     node_data[EPCT.CURR_LAST_HB] = hb_timestamp
     return
@@ -1188,16 +1198,21 @@ class EpochsManager(Singleton):
       # the remote epoch is the same as the local epoch so we can register the heartbeat
       with self.log.managed_lock_resource(EPOCHMON_MUTEX):
         # add the heartbeat timestamp for the current epoch
-        self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS].add(dt_remote_utc)
-        self.__data[node_addr][EPCT.LAST_SEEN] = str_date
-        self.__update_availability_accumulator(
-          node_addr=node_addr,
-          hb_timestamp=dt_remote_utc,
-          time_between_heartbeats=10,
-        )
+        timestamps_set = self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS]
+        # Check for duplicated heartbeat timestamps (due to duplicated messages most likely)
+        if dt_remote_utc not in timestamps_set:
+          timestamps_set.add(dt_remote_utc)
+          # LAST_SEEN is only updated on the first time seeing a heartbeat, since
+          # a duplicated heartbeat does not mean necessarily that the node is still online.
+          self.__data[node_addr][EPCT.LAST_SEEN] = str_date
+          self.__update_availability_accumulator(
+            node_addr=node_addr,
+            hb_timestamp=dt_remote_utc,
+            time_between_heartbeats=10,
+          )
       # endwith lock
     else:
-      self.P("Received invalid epoch {} from node {} on epoch {}".format(
+      self.P("Received heartbeat with invalid epoch {} from node {} on epoch {}".format(
         remote_epoch, node_addr, local_epoch
       ))
     #endif remote epoch is the same as the local epoch
@@ -1770,7 +1785,10 @@ class EpochsManager(Singleton):
         avail = round(score / (MAX_AVAIL + 1e7), 4)
         best_avail = max(best_avail, avail)
         non_zero = len([x for x in epochs if x > 0])
-        nr_eps = len(epochs)
+        # Epoch 0 can exist on genesys nodes in case the epoch counting started at 0
+        # instead of 1.
+        # It is harmful, but can cause log spamming
+        nr_eps = len(epochs) - (0 in dct_epochs)
         prev_epoch = self.get_time_epoch() - 1
         first_seen = self.data[node_addr][EPCT.FIRST_SEEN]
         last_seen = self.data[node_addr][EPCT.LAST_SEEN]

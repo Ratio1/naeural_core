@@ -9,6 +9,7 @@ import numpy as np
 from time import time, sleep
 from copy import deepcopy
 from collections import deque, OrderedDict
+from itertools import islice
 from datetime import datetime as dt
 from naeural_core import DecentrAIObject
 from naeural_core import constants as ct
@@ -68,6 +69,7 @@ NETMON_MUTEX = 'NETMON_MUTEX'
 
 NETMON_DB = 'db.pkl'
 NETMON_DB_SUBFOLDER = 'network_monitor'
+NETMON_DUPLICATE_TS_CHECK_LAST = 10
 
 ERROR_ADDRESS = '0xai_unknownunknownunknown'
 MISSING_ID = 'missing_id'
@@ -316,7 +318,27 @@ class NetworkMonitor(DecentrAIObject):
     return
   
 
-  def __register_heartbeat(self, addr, data):
+  def __register_heartbeat(self, addr, data, update_received_time=True):
+    """
+    Register a heartbeat in the local network monitor cache.
+
+    Parameters
+    ----------
+    addr : str
+      Remote node address.
+    data : dict
+      Heartbeat payload.
+    update_received_time : bool, optional
+      If True, stamp the heartbeat with the local receive time before storing
+      it. Use False for internal replay paths that should preserve the
+      existing receive-time semantics.
+
+    Returns
+    -------
+    bool
+      True when the heartbeat is accepted and stored, False when it is
+      dropped as a recent duplicate.
+    """
     # first check if data is encoded (as it always should be)
     if ct.HB.ENCODED_DATA in data:
       str_data = data.pop(ct.HB.ENCODED_DATA)
@@ -340,16 +362,32 @@ class NetworkMonitor(DecentrAIObject):
         self.P("Box alive: {}:{}.".format(addr, __eeid), color='y')
         self.__network_heartbeats[__addr_no_prefix] = deque(maxlen=self.HB_HISTORY)
       #endif
+      hb_deque = self.__network_heartbeats[__addr_no_prefix]
+      remote_ts = data.get(ct.PAYLOAD_DATA.EE_TIMESTAMP)
+      if remote_ts is not None:
+        # Check a small recent window for duplicated MQTT QoS 1 deliveries.
+        # Looking back 10 heartbeats is conservative safety and likely more than
+        # strictly necessary, but it avoids maintaining extra dedup state.
+        for prev_hb in islice(reversed(hb_deque), NETMON_DUPLICATE_TS_CHECK_LAST):
+          if prev_hb.get(ct.PAYLOAD_DATA.EE_TIMESTAMP) == remote_ts:
+            return False
       # Work on a copy to avoid mutating the stored heartbeat after append.
       hb_work = deepcopy(data)
+      if update_received_time:
+        # save the timestamp when received the heartbeat,
+        # helpful to know when computing the availability score
+        # this data is saved using the local time and could "appear" different
+        # from the timestamp in the heartbeat due to zone differences
+        # when reconstructing RECEIVED_TIME we will use local timezone
+        hb_work[ct.HB.RECEIVED_TIME] = dt.now().strftime(ct.HB.TIMESTAMP_FORMAT)
       # now register pipelines if avail (will pop from hb_work)
       self.__maybe_register_hb_pipelines(addr, hb_work)
-      self.__network_heartbeats[__addr_no_prefix].append(hb_work)
+      hb_deque.append(hb_work)
       # now remove the extra info from the previous heartbeat
       # this is done to avoid having the same info in multiple sequential heartbeats
       self.__pop_repeating_info_from_previous_heartbeat(addr)
     # endwith lock
-    return
+    return True
 
 
   def get_box_heartbeats(self, addr):
@@ -909,14 +947,9 @@ class NetworkMonitor(DecentrAIObject):
 
 
     def register_heartbeat(self, addr, data):
-      # save the timestamp when received the heartbeat,
-      # helpful to know when computing the availability score
-      # this data is saved using the local time and could "appear" different
-      # from the timestamp in the heartbeat due to zone differences
-      # when reconstructing RECEIVED_TIME we will use local timezone
-      data[ct.HB.RECEIVED_TIME] = dt.now().strftime(ct.HB.TIMESTAMP_FORMAT)
-      self.__register_heartbeat(addr, data)
-      self.epoch_manager.register_data(addr, data) # TODO: change this?
+      accepted = self.__register_heartbeat(addr, data, update_received_time=True)
+      if accepted:
+        self.epoch_manager.register_data(addr, data) # TODO: change this?
       return
         
     def network_nodes_status(self):
@@ -1435,7 +1468,7 @@ class NetworkMonitor(DecentrAIObject):
           for addr in current_heartbeats:
             for data in current_heartbeats[addr]:
               # TODO: replace register_heartbeat with something simpler
-              self.__register_heartbeat(addr, data)
+              self.__register_heartbeat(addr, data, update_received_time=False)
           # unlock the NETMON_MUTEX
           # end for
           result = True

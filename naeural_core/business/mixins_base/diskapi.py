@@ -5,6 +5,7 @@
         - add own file deletion `diskapi_remove`
   
 """
+from collections import deque
 import shutil
 
 import pandas as pd
@@ -515,6 +516,114 @@ class _DiskAPIMixin(object):
       Shortcut to _diskapi_save_json
       """
       return self._diskapi_save_json(dct=dct, filename=filename, folder='output', indent=indent)
+
+    def diskapi_save_json_circular_buffer(
+      self,
+      dct,
+      max_items : int,
+      filename : str = None,
+      folder : str = 'data',
+      subdir : str = None,
+      indent : bool = True,
+    ):
+      """
+      Save JSON data into a single-file circular buffer.
+
+      Parameters
+      ----------
+      dct : Any
+        JSON-serializable payload to be appended to the buffer. NumPy arrays and
+        scalars continue to use the existing `NPJson` serializer through
+        `_diskapi_save_json`.
+
+      max_items : int
+        Maximum number of items preserved in the buffer file.
+
+      filename : str, optional
+        Buffer-file name. When omitted, the helper stores the buffer in the
+        default diskapi location:
+        `_data/_diskapi/<plugin_id>/__circular_buffer.json`.
+
+      folder : str, optional
+        Local-cache root bucket. Supported values match the rest of the diskapi
+        JSON helpers: `data`, `models`, or `output`. The default is `data`.
+
+      subdir : str, optional
+        Optional relative subdirectory inside `folder`. The helper creates the
+        directory when needed and applies the normal safe-path checks before any
+        filesystem mutation.
+
+      indent : bool, optional
+        Forwarded to `_diskapi_save_json`. The default is `True`.
+
+      Returns
+      -------
+      dict
+        Operation metadata with the saved file path and the number of items kept
+        in the persisted buffer.
+
+      Notes
+      -----
+      When `max_items == 1`, the helper saves `dct` directly instead of wrapping
+      it in a one-element list. That keeps singleton state files compatible with
+      existing callers such as VAC while still routing them through the shared
+      API.
+      """
+      assert isinstance(max_items, int) and max_items > 0, \
+        f"`max_items` must be a positive integer, got {max_items!r}"
+      if subdir is not None:
+        assert isinstance(subdir, str), f"`subdir` must be a string, got {type(subdir)}"
+
+      if filename is None:
+        filename = "__circular_buffer.json"
+        if subdir is None:
+          subdir = os.path.join("_diskapi", self.plugin_id)
+
+      assert isinstance(filename, str) and filename.endswith('.json'), \
+        f"`filename` must be a .json file name, got {filename!r}"
+
+      relative_filename = os.path.join(subdir, filename) if subdir else filename
+      payload_to_save = dct
+      items_in_buffer = 1
+
+      if max_items > 1:
+        loaded_buffer = None
+        try:
+          loaded_buffer = self._diskapi_load_json(
+            filename=relative_filename,
+            folder=folder,
+            verbose=False,
+          )
+        except Exception:
+          loaded_buffer = None
+
+        if isinstance(loaded_buffer, list):
+          existing_items = list(loaded_buffer)
+        elif loaded_buffer is None:
+          existing_items = []
+        else:
+          # Allow older singleton saves to migrate naturally into the new
+          # buffer format on the next append without special-case tooling.
+          existing_items = [loaded_buffer]
+
+        json_buffer = deque(existing_items, maxlen=max_items)
+        json_buffer.append(dct)
+        payload_to_save = list(json_buffer)
+        items_in_buffer = len(payload_to_save)
+
+      saved_path = self._diskapi_save_json(
+        dct=payload_to_save,
+        filename=relative_filename,
+        folder=folder,
+        indent=indent,
+      )
+
+      return {
+        'saved_path': saved_path,
+        'filename': filename,
+        'items_in_buffer': items_in_buffer,
+        'max_items': max_items,
+      }
 
     def _diskapi_load_json(
       self, 

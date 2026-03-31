@@ -521,7 +521,7 @@ class _DiskAPIMixin(object):
       self,
       dct,
       max_items : int,
-      filename : str = None,
+      filename : str = 'jsons_circular_buffer.json',
       folder : str = 'data',
       subdir : str = None,
       indent : bool = True,
@@ -574,10 +574,8 @@ class _DiskAPIMixin(object):
       if subdir is not None:
         assert isinstance(subdir, str), f"`subdir` must be a string, got {type(subdir)}"
 
-      if filename is None:
-        filename = "jsons_circular_buffer.json"
-        if subdir is None:
-          subdir = os.path.join("_diskapi", self.plugin_id)
+      if subdir is None:
+        subdir = os.path.join("_diskapi", self.plugin_id)
 
       assert isinstance(filename, str) and filename.endswith('.json'), \
         f"`filename` must be a .json file name, got {filename!r}"

@@ -542,7 +542,7 @@ class _DiskAPIMixin(object):
       filename : str, optional
         Buffer-file name. When omitted, the helper stores the buffer in the
         default diskapi location:
-        `_data/_diskapi/<plugin_id>/__circular_buffer.json`.
+        `_data/_diskapi/<plugin_id>/jsons_circular_buffer.json`.
 
       folder : str, optional
         Local-cache root bucket. Supported values match the rest of the diskapi
@@ -631,32 +631,168 @@ class _DiskAPIMixin(object):
       verbose : bool = True
     ):
       """
-      Parameters:
-      -----------
-      filename: str, mandatory
-        Relative path to `folder` (in local cache), from where a json should be loaded
+      Load one JSON payload from the local cache.
 
-      folder: str, mandatory
-        The folder in local cache
-        Possible values: 'data', 'output', 'models'
+      Parameters
+      ----------
+      filename : str
+        Relative path to `folder` (in local cache) from where the JSON payload
+        should be loaded.
 
-      verbose: bool, optional
-        Controls logging when loading the json
-        The default value is True
+      folder : str
+        The local-cache root bucket. Possible values are `data`, `output`, and
+        `models`.
 
-      Returns:
-      --------
-      dict
+      subfolder : str, optional
+        Optional compatibility subfolder that is joined ahead of `filename`
+        during the safe-path validation step. The logger-facing call uses the
+        modern `subfolder_path` keyword.
+
+      verbose : bool, optional
+        Controls logger verbosity while loading the JSON payload. The default
+        value is `True`.
+
+      Returns
+      -------
+      Any
+        Decoded JSON payload, or `None` when the file is missing or unreadable.
       """
       assert_folder(folder)
       self.assert_legal_file_location(filename=filename, folder=folder, subfolder=subfolder)
 
       dct = self.log.load_json(
-        fname=filename, folder=folder, subfolder=subfolder, numeric_keys=True,
+        fname=filename, folder=folder, subfolder_path=subfolder, numeric_keys=True,
         locking=True, verbose=verbose
       )
 
       return dct
+
+    def diskapi_load_json_circular_buffer(
+      self,
+      entry_id : int = None,
+      filename : str = 'jsons_circular_buffer.json',
+      folder : str = 'data',
+      subdir : str = None,
+    ):
+      """
+      Load JSON entries from a single-file circular buffer.
+
+      Parameters
+      ----------
+      entry_id : int, optional
+        Zero-based entry index to extract from the buffer. When omitted, the
+        helper returns the full buffer content normalized as a list of
+        dictionaries.
+
+      filename : str, optional
+        Buffer-file name. When omitted, the helper loads from the default
+        diskapi circular-buffer path for the current plugin instance.
+
+      folder : str, optional
+        Local-cache root bucket. Supported values match the save helper:
+        `data`, `models`, or `output`. The default is `data`.
+
+      subdir : str, optional
+        Optional relative subdirectory inside `folder`. When omitted, the
+        helper resolves the shared diskapi buffer location:
+        `_diskapi/<plugin_id>/<filename>`.
+
+      Returns
+      -------
+      list[dict] or dict or None
+        Returns a list of dictionaries when `entry_id` is `None`. Returns the
+        selected dictionary when `entry_id` is provided. When the file is
+        missing, empty, unreadable, or the requested entry is not present, the
+        helper returns an empty list or `None` respectively.
+
+      Notes
+      -----
+      The save helper preserves a historical singleton on-disk contract when
+      `max_items == 1` by saving a direct dictionary instead of a list. This
+      loader normalizes that shape back to a one-item list so callers can treat
+      circular buffers uniformly.
+      """
+      if entry_id is not None and not isinstance(entry_id, int):
+        self.P(
+          f"JSON circular buffer load: `entry_id` must be an integer or None, got {entry_id!r}",
+          color='r',
+        )
+        return None
+
+      if subdir is not None:
+        assert isinstance(subdir, str), f"`subdir` must be a string, got {type(subdir)}"
+
+      if subdir is None:
+        subdir = os.path.join("_diskapi", self.plugin_id)
+
+      assert isinstance(filename, str) and filename.endswith('.json'), \
+        f"`filename` must be a .json file name, got {filename!r}"
+      assert_folder(folder)
+
+      relative_filename = os.path.join(subdir, filename) if subdir else filename
+      empty_result = [] if entry_id is None else None
+
+      try:
+        loaded_buffer = self._diskapi_load_json(
+          filename=relative_filename,
+          folder=folder,
+          verbose=False,
+        )
+      except Exception as exc:
+        self.P(
+          "Failed to load JSON circular buffer "
+          f"`{relative_filename}` from `{folder}`: {type(exc).__name__}: {exc}",
+          color='r',
+        )
+        return empty_result
+
+      if loaded_buffer is None:
+        self.P(
+          "JSON circular buffer "
+          f"`{relative_filename}` from `{folder}` is missing, empty, or unreadable.",
+          color='y',
+        )
+        return empty_result
+
+      if isinstance(loaded_buffer, list):
+        entries = list(loaded_buffer)
+      elif isinstance(loaded_buffer, dict):
+        entries = [loaded_buffer]
+      else:
+        self.P(
+          "JSON circular buffer "
+          f"`{relative_filename}` from `{folder}` has unsupported payload type "
+          f"`{type(loaded_buffer).__name__}`.",
+          color='r',
+        )
+        return empty_result
+
+      invalid_entry_indexes = [
+        idx for idx, entry in enumerate(entries)
+        if not isinstance(entry, dict)
+      ]
+      if len(invalid_entry_indexes) > 0:
+        self.P(
+          "JSON circular buffer "
+          f"`{relative_filename}` from `{folder}` contains non-dict entries at "
+          f"indices {invalid_entry_indexes}.",
+          color='r',
+        )
+        return empty_result
+
+      if entry_id is None:
+        return entries
+
+      if entry_id < 0 or entry_id >= len(entries):
+        self.P(
+          "JSON circular buffer entry "
+          f"`{entry_id}` not found in `{relative_filename}`. Buffer contains "
+          f"{len(entries)} item(s).",
+          color='y',
+        )
+        return None
+
+      return entries[entry_id]
     
     
     def diskapi_load_json(self, fn, verbose : bool = True):

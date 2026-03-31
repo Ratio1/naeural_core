@@ -59,6 +59,7 @@ This file is "alive." `AGENTS.md` is the authoritative source for repository pur
 
 ## Coding Style & Naming Conventions
 - Match the repository's two-space indentation, `snake_case` functions, `PascalCase` classes, and all-caps constants imported as `naeural_core.constants as ct`.
+- Treat production-grade Python quality as a hard requirement: touched Python code must keep clear control flow, extensive NumPy-style docstrings on modified classes and functions, and descriptive inline comments for non-trivial or contract-sensitive logic.
 - Prefer double quotes for user-facing strings.
 - Reuse the shared `Logger` for structured logs.
 - Reference config keys through `ct` instead of raw string literals.

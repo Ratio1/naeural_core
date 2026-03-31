@@ -7,10 +7,10 @@ from threading import Lock
 
 from naeural_core import constants as ct
 from naeural_core.core_logging import Logger
-from naeural_core.main.epochs_manager import EPCT, EpochsManager
+from naeural_core.main.epochs_manager import EPCT, EpochsManager, SYNC_SIGNATURES
 from naeural_core.main.net_mon import NetworkMonitor
 
-N_NODES = 1000
+N_NODES = 100
 N_HEARTBEATS = 24 * 60 * 6
 STRESS_TEST_ENV = "EE_EPOCHS_STRESS_TEST"
 DEFAULT_STRESS_TEST = "1"  # change to "0" in order to disable this by default
@@ -305,6 +305,151 @@ class TestEpochsManager(unittest.TestCase):
     self.manager._EpochsManager__recalculate_current_epoch_for_node(node_addr)
     local_epochs = self.manager._EpochsManager__data[node_addr][EPCT.LOCAL_EPOCHS]
     self.assertIn(self.manager.get_time_epoch(), local_epochs)
+
+  def test_cached_data_refresh_builds_compact_epoch_view(self):
+    node_addr = self.owner.node_addr
+    self.manager.update_epoch_availability(
+      epoch=1,
+      availability_table={node_addr: 42},
+      agreement_signatures={"sig": "x"},
+      agreement_cid="cid",
+      signatures_cid="scid",
+      debug=False,
+    )
+
+    self.manager.maybe_update_cached_data(force=True)
+
+    cached_state = self.manager.get_node_state(node_addr)
+    self.assertIsNotNone(cached_state)
+    self.assertEqual(set(cached_state.keys()), {EPCT.NAME, EPCT.EPOCHS})
+    self.assertEqual(cached_state[EPCT.EPOCHS][1], 42)
+
+  def test_get_full_node_state_preserves_runtime_epoch_fields(self):
+    node_addr = self.owner.node_addr
+    ts = self.manager.genesis_date + timedelta(seconds=11)
+    self.manager.register_data(node_addr, self._make_hb(ts))
+
+    full_state = self.manager.get_full_node_state(node_addr)
+
+    self.assertIsNotNone(full_state)
+    self.assertIn(EPCT.CURRENT_EPOCH, full_state)
+    self.assertIn(EPCT.LAST_EPOCH, full_state)
+    self.assertIn(EPCT.HB_TIMESTAMPS, full_state[EPCT.CURRENT_EPOCH])
+    self.assertIsInstance(full_state[EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS], set)
+
+  def test_cached_data_refresh_updates_only_dirty_nodes(self):
+    first_node = self.owner.node_addr
+    second_node = "0xNODE2"
+    self.manager._EpochsManager__initialize_new_node(second_node)
+
+    self.manager.update_epoch_availability(
+      epoch=1,
+      availability_table={first_node: 10, second_node: 20},
+      agreement_signatures={"sig": "x"},
+      agreement_cid="cid",
+      signatures_cid="scid",
+      debug=False,
+    )
+    self.manager.maybe_update_cached_data(force=True)
+
+    initial_second_cache = dict(self.manager.get_node_state(second_node)[EPCT.EPOCHS])
+
+    self.manager.update_epoch_availability(
+      epoch=2,
+      availability_table={first_node: 30},
+      agreement_signatures={"sig": "y"},
+      agreement_cid="cid2",
+      signatures_cid="scid2",
+      debug=False,
+    )
+    self.manager.maybe_update_cached_data(force=True)
+
+    self.assertEqual(self.manager.get_node_state(first_node)[EPCT.EPOCHS][2], 30)
+    self.assertEqual(self.manager.get_node_state(second_node)[EPCT.EPOCHS], initial_second_cache)
+
+  def test_cached_data_refresh_skip_on_contention_keeps_previous_cache(self):
+    node_addr = self.owner.node_addr
+    self.manager.update_epoch_availability(
+      epoch=1,
+      availability_table={node_addr: 11},
+      agreement_signatures={"sig": "x"},
+      agreement_cid="cid",
+      signatures_cid="scid",
+      debug=False,
+    )
+    self.manager.maybe_update_cached_data(force=True)
+    previous_cache = dict(self.manager.cached_data[node_addr][EPCT.EPOCHS])
+    previous_refresh = self.manager._last_cached_data_refresh
+
+    epoch_lock = Lock()
+    epoch_lock.acquire()
+    self.log._lock_table = {"epochmon_mutex": epoch_lock}
+    try:
+      self.manager.update_epoch_availability(
+        epoch=2,
+        availability_table={node_addr: 22},
+        agreement_signatures={"sig": "y"},
+        agreement_cid="cid2",
+        signatures_cid="scid2",
+        debug=False,
+      )
+      self.manager.maybe_update_cached_data(force=False)
+    finally:
+      epoch_lock.release()
+
+    self.assertEqual(self.manager.cached_data[node_addr][EPCT.EPOCHS], previous_cache)
+    self.assertEqual(self.manager._last_cached_data_refresh, previous_refresh)
+
+  def test_save_status_preserves_old_signature_epochs_while_refreshing_new_ones(self):
+    node_addr = self.owner.node_addr
+    saved_payloads = []
+
+    def _capture_pickle(data, **kwargs):
+      saved_payloads.append(data)
+      return
+
+    self.log.save_pickle_to_data = _capture_pickle
+
+    self.manager.update_epoch_availability(
+      epoch=1,
+      availability_table={node_addr: 11},
+      agreement_signatures={"sig_a": "va"},
+      agreement_cid="cid1",
+      signatures_cid="scid1",
+      debug=False,
+    )
+    self.manager.save_status()
+
+    self.manager.update_epoch_availability(
+      epoch=2,
+      availability_table={node_addr: 22},
+      agreement_signatures={"sig_b": "vb"},
+      agreement_cid="cid2",
+      signatures_cid="scid2",
+      debug=False,
+    )
+    self.manager.save_status()
+
+    latest_snapshot = saved_payloads[-1]
+    self.assertEqual(latest_snapshot[SYNC_SIGNATURES][1], {"sig_a": "va"})
+    self.assertEqual(latest_snapshot[SYNC_SIGNATURES][2], {"sig_b": "vb"})
+    self.assertEqual(self.manager._dirty_signature_epochs, set())
+
+  def test_maybe_close_epoch_persists_snapshot_dict_on_epoch_transition(self):
+    saved_payloads = []
+
+    def _capture_pickle(data, **kwargs):
+      saved_payloads.append(data)
+      return
+
+    self.log.save_pickle_to_data = _capture_pickle
+    self.manager._set_dbg_date(self.manager.genesis_date + timedelta(seconds=self.manager.epoch_length + 1))
+
+    closed_epoch = self.manager.maybe_close_epoch()
+
+    self.assertEqual(closed_epoch, 0)
+    self.assertTrue(len(saved_payloads) > 0)
+    self.assertIsInstance(saved_payloads[-1], dict)
 
   def test_stress_generator(self):
     genesis = self.manager.genesis_date

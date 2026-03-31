@@ -140,17 +140,32 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
   
   
-  def __send_data_to_chain_peers(self, data, peers=None):
+  def __send_data_to_chain_peers(self, data, peers=None, include_default_peers=True):
+    """Send chainstore payloads to the default peer set and optional extras.
+
+    Parameters
+    ----------
+    data : dict
+      Payload body forwarded to ``send_encrypted_payload``.
+    peers : str or list, optional
+      Extra explicit targets. When ``include_default_peers`` is ``False``,
+      these become the only recipients.
+    include_default_peers : bool, optional
+      If ``True``, start from ``self.__chain_peers`` and append any extra
+      targets that are not already present. If ``False``, send only to the
+      explicit ``peers`` argument.
+    """
     # check if list or str
-    send_to = self.deepcopy(self.__chain_peers)
-    if isinstance(peers, (str, list)) and len(peers) > 0:
-      if isinstance(peers, str):
-        peers = [peers]
-      # end if not a list
-      peers = [peer for peer in peers if peer not in self.__chain_peers]
+    send_to = self.deepcopy(self.__chain_peers) if include_default_peers else []
+    if isinstance(peers, str):
+      peers = [peers]
+    elif not isinstance(peers, list):
+      peers = []
+    if len(peers) > 0:
+      peers = [peer for peer in peers if peer not in send_to]
       send_to.extend(peers)
     # end if peers
-      
+
     self.send_encrypted_payload(node_addr=send_to, **data)
     return
   
@@ -507,7 +522,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           self.CS_CONFIRM_BY_ADDR : self.ee_addr,
         }
       }
-      self.__send_data_to_chain_peers(data, peers=peers)
+      self.__send_data_to_chain_peers(data, peers=peers, include_default_peers=False)
     else:
       if self.cfg_chain_store_debug:
         self.P(f" === REMOTE: Store for {key}={value} of {owner} failed", color='r')

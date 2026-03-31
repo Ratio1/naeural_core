@@ -20,6 +20,10 @@ _CONFIG = {
 
   'RECONNECTABLE': True,
   'ONE_AT_A_TIME': False,
+  'ADAPTIVE_STREAM_WINDOW': False,
+  'MIN_STREAM_WINDOW': 1,
+  'MAX_STREAM_WINDOW': 1,
+  'STREAM_WINDOW_STEP': 1,
 
 
   "HOST": '#DEFAULT',
@@ -34,6 +38,7 @@ _CONFIG = {
   "MESSAGE_FILTER": {},
   "PATH_FILTER": [None, None, None, None],
   "FILTER_BY_DESTINATION": False,
+  "DISABLE_ADDRESSED_PAYLOAD_SUBS": False,
 
   "URL": None,
   "STREAM_CONFIG_METADATA": {
@@ -53,6 +58,32 @@ _CONFIG = {
       "DESCRIPTION": "When true, drop payloads not addressed to this node (missing destination is treated as broadcast).",
       "TYPE": "bool",
     },
+    "ADAPTIVE_STREAM_WINDOW": {
+      "DESCRIPTION": "When true, dynamically adjust the per-loop message batch within the configured min/max bounds.",
+      "TYPE": "bool",
+    },
+    "MIN_STREAM_WINDOW": {
+      "DESCRIPTION": "Lower bound used when ADAPTIVE_STREAM_WINDOW is enabled.",
+      "TYPE": "int",
+      "MIN_VAL": 1,
+      "MAX_VAL": 2048,
+    },
+    "MAX_STREAM_WINDOW": {
+      "DESCRIPTION": "Upper bound used when ADAPTIVE_STREAM_WINDOW is enabled.",
+      "TYPE": "int",
+      "MIN_VAL": 1,
+      "MAX_VAL": 2048,
+    },
+    "STREAM_WINDOW_STEP": {
+      "DESCRIPTION": "Step used when the adaptive stream window grows or shrinks.",
+      "TYPE": "int",
+      "MIN_VAL": 1,
+      "MAX_VAL": 64,
+    },
+    "DISABLE_ADDRESSED_PAYLOAD_SUBS": {
+      "DESCRIPTION": "When true, subscribe only to the broadcast payload topic and skip addressed payload topics.",
+      "TYPE": "bool",
+    },
   },
 }
 
@@ -65,6 +96,7 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     self.message_queue = deque(maxlen=1000)
     self.connected = False
     self.subscribed = False
+    self._adaptive_stream_window = None
     self._io_formatter_manager: IOFormatterManager = None
     return
 
@@ -103,14 +135,53 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
 
     return ret
 
-  def __get_topic(self):
+  def __disable_addressed_payload_subs(self):
+    """
+    Determine whether addressed payload subscriptions should be disabled.
+
+    Returns
+    -------
+    bool
+      `True` when addressed payload topics should be skipped and only the
+      broadcast payload topic should be subscribed.
+    """
+    value = self.cfg_disable_addressed_payload_subs
+    if not value:
+      value = self.os_environ.get("EE_DISABLE_ADDRESSED_PAYLOAD_SUBS", "")
+    if isinstance(value, str):
+      return value.strip().upper() in ["1", "TRUE", "YES"]
+    return bool(value)
+
+  def __get_custom_channel_config(self):
+    """
+    Build the payload channel configuration used by the wrapper instance.
+
+    Returns
+    -------
+    dict
+      Payload channel configuration after applying stream-level overrides and
+      the addressed-subscription rollout flag.
+    """
     params = self.shmem['config_communication']['PARAMS']
-    ret = params['PAYLOADS_CHANNEL']['TOPIC']
+    channel_cfg = dict(params['PAYLOADS_CHANNEL'])
     if 'TOPIC' in self.cfg_stream_config_metadata and self.cfg_stream_config_metadata.get('TOPIC') != '#DEFAULT':
-      ret = self.cfg_stream_config_metadata.get('TOPIC')
-    return ret
+      channel_cfg['TOPIC'] = self.cfg_stream_config_metadata.get('TOPIC')
+    if 'TARGETED_TOPIC' in self.cfg_stream_config_metadata and self.cfg_stream_config_metadata.get('TARGETED_TOPIC') != '#DEFAULT':
+      channel_cfg['TARGETED_TOPIC'] = self.cfg_stream_config_metadata.get('TARGETED_TOPIC')
+    if self.__disable_addressed_payload_subs():
+      channel_cfg.pop('TARGETED_TOPIC', None)
+    return channel_cfg
 
   def _init(self):
+    """
+    Initialize the wrapper used by the IoT queue listener.
+
+    Notes
+    -----
+    The listener reuses the shared communication parameters, injects both
+    `EE_ID` and `EE_ADDR`, and can optionally disable addressed payload topic
+    subscriptions during rollout or rollback.
+    """
     # use the parameters from the comm layer as default for this connection, if unspecified
     params = self.shmem['config_communication']['PARAMS']
     self._io_formatter_manager = self.shmem['io_formatter_manager']
@@ -118,9 +189,9 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     # build the config dict with all connection paramteres required by wrapper server
     self._comm_config = {
       ct.COMMS.EE_ID: params.get(ct.COMMS.EE_ID, None),
-      "CUSTOM_CHANNEL": {
-        "TOPIC": self.__get_topic()
-      },
+      ct.COMMS.EE_ADDR: self.bc.address,
+      "DISABLE_ADDRESSED_PAYLOAD_SUBS": self.__disable_addressed_payload_subs(),
+      "CUSTOM_CHANNEL": self.__get_custom_channel_config(),
       ct.COMMS.HOST: self.__get_stream_config_metadata_property(ct.COMMS.HOST),
       ct.COMMS.PORT: self.__get_stream_config_metadata_property(ct.COMMS.PORT),
       ct.COMMS.USER: self.__get_stream_config_metadata_property(ct.COMMS.USER),
@@ -253,17 +324,93 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
 
 
   def _run_data_aquisition_step(self):
+    """
+    Drain one batch of queued pub-sub messages into the DCT output deque.
+
+    Notes
+    -----
+    The batch size is either fixed by ``STREAM_WINDOW`` or adjusted dynamically
+    through the adaptive stream-window controls. This keeps the MQTT ingress
+    loop independent from the node main-loop cadence while still bounding the
+    amount of work done in each capture-thread iteration.
+    """
     if len(self.message_queue) == 0:
       return
-    
-    if self.cfg_one_at_a_time:
-      nr_messages = 1
-    else:
-      nr_messages = min(len(self.message_queue), self.cfg_stream_window)
 
+    nr_messages = min(len(self.message_queue), self.__get_effective_stream_window())
     self._extract_and_process_messages(nr_messages)
     return
 
+
+  def __get_stream_window_bounds(self):
+    """
+    Return the bounded stream-window configuration used for queue draining.
+
+    Returns
+    -------
+    tuple[int, int, int, int]
+      Base stream window, minimum adaptive window, maximum adaptive window,
+      and adjustment step.
+    """
+    base_window = max(int(self.cfg_stream_window), 1)
+    min_window = max(int(self.cfg_min_stream_window), 1)
+    max_window = max(int(self.cfg_max_stream_window), 1)
+    step = max(int(self.cfg_stream_window_step), 1)
+    min_window = min(min_window, max_window)
+    if base_window < min_window:
+      base_window = min_window
+    if base_window > max_window:
+      base_window = max_window
+    return base_window, min_window, max_window, step
+
+  def __get_effective_stream_window(self):
+    """
+    Determine the current per-loop batch size used to drain ``message_queue``.
+
+    Returns
+    -------
+    int
+      Number of messages to process in the current capture iteration.
+
+    Notes
+    -----
+    When adaptive batching is enabled, backlog on the ingress queue grows the
+    window quickly while quiet periods shrink it gradually back toward the
+    configured minimum. Output deque headroom is also considered so the listener
+    does not scale up aggressively when downstream backpressure is already high.
+    The scale-up check uses the configured step size as a minimum free-capacity
+    requirement, so one adaptive increase only happens when the downstream DCT
+    queue has enough room to absorb that larger batch cleanly.
+    """
+    if self.cfg_one_at_a_time:
+      return 1
+
+    base_window, min_window, max_window, step = self.__get_stream_window_bounds()
+    if not self.cfg_adaptive_stream_window:
+      self._adaptive_stream_window = base_window
+      return base_window
+
+    current_window = self._adaptive_stream_window or base_window
+    message_queue_len = len(self.message_queue)
+    out_queue_len = len(self._deque) if self._deque is not None else 0
+    out_queue_maxlen = self._deque.maxlen if self._deque is not None else 0
+    remaining_output_capacity = max(out_queue_maxlen - out_queue_len, 0)
+    # Require enough downstream room for one adaptive growth step so we do not
+    # increase the ingress batch when the DCT queue is already close to full.
+    has_output_headroom = out_queue_maxlen <= 1 or remaining_output_capacity >= step
+
+    if message_queue_len >= max(current_window * 2, min_window) and has_output_headroom:
+      current_window = min(current_window + step, max_window)
+    elif message_queue_len <= max(min_window // 2, 1) and out_queue_len <= 1:
+      current_window = max(current_window - step, min_window)
+
+    if current_window != self._adaptive_stream_window:
+      self.Pd(
+        f"Adaptive stream window set to {current_window} "
+        f"(message_queue={message_queue_len}, deque={out_queue_len}/{out_queue_maxlen})"
+      )
+    self._adaptive_stream_window = current_window
+    return current_window
 
   def __process_iot_message(self, msg):
     """Decode the message if it is in a format supported by an Execution Engine, and then parse and filter it to support custom logic.

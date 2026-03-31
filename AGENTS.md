@@ -79,6 +79,7 @@ This file is "alive." `AGENTS.md` is the authoritative source for repository pur
 - Validate external payloads using the filters defined in `naeural_core.constants` when extending comms modules.
 - Do not embed credential defaults in plugin code or docs.
 - Treat new operator commands, deployment paths, auth flows, and incident semantics as `AGENTS.md` update triggers.
+- `EE_DISABLE_ADDRESSED_PAYLOAD_SUBS=true` disables addressed payload-topic subscriptions and forces broadcast-only payload receive during rollout/rollback of targeted payload routing; `EE_DISABLE_ADDRESSED_PAYLOAD_SENDS=true` separately disables targeted payload fanout on send and downgrades addressed payloads to one broadcast publish without warning spam.
 
 ## Agent Cards
 These are repo-local role cards inspired by current A2A agent-card practice. They are lightweight operating contracts for collaboration inside this repository.
@@ -366,3 +367,8 @@ Latest:
 - `2026-03-19`: Additional package manifest matching now normalizes package-list order, and `naeural_core/main/entrypoint.py` initializes `lock` before startup so exception cleanup cannot reference it before assignment.
 - `2026-03-19`: NET_MON sender-side compression cannot move routing/meta fields such as `STREAM_NAME`, `SIGNATURE`, `INSTANCE_ID`, `SESSION_ID`, or initiator/modifier addresses into `ENCODED_DATA`, because the comm layer still reads those top-level keys to build `EE_PAYLOAD_PATH`, session metadata, and destination routing before transport packaging (`naeural_core/comm/base/base_comm_thread.py`, `naeural_core/business/default/admin/net_mon_01.py`, `ratio1_sdk/ratio1/const/payload.py`).
 - `2026-03-19`: Passive rollout scripts under `xperimental/payloads_tests/` still require a valid Ratio1 SDK network user in env or config; without that, `sdk_bandwidth_capture.py` and `netmon_compression_probe.py` fail during `GenericSession.__fill_config` before any baseline capture begins.
+- `2026-03-30`: `EpochsManager.maybe_update_cached_data` should stay a compact dirty-epoch-history refresh (`EPCT.EPOCHS` + optional `EPCT.NAME`) rather than a full `__data` deepcopy, and callers needing full debug state should use `get_full_node_state()` so heartbeat registration does not contend on long cache copies (`naeural_core/main/epochs_manager.py`, `naeural_core/business/default/admin/net_mon_01.py`).
+- `2026-03-30`: `EpochsManager.save_status` now keeps detached per-epoch caches for `SYNC_SIGNATURES`, `SYNC_AGREEMENT_CID`, and `SYNC_SIGNATURES_CID` and refreshes only dirty epochs before persistence, so unbounded signature retention no longer implies full signature-history deepcopy on every save (`naeural_core/main/epochs_manager.py`).
+- `2026-03-31`: `Dockerfile_core` now expects the docker build context to be the parent directory containing both `naeural_core/` and `ratio1/`, installs both packages from those local trees, and starts the container with `python3 start_nen.py`.
+
+- `2026-03-31`: Targeted payload fanout now requires an addressed topic template on the active payload channel (`TARGETED_TOPIC` or a templated `TOPIC`); otherwise both `naeural_core` and `ratio1` intentionally downgrade addressed payloads to one broadcast publish to avoid sending the same payload once per destination onto the broadcast topic.

@@ -199,6 +199,11 @@ class EpochsManager(Singleton):
     self.__current_epoch = None
     self.cached_data = {}
     self._last_cached_data_refresh = None
+    self._cached_data_dirty_nodes = set()
+    self._dirty_signature_epochs = set()
+    self._save_cache_signatures = {}
+    self._save_cache_agreement_cid = {}
+    self._save_cache_signatures_cid = {}
     self.__data = {}
     self.__full_data = {}
     self.__eth_to_node = {}
@@ -215,6 +220,7 @@ class EpochsManager(Singleton):
     self._set_dbg_date(debug_date)
 
     loaded = self._load_status()
+    self.__initialize_signature_save_cache()
     self.maybe_close_epoch()
 
     self.P(
@@ -376,48 +382,230 @@ class EpochsManager(Singleton):
     return
 
 
-  def save_status(self):
-    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
-      self.__save_status()
+  def __mark_signature_snapshot_dirty(self, epoch):
+    """
+    Mark one epoch signature snapshot as needing refresh before save.
+
+    Parameters
+    ----------
+    epoch : int or None
+      Epoch whose signature-related persistence fields changed.
+    """
+    if epoch is not None:
+      self._dirty_signature_epochs.add(epoch)
     return
 
-      
-  def __save_status(self):
+  def __initialize_signature_save_cache(self):
     """
-    Saves the epochs status to disk called ONLY by `maybe_close_epoch` method - uses the critical section of the maybe_close_epoch method.
-    If used separately, make sure to use a lock.
-    """
-    self.P(f"{self.__class__.__name__} saving epochs status for {len(self.__data)} nodes...")
-    
-    self.__full_data[SYNC_SAVES_TS].append(self.date_to_str())
-    self.__full_data[SYNC_SAVES_EP].append(self.__current_epoch)
-    self.__trim_history()
-    _full_data_copy = deepcopy(self.__full_data) # maybe not needed
+    Seed the detached signature-save caches from the live full-data maps.
 
+    Returns
+    -------
+    None
+    """
+    signatures = self.__full_data.get(SYNC_SIGNATURES, {})
+    agreement_cid = self.__full_data.get(SYNC_AGREEMENT_CID, {})
+    signatures_cid = self.__full_data.get(SYNC_SIGNATURES_CID, {})
+    self._save_cache_signatures = {
+      epoch: dict(epoch_signatures or {})
+      for epoch, epoch_signatures in signatures.items()
+    }
+    self._save_cache_agreement_cid = dict(agreement_cid)
+    self._save_cache_signatures_cid = dict(signatures_cid)
+    self._dirty_signature_epochs = set()
+    return
+
+  def __refresh_signature_save_cache_locked(self):
+    """
+    Refresh detached signature-save caches only for epochs changed since the
+    previous save snapshot.
+
+    Returns
+    -------
+    None
+    """
+    dirty_epochs = set(self._dirty_signature_epochs)
+    if len(dirty_epochs) == 0:
+      return
+    signatures = self.__full_data.get(SYNC_SIGNATURES, {})
+    agreement_cid = self.__full_data.get(SYNC_AGREEMENT_CID, {})
+    signatures_cid = self.__full_data.get(SYNC_SIGNATURES_CID, {})
+    for epoch in dirty_epochs:
+      epoch_signatures = signatures.get(epoch)
+      if epoch_signatures is None:
+        self._save_cache_signatures.pop(epoch, None)
+      else:
+        self._save_cache_signatures[epoch] = dict(epoch_signatures)
+      if epoch in agreement_cid:
+        self._save_cache_agreement_cid[epoch] = agreement_cid[epoch]
+      else:
+        self._save_cache_agreement_cid.pop(epoch, None)
+      if epoch in signatures_cid:
+        self._save_cache_signatures_cid[epoch] = signatures_cid[epoch]
+      else:
+        self._save_cache_signatures_cid.pop(epoch, None)
+    self._dirty_signature_epochs.difference_update(dirty_epochs)
+    return
+
+  def __snapshot_node_state_for_save(self, node_state):
+    """
+    Build a detached per-node snapshot suitable for persistence.
+
+    Parameters
+    ----------
+    node_state : dict
+      Live node state from ``self.__data``.
+
+    Returns
+    -------
+    dict
+      Detached node-state copy preserving the on-disk schema.
+    """
+    current_epoch = node_state.get(EPCT.CURRENT_EPOCH, {})
+    last_epoch = node_state.get(EPCT.LAST_EPOCH, {})
+    return {
+      EPCT.NAME: node_state.get(EPCT.NAME),
+      EPCT.EPOCHS: defaultdict(int, node_state.get(EPCT.EPOCHS, {})),
+      EPCT.LOCAL_EPOCHS: defaultdict(int, node_state.get(EPCT.LOCAL_EPOCHS, {})),
+      EPCT.ALERTS: node_state.get(EPCT.ALERTS, 0),
+      EPCT.LAST_ALERT_TS: node_state.get(EPCT.LAST_ALERT_TS, 0),
+      EPCT.FIRST_SEEN: node_state.get(EPCT.FIRST_SEEN),
+      EPCT.LAST_SEEN: node_state.get(EPCT.LAST_SEEN),
+      EPCT.LAST_EPOCH_RESTARTS: list(node_state.get(EPCT.LAST_EPOCH_RESTARTS, [])),
+      EPCT.CURR_AVAIL_SECONDS: node_state.get(EPCT.CURR_AVAIL_SECONDS, 0),
+      EPCT.CURR_SEGMENT_START: node_state.get(EPCT.CURR_SEGMENT_START),
+      EPCT.CURR_LAST_HB: node_state.get(EPCT.CURR_LAST_HB),
+      EPCT.CURR_BAD_GAPS: node_state.get(EPCT.CURR_BAD_GAPS, 0),
+      EPCT.CURR_GAP_ERRORS: deque(node_state.get(EPCT.CURR_GAP_ERRORS, []), maxlen=CURR_GAP_ERRORS_MAXLEN),
+      EPCT.CURR_NEEDS_RECALC: node_state.get(EPCT.CURR_NEEDS_RECALC, False),
+      EPCT.CURRENT_EPOCH: {
+        EPCT.ID: current_epoch.get(EPCT.ID),
+        EPCT.HB_TIMESTAMPS: set(current_epoch.get(EPCT.HB_TIMESTAMPS, set())),
+      },
+      EPCT.LAST_EPOCH: {
+        EPCT.ID: last_epoch.get(EPCT.ID),
+        EPCT.HB_TIMESTAMPS: set(last_epoch.get(EPCT.HB_TIMESTAMPS, set())),
+      },
+    }
+
+  def __snapshot_full_data_for_save(self, with_lock=True):
+    """
+    Capture a detached epochs-status payload for persistence.
+
+    Parameters
+    ----------
+    with_lock : bool, optional
+      When True, acquire ``EPOCHMON_MUTEX`` internally. Use False only when
+      the caller already holds that mutex.
+
+    Returns
+    -------
+    tuple[dict, int]
+      Detached payload matching the on-disk ``epochs_status.pkl`` schema and
+      the number of signature epochs that were dirty before the incremental
+      signature-save cache refresh.
+    """
+    def _build_snapshot():
+      self.P(f"{self.__class__.__name__} saving epochs status for {len(self.__data)} nodes...")
+      self.__full_data[SYNC_SAVES_TS].append(self.date_to_str())
+      self.__full_data[SYNC_SAVES_EP].append(self.__current_epoch)
+      self.__trim_history()
+      dirty_signature_epochs = len(self._dirty_signature_epochs)
+      self.__refresh_signature_save_cache_locked()
+      snapshot = {
+        SYNC_NODES: {
+          node_addr: self.__snapshot_node_state_for_save(node_state)
+          for node_addr, node_state in self.__data.items()
+        },
+        SYNC_SIGNATURES: dict(self._save_cache_signatures),
+        SYNC_AGREEMENT_CID: dict(self._save_cache_agreement_cid),
+        SYNC_SIGNATURES_CID: dict(self._save_cache_signatures_cid),
+      }
+      for key, value in self.__full_data.items():
+        if key in [SYNC_NODES, SYNC_SIGNATURES, SYNC_AGREEMENT_CID, SYNC_SIGNATURES_CID]:
+          continue
+        snapshot[key] = deepcopy(value)
+      return snapshot, dirty_signature_epochs
+
+    if with_lock:
+      with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+        return _build_snapshot()
+    return _build_snapshot()
+
+  def __persist_full_data_snapshot(self, snapshot):
+    """
+    Persist a detached epochs-status payload to disk.
+
+    Parameters
+    ----------
+    snapshot : dict
+      Detached payload previously produced by
+      ``__snapshot_full_data_for_save``.
+    """
     self.log.save_pickle_to_data(
-      data=_full_data_copy, 
+      data=snapshot,
       fn=FN_NAME,
       subfolder_path=FN_SUBFOLDER,
     )
     return
-  
-  
+
+  def save_status(self):
+    """
+    Persist the current epochs status using a detached save snapshot.
+
+    Notes
+    -----
+    This public save entrypoint acquires ``EPOCHMON_MUTEX`` only for the
+    snapshot-building phase. The detached snapshot is then written to disk
+    outside the mutex, and the completion log includes both total elapsed time
+    and the time spent building the locked snapshot.
+
+    Returns
+    -------
+    None
+    """
+    save_start = time()
+    lock_start = time()
+    snapshot, dirty_signature_epochs = self.__snapshot_full_data_for_save(with_lock=True)
+    lock_elapsed = time() - lock_start
+    self.__persist_full_data_snapshot(snapshot)
+    elapsed = time() - save_start
+    self.P(
+      "Epochs status saved in {:.2f} seconds (epochmon_mutex={:.4f}s, dirty_signature_epochs={})".format(
+        elapsed, lock_elapsed, dirty_signature_epochs
+      )
+    )
+    return
+
+      
   def _load_status(self):
     """
-    NOTE: 2025-01-23 / AID: 
-    ----------------------------
-    This method is called only once at the beginning of the class initialization and it will
-    load the data previously saved to disk (via `__save_status` method) that in turn is called
-    by `maybe_close_epoch` method. Thus the status is saved only when the epoch changes (and the
-    hb timestamps are reset).
-    This means that if a restart is done during a epoch, the data will be loaded from the last 
-    reset resulting in a loss of data for the current epoch and the invalidation of the node
-    capacity to act as a validator for the current epoch. This is a security feature to prevent
-    fraud.
-    ------------------------------------------------
-    HOWEVER for TRUSTED nodes a procedure of save-reload should be implemented to ensure the
-    data is not lost in case of a restart during an epoch but rather preserved and reloaded.
-        
+    Load previously persisted epoch state during manager initialization.
+
+    Notes
+    -----
+    This method runs only during class initialization. It reloads the status
+    previously saved to disk by :meth:`save_status`, which is itself triggered
+    from the epoch-closing flow. In practice, durability is periodic and is
+    normally driven by the ``net_mon_01`` save path rather than by every
+    heartbeat, so persistence usually captures the state at epoch boundaries,
+    after current-heartbeat timestamps have been folded into epoch history.
+
+    As a result, if a node restarts during an epoch, the reloaded state comes
+    from the last completed save point rather than from the in-progress epoch.
+    The current epoch data is therefore lost on restart and the node should not
+    continue acting as a validator for that partially observed epoch. This is a
+    deliberate safety property that reduces fraud risk.
+
+    Trusted-node deployments that need mid-epoch continuity would require a
+    separate save-and-reload procedure designed specifically for that trust
+    model. That behavior is intentionally outside the default runtime path.
+
+    Returns
+    -------
+    bool
+      True when a previous epochs-status payload was loaded successfully,
+      otherwise False.
     """
     result = False
     exists = self.log.get_data_file(FN_FULL) is not None
@@ -1011,6 +1199,7 @@ class EpochsManager(Singleton):
     record_value = round(prc_available * EPOCH_MAX_VALUE)
     self.__data[node_addr][EPCT.EPOCHS][current_epoch] = record_value
     self.__data[node_addr][EPCT.LOCAL_EPOCHS][current_epoch] = record_value
+    self.__mark_cached_data_dirty(node_addr)
     log_msg = None
     log_msg_color = None
 
@@ -1096,13 +1285,25 @@ class EpochsManager(Singleton):
 
 
   def maybe_close_epoch(self):
-    """
-    This method checks if the current epoch has changed and if so, it closes the current epoch and 
-    starts a new one. Closing the epoch implies recalculating the current epoch node availability 
-    for all nodes and then resetting the timestamps.
+    """Close the current epoch when the wall clock advances to the next one.
+
+    Returns
+    -------
+    int
+      The epoch identifier that was just closed, or ``0`` when no epoch change
+      was detected.
+
+    Notes
+    -----
+    The close sequence runs under ``EPOCHMON_MUTEX`` so epoch rollover, live
+    state reset, and the detached save snapshot stay consistent with one
+    another. The actual persistence happens after the mutex is released, and the
+    forced cache refresh remains inside the critical section so readers cannot
+    observe a half-rolled epoch view.
     """
     result = 0  # assume no epoch change
     closed_epoch = False
+    save_snapshot = None
     with self.log.managed_lock_resource(EPOCHMON_MUTEX):
       current_epoch = self.get_time_epoch()
       if self.__current_epoch is None:
@@ -1120,17 +1321,15 @@ class EpochsManager(Singleton):
         self.P("Starting epoch: {}".format(current_epoch))
         self.__current_epoch = current_epoch 
         self.__reset_all_timestamps()
-        self.__save_status()  # save fresh status current epoch
-        #endif epoch is not the same as the current one
+        save_snapshot, _dirty_signature_epochs = self.__snapshot_full_data_for_save(with_lock=False)
       #endif current epoch is not None
       # This is included in order to ensure that if a parallel process checks the epoch ending
       # it will also wait in case the cache needs to be updated.
       if closed_epoch:
-        # Update the cached data
-        # This method already has a lock in it so it is safe to call it here
         self.maybe_update_cached_data(force=True, with_lock=False)
-      # endif closed epoch
     # endwith lock
+    if save_snapshot is not None:
+      self.__persist_full_data_snapshot(save_snapshot)
     return result
 
 
@@ -1157,6 +1356,7 @@ class EpochsManager(Singleton):
     node_name = self.get_node_name(node_addr)
     self.__data[node_addr] = _get_node_template(node_name)
     self.__reset_timestamps(node_addr)
+    self.__mark_cached_data_dirty(node_addr)
     eth_node_addr = self.owner.node_address_to_eth_address(node_addr)
     self.__eth_to_node[eth_node_addr] = node_addr
     self.P("New node {:<8} <{}> / <{}> added to db".format(name, node_addr, eth_node_addr))
@@ -1229,16 +1429,46 @@ class EpochsManager(Singleton):
   
   def get_node_state(self, node_addr):
     """
-    Returns the state of a node in the current epoch.
+    Returns the cached epoch-history view for one node.
 
     Parameters
     ----------
     node_addr : str
       The node address.
+
+    Returns
+    -------
+    dict or None
+      Compact cached epoch state, or None when the node is not in the cache.
     """
-    if node_addr not in self.cached_data:
-      return None
-    return self.cached_data[node_addr]
+    return self.cached_data.get(node_addr)
+
+  def get_full_node_state(self, node_addr):
+    """
+    Return a detached full node-state snapshot for debug or diagnostics.
+
+    Parameters
+    ----------
+    node_addr : str
+      The node address.
+
+    Returns
+    -------
+    dict or None
+      Full detached node-state snapshot, or None when the node is unknown.
+
+    Notes
+    -----
+    This method acquires ``EPOCHMON_MUTEX`` and copies the full live node
+    structure. Prefer :meth:`get_node_state` for read-heavy paths and reserve
+    this accessor for diagnostics or other low-frequency callers that truly
+    need the full runtime fields.
+    """
+    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+      node_state = self.__data.get(node_addr)
+      if node_state is None:
+        return None
+      return self.__snapshot_node_state_for_save(node_state)
   
   # TODO: Have method like this, only for one epoch,
   #  to reduce complexity!!!!
@@ -1867,33 +2097,184 @@ class EpochsManager(Singleton):
       stats['error'] = msg
     return stats
 
+  def __mark_cached_data_dirty(self, node_addr):
+    """
+    Mark one node as needing a compact cache refresh.
+
+    Parameters
+    ----------
+    node_addr : str
+      Node address whose cache-relevant epoch history changed.
+    """
+    if node_addr is not None:
+      self._cached_data_dirty_nodes.add(node_addr)
+    return
+
+  def __snapshot_cached_node_state(self, node_addr):
+    """
+    Build the compact cached view for one node.
+
+    Parameters
+    ----------
+    node_addr : str
+      Node address.
+
+    Returns
+    -------
+    dict or None
+      Compact node cache containing only the epoch history needed by the
+      cache-backed read paths.
+    """
+    node_data = self.__data.get(node_addr)
+    if node_data is None:
+      return None
+    return {
+      EPCT.NAME: node_data.get(EPCT.NAME),
+      EPCT.EPOCHS: dict(node_data.get(EPCT.EPOCHS, {})),
+    }
+
+  def __get_epochmon_lock_for_cache_refresh(self, force=False):
+    """
+    Try to acquire the epoch mutex without heavily contending with heartbeats.
+
+    Parameters
+    ----------
+    force : bool, optional
+      When True, allow a very short bounded wait before giving up.
+
+    Returns
+    -------
+    object or None
+      A lock object that must be released by the caller, the string
+      ``"managed"`` when only the blocking managed-lock API is available, or
+      ``None`` when the best-effort acquire should be skipped.
+
+    Notes
+    -----
+    When the logger exposes its internal lock table, this helper reuses the
+    same per-resource lock object as :meth:`self.log.managed_lock_resource` so
+    best-effort cache refresh contends with the normal epoch mutex. New lock
+    entries are created under the logger's table mutex to avoid racing the
+    standard logger lock-creation path.
+    """
+    lock_table = getattr(self.log, "_lock_table", None)
+    if lock_table is None:
+      return "managed"
+    lock_table_mutex = getattr(self.log, "_lock_table_mutex", None)
+    if lock_table_mutex is not None:
+      lock_table_mutex.acquire(blocking=True)
+    try:
+      lock = lock_table.get(EPOCHMON_MUTEX)
+      if lock is None:
+        lock = Lock()
+        lock_table[EPOCHMON_MUTEX] = lock
+    finally:
+      if lock_table_mutex is not None:
+        lock_table_mutex.release()
+    acquired = lock.acquire(timeout=0.01) if force else lock.acquire(blocking=False)
+    if not acquired:
+      return None
+    return lock
+
+  def _snapshot_data_for_cache_refresh(self, force=False, with_lock=True):
+    """
+    Snapshot the compact cached epoch view for dirty nodes.
+
+    Parameters
+    ----------
+    force : bool, optional
+      When True, prefer refreshing now, but still fail open if the epoch mutex
+      is contended for longer than the bounded acquire interval.
+    with_lock : bool, optional
+      When False, assume the caller already holds ``EPOCHMON_MUTEX``.
+
+    Returns
+    -------
+    tuple[dict, int] or None
+      The compact cache entries keyed by node address together with the number
+      of dirty nodes consumed by the refresh, or None when the refresh was
+      skipped due to lock contention.
+    """
+    def _build_snapshot_locked():
+      dirty_nodes = set(self._cached_data_dirty_nodes)
+      if force and (not dirty_nodes or len(self.cached_data) == 0):
+        dirty_nodes.update(self.__data.keys())
+      if len(dirty_nodes) == 0:
+        return {}, 0
+      snapshot = {}
+      for node_addr in dirty_nodes:
+        node_snapshot = self.__snapshot_cached_node_state(node_addr)
+        if node_snapshot is not None:
+          snapshot[node_addr] = node_snapshot
+      self._cached_data_dirty_nodes.difference_update(dirty_nodes)
+      return snapshot, len(dirty_nodes)
+
+    if not with_lock:
+      return _build_snapshot_locked()
+
+    epoch_lock = self.__get_epochmon_lock_for_cache_refresh(force=force)
+    if epoch_lock is None:
+      return None
+    if epoch_lock == "managed":
+      with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+        return _build_snapshot_locked()
+    try:
+      return _build_snapshot_locked()
+    finally:
+      epoch_lock.release()
+
   def maybe_update_cached_data(self, force=False, with_lock=True):
+    """
+    Refresh the compact cached epoch view used by read-heavy helpers.
+
+    Parameters
+    ----------
+    force : bool, optional
+      When True, request a prompt refresh while still preferring heartbeat
+      ingestion over waiting on ``EPOCHMON_MUTEX``.
+    with_lock : bool, optional
+      When False, assume the caller already holds ``EPOCHMON_MUTEX``.
+
+    Notes
+    -----
+    This refresh is best-effort. If the helper cannot acquire the epoch mutex
+    within the allowed policy for the current call, the refresh is skipped and
+    the previous cache remains in place. Existing logs report whether the
+    refresh updated the cache or was skipped due to mutex contention.
+
+    Returns
+    -------
+    None
+    """
     if force or self._last_cached_data_refresh is None or time() - self._last_cached_data_refresh > CACHE_DATA_REFRESH_SECONDS:
       self.P(f"Updating epoch manager cached data (force={force})...")
-      success = False
-      # This is could have been replaced with condition=with_lock in the managed_lock_resource call,
-      # but it was written this way to be more explicit and clear.
-      if with_lock:
-        with self.log.managed_lock_resource(EPOCHMON_MUTEX):
-          try:
-            tmp_cache = deepcopy(self.__data)
-            success = True
-          except Exception as e:
-            self.P(f"Error updating cached data: {str(e)}", color='r')
-        # endwith lock
-      else:
-        try:
-          tmp_cache = deepcopy(self.__data)
-          success = True
-        except Exception as e:
-          self.P(f"Error updating cached data: {str(e)}", color='r')
-      # endif with_lock
-      if success:
-        self.cached_data = tmp_cache
-        self._last_cached_data_refresh = time()
-        self.P("Epoch manager cached data updated.")
-      # endif success
-    # endif force or cache expired
+      refresh_start = time()
+      lock_start = time()
+      try:
+        result = self._snapshot_data_for_cache_refresh(force=force, with_lock=with_lock)
+      except Exception as e:
+        self.P(f"Error updating cached data: {str(e)}", color='r')
+        return
+      lock_elapsed = time() - lock_start
+      if result is None:
+        self.P(
+          "Epoch manager cached data refresh skipped (force={}, epochmon_mutex_busy=True)".format(force)
+        )
+        return
+      snapshot, dirty_nodes = result
+      if len(snapshot) > 0:
+        refreshed_cache = dict(self.cached_data)
+        refreshed_cache.update(snapshot)
+        self.cached_data = refreshed_cache
+      elif force and len(self.cached_data) == 0:
+        self.cached_data = {}
+      self._last_cached_data_refresh = time()
+      elapsed = time() - refresh_start
+      self.P(
+        "Epoch manager cached data updated (elapsed={:.4f}s, epochmon_mutex={:.4f}s, dirty_nodes={})".format(
+          elapsed, lock_elapsed, dirty_nodes
+        )
+      )
     return
 
 ### Below area contains the methods for availability resulted from multi-oracle sync
@@ -2101,6 +2482,7 @@ class EpochsManager(Singleton):
       return False
     self.__full_data[SYNC_AGREEMENT_CID][epoch] = agreement_cid
     self.__full_data[SYNC_SIGNATURES_CID][epoch] = signatures_cid
+    self.__mark_signature_snapshot_dirty(epoch)
     if debug:
       self.P(f"Agreement CID and signatures CID for epoch {epoch} added successfully.")
     return True
@@ -2156,11 +2538,13 @@ class EpochsManager(Singleton):
       if debug:
         self.P(f'DEBUG self.__data before update: {self.__data[node_addr]}')
       self.__data[node_addr][EPCT.EPOCHS][epoch] = availability_table[node_addr]
+      self.__mark_cached_data_dirty(node_addr)
       if debug:
         self.P(f'DEBUG self.__data after update: {self.__data[node_addr]}')
     self.__full_data[SYNC_SIGNATURES][epoch] = agreement_signatures
     self.__full_data[SYNC_AGREEMENT_CID][epoch] = agreement_cid
     self.__full_data[SYNC_SIGNATURES_CID][epoch] = signatures_cid
+    self.__mark_signature_snapshot_dirty(epoch)
     self.__full_data[SYNC_LAST_EPOCH] = epoch
 
     self.P(f"Epoch {epoch} availability updated successfully.")

@@ -1,7 +1,13 @@
 """
-TODO: Modify stream window for more than 1 data step after plugins such as net-config support multiple data steps.
+NetworkListener defaults are tuned for small batched payload delivery.
 
-2024-11-16: This is a single data step DCT designed for plugins that expect only one data step from upstream.
+Notes
+-----
+The listener now drains and forwards short bursts instead of enforcing one
+payload per loop. Adaptive batching keeps the normal batch small while letting
+the listener scale up under backlog. If end-to-end latency grows again,
+increase ``MAX_STREAM_WINDOW`` first and then ``MAX_DEQUE_LEN`` for burst
+absorption before raising the capture frequency.
 
 """
 
@@ -11,9 +17,19 @@ from naeural_core.data.default.iot.iot_queue_listener import IoTQueueListenerDat
 _CONFIG = {
   **IoTQueueListenerDataCapture.CONFIG,
   
-  'MAX_DEQUE_LEN'   : 32, 
-  'STREAM_WINDOW'   : 1,
-  'ONE_AT_A_TIME'   : True,
+  # Allow short bursts to accumulate locally so the main loop can harvest a
+  # larger batch without dropping into immediate backpressure.
+  'MAX_DEQUE_LEN'   : 512,
+  # Keep the steady-state batch small and let the adaptive window scale up when
+  # the ingress queue grows faster than the plugin can consume it.
+  'STREAM_WINDOW'   : 8,
+  'ADAPTIVE_STREAM_WINDOW': True,
+  'MIN_STREAM_WINDOW': 4,
+  'MAX_STREAM_WINDOW': 64,
+  'STREAM_WINDOW_STEP': 4,
+  # Keep batch mode explicit because NetworkListener throughput now depends on
+  # draining more than one payload when backlog exists.
+  'ONE_AT_A_TIME'   : False,
   
   'DEBUG_IOT_PAYLOADS' : False,
   "FILTER_BY_DESTINATION": True,

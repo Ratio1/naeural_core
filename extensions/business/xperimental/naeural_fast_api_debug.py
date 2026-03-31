@@ -203,6 +203,36 @@ class NaeuralFastApiDebugPlugin(NaeuralFastApiWebApp):
     }
 
   @NaeuralFastApiWebApp.endpoint(method='post')
+  def test_chainstore(self, key: str = "debug_chainstore_key", value: str = "debug_chainstore_value", readonly: bool = False):
+    """Exercise the chainstore set/get path from the debug FastAPI plugin.
+
+    Parameters
+    ----------
+    key : str, optional
+      Chainstore key to write and read back.
+    value : str, optional
+      Value to store under ``key`` before reading it back.
+    readonly : bool, optional
+      Forwarded to ``chainstore_set`` for debugging readonly writes.
+
+    Returns
+    -------
+    dict
+      Summary of the set result together with the value read back from
+      chainstore.
+    """
+    set_result = self.chainstore_set(key, value, readonly=readonly, debug=True)
+    stored_value = self.chainstore_get(key, debug=True)
+    return {
+      'status': 'success' if set_result else 'failed',
+      'key': key,
+      'written_value': value,
+      'stored_value': stored_value,
+      'set_result': set_result,
+      'readonly': readonly,
+    }
+
+  @NaeuralFastApiWebApp.endpoint(method='post')
   def trigger_exception(self, exc_type: str = "ValueError", message: str = "debug crash"):
     """
     Raise a user-selected exception to exercise FastAPI/IPC error handling paths.

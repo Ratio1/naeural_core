@@ -1407,21 +1407,56 @@ class NetworkMonitor(DecentrAIObject):
       return ret
     
     
-    def network_save_status(self):
-      self.P("Saving network map status...")
-      with self.log.managed_lock_resource(NETMON_MUTEX):
+    def _snapshot_network_heartbeats_for_save(self):
+      """
+      Build a detached heartbeat snapshot suitable for persistence.
 
-        self.start_timer("network_save_status")
-        self.log.save_pickle_to_data(
-          data=self.__network_heartbeats, 
-          fn=NETMON_DB,
-          subfolder_path='network_monitor'
+      Returns
+      -------
+      dict
+        Mapping of node address to detached heartbeat deques.
+      """
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        return {
+          addr_no_prefix: deque((dict(hb) for hb in hb_deque), maxlen=self.HB_HISTORY)
+          for addr_no_prefix, hb_deque in self.__network_heartbeats.items()
+        }
+
+    def network_save_status(self):
+      """
+      Persist the detached network heartbeat snapshot and epoch status.
+
+      Notes
+      -----
+      The save flow first snapshots network heartbeats under ``NETMON_MUTEX``
+      and then persists both the heartbeat snapshot and the epoch-manager
+      status outside that mutex. Existing completion logs report total elapsed
+      time together with the time spent under ``NETMON_MUTEX`` and the nested
+      epoch-save duration.
+
+      Returns
+      -------
+      None
+      """
+      self.P("Saving network map status...")
+      self.start_timer("network_save_status")
+      netmon_lock_start = time()
+      heartbeats_snapshot = self._snapshot_network_heartbeats_for_save()
+      netmon_lock_elapsed = time() - netmon_lock_start
+      epoch_save_start = time()
+      self.log.save_pickle_to_data(
+        data=heartbeats_snapshot,
+        fn=NETMON_DB,
+        subfolder_path='network_monitor'
+      )
+      self.epoch_manager.save_status()
+      epoch_save_elapsed = time() - epoch_save_start
+      elapsed = self.end_timer("network_save_status")
+      self.P(
+        "Network map status saved in {:.2f} seconds (netmon_mutex={:.4f}s, epoch_save={:.4f}s)".format(
+          elapsed, netmon_lock_elapsed, epoch_save_elapsed
         )
-        # now we add epoch manager save
-        self.epoch_manager.save_status()
-        elapsed = self.end_timer("network_save_status")
-        self.P("Network map status saved in {:.2f} seconds".format(elapsed))
-      # endwith lock
+      )
       return
     
     

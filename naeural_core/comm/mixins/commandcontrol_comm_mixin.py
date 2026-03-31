@@ -13,6 +13,14 @@ class _CommandControlCommMixin(object):
     return
 
   def _run_thread_command_and_control(self):
+    """Run the command-and-control comm loop.
+
+    Notes
+    -----
+    The loop multiplexes command send, command receive, and heartbeat
+    registration. Command retries preserve the original command payload and only
+    narrow the transport targets when a multi-target publish partially fails.
+    """
     bytes_delivered = 1 # force to 1 to trigger the first send
     self._init()
     while True:
@@ -35,7 +43,8 @@ class _CommandControlCommMixin(object):
         self._maybe_reconnect_recv()
 
         if data is not None:
-          msg_id, (receiver_id, receiver_addr, command), _ = data
+          msg_id, (receiver_id, receiver_addr, command), ts_added_in_buff, retry_send_to = data
+          raw_command = command
           command = self._prepare_command(command, receiver_addr)
           self.P("Sending '{}'  <{}> (LOG_SEND_COMMANDS={}){}".format(
               receiver_id, receiver_addr,
@@ -49,7 +58,10 @@ class _CommandControlCommMixin(object):
             # TODO: code review and refactor as there are too many unused messages!
             # `received_addr` is being used, since any node will always listen to the address subtopic,
             # even if it also listens to the alias subtopic.
-            bytes_delivered = self.send_wrapper(command, send_to=receiver_addr)
+            send_target = retry_send_to if retry_send_to is not None else receiver_addr
+            bytes_delivered = self.send_wrapper(command, send_to=send_target)
+            if bytes_delivered <= 0 and self._last_send_retry_targets is not None:
+              data = (msg_id, (receiver_id, receiver_addr, raw_command), ts_added_in_buff, self._last_send_retry_targets)
         # endif
 
         if self.has_recv_conn:

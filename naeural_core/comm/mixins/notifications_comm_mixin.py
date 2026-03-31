@@ -9,6 +9,14 @@ class _NotificationsCommMixin(object):
     return
 
   def _run_thread_notifications(self):
+    """Run the notifications comm loop.
+
+    Notes
+    -----
+    Notification payloads remain queued as their original objects until a send
+    succeeds. Partial fanout failures reuse the same payload and retry only the
+    unresolved destinations from the previous attempt.
+    """
     self._init()
     bytes_delivered = 1 # force to 1 to trigger the first send
     while True:
@@ -30,9 +38,12 @@ class _NotificationsCommMixin(object):
             bytes_delivered = 0 if to_send is not None else 1
 
         if to_send is not None and self.has_send_conn:
-          msg_id, msg, ts_added_in_buff = to_send
+          msg_id, msg, ts_added_in_buff, retry_send_to = to_send
+          raw_msg = msg
           msg = self._prepare_message(msg=msg, msg_id=msg_id)
-          bytes_delivered = self.send_wrapper(msg)
+          bytes_delivered = self.send_wrapper(msg, send_to=retry_send_to)
+          if bytes_delivered <= 0 and self._last_send_retry_targets is not None:
+            to_send = (msg_id, raw_msg, ts_added_in_buff, self._last_send_retry_targets)
           self.telemetry_maybe_add_message(msg=msg, ts_added_in_buff=ts_added_in_buff, successful_send=bytes_delivered)
         # endif
         end_it = time()

@@ -249,7 +249,7 @@ class NetMon01Plugin(
       self.__last_epoch_debug_time = self.time()
       epoch_manager = self.netmon.epoch_manager
       epoch_node_list = epoch_manager.get_node_list()
-      epoch_node_states = [epoch_manager.get_node_state(node) for node in epoch_node_list]
+      epoch_node_states = [epoch_manager.get_full_node_state(node) for node in epoch_node_list]
       epoch_node_states = self.deepcopy(epoch_node_states)
       for entry in epoch_node_states:
         entry['current_epoch']['hb_dates'] = sorted(entry['current_epoch']['hb_dates'])

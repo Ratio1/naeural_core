@@ -14,6 +14,14 @@ class _DefaultCommMixin(object):
     return
 
   def _run_thread_default(self):
+    """Run the default comm send loop.
+
+    Notes
+    -----
+    Messages are prepared only when they reach the head of the send queue. When
+    a fanout send partially succeeds, the loop keeps the original payload and
+    retries only the failed destinations recorded by ``send_wrapper``.
+    """
     self._init()
     bytes_delivered = 1 # force to 1 to trigger the first send
     while True:
@@ -37,12 +45,15 @@ class _DefaultCommMixin(object):
 
         if to_send is not None and self.has_send_conn:
           # msg is always a dict!
-          msg_id, msg, ts_added_in_buff = to_send
+          msg_id, msg, ts_added_in_buff, retry_send_to = to_send
+          raw_msg = msg
           self._heavy_ops_manager.run_all_on_comm_thread(msg)
           # now add whatever you need in the message
           msg = self._prepare_message(msg=msg, msg_id=msg_id)
           # now convert and send the dict as json
-          bytes_delivered = self.send_wrapper(msg)
+          bytes_delivered = self.send_wrapper(msg, send_to=retry_send_to)
+          if bytes_delivered <= 0 and self._last_send_retry_targets is not None:
+            to_send = (msg_id, raw_msg, ts_added_in_buff, self._last_send_retry_targets)
           self.telemetry_maybe_add_message(msg=msg, ts_added_in_buff=ts_added_in_buff, successful_send=bytes_delivered > 0)
           if bytes_delivered <= 0:
             self.P("Failed to send message: {}...".format(

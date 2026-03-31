@@ -1,5 +1,6 @@
 import abc
 import json
+import os
 import traceback
 
 import numpy as np
@@ -48,6 +49,8 @@ _CONFIG = {
   'DEBUG_COMM_ERRORS': False,
 
   'DEBUG_SAVE_MESSAGE_STAGES': False,
+
+  'DISABLE_ADDRESSED_PAYLOAD_SENDS': False,
 
   'VALIDATION_RULES': {
 
@@ -107,6 +110,7 @@ class BaseCommThread(
     self.has_send_conn = False  # public flag for SEND connection
     self.has_recv_conn = False  # public flag for RECV connection
     self._send_to = None
+    self._last_send_retry_targets = None
     self._send_buff = deque(maxlen=ct.COMM_SEND_BUFFER)
     self._send_channel_name = send_channel_name
     self._recv_buff = deque(maxlen=ct.COMM_RECV_BUFFER + extra_receive_buffer)
@@ -265,6 +269,159 @@ class BaseCommThread(
     self._outgoing_times.append(time())
     return
 
+  def _normalize_publish_targets(self, send_to):
+    """
+    Normalize one-or-many publish targets into an ordered list.
+
+    Parameters
+    ----------
+    send_to : str or collection or None
+      Requested publish destination or destinations. String values are normalized
+      through the blockchain engine so non-prefixed addresses are prefixed before
+      topic formatting.
+
+    Returns
+    -------
+    list
+      Ordered unique publish targets. A single `None` entry is returned for the
+      broadcast case so callers can reuse the same loop for broadcast and
+      targeted sends.
+    """
+    if send_to is None:
+      return [None]
+    if isinstance(send_to, str):
+      send_targets = [send_to]
+    elif isinstance(send_to, (list, tuple, set)):
+      send_targets = list(send_to)
+    else:
+      send_targets = [send_to]
+
+    normalized_targets = []
+    for target in send_targets:
+      normalized_target = target
+      if isinstance(target, str) and self.bc_engine is not None:
+        normalized_target = self.bc_engine.maybe_add_prefix(target)
+      if normalized_target is not None:
+        normalized_targets.append(normalized_target)
+
+    if len(normalized_targets) == 0:
+      return [None]
+    # Preserve first-seen destination order while removing duplicates.
+    return list(dict.fromkeys(normalized_targets))
+
+  def __disable_addressed_payload_sends(self):
+    """Return whether addressed payload fanout is disabled locally.
+
+    Returns
+    -------
+    bool
+      ``True`` when payloads carrying ``EE_DESTINATION`` should be downgraded to
+      one broadcast send instead of targeted fanout.
+    """
+    value = self._config.get('DISABLE_ADDRESSED_PAYLOAD_SENDS', False)
+    if not value:
+      value = os.environ.get('EE_DISABLE_ADDRESSED_PAYLOAD_SENDS', '')
+    if isinstance(value, str):
+      return value.strip().upper() in ['1', 'TRUE', 'YES']
+    return bool(value)
+
+  def _resolve_publish_targets(self, data, send_to=None):
+    """
+    Resolve the effective publish targets for an outgoing message.
+
+    Parameters
+    ----------
+    data : dict
+      Prepared outgoing payload data.
+    send_to : str or collection or None, optional
+      Explicit publish target override. When provided, it takes precedence over
+      any destination embedded in the payload.
+
+    Returns
+    -------
+    list
+      Ordered unique publish targets normalized for the transport layer.
+
+    Notes
+    -----
+    Targeted fanout is only valid when the active send channel exposes
+    addressed routing through either ``TARGETED_TOPIC`` or a templated
+    broadcast ``TOPIC``. If a payload carries ``EE_DESTINATION`` but the
+    channel has only a fixed broadcast topic, the method falls back to a single
+    broadcast send and logs the configuration mismatch instead of emitting the
+    same payload once per destination onto the broadcast topic. The separate
+    ``EE_DISABLE_ADDRESSED_PAYLOAD_SENDS`` rollout flag also forces a single
+    broadcast send without the warning so operators can disable targeted sends
+    intentionally without spamming logs.
+    """
+    if send_to is not None:
+      return self._normalize_publish_targets(send_to)
+
+    event_type = data.get(ct.PAYLOAD_DATA.EE_EVENT_TYPE, data.get('EE_EVENT_TYPE'))
+    if event_type != 'PAYLOAD':
+      return [None]
+
+    destination = data.get(ct.PAYLOAD_DATA.EE_DESTINATION)
+    if destination in [None, [], ()]:
+      return [None]
+
+    if self.__disable_addressed_payload_sends():
+      return [None]
+
+    channel_cfg = self._config.get(self._send_channel_name, {}) if isinstance(self._send_channel_name, str) else {}
+    has_targeted_topic = channel_cfg.get('TARGETED_TOPIC') is not None
+    has_templated_topic = '{}' in str(channel_cfg.get('TOPIC', ''))
+    if not (has_targeted_topic or has_templated_topic):
+      payload_path = data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, '<Unknown path>')
+      self.P(
+        "Payload {} includes EE_DESTINATION but channel '{}' has no addressed topic template. Falling back to one broadcast send.".format(
+          payload_path, self._send_channel_name
+        ),
+        color='y'
+      )
+      return [None]
+
+    return self._normalize_publish_targets(destination)
+
+  def _publish_serialized_message(self, message, data, send_to=None):
+    """
+    Publish one serialized message to one or many resolved targets.
+
+    Parameters
+    ----------
+    message : str
+      Serialized payload ready to be sent by the transport primitive.
+    data : dict
+      Signed payload dictionary associated with `message`.
+    send_to : str or collection or None, optional
+      Explicit publish target override.
+
+    Returns
+    -------
+    dict
+      Aggregate publish result with attempted targets, successful targets,
+      failed targets, failed error strings, and the total published byte count.
+    """
+    targets = self._resolve_publish_targets(data=data, send_to=send_to)
+    result = {
+      'attempted_targets': targets,
+      'successful_targets': [],
+      'failed_targets': [],
+      'published_bytes': 0,
+      'failed_errors': [],
+    }
+
+    for target in targets:
+      try:
+        self._send(message, send_to=target)
+        result['successful_targets'].append(target)
+      except Exception as exc:
+        result['failed_targets'].append(target)
+        result['failed_errors'].append(str(exc))
+
+    result['published_bytes'] = len(message) * len(result['successful_targets'])
+    return result
+
   def get_incoming_bandwidth(self):
     result = 0
     self._bandwidth_mutex = True
@@ -389,10 +546,19 @@ class BaseCommThread(
     Returns
     -------
     is_ok : int
-      below 0 if error or the len of the message otherwise.
+      `0` on send failure, or the number of bytes successfully published across
+      all transport sends for the serialized message.
+
+    Notes
+    -----
+    When a fanout send only partially succeeds, the serialized payload remains
+    unchanged and ``self._last_send_retry_targets`` is populated with only the
+    failed destinations so the comm loop can retry those targets without
+    re-broadcasting to the successful ones.
 
     """
     is_ok = 0
+    self._last_send_retry_targets = None
     try:
       # next step will add the signature, hash, addr and also cleanup the payload
       self.maybe_debug_save_message_stage(
@@ -430,12 +596,38 @@ class BaseCommThread(
       
       # now check the message size
       if self._check_send_message(message): 
-        self._send(message, send_to=send_to)
-        is_ok = len(message)
-        if is_ok > 0 and self.cfg_debug_log_payloads:
+        publish_result = self._publish_serialized_message(message=message, data=signed_data, send_to=send_to)
+        published_bytes = publish_result['published_bytes']
+        if published_bytes > 0 and self.cfg_debug_log_payloads:
           self.payload_debugger(message)
-        self.add_outgoing(is_ok)
-        self._last_activity = time()
+        if published_bytes > 0:
+          self.add_outgoing(published_bytes)
+          self._last_activity = time()
+        if len(publish_result['failed_targets']) > 0:
+          self._last_send_retry_targets = list(publish_result['failed_targets'])
+          attempted_targets = [x if x is not None else '<broadcast>' for x in publish_result['attempted_targets']]
+          failed_targets = [x if x is not None else '<broadcast>' for x in publish_result['failed_targets']]
+          failed_error_lines = [
+            "  - {}: {}".format(target, error)
+            for target, error in zip(failed_targets, publish_result['failed_errors'])
+          ]
+          self.has_send_conn = False
+          msg = "Failed to publish payload {} to targets [{}].".format(
+            signed_data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, '<Unknown path>'),
+            ", ".join(attempted_targets),
+          )
+          if len(failed_error_lines) > 0:
+            msg += "\n" + "\n".join(failed_error_lines)
+          self.P(msg, color='r')
+          self._create_notification(
+            notif=ct.STATUS_TYPE.STATUS_EXCEPTION,
+            msg=msg,
+            displayed=True,
+            autocomplete_info=True
+          )
+          is_ok = 0
+        else:
+          is_ok = published_bytes
       else:
         self.P("Message size {:,.1f} KB was dropped for pipeline {}".format(
           len(message) / 1024, signed_data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>")
@@ -567,10 +759,25 @@ class BaseCommThread(
     return self._msg_id
 
   def send(self, data):
+    """Queue one outbound message for the comm loop.
+
+    Parameters
+    ----------
+    data : Any
+      Outbound payload or command object to be prepared later by the
+      channel-specific comm loop.
+
+    Notes
+    -----
+    The queued tuple also carries an internal retry-target override slot. That
+    slot starts as ``None`` so the first attempt uses the message's natural
+    routing, and later retries can narrow the publish target list without
+    mutating the original payload.
+    """
     self._msg_id += 1
     msg_id = self._msg_id
     now = self.log.now_str(nice_print=True, short=False)
-    self._send_buff.append((msg_id, data, now))
+    self._send_buff.append((msg_id, data, now, None))
     return
 
   def _save_raw_payload(self, msg, prefix='', pickle=False):

@@ -13,6 +13,14 @@ class _HeartbeatsCommMixin(object):
     return
 
   def _run_thread_heartbeats(self):
+    """Run the heartbeat comm loop.
+
+    Notes
+    -----
+    The loop records heartbeat cadence diagnostics and uses the same failed-only
+    retry semantics as the default comm loop so addressed retries do not resend
+    already delivered heartbeat targets.
+    """
     self._init()
     bytes_delivered = 1 # force to 1 to trigger the first send
     last_delivered = 0
@@ -37,9 +45,12 @@ class _HeartbeatsCommMixin(object):
             bytes_delivered = 0 if to_send is not None else 1
 
         if to_send is not None and self.has_send_conn:
-          msg_id, msg, ts_added_in_buff = to_send
+          msg_id, msg, ts_added_in_buff, retry_send_to = to_send
+          raw_msg = msg
           msg = self._prepare_message(msg=msg, msg_id=msg_id)
-          bytes_delivered = self.send_wrapper(msg)
+          bytes_delivered = self.send_wrapper(msg, send_to=retry_send_to)
+          if bytes_delivered <= 0 and self._last_send_retry_targets is not None:
+            to_send = (msg_id, raw_msg, ts_added_in_buff, self._last_send_retry_targets)
           time_from_last = 0
           if last_delivered != 0:
             time_from_last = time() - last_delivered

@@ -624,7 +624,15 @@ class BCWrapper:
     return self.__bc.eth_sign_payload(payload)
   
   
-  def eth_verify_payload_signature(self, payload: dict, message_prefix: str = "", no_hash: bool = False, indent=0, raise_if_error: bool = False):
+  def eth_verify_payload_signature(
+    self,
+    payload: dict,
+    message_prefix: str = "",
+    no_hash: bool = False,
+    indent=0,
+    raise_if_error: bool = False,
+    verify_safe: bool = False,
+  ):
     """
     Verifies a payload signature using the EVM account of the current node
 
@@ -645,6 +653,10 @@ class BCWrapper:
     
     indent : int, optional
         The indentation level for the JSON string. The default is 0.
+
+    verify_safe : bool, optional
+        If True, enables Safe (EIP-1271) verification fallback using the
+        claimed sender in the payload. Default is False.
         
 
     Returns
@@ -653,8 +665,12 @@ class BCWrapper:
         The address of the signer or None if the signature is invalid
     """
     return self.__bc.eth_verify_payload_signature(
-      payload=payload, message_prefix=message_prefix, 
-      no_hash=no_hash, indent=indent, raise_if_error=raise_if_error
+      payload=payload,
+      message_prefix=message_prefix,
+      no_hash=no_hash,
+      indent=indent,
+      raise_if_error=raise_if_error,
+      verify_safe=verify_safe,
     )
   
   @property

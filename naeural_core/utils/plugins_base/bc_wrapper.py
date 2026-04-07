@@ -664,21 +664,13 @@ class BCWrapper:
     str
         The address of the signer or None if the signature is invalid
     """
-    if verify_safe:
-      return self.__bc.eth_verify_payload_signature(
-        payload=payload,
-        message_prefix=message_prefix,
-        no_hash=no_hash,
-        indent=indent,
-        raise_if_error=raise_if_error,
-        verify_safe=True,
-      )
     return self.__bc.eth_verify_payload_signature(
       payload=payload,
       message_prefix=message_prefix,
       no_hash=no_hash,
       indent=indent,
       raise_if_error=raise_if_error,
+      verify_safe=verify_safe,
     )
   
   @property

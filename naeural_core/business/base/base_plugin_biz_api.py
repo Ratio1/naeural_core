@@ -336,7 +336,50 @@ class _BasePluginAPIMixin:
     self.__chain_state_initialized = True
     return
   
-  def chainstore_set(self, key, value, readonly=False, token=None, debug=False, extra_peers=[]):
+  def __normalize_chainstore_peers(self, peers):
+    """
+    Normalize chain-store peer selectors.
+
+    Parameters
+    ----------
+    peers : str or list or any
+      Peer selector provided by plugin configuration or per-call overrides.
+      Strings are promoted to one-element lists. Non-list, non-string values
+      are treated as empty input.
+
+    Returns
+    -------
+    list of str
+      De-duplicated peer addresses with empty values and the local node address
+      removed.
+    """
+    if isinstance(peers, str):
+      peers = [peers]
+    elif not isinstance(peers, list):
+      peers = []
+    result = []
+    for peer in peers:
+      if not isinstance(peer, str) or len(peer) == 0:
+        continue
+      if peer == self.ee_addr or peer in result:
+        continue
+      result.append(peer)
+    return result
+
+
+  def chainstore_set(
+    self,
+    key,
+    value,
+    readonly=False,
+    token=None,
+    debug=False,
+    extra_peers=None,
+    include_default_peers=True,
+    include_configured_peers=True,
+    timeout=None,
+    max_retries=None,
+  ):
     """
     Set data in the R1 Chain Storage.
 
@@ -391,8 +434,25 @@ class _BasePluginAPIMixin:
       confirmation status, and timing information. Default is False.
 
     extra_peers : list, optional
-      Additional peer addresses to broadcast the data to, beyond the default
-      chain peers. Default is an empty list.
+      Additional peer addresses to target for this call. Default is None.
+
+    include_default_peers : bool, optional
+      If True, include the backend chain-store default peer set in addition to
+      any explicit peers. If False, target only the explicit peer set built
+      from configured and extra peers. Default is True.
+
+    include_configured_peers : bool, optional
+      If True, include ``cfg_chainstore_peers`` in the explicit peer set for
+      this call. If False, only ``extra_peers`` are used as explicit targets.
+      Default is True.
+
+    timeout : float, optional
+      Per-attempt confirmation wait timeout in seconds. If None, use the
+      backend default behavior. Default is None.
+
+    max_retries : int, optional
+      Maximum number of timeout-triggered rebroadcast retries for this write.
+      If None, use the backend default behavior. Default is None.
 
     Returns
     -------
@@ -419,22 +479,30 @@ class _BasePluginAPIMixin:
       # would have {"8080": "http"}, causing confirmation comparisons to fail.
       value = self.json_loads(self.json_dumps(value))
 
-      specific_peers = self.cfg_chainstore_peers or []
-      if isinstance(specific_peers, str):
-        specific_peers = [specific_peers]
-      elif not isinstance(specific_peers, list):
-        specific_peers = []
-      if isinstance(extra_peers, list):
-        specific_peers += extra_peers
-      # filter self address from specific_peers  
-      specific_peers = [x for x in specific_peers if x != self.ee_addr]
+      specific_peers = []
+      if include_configured_peers:
+        specific_peers.extend(
+          self.__normalize_chainstore_peers(self.cfg_chainstore_peers or [])
+        )
+      specific_peers.extend(
+        [
+          peer for peer in self.__normalize_chainstore_peers(extra_peers)
+          if peer not in specific_peers
+        ]
+      )
       
       if func is not None:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")
         result = func(
           key, value, 
-          readonly=readonly, token=token, peers=specific_peers, debug=debug
+          readonly=readonly,
+          token=token,
+          peers=specific_peers,
+          include_default_peers=include_default_peers,
+          timeout=timeout,
+          max_retries=max_retries,
+          debug=debug,
         )
         elapsed = self.end_timer("chainstore_set")        
         if debug:
@@ -519,16 +587,85 @@ class _BasePluginAPIMixin:
       self.P(f"HGET: '{composed_key}' (index_time={elapsed_1:.4f}s, get_time={elapsed_2:.4f}s)")
     return result  
 
-  def chainstore_hset(self, hkey, key, value, readonly=False, token=None, debug=False, extra_peers=[]):
+  def chainstore_hset(
+    self,
+    hkey,
+    key,
+    value,
+    readonly=False,
+    token=None,
+    debug=False,
+    extra_peers=None,
+    include_default_peers=True,
+    include_configured_peers=True,
+    timeout=None,
+    max_retries=None,
+  ):
     """
-    This is a basic implementation of a hash set operation in the chain storage.
-    It uses a hash-based string composition to create a composed key.
+    Store one field of a hash-like namespace in chain storage.
+
+    This is a basic implementation of a hash set operation in the chain
+    storage. It uses a hash-based string composition to create a composed key
+    and then delegates the actual write, routing, and confirmation behavior to
+    ``chainstore_set``.
+
+    Parameters
+    ----------
+    hkey : str
+      Logical hash namespace.
+    key : str
+      Field name stored under ``hkey``.
+    value : any
+      Value stored for the field. Must be JSON-serializable under the same
+      constraints as ``chainstore_set``.
+    readonly : bool, optional
+      If True, the composed key becomes read-only for other owners.
+      Default is False.
+    token : any, optional
+      Access token associated with the composed key. Default is None.
+    debug : bool, optional
+      If True, enable verbose timing and routing logs. Default is False.
+    extra_peers : list, optional
+      Additional peer addresses to target for this call. Default is None.
+    include_default_peers : bool, optional
+      If True, include the backend chain-store default peer set. Default is
+      True.
+    include_configured_peers : bool, optional
+      If True, include ``cfg_chainstore_peers`` in the explicit target set.
+      Default is True.
+    timeout : float, optional
+      Per-attempt confirmation wait timeout in seconds. If None, use the
+      backend default behavior. Default is None.
+    max_retries : int, optional
+      Maximum number of timeout-triggered rebroadcast retries. If None, use
+      the backend default behavior. Default is None.
+
+    Returns
+    -------
+    bool
+      True if the composed key was stored successfully, False otherwise.
+
+    See Also
+    --------
+    chainstore_set : Underlying chain-store write operation.
+    chainstore_hget : Retrieve one field from a hash-like namespace.
     """
     start_1 = self.time()
     composed_key = self.__hset_key(hkey, key)
     elapsed_1 = self.time() - start_1
     start_2 = self.time()
-    result = self.chainstore_set(composed_key, value, readonly=readonly, token=token, debug=debug, extra_peers=extra_peers)
+    result = self.chainstore_set(
+      composed_key,
+      value,
+      readonly=readonly,
+      token=token,
+      debug=debug,
+      extra_peers=extra_peers,
+      include_default_peers=include_default_peers,
+      include_configured_peers=include_configured_peers,
+      timeout=timeout,
+      max_retries=max_retries,
+    )
     elapsed_2 = self.time() - start_2
     if debug:
       self.P(f"HSET: '{composed_key}' (index_time={elapsed_1:.4f}s, set_time={elapsed_2:.4f}s)")

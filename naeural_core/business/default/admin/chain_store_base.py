@@ -59,6 +59,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_CONFIRM = "SCONFIRM"
   CS_DATA = "CHAIN_STORE_DATA"
   CS_PEERS = "PEERS"
+  CS_INCLUDE_DEFAULT_PEERS = "INCLUDE_DEFAULT_PEERS"
+  CS_TIMEOUT = "TIMEOUT"
+  CS_MAX_RETRIES = "MAX_RETRIES"
 
   CS_CONFIRM_BY = "confirm_by"
   CS_CONFIRM_BY_ADDR = "confirm_by_addr"
@@ -140,6 +143,62 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
   
   
+  def __normalize_peer_list(self, peers):
+    """
+    Normalize peer selectors into a de-duplicated address list.
+
+    Parameters
+    ----------
+    peers : str or list or any
+      Peer selector passed by higher-level chain-store APIs. Strings are
+      promoted to one-element lists. Non-list, non-string values are treated
+      as empty input.
+
+    Returns
+    -------
+    list of str
+      De-duplicated peer addresses with empty values and the local node
+      address removed.
+    """
+    if isinstance(peers, str):
+      peers = [peers]
+    elif not isinstance(peers, list):
+      peers = []
+    result = []
+    for peer in peers:
+      if not isinstance(peer, str) or len(peer) == 0:
+        continue
+      if peer == self.ee_addr or peer in result:
+        continue
+      result.append(peer)
+    return result
+
+
+  def __get_target_peers(self, peers=None, include_default_peers=True):
+    """
+    Compute the effective peer list for a chain-store write.
+
+    Parameters
+    ----------
+    peers : str or list, optional
+      Explicit peer addresses requested for the write.
+    include_default_peers : bool, optional
+      If True, start from the refreshed default chain peer set and append any
+      explicit peers not already present. If False, only explicit peers are
+      returned. Default is True.
+
+    Returns
+    -------
+    list of str
+      Effective peer list used for confirmation math and outbound sends.
+    """
+    send_to = self.deepcopy(self.__chain_peers) if include_default_peers else []
+    for peer in self.__normalize_peer_list(peers):
+      if peer not in send_to:
+        send_to.append(peer)
+    return send_to
+
+
   def __send_data_to_chain_peers(self, data, peers=None, include_default_peers=True):
     """Send chainstore payloads to the default peer set and optional extras.
 
@@ -154,26 +213,55 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       If ``True``, start from ``self.__chain_peers`` and append any extra
       targets that are not already present. If ``False``, send only to the
       explicit ``peers`` argument.
-    """
-    # check if list or str
-    send_to = self.deepcopy(self.__chain_peers) if include_default_peers else []
-    if isinstance(peers, str):
-      peers = [peers]
-    elif not isinstance(peers, list):
-      peers = []
-    if len(peers) > 0:
-      peers = [peer for peer in peers if peer not in send_to]
-      send_to.extend(peers)
-    # end if peers
 
+    Returns
+    -------
+    None
+    """
+    send_to = self.__get_target_peers(
+      peers=peers,
+      include_default_peers=include_default_peers,
+    )
     self.send_encrypted_payload(node_addr=send_to, **data)
     return
   
   
-  def __get_min_peer_confirmations(self):
+  def __get_min_peer_confirmations(self, peers=None, include_default_peers=True):
+    """
+    Return the minimum confirmations required for the effective target set.
+
+    Parameters
+    ----------
+    peers : str or list, optional
+      Explicit peers requested for the write.
+    include_default_peers : bool, optional
+      If True, include the default chain peer set when deriving the effective
+      target count. Default is True.
+
+    Returns
+    -------
+    int
+      Required confirmation count for the current write.
+
+    Notes
+    -----
+    When ``cfg_min_confirmations`` is configured, that value takes precedence
+    even if it exceeds the effective peer count. A warning is emitted in that
+    case because the write may only fail later through timeout/retry
+    exhaustion.
+    """
+    target_peers = self.__get_target_peers(
+      peers=peers,
+      include_default_peers=include_default_peers,
+    )
     if self.cfg_min_confirmations is not None and self.cfg_min_confirmations > 0:
+      if len(target_peers) > 0 and self.cfg_min_confirmations > len(target_peers):
+        self.P(
+          f" === Configured MIN_CONFIRMATIONS={self.cfg_min_confirmations} exceeds targeted peers={len(target_peers)}",
+          color='y'
+        )
       return self.cfg_min_confirmations    
-    return len(self.__chain_peers) // 2 + 1
+    return len(target_peers) // 2 + 1
   
   
   def __save_chain_storage(self):
@@ -207,9 +295,29 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return self.__chain_storage.get(key, {}).get(self.CS_MIN_CONFIRMATIONS, 0)
 
 
-  def __reset_confirmations(self, key):
+  def __reset_confirmations(self, key, peers=None, include_default_peers=True):
+    """
+    Reset confirmation counters for a stored key.
+
+    Parameters
+    ----------
+    key : str
+      Chain-store key whose counters are reset.
+    peers : str or list, optional
+      Explicit peers requested for the write associated with ``key``.
+    include_default_peers : bool, optional
+      If True, include the default chain peer set when deriving the minimum
+      confirmation count. Default is True.
+
+    Returns
+    -------
+    None
+    """
     self.__chain_storage[key][self.CS_CONFIRMATIONS] = 0
-    self.__chain_storage[key][self.CS_MIN_CONFIRMATIONS] = self.__get_min_peer_confirmations()
+    self.__chain_storage[key][self.CS_MIN_CONFIRMATIONS] = self.__get_min_peer_confirmations(
+      peers=peers,
+      include_default_peers=include_default_peers,
+    )
     return
 
 
@@ -222,34 +330,56 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
 
 
-  def __set_key_value(self, key, value, owner,  readonly=False, token=None, local_sync_storage_op=False):
+  def __set_key_value(
+    self,
+    key,
+    value,
+    owner,
+    readonly=False,
+    token=None,
+    local_sync_storage_op=False,
+    peers=None,
+    include_default_peers=True,
+  ):
     """
+    Set a key-value pair in the local chain-store replica.
+
     This method is called to set a key-value pair in the chain storage.
-    
-    Parameters:
+
+    Parameters
     ----------
-    
     key : str
-      The key to set the value for
-    
+      The key to set the value for.
     value : any
-      The value to set
-      
+      The value to set. ``None`` deletes the key locally.
     owner : str
-      The owner of the key-value pair
-      
+      The owner of the key-value pair.
     readonly : bool
-      If True the key-value pair will be readonly and cannot be overwritten by other owners
-      
-    token: any
-      A token to be used for the set operation. If the token is not None, any read/write operations
-      will have to have the same token.
-      
+      If True the key-value pair will be read-only and cannot be overwritten
+      by other owners.
+    token : any, optional
+      Token associated with the key. If the token is not None, any read/write
+      operations must provide the same token.
     local_sync_storage_op : bool
-      If `True` will only set the local kv pair without broadcasting to the network. 
-      This operation is used for remote sync when a node receives a set operation from 
-      the network and needs to set the value in the local chain storage replica.
-      
+      If True, only set the local key-value pair without broadcasting to the
+      network. This operation is used for remote sync when a node receives a
+      set operation from the network and needs to set the value in the local
+      chain storage replica.
+    peers : str or list, optional
+      Explicit peer targets associated with the write. These are used only for
+      confirmation bookkeeping on local-originated writes.
+    include_default_peers : bool, optional
+      If True, include the default chain peer set when deriving confirmation
+      thresholds. Default is True.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    When ``value`` is ``None``, the key is deleted locally. The existing
+    delete semantics and related trade-offs described below are preserved.
     """
     # key should be composed of the chainstore app identity and the actual key
     # so if two chainstore apps are running on the same node, they will not overwrite each other
@@ -274,7 +404,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.CS_READONLY  : readonly,
       self.CS_TOKEN     : token,
     }
-    self.__reset_confirmations(key)
+    self.__reset_confirmations(
+      key,
+      peers=peers,
+      include_default_peers=include_default_peers,
+    )
     if local_sync_storage_op:
       # set the confirmations to -1 to indicate that the key is remote synced on this node
       self.__set_confirmations(key, -1) # set to -1 to indicate that the key is remote synced on this node
@@ -291,47 +425,65 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     token=None,
     local_sync_storage_op=False, 
     peers=None,
+    include_default_peers=True,
+    timeout=None,
+    max_retries=None,
     debug=False, 
   ):
-    """ 
-    This method is called to set a value in the chain storage.
-    If called locally will push a broadcast request to the network, 
-    while if called from the network will set the value in the chain storage.
-    
-    Parameters:
-    ----------
-    
-    key : str
-      The key to set the value for
-      
-    value : any
-      The value to set
-      
-    owner : str 
-      The owner of the key-value pair
-      
-    readonly : bool
-      If True the key-value pair will be readonly and cannot be overwritten by other owners
-      
-    token: any
-      A token to be used for the set operation. If the token is not None, any read/write operations 
-      will have to have the same token.
-            
-    local_sync_storage_op : bool
-      If True will only set the local kv pair without broadcasting to the network
-      
-    peers : list
-      A list of peers to send the data to. If None, will use only the chain peers list.
+    """
+    Set a value in chain storage and optionally wait for confirmations.
 
-    debug : bool
-      If True will print debug messages
-      
-      
-    Returns:
-    --------
-    
-    
-    
+    This method is called to set a value in the chain storage. If called
+    locally it pushes a broadcast request to the network, while if called from
+    the network it updates only the local chain-store replica.
+
+    Parameters
+    ----------
+    key : str
+      The key to set the value for.
+    value : any
+      The value to set.
+    owner : str, optional
+      The owner of the key-value pair. If None, the current instance path is
+      used.
+    readonly : bool
+      If True the key-value pair will be read-only and cannot be overwritten
+      by other owners.
+    token : any, optional
+      Token associated with the set operation. If the token is not None, any
+      read/write operations must use the same token.
+    local_sync_storage_op : bool
+      If True, update only the local key-value pair without broadcasting to
+      the network.
+    peers : str or list, optional
+      Explicit peers to target for this write.
+    include_default_peers : bool
+      If True, also target the chain-store default peer set.
+    timeout : float, optional
+      Per-attempt confirmation wait timeout in seconds. If None, use the
+      built-in default.
+    max_retries : int, optional
+      Maximum number of timeout-triggered rebroadcast retries. If None, use
+      the built-in default.
+    debug : bool, optional
+      If True, print debug messages. Default is False.
+
+    Returns
+    -------
+    bool
+      True if the desired state was stored successfully or was already present.
+      False if the write was rejected or timed out after the allowed retries.
+
+    Raises
+    ------
+    ValueError
+      If ``key`` is invalid, if ``timeout`` or ``max_retries`` fail
+      validation, or if the underlying storage/update flow raises an error.
+
+    Notes
+    -----
+    This method blocks the caller thread while waiting for confirmations on
+    local-originated writes.
     """
     if not isinstance(key, str) or len(key) == 0:
       raise ValueError("Key must be a non-empty string.")
@@ -341,6 +493,32 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
       if owner is None:
         owner = self.get_instance_path()
+      if timeout is not None and (
+        isinstance(timeout, bool) or
+        not isinstance(timeout, (int, float)) or
+        timeout <= 0
+      ):
+        raise ValueError("timeout must be a positive number or None.")
+      if max_retries is not None and (
+        isinstance(max_retries, bool) or
+        not isinstance(max_retries, int) or
+        max_retries < 0
+      ):
+        raise ValueError("max_retries must be a non-negative integer or None.")
+      if timeout is None:
+        timeout = 10
+      if max_retries is None:
+        max_retries = 2
+      target_peers = self.__get_target_peers(
+        peers=peers,
+        include_default_peers=include_default_peers,
+      )
+      if not local_sync_storage_op and len(target_peers) == 0:
+        self.P(
+          f" === No target peers resolved for chain-store write on key {key}",
+          color='y'
+        )
+        return False
       need_store = True
       existing_owner = None
       existing_value = None
@@ -382,6 +560,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           key=key, value=value, owner=owner,
           local_sync_storage_op=local_sync_storage_op,
           readonly=readonly, token=token,
+          peers=peers,
+          include_default_peers=include_default_peers,
         )
         if not local_sync_storage_op:
           # now send set-value (including confirmation request) to all
@@ -393,15 +573,17 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               self.CS_TOKEN     : token,
               self.CS_READONLY  : readonly, # if the key is readonly, it will not be overwritten by other owners
               self.CS_PEERS     : peers,
+              self.CS_INCLUDE_DEFAULT_PEERS : include_default_peers,
+              self.CS_TIMEOUT   : timeout,
+              self.CS_MAX_RETRIES : max_retries,
           }
           self.__ops.append(op)
           if debug:
             self.P(f" === {where} key {key} locally stored for {owner}. Now waiting for confirmations...")
           # at this point we can wait until we have enough confirmations
-          _timeout = self.time() + 10
+          _timeout = self.time() + timeout
           _done = False
           _prev_confirm = 0
-          _max_retries = 2
           _retries = 0
           while not _done: # this LOCKS the calling thread set_value
             recv_confirm = self.__get_key_confirmations(key)
@@ -419,16 +601,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               if debug:
                 self.P(f" === {where}Key '{key}' has not enough confirmations after timeout. [Q:{self.input_queue_size}/{self.cfg_max_inputs_queue_size}]", color='r')
               _retries += 1
-              if _retries > _max_retries:
+              if _retries > max_retries:
                 if debug:
-                  self.P(f" === {where}Key '{key}' has not enough confirmations after {_max_retries} retries", color='r')
+                  self.P(f" === {where}Key '{key}' has not enough confirmations after {max_retries} retries", color='r')
                 _done = True
                 need_store = False
               else:
                 if debug:
                   self.P(f" === {where}Retrying key '{key}' with timeout...", color='r')
                 self.__ops.append(op)
-                _timeout = self.time() + 10
+                _timeout = self.time() + timeout
               # end if retries
             # end if timeout
             self.sleep(0.100)  # sleep for 100ms to give protocol sync time
@@ -474,27 +656,55 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
 
   def __maybe_broadcast(self):
-    """ 
-    This method is called to broadcast the chain store operations to the network.
-    For each operation in the queue, a broadcast is sent to the network    
+    """
+    Broadcast queued chain-store operations to the network.
+
+    This method is called to broadcast the chain store operations to the
+    network. For each operation in the queue, a broadcast is sent to the
+    network.
+
+    Returns
+    -------
+    None
     """
     if self.cfg_chain_store_debug and len(self.__ops) > 0:
-      self.P(f" === Broadcasting {len(self.__ops)} chain store {self.CS_STORE} ops to {self.__chain_peers}")
+      self.P(
+        f" === Broadcasting {len(self.__ops)} chain store {self.CS_STORE} ops using default chain peers {self.__chain_peers}"
+      )
     while len(self.__ops) > 0:
       data = self.__ops.popleft()
       peers = data.get(self.CS_PEERS, None)
+      include_default_peers = data.get(self.CS_INCLUDE_DEFAULT_PEERS, True)
       payload_data = {
         self.CS_DATA : data
       }
-      self.__send_data_to_chain_peers(payload_data, peers=peers)
+      self.__send_data_to_chain_peers(
+        payload_data,
+        peers=peers,
+        include_default_peers=include_default_peers,
+      )
     return
 
 
   def __exec_store(self, data, peers=None):
-    """ 
-    This method is called when a store operation is received from the network. The method will:
+    """
+    Apply a remote store operation to the local replica and confirm it.
+
+    This method is called when a store operation is received from the network.
+    The method will:
       - set the value in the chain storage
-      - send a ecrypted confirmation of the storage operation to the network
+      - send an encrypted confirmation of the storage operation to the sender
+
+    Parameters
+    ----------
+    data : dict
+      Decrypted chain-store operation payload.
+    peers : str or list, optional
+      Sender address or addresses that should receive the confirmation.
+
+    Returns
+    -------
+    None
     """
     key = data.get(self.CS_KEY, None)
     value = data.get(self.CS_VALUE , None)
@@ -511,7 +721,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if result:
       # now send confirmation of the storage execution
       if self.cfg_chain_store_debug:
-        self.P(f" === REMOTE: {self.CS_CONFIRM} for {key} of {owner} to {self.__chain_peers}")
+        self.P(f" === REMOTE: {self.CS_CONFIRM} for {key} of {owner} back to sender {peers}")
       data = {
         self.CS_DATA : {
           self.CS_OP : self.CS_CONFIRM,
@@ -530,7 +740,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
 
   def __exec_received_confirm(self, data):
-    """ This method is called when a confirmation of a broadcasted store operation is received from the network """
+    """
+    Process a confirmation for a previously broadcast store operation.
+
+    Parameters
+    ----------
+    data : dict
+      Decrypted confirmation payload received from the network.
+
+    Returns
+    -------
+    None
+    """
     key = data.get(self.CS_KEY, None)
     value = data.get(self.CS_VALUE, None)
     owner = data.get(self.CS_OWNER, None)

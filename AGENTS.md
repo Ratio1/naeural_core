@@ -3,6 +3,9 @@ This file is "alive." `AGENTS.md` is the authoritative source for repository pur
 
 ## Authority & Update Policy
 - Follow `AGENTS.md` when other repo docs drift, then fix the stale doc.
+- For ChainStore/CStore work, use `docs/CSTORE.md` as the quick-state review
+  after reading `AGENTS.md`. It is a subsystem contract note, not a replacement
+  for the repo rules here.
 - Keep write scopes narrow; if a task spans more than one owner area, assign an `integrator-test-executor`.
 - Prefer one responsible agent first. Split work only when there is a clear ownership boundary, hardware/tool boundary, or real parallel slack.
 - Keep append-only sections append-only. Do not rewrite prior lessons to make a new task look cleaner.

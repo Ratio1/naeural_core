@@ -367,6 +367,40 @@ class _BasePluginAPIMixin:
     return result
 
 
+  def __chainstore_specific_peers(self, extra_peers=None, include_configured_peers=True):
+    """
+    Build the explicit peer override list for one chain-store call.
+
+    This helper keeps ``chainstore_set`` and ``chainstore_hsync`` aligned so
+    both operations interpret configured peers, per-call peers, de-duplication,
+    and self-exclusion in exactly the same way.
+
+    Parameters
+    ----------
+    extra_peers : str or list, optional
+      Additional peer addresses requested by the caller for this operation.
+    include_configured_peers : bool, optional
+      If True, include ``cfg_chainstore_peers`` before appending
+      ``extra_peers``. Default is True.
+
+    Returns
+    -------
+    list or None
+      Explicit peer addresses to forward to the backend helper. ``None`` means
+      that the caller did not request any explicit peer override and the
+      backend should rely only on its default peer set.
+    """
+    specific_peers = []
+    if include_configured_peers:
+      specific_peers.extend(
+        self.__normalize_chainstore_peers(self.cfg_chainstore_peers or [])
+      )
+    for peer in self.__normalize_chainstore_peers(extra_peers):
+      if peer not in specific_peers:
+        specific_peers.append(peer)
+    return specific_peers or None
+
+
   def chainstore_set(
     self,
     key,
@@ -479,16 +513,9 @@ class _BasePluginAPIMixin:
       # would have {"8080": "http"}, causing confirmation comparisons to fail.
       value = self.json_loads(self.json_dumps(value))
 
-      specific_peers = []
-      if include_configured_peers:
-        specific_peers.extend(
-          self.__normalize_chainstore_peers(self.cfg_chainstore_peers or [])
-        )
-      specific_peers.extend(
-        [
-          peer for peer in self.__normalize_chainstore_peers(extra_peers)
-          if peer not in specific_peers
-        ]
+      specific_peers = self.__chainstore_specific_peers(
+        extra_peers=extra_peers,
+        include_configured_peers=include_configured_peers,
       )
       
       if func is not None:
@@ -702,6 +729,89 @@ class _BasePluginAPIMixin:
       value = self.chainstore_hget(hkey, key, token=token, debug=debug)
       result[key] = value
     return result
+
+
+  def chainstore_hsync(
+    self,
+    hkey,
+    debug=False,
+    extra_peers=None,
+    include_default_peers=True,
+    include_configured_peers=True,
+    timeout=None,
+  ):
+    """
+    Refresh one hash namespace from a live peer snapshot.
+
+    The runtime implementation exports one peer snapshot for ``hkey`` and then
+    merges it into the local replica. The merge is additive: remote fields
+    overwrite stale overlaps, while local-only fields remain untouched.
+
+    Parameters
+    ----------
+    hkey : str
+      Logical hash namespace to refresh.
+    debug : bool, optional
+      If True, enable verbose timing and routing logs. Default is False.
+    extra_peers : str or list, optional
+      Additional peer addresses to target for this request. Default is None.
+    include_default_peers : bool, optional
+      If True, include the backend chain-store default peer set in addition to
+      any explicit peers. If False, target only the explicit peer set built
+      from configured and extra peers. Default is True.
+    include_configured_peers : bool, optional
+      If True, include ``cfg_chainstore_peers`` in the explicit peer set for
+      this call. If False, only ``extra_peers`` are used as explicit targets.
+      Default is True.
+    timeout : float, optional
+      Maximum time in seconds to wait for one valid peer snapshot. If None,
+      use the backend default behavior. Default is None.
+
+    Returns
+    -------
+    dict
+      A result envelope with the refreshed ``hkey``, the accepted peer, and
+      the number of merged fields.
+
+    Raises
+    ------
+    ValueError
+      If ``hkey`` is invalid, the backend helper is unavailable, or the peer
+      refresh fails.
+    """
+    self.start_timer("chainstore_hsync")
+    memory = self.__chainstorage_memory()
+    try:
+      self.__maybe_wait_for_chain_state_init()
+      func = memory.get("__chain_storage_hsync")
+      if func is None:
+        raise ValueError("Chain storage hsync function not found.")
+
+      specific_peers = self.__chainstore_specific_peers(
+        extra_peers=extra_peers,
+        include_configured_peers=include_configured_peers,
+      )
+
+      result = func(
+        hkey,
+        peers=specific_peers,
+        include_default_peers=include_default_peers,
+        timeout=timeout,
+        debug=debug,
+      )
+      elapsed = self.end_timer("chainstore_hsync")
+      if debug:
+        self.P(
+          "====> `chainstore_hsync`: {} -> {} in {:.4f}s".format(
+            hkey, result, elapsed
+          )
+        )
+      return result
+    except Exception as ex:
+      elapsed = self.end_timer("chainstore_hsync")
+      msg = "Error in chainstore_hsync: {} after {:.4f}s".format(ex, elapsed)
+      self.P(msg, color="red")
+      raise ValueError(msg) from ex
     
   
   # # @property

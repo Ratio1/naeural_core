@@ -76,6 +76,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_STORAGE_MEM = "__chain_storage" # shared memory key
   CS_GETTER = "__chain_storage_get"
   CS_SETTER = "__chain_storage_set"
+  CS_HSYNC = "__chain_storage_hsync"
+  CS_HSYNC_REQ = "SHSYNC_REQ"
+  CS_HSYNC_RESP = "SHSYNC_RESP"
+  CS_REQUEST_ID = "request_id"
+  CS_HKEY = "hkey"
+  CS_SNAPSHOT = "snapshot"
+  CS_RESPONSE = "response"
+  CS_SENDER = "sender"
   
   
   
@@ -107,9 +115,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     memory[self.CS_STORAGE_MEM] = self.__chain_storage
     memory[self.CS_GETTER] = self._get_value
     memory[self.CS_SETTER] = self._set_value
+    memory[self.CS_HSYNC] = self._hsync
     
     self.__last_chain_peers_refresh = 0
     self.__chain_peers = []
+    self.__pending_hsync = {}
     self.__maybe_refresh_chain_peers()
     return
   
@@ -268,6 +278,129 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.cacheapi_save_pickle(self.__chain_storage, verbose=True)
     self.__last_chain_storage_save = self.time()
     return
+
+
+  def __hset_index(self, hkey):
+    """
+    Compute the composed-key prefix for one hash namespace.
+
+    Parameters
+    ----------
+    hkey : str
+      Logical hash namespace requested by higher-level ``h*`` APIs.
+
+    Returns
+    -------
+    str
+      Prefix shared by every field stored under ``hkey``.
+    """
+    hkey_hash = self.get_hash(hkey, algorithm="sha256", length=10)
+    return f"hs:{hkey_hash}:"
+
+
+  def __export_hset_snapshot(self, hkey):
+    """
+    Export a stable snapshot for one hash namespace.
+
+    Parameters
+    ----------
+    hkey : str
+      Logical hash namespace to export from the local replica.
+
+    Returns
+    -------
+    dict
+      Deep-copied chain-store records keyed by their composed storage key.
+
+    Notes
+    -----
+    The export freezes ``self.__chain_storage.items()`` into a list before
+    filtering. That keeps snapshot generation stable even if another local
+    write mutates the dictionary while the snapshot is being assembled.
+    """
+    index = self.__hset_index(hkey)
+    snapshot = {}
+    # Freeze the current dictionary view before filtering so live writes do not
+    # mutate the iterator while this response is being serialized.
+    for key, record in list(self.__chain_storage.items()):
+      if not isinstance(key, str) or not key.startswith(index):
+        continue
+      if not isinstance(record, dict):
+        continue
+      snapshot[key] = self.deepcopy(record)
+    return snapshot
+
+
+  def __merge_hset_snapshot(self, hkey, snapshot):
+    """
+    Merge one peer-exported snapshot into the local replica.
+
+    Parameters
+    ----------
+    hkey : str
+      Logical hash namespace being refreshed.
+    snapshot : dict
+      Snapshot payload exported by a peer for ``hkey``.
+
+    Returns
+    -------
+    int
+      Number of local fields that were inserted or overwritten from the peer
+      snapshot.
+
+    Notes
+    -----
+    The merge is additive only. Remote fields that overlap the local replica
+    overwrite stale values, while fields absent from the remote snapshot are
+    preserved locally and are never pruned by this method.
+    """
+    if not isinstance(snapshot, dict):
+      return 0
+
+    index = self.__hset_index(hkey)
+    merged_fields = 0
+    changed = False
+    for key, record in snapshot.items():
+      if not isinstance(key, str) or not key.startswith(index):
+        continue
+      if not isinstance(record, dict):
+        continue
+      if self.CS_OWNER not in record or self.CS_VALUE not in record:
+        continue
+
+      value = self.deepcopy(record.get(self.CS_VALUE))
+      if value is None:
+        continue
+
+      readonly = record.get(self.CS_READONLY, False)
+      token = record.get(self.CS_TOKEN, None)
+      local_record = self.__chain_storage.get(key)
+      if isinstance(local_record, dict):
+        same_owner = local_record.get(self.CS_OWNER) == record.get(self.CS_OWNER)
+        same_value = local_record.get(self.CS_VALUE) == value
+        same_readonly = local_record.get(self.CS_READONLY, False) == readonly
+        same_token = local_record.get(self.CS_TOKEN, None) == token
+        if same_owner and same_value and same_readonly and same_token:
+          continue
+
+      # Apply the peer record only to the local replica. HSync intentionally
+      # does not enqueue a broadcast because this node is catching up to peer
+      # state rather than originating a new write.
+      self.__chain_storage[key] = {
+        self.CS_KEY: key,
+        self.CS_VALUE: value,
+        self.CS_OWNER: record.get(self.CS_OWNER),
+        self.CS_READONLY: readonly,
+        self.CS_TOKEN: token,
+        self.CS_CONFIRMATIONS: -1,
+        self.CS_MIN_CONFIRMATIONS: 0,
+      }
+      merged_fields += 1
+      changed = True
+
+    if changed:
+      self.__save_chain_storage()
+    return merged_fields
   
   ## START setter-getter methods
 
@@ -626,6 +759,117 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return need_store
 
 
+  def _hsync(
+    self,
+    hkey,
+    peers=None,
+    include_default_peers=True,
+    timeout=None,
+    debug=False,
+  ):
+    """
+    Request one live snapshot for a hash namespace and merge it locally.
+
+    Parameters
+    ----------
+    hkey : str
+      Logical hash namespace to refresh.
+    peers : str or list, optional
+      Explicit peer addresses to target for this refresh. Default is None.
+    include_default_peers : bool, optional
+      If True, also target the runtime default chain-peer set. If False, only
+      the explicit ``peers`` list is used. Default is True.
+    timeout : float, optional
+      Maximum wait time in seconds for one valid peer snapshot. If None, use
+      the built-in default. Default is None.
+    debug : bool, optional
+      If True, print detailed routing and timing logs. Default is False.
+
+    Returns
+    -------
+    dict
+      Result envelope with ``hkey``, the accepted ``source_peer``, and the
+      number of ``merged_fields`` applied locally.
+
+    Raises
+    ------
+    ValueError
+      If ``hkey`` or ``timeout`` is invalid, if no target peer can be
+      resolved, or if no valid peer snapshot is accepted before timeout.
+
+    Notes
+    -----
+    A valid peer response with an empty snapshot is a successful cold-state
+    sync. Timeout means that no valid peer response was accepted at all.
+    """
+    debug = debug or self.cfg_chain_store_debug
+    if not isinstance(hkey, str) or len(hkey) == 0:
+      raise ValueError("hsync hkey must be a non-empty string.")
+    if timeout is not None and (
+      isinstance(timeout, bool) or
+      not isinstance(timeout, (int, float)) or
+      timeout <= 0
+    ):
+      raise ValueError("timeout must be a positive number or None.")
+    if timeout is None:
+      timeout = 10
+
+    explicit_peers = self.__normalize_peer_list(peers)
+    allowed_peers = self.__get_target_peers(
+      peers=explicit_peers,
+      include_default_peers=include_default_peers,
+    )
+    if len(allowed_peers) == 0:
+      raise ValueError(f"No target peers resolved for hsync '{hkey}'.")
+
+    request_id = self.uuid()
+    self.__pending_hsync[request_id] = {
+      self.CS_HKEY: hkey,
+      self.CS_PEERS: allowed_peers,
+      self.CS_RESPONSE: None,
+    }
+
+    try:
+      if debug:
+        self.P(
+          f" === HSYNC request for {hkey} to peers {allowed_peers}",
+          color="green",
+        )
+
+      self.__send_data_to_chain_peers(
+        {
+          self.CS_DATA: {
+            self.CS_OP: self.CS_HSYNC_REQ,
+            self.CS_REQUEST_ID: request_id,
+            self.CS_HKEY: hkey,
+          }
+        },
+        peers=explicit_peers or None,
+        include_default_peers=include_default_peers,
+      )
+
+      deadline = self.time() + timeout
+      while self.time() <= deadline:
+        pending = self.__pending_hsync.get(request_id, {})
+        response = pending.get(self.CS_RESPONSE, None)
+        if response is not None:
+          sender = response.get(self.CS_SENDER, None)
+          snapshot = response.get(self.CS_SNAPSHOT, {})
+          # Empty snapshots still prove that a valid peer answered, so they are
+          # treated as successful cold-state syncs with zero merged fields.
+          merged_fields = self.__merge_hset_snapshot(hkey, snapshot)
+          return {
+            self.CS_HKEY: hkey,
+            "source_peer": sender,
+            "merged_fields": merged_fields,
+          }
+        self.sleep(0.100)
+
+      raise ValueError(f"hsync for '{hkey}' timed out after {timeout}s.")
+    finally:
+      self.__pending_hsync.pop(request_id, None)
+
+
   def _get_value(self, key, token=None, get_owner=False, debug=False):
     """ This method is called to get a value from the chain storage """
     # TODO: Check if this constraint could break anything.
@@ -772,6 +1016,103 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         self.P(f" === LOCAL: Key {key} confirmed by {confirm_by}")
     return
 
+
+  def __exec_hsync_request(self, data, peers=None):
+    """
+    Reply to a peer snapshot request for one hash namespace.
+
+    Parameters
+    ----------
+    data : dict
+      Decrypted hsync request payload.
+    peers : str or list, optional
+      Sender address or addresses that should receive the snapshot response.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The response carries only the requested hash namespace snapshot. This
+    keeps the wire payload small and avoids broad chain-store exports.
+    """
+    request_id = data.get(self.CS_REQUEST_ID, None)
+    hkey = data.get(self.CS_HKEY, None)
+    if not isinstance(request_id, str) or len(request_id) == 0:
+      return
+    if not isinstance(hkey, str) or len(hkey) == 0:
+      return
+
+    snapshot = self.__export_hset_snapshot(hkey)
+    if self.cfg_chain_store_debug:
+      self.P(
+        f" === REMOTE: HSYNC request {request_id} for {hkey} back to {peers}",
+        color="green",
+      )
+    self.__send_data_to_chain_peers(
+      {
+        self.CS_DATA: {
+          self.CS_OP: self.CS_HSYNC_RESP,
+          self.CS_REQUEST_ID: request_id,
+          self.CS_HKEY: hkey,
+          self.CS_SNAPSHOT: snapshot,
+        }
+      },
+      peers=peers,
+      include_default_peers=False,
+    )
+    return
+
+
+  def __exec_hsync_response(self, data, sender=None):
+    """
+    Record the first valid peer snapshot response for one pending request.
+
+    Parameters
+    ----------
+    data : dict
+      Decrypted hsync response payload.
+    sender : str, optional
+      Transport-level sender address for the current payload.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The first valid response wins. This keeps each ``_hsync`` call
+    deterministic and avoids merging multiple peer views into a single refresh
+    operation. Freshness arbitration remains a documented follow-up concern.
+    """
+    request_id = data.get(self.CS_REQUEST_ID, None)
+    pending = self.__pending_hsync.get(request_id, None)
+    if pending is None or pending.get(self.CS_RESPONSE, None) is not None:
+      return
+    if not isinstance(sender, str) or len(sender) == 0:
+      return
+
+    allowed_peers = pending.get(self.CS_PEERS, [])
+    if sender not in allowed_peers:
+      return
+
+    hkey = data.get(self.CS_HKEY, None)
+    if hkey != pending.get(self.CS_HKEY, None):
+      return
+
+    snapshot = data.get(self.CS_SNAPSHOT, {})
+    if not isinstance(snapshot, dict):
+      return
+
+    # Accept only one response from the precomputed peer set so an unrelated
+    # or late peer cannot replace the snapshot chosen for this sync request.
+    pending[self.CS_RESPONSE] = {
+      self.CS_SENDER: sender,
+      self.CS_SNAPSHOT: self.deepcopy(snapshot),
+    }
+    return
+
   @NetworkProcessorPlugin.payload_handler()
   def default_handler(self, payload):
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
@@ -811,6 +1152,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.__exec_store(data, peers=sender) # make sure you send also to the sender
     elif operation == self.CS_CONFIRM:
       self.__exec_received_confirm(data)
+    elif operation == self.CS_HSYNC_REQ:
+      self.__exec_hsync_request(data, peers=sender)
+    elif operation == self.CS_HSYNC_RESP:
+      self.__exec_hsync_response(data, sender=sender)
     return
   
 

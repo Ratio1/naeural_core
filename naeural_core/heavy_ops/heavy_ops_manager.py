@@ -17,6 +17,7 @@
 DEFAULT_HEAVY_OPS_CONFIG = {
   "ACTIVE_COMM_ASYNC" : [
     "send_mail",
+    "send_sms",
     "save_image_dataset",
   ],
 

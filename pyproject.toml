@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "naeural_core"
-version = "2.0.0"
+version = "7.7.289"
 authors = [
   { name="Andrei Ionut Damian", email="andrei.damian@me.com" },
   { name="Cristan Bleotiu", email="cristibleotiu@gmail.com" },

@@ -379,6 +379,26 @@ class EMAIL_NOTIFICATION:
   DESTINATION = 'DESTINATION'
 
 
+class SMS_NOTIFICATION:
+  """Flat configuration keys for SMS heavy-op delivery.
+
+  Notes
+  -----
+  The SMS notification workflow intentionally mirrors the email notification
+  contract by exposing a compact, flat configuration namespace. The heavy-op
+  reads the values directly from the payload config dictionary and keeps the
+  provider-specific transport details inside the SMS heavy-op module.
+  """
+
+  SMS_CONFIG = 'SMS_CONFIG'
+  DEFAULT_SMS_CONFIG = None
+  PROVIDER = 'PROVIDER'
+  API_KEY = 'API_KEY'
+  SIGNATURE = 'SIGNATURE'
+  SENDER = 'SENDER'
+  TO = 'TO'
+
+
 class IMAGE_COMPRESSION:
   MAX_HEIGHT = 720
   QUALITY = 60
@@ -929,6 +949,7 @@ SECS_DISMISS_ALERT = 'SECS_DISMISS_ALERT'
 SECS_NEXT_DECISION = 'SECS_NEXT_DECISION'
 SELECTIVE_ZONES = 'SELECTIVE_ZONES'
 SEND_EMAIL = '_H_SEND_EMAIL'
+SEND_SMS = '_H_SEND_SMS'
 SEND_PRIORITY = 'SEND_PRIORITY'
 SEND_PRIORITY_HIGH = 'SEND_PRIORITY_HIGH'
 SEND_PRIORITY_MEDIUM = 'SEND_PRIORITY_MEDIUM'

@@ -27,6 +27,14 @@ GENERAL_PAYLOAD_INTERNAL = [
 ]
 
 DEFAULT_STATUS_MESSAGE = "N/A"
+NOTIFICATION_EMAIL_SUBJECT_TEMPLATE = (
+  "Automatic alert in EE '{device_id}': {stream_name}:{signature}:{instance_id}"
+)
+NOTIFICATION_TRANSITION_PREFIX_TEMPLATE = "On stream `{stream_name}`"
+NOTIFICATION_SINGLE_ALERTER_TEMPLATE = "alert was {raised_or_lowered}"
+NOTIFICATION_MULTI_ALERTER_TEMPLATE = (
+  "{alerter_count} alerts were {raised_or_lowered}: {alerters}"
+)
 
 class GeneralPayload:
   def __init__(self, owner, **kwargs):
@@ -44,9 +52,122 @@ class GeneralPayload:
 
   @staticmethod
   def _fmt_msg(lst_alerters, raised_or_lowered):
+    """Return the alerter-transition clause using the module templates.
+
+    Parameters
+    ----------
+    lst_alerters : list[str]
+      Names of the alerters that transitioned in the current payload build.
+
+    raised_or_lowered : str
+      Human-readable transition state, expected to be either ``"raised"`` or
+      ``"lowered"``.
+
+    Returns
+    -------
+    str
+      Transition clause built from the single- or multi-alerter template. The
+      helper keeps the wording centralized at module scope so operators can
+      adjust the phrasing without chasing inline string assembly in multiple
+      branches.
+    """
     if len(lst_alerters) == 1 and lst_alerters[0] == 'default':
-      return "alert was {}".format(raised_or_lowered)
-    return "{} alerts were {}: {}".format(len(lst_alerters), raised_or_lowered, lst_alerters)
+      return NOTIFICATION_SINGLE_ALERTER_TEMPLATE.format(
+        raised_or_lowered=raised_or_lowered,
+      )
+    return NOTIFICATION_MULTI_ALERTER_TEMPLATE.format(
+      alerter_count=len(lst_alerters),
+      raised_or_lowered=raised_or_lowered,
+      alerters=lst_alerters,
+    )
+
+
+  def _build_notification_transition_message(self):
+    """Build the concise alert-transition summary for notification payloads.
+
+    Returns
+    -------
+    str or None
+      Human-readable transition summary when at least one alerter changed, or
+      ``None`` when the payload should not carry notification metadata.
+
+    Notes
+    -----
+    The message is assembled from module-level templates so both the email body
+    and SMS body inherit the same wording from one contract location.
+    """
+    alerters = self.owner.alerters_names
+
+    # Notification payloads are only emitted when the alert state actually
+    # changed. This keeps the flat contract from leaking static config into
+    # every payload build.
+    any_alerter_changed = any(self.owner.alerter_status_changed(al) for al in alerters)
+    if not any_alerter_changed:
+      return None
+
+    new_raise_alerters = [al for al in alerters if self.owner.alerter_is_new_raise(al)]
+    new_lower_alerters = [al for al in alerters if self.owner.alerter_is_new_lower(al)]
+
+    prefix = NOTIFICATION_TRANSITION_PREFIX_TEMPLATE.format(
+      stream_name=self.owner.get_stream_id(),
+    )
+    message = ""
+    if len(new_raise_alerters) > 0:
+      s = self._fmt_msg(new_raise_alerters, 'raised')
+      message = "{}, {}".format(prefix, s)
+
+    if len(new_lower_alerters) > 0:
+      s = self._fmt_msg(new_lower_alerters, 'lowered')
+      if len(message) == 0:
+        message = "{}, {}".format(prefix, s)
+      else:
+        message += " and {}".format(s)
+
+    return message or None
+
+
+  def _stage_notification_metadata(self):
+    """Stage email and SMS heavy-op metadata only for alert transitions.
+
+    Notes
+    -----
+    The helper keeps notification config staging independent from the rest of
+    the payload metadata collection. Email and SMS are treated separately so a
+    payload can already carry one notification flag without blocking the other.
+    Existing control flags are left untouched to avoid duplicating upstream
+    staging decisions, and the duplicate check is intentionally channel-local
+    so a preexisting email flag never suppresses SMS staging, or vice versa.
+    The staged subject and message strings are derived from module-level
+    templates so the wording stays centralized next to the payload contract.
+    """
+    transition_message = self._build_notification_transition_message()
+    if transition_message is None:
+      return
+
+    payload_vars = vars(self)
+
+    # Email and SMS are guarded independently. A preexisting send flag only
+    # blocks staging for that exact channel; the other channel still follows
+    # the normal alert-transition contract.
+    email_flag_already_staged = ct.SEND_EMAIL in payload_vars
+    if self.owner.cfg_email_config is not None and not email_flag_already_staged:
+      payload_vars['_H_EMAIL_CONFIG'] = self.owner.cfg_email_config
+      payload_vars['_H_EMAIL_SUBJECT'] = NOTIFICATION_EMAIL_SUBJECT_TEMPLATE.format(
+        device_id=self.owner._device_id,
+        stream_name=self.owner.get_stream_id(),
+        signature=self.owner._signature,
+        instance_id=self.owner.cfg_instance_id,
+      )
+      payload_vars['_H_EMAIL_MESSAGE'] = transition_message
+      payload_vars[ct.SEND_EMAIL] = True
+
+    # SMS uses the same concise transition text so both channels stay aligned
+    # without duplicating alert-summary formatting rules.
+    sms_flag_already_staged = ct.SEND_SMS in payload_vars
+    if self.owner.cfg_sms_config is not None and not sms_flag_already_staged:
+      payload_vars['_H_SMS_CONFIG'] = self.owner.cfg_sms_config
+      payload_vars['_H_SMS_MESSAGE'] = transition_message
+      payload_vars[ct.SEND_SMS] = True
 
 
   def _handle_status(self):
@@ -69,20 +190,22 @@ class GeneralPayload:
     excluded_list=['original_image', 'temp_data'], 
     direct_keys=['payload_context']
     ):
-    """
-    This method added capture metadata as `_C_XXX` properties
+    """Add capture metadata and stage notification payload control fields.
 
     Parameters
     ----------
     excluded_list : list, optional
-      Exclude images and other large objects from payloads. 
-      The default is ['original_image'].
+      Metadata keys that should be skipped when copying capture metadata into
+      the payload. The default excludes large image and temporary data fields.
 
+    direct_keys : list, optional
+      Metadata keys that should be copied directly onto the payload instead of
+      being prefixed with ``_C_``. This keeps known structured fields stable.
 
     Returns
     -------
-    None.
-
+    None
+      The payload instance is mutated in place.
     """
     for meta_key, meta_val in self.owner.dataapi_all_metadata().items():
       if meta_key.lower() not in excluded_list:
@@ -92,58 +215,10 @@ class GeneralPayload:
           vars(self)['_C_' + meta_key] = meta_val
     #end for all capture metadata
     
-    # now process email heavy ops
-    if self.owner.cfg_email_config is None:
-      return
-
-    # if the plugin instance contains "EMAIL_CONFIG" then we have to setup the
-    # email alerting composing the subject & body and expecting downstream 
-    # processing by the `SendMailHeavyOp`
-
-    if vars(self).get('_H_SEND_EMAIL', False):
-      # if payload already contains "SEND_EMAIL", then it means that the 
-      # notification was already handled
-      return
-    
-    device_id = self.owner._device_id
-    stream_id = self.owner.get_stream_id()
-    plugin_id = self.owner._signature
-    instance_id = self.owner.cfg_instance_id
-    
-    vars(self)['_H_EMAIL_CONFIG'] = self.owner.cfg_email_config
-    vars(self)['_H_EMAIL_SUBJECT'] = "Automatic alert in EE '{}': {}:{}:{}".format(
-      device_id,
-      stream_id,
-      plugin_id,
-      instance_id,
-    )
-    
-    alerters = self.owner.alerters_names
-
-    # Check changes in all alerters, and print the ones that raise or lower
-    any_alerter_changed = any([self.owner.alerter_status_changed(al) for al in alerters])
-    if any_alerter_changed:
-      vars(self)['_H_SEND_EMAIL'] = True
-      new_raise_alerters = [al for al in alerters if self.owner.alerter_is_new_raise(al)]
-      new_lower_alerters = [al for al in alerters if self.owner.alerter_is_new_lower(al)]
-
-      email_message = ""
-      prefix = "On stream `{}`".format(self.owner.get_stream_id())
-      if len(new_raise_alerters) > 0:
-        s = self._fmt_msg(new_raise_alerters, 'raised')
-        email_message = "{}, {}".format(prefix, s)
-      #endif
-
-      if len(new_lower_alerters) > 0:
-        s = self._fmt_msg(new_lower_alerters, 'lowered')
-        if len(email_message) == 0:
-          email_message = "{}, {}".format(prefix, s)
-        else:
-          email_message += " and {}".format(s)
-      #endif
-
-      vars(self)['_H_EMAIL_MESSAGE'] = email_message
-    #endif
+    # Notification staging is intentionally isolated from the generic metadata
+    # copy above. If no alerter changed, the helper returns without emitting
+    # any notification control fields.
+    self._stage_notification_metadata()
     return
   
   

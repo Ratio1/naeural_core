@@ -8,6 +8,16 @@ from collections import deque
 from threading import Thread
 
 class BaseHeavyOp(DecentrAIObject):
+  """Base class for asynchronous or synchronous heavy operations.
+
+  The class converts payloads into heavy-operation dictionaries via
+  `_register_payload_operation()` and then either queues or executes the
+  resulting work item. `None` is reserved for the intentional no-work
+  sentinel. Internal registration failures use a distinct sentinel so the
+  no-work contract remains separable from error handling.
+  """
+
+  _REGISTER_FAILED_SENTINEL = object()
 
   def __init__(self, log: Logger, shmem, config, comm_async=True, **kwargs):
     self._thread = None
@@ -104,6 +114,20 @@ class BaseHeavyOp(DecentrAIObject):
     return
 
   def register_payload_operation(self, payload):
+    """Register a payload and isolate registration failures.
+
+    Parameters
+    ----------
+    payload : dict
+      Incoming payload dictionary to transform into a heavy-op work item.
+
+    Returns
+    -------
+    object or None
+      The registered work dictionary when work should proceed, ``None`` when
+      subclasses intentionally signal no work, or an internal failure
+      sentinel when registration raised and notification handling already ran.
+    """
     dct = None
     try:
       dct = self._register_payload_operation(payload)
@@ -113,11 +137,41 @@ class BaseHeavyOp(DecentrAIObject):
         notif='EXCEPTION',
         msg='Error in heavy payload operation {}\n{}'.format(self.__class__.__name__, err_dict)
       )
+      # Keep the failure path distinguishable from the intentional no-work
+      # sentinel. `process_payload()` treats both as non-work, but callers can
+      # still reason about the outcome without overloading `None`.
+      return self._REGISTER_FAILED_SENTINEL
     return dct
 
   def process_payload(self, payload):
-    
+    """Register and execute one heavy-op payload.
+
+    Parameters
+    ----------
+    payload : dict
+      Incoming payload dictionary that subclasses may inspect or normalize
+      before deciding whether any heavy-op work is required.
+
+    Returns
+    -------
+    None
+      The method performs side effects only. When registration returns
+      `None`, the payload is treated as an explicit no-work sentinel and is
+      neither queued nor counted. When registration fails, the internal
+      failure sentinel is also returned early without queueing or counting.
+    """
     dct = self.register_payload_operation(payload)
+    if dct is None:
+      # Subclasses use `None` to mean that the payload should be ignored
+      # entirely. Keep that sentinel out of the async queue and out of the
+      # execution counter so no-op registrations stay invisible to metrics.
+      return
+    if dct is self._REGISTER_FAILED_SENTINEL:
+      # Registration already emitted the error notification and returned a
+      # distinct sentinel. Keep that failure path separate from intentional
+      # no-work so the code remains readable and future-safe.
+      return
+
     if self.comm_async:
       # only add to ops queue of the async thread
       self._ops.append(dct)

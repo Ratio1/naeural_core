@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 
 from naeural_core import constants as ct
+from naeural_core import email_sms_templates as notification_templates
 from naeural_core.utils.img_utils import maybe_prepare_img_payload
 
 from naeural_core.utils.debug_save_img import save_images_and_payload_to_output
@@ -27,14 +28,6 @@ GENERAL_PAYLOAD_INTERNAL = [
 ]
 
 DEFAULT_STATUS_MESSAGE = "N/A"
-NOTIFICATION_EMAIL_SUBJECT_TEMPLATE = (
-  "Automatic alert in EE '{device_id}': {stream_name}:{signature}:{instance_id}"
-)
-NOTIFICATION_TRANSITION_PREFIX_TEMPLATE = "On stream `{stream_name}`"
-NOTIFICATION_SINGLE_ALERTER_TEMPLATE = "alert was {raised_or_lowered}"
-NOTIFICATION_MULTI_ALERTER_TEMPLATE = (
-  "{alerter_count} alerts were {raised_or_lowered}: {alerters}"
-)
 
 class GeneralPayload:
   def __init__(self, owner, **kwargs):
@@ -67,18 +60,37 @@ class GeneralPayload:
     -------
     str
       Transition clause built from the single- or multi-alerter template. The
-      helper keeps the wording centralized at module scope so operators can
-      adjust the phrasing without chasing inline string assembly in multiple
-      branches.
+      helper keeps the wording centralized in the shared notification-template
+      module so operators can adjust the phrasing without chasing inline string
+      assembly in multiple branches.
     """
     if len(lst_alerters) == 1 and lst_alerters[0] == 'default':
-      return NOTIFICATION_SINGLE_ALERTER_TEMPLATE.format(
+      return notification_templates.NOTIFICATION_SINGLE_ALERTER_TEMPLATE.format(
         raised_or_lowered=raised_or_lowered,
       )
-    return NOTIFICATION_MULTI_ALERTER_TEMPLATE.format(
+    return notification_templates.NOTIFICATION_MULTI_ALERTER_TEMPLATE.format(
       alerter_count=len(lst_alerters),
       raised_or_lowered=raised_or_lowered,
       alerters=lst_alerters,
+    )
+
+
+  def _build_notification_context(self):
+    """Render the shared notification context string for this payload.
+
+    Returns
+    -------
+    str
+      Context string built from the active notification context template. The
+      context is rendered once and then reused by both the subject and the
+      transition prefix so default core wording and E2 override wording stay
+      aligned automatically.
+    """
+    return notification_templates.NOTIFICATION_CONTEXT_TEMPLATE.format(
+      device_id=self.owner._device_id,
+      stream_name=self.owner.get_stream_id(),
+      signature=self.owner._signature,
+      instance_id=self.owner.cfg_instance_id,
     )
 
 
@@ -93,8 +105,9 @@ class GeneralPayload:
 
     Notes
     -----
-    The message is assembled from module-level templates so both the email body
-    and SMS body inherit the same wording from one contract location.
+    The message is assembled from the shared notification-template module so
+    both the email body and SMS body inherit the same wording from one
+    contract location.
     """
     alerters = self.owner.alerters_names
 
@@ -108,8 +121,13 @@ class GeneralPayload:
     new_raise_alerters = [al for al in alerters if self.owner.alerter_is_new_raise(al)]
     new_lower_alerters = [al for al in alerters if self.owner.alerter_is_new_lower(al)]
 
-    prefix = NOTIFICATION_TRANSITION_PREFIX_TEMPLATE.format(
+    context = self._build_notification_context()
+    prefix = notification_templates.NOTIFICATION_TRANSITION_PREFIX_TEMPLATE.format(
+      context=context,
+      device_id=self.owner._device_id,
       stream_name=self.owner.get_stream_id(),
+      signature=self.owner._signature,
+      instance_id=self.owner.cfg_instance_id,
     )
     message = ""
     if len(new_raise_alerters) > 0:
@@ -137,14 +155,16 @@ class GeneralPayload:
     Existing control flags are left untouched to avoid duplicating upstream
     staging decisions, and the duplicate check is intentionally channel-local
     so a preexisting email flag never suppresses SMS staging, or vice versa.
-    The staged subject and message strings are derived from module-level
-    templates so the wording stays centralized next to the payload contract.
+    The staged subject and message strings are derived from the shared
+    notification-template module so the wording stays centralized behind a
+    dedicated override seam.
     """
     transition_message = self._build_notification_transition_message()
     if transition_message is None:
       return
 
     payload_vars = vars(self)
+    context = self._build_notification_context()
 
     # Email and SMS are guarded independently. A preexisting send flag only
     # blocks staging for that exact channel; the other channel still follows
@@ -152,7 +172,8 @@ class GeneralPayload:
     email_flag_already_staged = ct.SEND_EMAIL in payload_vars
     if self.owner.cfg_email_config is not None and not email_flag_already_staged:
       payload_vars['_H_EMAIL_CONFIG'] = self.owner.cfg_email_config
-      payload_vars['_H_EMAIL_SUBJECT'] = NOTIFICATION_EMAIL_SUBJECT_TEMPLATE.format(
+      payload_vars['_H_EMAIL_SUBJECT'] = notification_templates.NOTIFICATION_EMAIL_SUBJECT_TEMPLATE.format(
+        context=context,
         device_id=self.owner._device_id,
         stream_name=self.owner.get_stream_id(),
         signature=self.owner._signature,

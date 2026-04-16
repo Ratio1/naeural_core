@@ -337,40 +337,68 @@ def test_payload_stages_both_email_and_sms_flags_when_alert_changes():
   assert vars(payload)["_H_SMS_CONFIG"] == {"PROVIDER": "web2sms"}
   assert vars(payload)[ct.SEND_EMAIL] is True
   assert vars(payload)[ct.SEND_SMS] is True
-  assert vars(payload)["_H_EMAIL_SUBJECT"] == "Automatic alert in EE 'device-1': stream-a:plugin-x:instance-1"
-  assert vars(payload)["_H_EMAIL_MESSAGE"] == "On stream `stream-a`, alert was raised"
-  assert vars(payload)["_H_SMS_MESSAGE"] == "On stream `stream-a`, alert was raised"
+  assert vars(payload)["_H_EMAIL_SUBJECT"] == "stream-a"
+  assert vars(payload)["_H_EMAIL_MESSAGE"] == "stream-a, alert was raised"
+  assert vars(payload)["_H_SMS_MESSAGE"] == "stream-a, alert was raised"
 
 
-def test_payload_uses_notification_templates_for_subject_and_transition_text():
-  """Verify notification text is assembled from module-level templates.
+def test_default_notification_template_contract_is_minimal():
+  """Verify the core template module keeps only the minimal context by default.
 
-  The notification contract should keep the email subject and the shared
-  transition summary configurable from one place at the top of the module.
-  This regression patches those templates and confirms both heavy-op payloads
-  pick up the customized strings.
+  The default PyPI-facing contract should not encode E2-specific wording.
+  Operators may override it from `HyFy-E2/extensions`, but the baseline
+  package must stay limited to the pipeline name for both subject and message
+  prefixes.
   """
-  original_subject_template = data_structures_module.NOTIFICATION_EMAIL_SUBJECT_TEMPLATE
-  original_prefix_template = data_structures_module.NOTIFICATION_TRANSITION_PREFIX_TEMPLATE
-  original_single_alerter_template = data_structures_module.NOTIFICATION_SINGLE_ALERTER_TEMPLATE
+  import importlib
+
+  templates_module = importlib.import_module("naeural_core.email_sms_templates")
+
+  assert templates_module.NOTIFICATION_CONTEXT_TEMPLATE == "{stream_name}"
+  assert templates_module.NOTIFICATION_EMAIL_SUBJECT_TEMPLATE == "{context}"
+  assert templates_module.NOTIFICATION_TRANSITION_PREFIX_TEMPLATE == "{context}"
+
+
+def test_payload_uses_notification_template_module_for_subject_and_transition_text():
+  """Verify payload staging reads notification wording from the template module.
+
+  The regression patches the shared template module rather than local globals.
+  This proves `GeneralPayload` consumes the dedicated template seam that E2 can
+  override without further edits to `data_structures.py`.
+  """
+  import importlib
+
+  templates_module = importlib.import_module("naeural_core.email_sms_templates")
+  original_context_template = templates_module.NOTIFICATION_CONTEXT_TEMPLATE
+  original_subject_template = templates_module.NOTIFICATION_EMAIL_SUBJECT_TEMPLATE
+  original_prefix_template = templates_module.NOTIFICATION_TRANSITION_PREFIX_TEMPLATE
+  original_single_alerter_template = templates_module.NOTIFICATION_SINGLE_ALERTER_TEMPLATE
 
   try:
-    data_structures_module.NOTIFICATION_EMAIL_SUBJECT_TEMPLATE = (
-      "EE={device_id}|{stream_name}|{signature}|{instance_id}"
+    templates_module.NOTIFICATION_CONTEXT_TEMPLATE = (
+      "ctx={device_id}|{stream_name}|{signature}|{instance_id}"
     )
-    data_structures_module.NOTIFICATION_TRANSITION_PREFIX_TEMPLATE = "stream={stream_name}"
-    data_structures_module.NOTIFICATION_SINGLE_ALERTER_TEMPLATE = "state={raised_or_lowered}"
+    templates_module.NOTIFICATION_EMAIL_SUBJECT_TEMPLATE = "subject={context}"
+    templates_module.NOTIFICATION_TRANSITION_PREFIX_TEMPLATE = "prefix={context}"
+    templates_module.NOTIFICATION_SINGLE_ALERTER_TEMPLATE = "state={raised_or_lowered}"
 
     payload = _build_payload(changed=True)
     payload._add_metadata_to_payload()
 
-    assert vars(payload)["_H_EMAIL_SUBJECT"] == "EE=device-1|stream-a|plugin-x|instance-1"
-    assert vars(payload)["_H_EMAIL_MESSAGE"] == "stream=stream-a, state=raised"
-    assert vars(payload)["_H_SMS_MESSAGE"] == "stream=stream-a, state=raised"
+    assert vars(payload)["_H_EMAIL_SUBJECT"] == (
+      "subject=ctx=device-1|stream-a|plugin-x|instance-1"
+    )
+    assert vars(payload)["_H_EMAIL_MESSAGE"] == (
+      "prefix=ctx=device-1|stream-a|plugin-x|instance-1, state=raised"
+    )
+    assert vars(payload)["_H_SMS_MESSAGE"] == (
+      "prefix=ctx=device-1|stream-a|plugin-x|instance-1, state=raised"
+    )
   finally:
-    data_structures_module.NOTIFICATION_EMAIL_SUBJECT_TEMPLATE = original_subject_template
-    data_structures_module.NOTIFICATION_TRANSITION_PREFIX_TEMPLATE = original_prefix_template
-    data_structures_module.NOTIFICATION_SINGLE_ALERTER_TEMPLATE = original_single_alerter_template
+    templates_module.NOTIFICATION_CONTEXT_TEMPLATE = original_context_template
+    templates_module.NOTIFICATION_EMAIL_SUBJECT_TEMPLATE = original_subject_template
+    templates_module.NOTIFICATION_TRANSITION_PREFIX_TEMPLATE = original_prefix_template
+    templates_module.NOTIFICATION_SINGLE_ALERTER_TEMPLATE = original_single_alerter_template
 
 
 def test_payload_stages_email_without_sms_config():
@@ -423,7 +451,7 @@ def test_payload_keeps_sms_staging_when_email_flag_already_exists():
   assert "_H_EMAIL_MESSAGE" not in vars(payload)
   assert vars(payload)["_H_SMS_CONFIG"] == {"PROVIDER": "web2sms"}
   assert vars(payload)[ct.SEND_SMS] is True
-  assert vars(payload)["_H_SMS_MESSAGE"] == "On stream `stream-a`, alert was raised"
+  assert vars(payload)["_H_SMS_MESSAGE"] == "stream-a, alert was raised"
 
 
 def test_payload_keeps_email_staging_when_sms_flag_already_exists():
@@ -441,8 +469,8 @@ def test_payload_keeps_email_staging_when_sms_flag_already_exists():
   assert vars(payload)[ct.SEND_SMS] is False
   assert vars(payload)["_H_EMAIL_CONFIG"] == {"PROVIDER": "resend"}
   assert vars(payload)[ct.SEND_EMAIL] is True
-  assert vars(payload)["_H_EMAIL_SUBJECT"] == "Automatic alert in EE 'device-1': stream-a:plugin-x:instance-1"
-  assert vars(payload)["_H_EMAIL_MESSAGE"] == "On stream `stream-a`, alert was raised"
+  assert vars(payload)["_H_EMAIL_SUBJECT"] == "stream-a"
+  assert vars(payload)["_H_EMAIL_MESSAGE"] == "stream-a, alert was raised"
   assert "_H_SMS_CONFIG" not in vars(payload)
   assert "_H_SMS_MESSAGE" not in vars(payload)
 
@@ -453,7 +481,8 @@ TEST_FUNCTIONS = (
   test_payload_only_stages_channel_flags_on_alert_change,
   test_payload_skips_blank_provider_notification_dicts,
   test_payload_stages_both_email_and_sms_flags_when_alert_changes,
-  test_payload_uses_notification_templates_for_subject_and_transition_text,
+  test_default_notification_template_contract_is_minimal,
+  test_payload_uses_notification_template_module_for_subject_and_transition_text,
   test_payload_stages_email_without_sms_config,
   test_payload_stages_sms_without_email_config,
   test_payload_keeps_sms_staging_when_email_flag_already_exists,

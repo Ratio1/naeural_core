@@ -17,6 +17,12 @@ jobs:
   build-n-publish:
     name: Build and publish Python 🐍 distributions 📦 to PyPI
     runs-on: ubuntu-latest
+    permissions:
+      # The PyPI publish action falls back to GitHub OIDC trusted publishing
+      # whenever no explicit password token is provided, so the workflow must
+      # be allowed to mint an ID token for that exchange.
+      contents: read
+      id-token: write
 
     steps:
       - uses: actions/checkout@v3

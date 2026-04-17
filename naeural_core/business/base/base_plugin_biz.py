@@ -925,6 +925,38 @@ class BasePluginExecutor(
     )
     return self.sanitize_name(str_name)
 
+  def _safe_path_component(self, raw):
+    """
+    Sanitize a single path component derived from user-supplied configuration.
+
+    `sanitize_name` allows `.` and `-` through, which means a component of
+    exactly `.` or `..` survives unchanged and becomes a traversal segment
+    when joined into a filesystem path. Substitute those (and the empty
+    string) with `_` so every returned component is a safe directory name.
+    """
+    s = self.sanitize_name(str(raw))
+    if s in ('', '.', '..'):
+      s = '_'
+    return s
+
+  def _get_instance_data_subfolder(self):
+    """
+    Instance-specific subfolder for persistent data under the data folder.
+    All per-instance artifacts (plugin_data, logs, file_volumes, fixed_volumes)
+    live under this path.
+
+    Components are sanitized via `_safe_path_component` so pathological
+    stream_id or instance_id values cannot escape the pipelines_data root.
+
+    Returns
+    -------
+    str
+        Subfolder path: pipelines_data/{safe_stream_id}/{safe_instance_id}
+    """
+    sid = self._safe_path_component(self._stream_id)
+    iid = self._safe_path_component(self.cfg_instance_id)
+    return "pipelines_data/{}/{}".format(sid, iid)
+
   @property
   def str_unique_identification(self):
     return str(self.unique_identification)

@@ -16,6 +16,7 @@ windows: set PYTHONPATH=%PYTHONPATH%;C:\work\
 """
 
 import os
+import shutil
 import threading
 import traceback
 
@@ -357,12 +358,50 @@ class ServingManager(Manager):
     return
   
   def _download_and_load_config(self, url, server_name, force_download=True):
+    """Resolve and load a custom downloadable serving configuration.
+
+    Parameters
+    ----------
+    url : str
+        Source location for the configuration payload. Supports the existing
+        logger-managed schemes plus ``r1fs:<CID>``.
+    server_name : str
+        Serving signature used to derive the cached local definition filename.
+    force_download : bool, optional
+        Preserved logger download flag for non-R1FS sources.
+
+    Returns
+    -------
+    dict
+        Parsed serving configuration dictionary.
+    """
+
     fn_custom_model_definition = server_name + '_def.txt'
-    model_zoo_kwargs = self.cfg_serving_environment.get(ct.MODEL_ZOO_CONFIG) or {}
-    self.log.maybe_download_model(
-      url, fn_custom_model_definition, force_download=force_download,
-      **model_zoo_kwargs
-    )
+    if isinstance(url, str) and url.lower().startswith("r1fs:"):
+      cid = url.split(":", 1)[1].strip()
+      r1fs_engine = self.shmem.get(ct.R1FS_ENGINE)
+      if r1fs_engine is None:
+        raise RuntimeError("R1FS engine missing from shared memory for custom model definition download")
+
+      source_path = r1fs_engine.get_file(cid=cid)
+      if source_path is None or not os.path.isfile(source_path):
+        raise RuntimeError("Failed to resolve R1FS custom model definition '{}'".format(url))
+
+      target_path = os.path.join(self.log.get_models_folder(), fn_custom_model_definition)
+      target_dir = os.path.dirname(target_path)
+      if target_dir != "":
+        os.makedirs(target_dir, exist_ok=True)
+
+      # The serving manager consumes the fetched definition immediately, and
+      # `get_file()` recreates the CID folder on the next access, so relocating
+      # the artifact avoids keeping duplicate copies of the same file.
+      shutil.move(source_path, target_path)
+    else:
+      model_zoo_kwargs = self.cfg_serving_environment.get(ct.MODEL_ZOO_CONFIG) or {}
+      self.log.maybe_download_model(
+        url, fn_custom_model_definition, force_download=force_download,
+        **model_zoo_kwargs
+      )
     dct_config = self.log.load_models_json(fn_custom_model_definition)
     return dct_config
 
@@ -1496,4 +1535,3 @@ class ServingManager(Manager):
     full_log = "\n".join(["    " + x for x in lst_log])
     self.P(full_log.lstrip(), color=color)
     return
-

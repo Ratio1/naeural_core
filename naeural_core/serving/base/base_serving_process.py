@@ -1,6 +1,8 @@
 #global dependencies
 import json
+import os
 import re
+import shutil
 import abc
 import traceback
 from collections import OrderedDict
@@ -28,8 +30,6 @@ _CONFIG = {
   "SERVING_TIMERS_PREDICT_DUMP"           : 901,
   "SERVING_TIMERS_PREDICT_DUMP_DEFAULT"   : 601,
   
-  "R1FS_ENABLED"                          : False,
-
   "CLOSE_IF_UNUSED"                       : False,
   
   "MAX_WAIT_TIME"                         : 5,
@@ -178,12 +178,130 @@ class ModelServingProcess(
     return val
   
   def download(self, url, fn):
-    kwargs = self.cfg_model_zoo_config 
+    """Resolve a serving artifact into the local models cache.
+
+    Parameters
+    ----------
+    url : str
+        Artifact source. Supported values remain the existing logger-managed
+        schemes plus the new ``r1fs:<CID>`` serving-local scheme.
+    fn : str
+        Relative path inside the logger models directory where the artifact
+        must be materialized.
+
+    Returns
+    -------
+    str
+        Absolute path to the resolved local artifact.
+
+    Raises
+    ------
+    RuntimeError
+        Raised when a requested ``r1fs:<CID>`` artifact cannot be materialized
+        into the serving models cache.
+    """
+
+    # Serving subclasses expect `download()` to leave a concrete file at the
+    # destination path. We therefore keep all existing logger-backed behavior
+    # intact and only intercept the new R1FS-specific source scheme here.
+    if isinstance(url, str) and url.lower().startswith("r1fs:"):
+      return self._download_r1fs_artifact(url=url, model_file=fn)
+
+    # Some tests and early lifecycle paths call `download()` before config
+    # handlers are fully prepared. Falling back to an empty dict preserves the
+    # old semantics without forcing those callers through `_setup_config()`.
+    kwargs = self.cfg_model_zoo_config if self.ready_cfg_handlers else {}
     return self.log.maybe_download_model(
       url=url,
       model_file=fn,
       **kwargs,
     )
+
+  def _is_vpn_implementation(self):
+    """Return whether the current serving process runs in VPN mode.
+
+    Returns
+    -------
+    bool
+        ``True`` when the process environment explicitly marks this runtime as a
+        VPN implementation, otherwise ``False``.
+    """
+
+    vpn_value = str(os.environ.get("EE_VPN_IMPL", False)).lower()
+    return vpn_value in ["true", "1", "yes", "y", "t", "on"]
+
+  def _maybe_init_r1fs_for_startup(self):
+    """Initialize the serving-local ``R1FSEngine`` when serving policy allows it.
+
+    Returns
+    -------
+    R1FSEngine or None
+        The serving-local R1FS engine when initialized or already available.
+        Returns ``None`` when VPN mode intentionally disables serving-local
+        startup of R1FS.
+    """
+
+    # The current serving policy is "start R1FS for all normal serving
+    # processes, skip VPN implementations". We short-circuit early so VPN
+    # processes do not incur IPFS bootstrap work they are not expected to use.
+    if self._is_vpn_implementation():
+      return None
+
+    # Serving processes are spawned children, so they cannot rely on the
+    # orchestrator's in-memory engine instance. Each child owns its local engine
+    # and initializes it exactly once.
+    if self.r1fs is None:
+      self.r1fs = R1FSEngine(
+        logger=self.log,
+      )
+    return self.r1fs
+
+  def _download_r1fs_artifact(self, url, model_file):
+    """Resolve a file-oriented R1FS CID into the models cache.
+
+    Parameters
+    ----------
+    url : str
+        Source string in the form ``r1fs:<CID>``.
+    model_file : str
+        Relative models path expected by downstream serving loaders.
+
+    Returns
+    -------
+    str
+        Absolute path to the copied artifact inside the models cache.
+
+    Raises
+    ------
+    RuntimeError
+        Raised when R1FS is unavailable or when the requested CID cannot be
+        fetched as a concrete local file.
+    """
+
+    cid = url.split(":", 1)[1].strip()
+    if cid == "":
+      raise RuntimeError("Invalid R1FS serving URL: missing CID")
+
+    # `download()` can be called outside startup as well, so the R1FS engine is
+    # re-initialized lazily here if a caller reaches this path before startup.
+    r1fs_engine = self.r1fs or self._maybe_init_r1fs_for_startup()
+    if r1fs_engine is None:
+      raise RuntimeError("R1FS serving downloads are disabled for VPN implementations")
+
+    source_path = r1fs_engine.get_file(cid=cid)
+    if source_path is None or not os.path.isfile(source_path):
+      raise RuntimeError("Failed to resolve R1FS artifact '{}'".format(url))
+
+    target_path = os.path.join(self.log.get_models_folder(), model_file)
+    target_dir = os.path.dirname(target_path)
+    if target_dir != "":
+      os.makedirs(target_dir, exist_ok=True)
+
+    # `get_file()` rebuilds the CID folder on every call, so the serving layer
+    # can safely relocate the plaintext artifact into the models cache instead
+    # of duplicating large model files on disk.
+    shutil.move(source_path, target_path)
+    return target_path
 
   def get_server_parents(self):
     parents = self.__class__.mro()
@@ -316,12 +434,24 @@ class ModelServingProcess(
     return
 
   def inprocess_startup(self):
+    """Run the serving startup path inside the current process.
+
+    Returns
+    -------
+    None
+        This method mutates the serving instance in-place and does not return a
+        value.
+    """
+
     if self._inprocess_startup_done:
       self.P("inprocess_startup` already called. Bypassing.", color='y')
       return
     if self.inprocess:
       # now we prepare config
       self._setup_config()
+      # Startup-time model preparation can now depend on `self.r1fs`, so the
+      # engine must exist before `_startup()` executes.
+      self._maybe_init_r1fs_for_startup()
       _ = self._startup() 
       self._inprocess_startup_done = True
     else:
@@ -596,6 +726,15 @@ class ModelServingProcess(
     return
   
   def run(self):
+    """Execute the serving event loop in a spawned child process.
+
+    Returns
+    -------
+    None
+        The method owns the process lifetime and only returns when the serving
+        loop exits.
+    """
+
     if self.inprocess:
       raise ValueError("Something is wrong: `{}.run` called for a inprocess serving process".format(
         self.__class__.__name__))
@@ -616,6 +755,9 @@ class ModelServingProcess(
       # startup: finally this is where the model (should be) is created in theory
       self._startup_failure = True # we assume anything can go wrong
       self._start_timer('startup')
+      # Startup-time weights and graph downloads now support `r1fs:<CID>`, so
+      # the child-local R1FS engine has to be ready before `_startup()` begins.
+      self._maybe_init_r1fs_for_startup()
       _msg = self.__startup() 
       self.__on_init()
       self._stop_timer('startup')
@@ -720,10 +862,14 @@ class ModelServingProcess(
     return
 
   def __on_init(self):
-    if self.cfg_r1fs_enabled:
-      self.r1fs = R1FSEngine(
-        logger=self.log,
-      )
+    """Run post-startup initialization hooks.
+
+    Returns
+    -------
+    None
+        The method forwards control to subclass post-startup hooks.
+    """
+
     self._on_init()
     return
   

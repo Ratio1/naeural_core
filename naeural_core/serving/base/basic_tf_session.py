@@ -47,6 +47,15 @@ class BasicTFSessionServer(BaseServingProcess):
     return self.config_model.get(ct.OUTPUT_TENSORS, [])
 
   def _setup_session(self):
+    """Load the TensorFlow graph and create the serving session.
+
+    Returns
+    -------
+    None
+        The method prepares the graph and session state on the serving
+        instance.
+    """
+
     self._start_timer('setup_session')
     import tensorflow.compat.v1 as tf
     mem_minimal = self.cfg_gpu_min_memory_mb
@@ -74,10 +83,10 @@ class BasicTFSessionServer(BaseServingProcess):
 
     url = self.cfg_url
     if url is not None:
-      self.log.maybe_download_model(
-        url=url,
-        model_file=graph_file
-      )
+      # TensorFlow serving must resolve artifacts through the base serving seam
+      # so `r1fs:<CID>` sources behave exactly like the existing HTTP/MinIO
+      # model sources.
+      self.download(url=url, fn=graph_file)
     #endif
 
     graph = self.log.load_graph_from_models(graph_file)
@@ -210,5 +219,4 @@ class BasicTFSessionServer(BaseServingProcess):
     
   
   
-
 

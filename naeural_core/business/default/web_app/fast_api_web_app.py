@@ -70,10 +70,14 @@ _CONFIG = {
   'PROFILE_RATE': 1.0,
   # Log aggregated timings every N seconds (0 disables periodic logs).
   'PROFILE_LOG_INTERVAL': 10 * 60,
-  # If true, log each profiled request (high overhead).
+  # If true, allow request timing debug logging.
   'PROFILE_LOG_PER_REQUEST': True,
   # If true, include detailed per-stage averages in periodic logs.
   'PROFILE_LOG_DETAILED': True,
+  # If true, emit request timing debug logs in batches.
+  'DEBUG_TIMINGS': True,
+  # Emit one timing debug log per N profiled requests.
+  'DEBUG_TIMINGS_STEPS': 5,
 
   # No suppression of logs after interval
   "SUPRESS_LOGS_AFTER_INTERVAL": None,
@@ -150,6 +154,14 @@ class FastApiWebAppPlugin(BasePlugin):
       return None
     if configured_value <= 0:
       return None
+    return configured_value
+
+  def get_debug_timings_steps(self):
+    configured_value = self.cfg_debug_timings_steps
+    if not isinstance(configured_value, int):
+      return 5
+    if configured_value <= 0:
+      return 1
     return configured_value
 
   @staticmethod
@@ -1010,24 +1022,91 @@ class FastApiWebAppPlugin(BasePlugin):
       if val is not None and sum_key in stats:
         stats[sum_key] += val
 
-    if self.cfg_profile_log_per_request:
-      total_ms = total_ms or 0.0
-      wait_ms = wait_ms or 0.0
-      queue_ms = queue_ms or 0.0
-      exec_ms = exec_ms or 0.0
-      base = f"<{endpoint}> timings(ms): t {total_ms:.2f} | w {wait_ms:.2f} | q {queue_ms:.2f} | e {exec_ms:.2f} | steps {profile.get('slice_count')}"
-      if self.cfg_profile_log_detailed:
-        detail = (
-          f" | detail call_start={detailed.get('until_call_plugin_start') or 0:.2f} "
-          f"put_s={detailed.get('until_put_start') or 0:.2f} put_e={detailed.get('until_put_end') or 0:.2f} "
-          f"wait_s={detailed.get('until_wait_start') or 0:.2f} ep_s={detailed.get('until_endpoint_start') or 0:.2f} "
-          f"ep_e={detailed.get('until_endpoint_end') or 0:.2f} wait_e={detailed.get('until_wait_end') or 0:.2f} "
-          f"call_e={detailed.get('until_call_plugin_end') or 0:.2f} ret={detailed.get('until_return') or 0:.2f}"
-        )
-        self.P(base + detail)
-      else:
-        self.P(base)
+    self._maybe_log_debug_timings(
+      endpoint=endpoint,
+      stats=stats,
+      total_ms=total_ms,
+      wait_ms=wait_ms,
+      queue_ms=queue_ms,
+      exec_ms=exec_ms,
+      detailed=detailed,
+      slice_count=profile.get('slice_count'),
+    )
     return
+
+  def _maybe_log_debug_timings(self, endpoint, stats, total_ms, wait_ms, queue_ms, exec_ms, detailed, slice_count):
+    if not self.cfg_profile_log_per_request:
+      return
+    if not self.cfg_debug_timings:
+      return
+
+    batch = stats.get('debug_timings_batch')
+    if batch is None:
+      batch = {
+        't': [],
+        'w': [],
+        'q': [],
+        'e': [],
+        'steps': [],
+        'call_start': [],
+        'put_s': [],
+        'put_e': [],
+        'wait_s': [],
+        'ep_s': [],
+        'ep_e': [],
+        'wait_e': [],
+        'call_e': [],
+        'ret': [],
+      }
+      stats['debug_timings_batch'] = batch
+
+    batch['t'].append(float(total_ms or 0.0))
+    batch['w'].append(float(wait_ms or 0.0))
+    batch['q'].append(float(queue_ms or 0.0))
+    batch['e'].append(float(exec_ms or 0.0))
+    batch['steps'].append(int(slice_count or 0))
+    batch['call_start'].append(float(detailed.get('until_call_plugin_start') or 0.0))
+    batch['put_s'].append(float(detailed.get('until_put_start') or 0.0))
+    batch['put_e'].append(float(detailed.get('until_put_end') or 0.0))
+    batch['wait_s'].append(float(detailed.get('until_wait_start') or 0.0))
+    batch['ep_s'].append(float(detailed.get('until_endpoint_start') or 0.0))
+    batch['ep_e'].append(float(detailed.get('until_endpoint_end') or 0.0))
+    batch['wait_e'].append(float(detailed.get('until_wait_end') or 0.0))
+    batch['call_e'].append(float(detailed.get('until_call_plugin_end') or 0.0))
+    batch['ret'].append(float(detailed.get('until_return') or 0.0))
+
+    if len(batch['t']) < self.get_debug_timings_steps():
+      return
+
+    base = (
+      f"<{endpoint}> timings(ms): "
+      f"t {self._format_debug_timing_list(batch['t'])} | "
+      f"w {self._format_debug_timing_list(batch['w'])} | "
+      f"q {self._format_debug_timing_list(batch['q'])} | "
+      f"e {self._format_debug_timing_list(batch['e'])} | "
+      f"steps {self._format_debug_steps_list(batch['steps'])}"
+    )
+    if self.cfg_profile_log_detailed:
+      detail = (
+        f" | detail call_start={self._format_debug_timing_list(batch['call_start'])} "
+        f"put_s={self._format_debug_timing_list(batch['put_s'])} put_e={self._format_debug_timing_list(batch['put_e'])} "
+        f"wait_s={self._format_debug_timing_list(batch['wait_s'])} ep_s={self._format_debug_timing_list(batch['ep_s'])} "
+        f"ep_e={self._format_debug_timing_list(batch['ep_e'])} wait_e={self._format_debug_timing_list(batch['wait_e'])} "
+        f"call_e={self._format_debug_timing_list(batch['call_e'])} ret={self._format_debug_timing_list(batch['ret'])}"
+      )
+      self.P(base + detail)
+    else:
+      self.P(base)
+
+    for values in batch.values():
+      values.clear()
+    return
+
+  def _format_debug_timing_list(self, values):
+    return "[" + ", ".join(f"{float(value):.2f}" for value in values) + "]"
+
+  def _format_debug_steps_list(self, values):
+    return "[" + ", ".join(str(int(value)) for value in values) + "]"
 
   def _maybe_log_profile_stats(self):
     if self.cfg_profile_rate <= 0:
@@ -1139,6 +1218,8 @@ class FastApiWebAppPlugin(BasePlugin):
       'api_version': repr(self.__version__),
       'node_comm_params': self._node_comms_jinja_args,
       'debug_web_app': self.cfg_debug_web_app,
+      'debug_timings': self.cfg_debug_timings,
+      'debug_timings_steps': self.get_debug_timings_steps(),
       'default_route': default_route,
       'profile_rate': float(self.cfg_profile_rate or 0.0),
       'profile_log_per_request': bool(self.cfg_profile_log_per_request),

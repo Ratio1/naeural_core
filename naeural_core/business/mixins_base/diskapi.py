@@ -90,6 +90,7 @@ class _DiskAPIMixin(object):
         filename: str = None,
         folder: str = None,
         subfolder: str = None,
+        plugin_base_path: str = None,
     ):
       """
       Method for validating a file location is safe.
@@ -99,6 +100,10 @@ class _DiskAPIMixin(object):
       filename - str, filename to be checked
       folder - str, folder to be checked
       subfolder - str, subfolder to be checked
+      plugin_base_path - str, optional absolute path of the plugin's own
+        instance folder. When provided, paths outside this folder emit a
+        deprecation warning (tier-2 isolation). The cache-root safety check
+        (tier-1) is always enforced.
 
       Raises
       ------
@@ -120,8 +125,80 @@ class _DiskAPIMixin(object):
         assert isinstance(target_folder, str), f"`{folder}` -> `{target_folder}` not a string, got {type(target_folder)}"
         current_path = os.path.join(target_folder, current_path)
       # endif folder provided
+      # Tier 1: cache-root safety (always enforced, hard fail)
       is_safe, err_msg = self.is_path_safe(current_path, return_reason=True)
       assert is_safe, err_msg
+      # Tier 2: per-plugin isolation (deprecation warning when violated)
+      if plugin_base_path is not None:
+        is_inside_plugin, _ = self.is_path_safe(
+          current_path, base_path=plugin_base_path, return_reason=True,
+        )
+        if not is_inside_plugin:
+          self._diskapi_warn(
+            f"DEPRECATION: Path `{current_path}` is outside the plugin's own folder "
+            f"`{plugin_base_path}`. Cross-plugin access will be rejected in a future "
+            f"version. Move data under the plugin's instance subfolder."
+          )
+
+    def _diskapi_warn(self, msg):
+      """
+      Route diskapi deprecation warnings through `self.P` when available
+      (plugin context) or fall back to stdout (bare-mixin / test contexts).
+      """
+      p = getattr(self, 'P', None)
+      if p is not None:
+        p(msg, color='y')
+      else:
+        print(msg)
+
+    def _get_instance_data_root(self):
+      """
+      Return the plugin's instance data subfolder path (relative to the
+      data folder), e.g. `pipelines_data/{stream_id}/{instance_id}`.
+
+      Returns None outside a plugin context so diskapi calls degrade to
+      the pre-refactor behavior (cache-root isolation only).
+      """
+      fn = getattr(self, '_get_instance_data_subfolder', None)
+      if fn is None:
+        return None
+      try:
+        return fn()
+      except Exception:
+        return None
+
+    def _get_plugin_absolute_base(self):
+      """
+      Absolute filesystem path of the plugin's instance folder, or None
+      when outside a plugin context. Used as `plugin_base_path` for the
+      tier-2 isolation check.
+      """
+      root = self._get_instance_data_root()
+      if root is None:
+        return None
+      data_folder = getattr(self, 'get_data_folder', None)
+      if data_folder is None:
+        return None
+      return os.path.join(data_folder(), root)
+
+    def _resolve_data_subfolder(self, subfolder=None):
+      """
+      Resolve subfolder under the instance data root. Single knob: `subfolder`.
+
+      - If caller passes no subfolder, default to `plugin_data` (the canonical
+        place for plugin-generated pickles/json/dataframes).
+      - If caller passes a subfolder, use it as the top-level directory under
+        the instance root. This lets callers reach siblings like `logs` by
+        just passing `subfolder='logs'`.
+
+      Outside a plugin context, returns `subfolder` unchanged so callers
+      preserve their pre-refactor behavior.
+      """
+      root = self._get_instance_data_root()
+      if root is None:
+        return subfolder
+      sub = subfolder if subfolder else 'plugin_data'
+      return "{}/{}".format(root, sub)
   # endif Utils
 
   # Dataframe serialization section
@@ -130,7 +207,8 @@ class _DiskAPIMixin(object):
                                 ignore_index : bool = True, compress : bool = False, mode : str = 'w',
                                 header : Union[bool, List[str]] = True,
                                 also_markdown : bool = False, verbose : bool = True,
-                                as_parquet : bool = False):
+                                as_parquet : bool = False,
+                                subfolder : str = None, _plugin_base_path : str = None):
 
       """
       Parameters:
@@ -179,13 +257,17 @@ class _DiskAPIMixin(object):
       mode = mode.lower()
       assert mode in ['w', 'a']
       assert_folder(folder)
-      self.assert_legal_file_location(filename=filename, folder=folder)
+      self.assert_legal_file_location(
+        filename=filename, folder=folder, subfolder=subfolder,
+        plugin_base_path=_plugin_base_path,
+      )
 
       _, full_path = self.log.save_dataframe(
         df=df, fn=filename, folder=folder,
         ignore_index=ignore_index, compress=compress,
         mode=mode, header=header, also_markdown=also_markdown, verbose=verbose,
         as_parquet=as_parquet,
+        subfolder_path=subfolder,
       )
 
       return full_path
@@ -195,15 +277,23 @@ class _DiskAPIMixin(object):
                                        ignore_index : bool = True, compress : bool = False, mode : str = 'w',
                                        header : Union[bool, List[str]] = True,
                                        also_markdown : bool = False, verbose : bool = True,
-                                       as_parquet : bool = False
+                                       as_parquet : bool = False,
+                                       subfolder : str = None,
                                        ):
       """
       Shortcut to _diskapi_save_dataframe.
+
+      In a plugin context, auto-routes to
+      `pipelines_data/{sid}/{iid}/plugin_data/{filename}` (default) or to the
+      `{subfolder}/` sibling when provided.
       """
+      resolved_subfolder = self._resolve_data_subfolder(subfolder)
       return self._diskapi_save_dataframe(
         df=df, filename=filename, folder='data',
         ignore_index=ignore_index, compress=compress, mode=mode, header=header,
         also_markdown=also_markdown, verbose=verbose, as_parquet=as_parquet,
+        subfolder=resolved_subfolder,
+        _plugin_base_path=self._get_plugin_absolute_base(),
       )
 
     def diskapi_save_dataframe_to_models(self, df : pd.DataFrame, filename : str,
@@ -237,7 +327,8 @@ class _DiskAPIMixin(object):
       )
 
     def _diskapi_load_dataframe(self, filename : str, folder : str,
-                                decompress : bool = False, timestamps : Union[str, List[str]] = None):
+                                decompress : bool = False, timestamps : Union[str, List[str]] = None,
+                                subfolder : str = None, _plugin_base_path : str = None):
       """
       Parameters:
       ----------
@@ -257,28 +348,68 @@ class _DiskAPIMixin(object):
         Column names that should be parsed as dates when loading the dataframe
         The default is None
 
+      subfolder: str, optional
+        A subfolder under `folder` to load from.
+
+      _plugin_base_path: str, optional
+        Absolute path of the plugin's own instance folder. Triggers tier-2
+        isolation deprecation warning when the resolved path escapes it.
+
       Returns:
       --------
       pandas.DataFrame
       """
       assert_folder(folder)
-      self.assert_legal_file_location(filename=filename, folder=folder)
+      self.assert_legal_file_location(
+        filename=filename, folder=folder, subfolder=subfolder,
+        plugin_base_path=_plugin_base_path,
+      )
       df = self.log.load_dataframe(
-        fn=filename, 
-        folder=folder, 
-        decompress=decompress, 
-        timestamps=timestamps
+        fn=filename,
+        folder=folder,
+        decompress=decompress,
+        timestamps=timestamps,
+        subfolder_path=subfolder,
       )
       return df
 
     def diskapi_load_dataframe_from_data(self, filename : str, decompress : bool = False,
-                                         timestamps : Union[str, List[str]] = None):
+                                         timestamps : Union[str, List[str]] = None,
+                                         subfolder : str = None):
       """
       Shortcut to _diskapi_load_dataframe.
+
+      Tries the new plugin-scoped path first. If not found AND the caller
+      passed no explicit subfolder, falls back once to the flat
+      `{data_folder}/{filename}` layout with a deprecation warning.
+      Outside a plugin context, behaves as before.
       """
-      return self._diskapi_load_dataframe(
-        filename=filename, folder='data', decompress=decompress, timestamps=timestamps
+      plugin_base = self._get_plugin_absolute_base()
+      if plugin_base is None:
+        return self._diskapi_load_dataframe(
+          filename=filename, folder='data', decompress=decompress,
+          timestamps=timestamps, subfolder=subfolder,
+        )
+      resolved = self._resolve_data_subfolder(subfolder)
+      df = self._diskapi_load_dataframe(
+        filename=filename, folder='data', decompress=decompress,
+        timestamps=timestamps, subfolder=resolved,
+        _plugin_base_path=plugin_base,
       )
+      if df is not None:
+        return df
+      if subfolder is None:
+        df = self._diskapi_load_dataframe(
+          filename=filename, folder='data', decompress=decompress,
+          timestamps=timestamps, subfolder=None,
+        )
+        if df is not None:
+          self._diskapi_warn(
+            f"DEPRECATION: Loaded '{filename}' from flat data folder. "
+            f"Re-save to migrate it under `{resolved}/`."
+          )
+        return df
+      return None
 
     def diskapi_load_dataframe_from_models(self, filename : str, decompress : bool = False,
                                            timestamps : Union[str, List[str]] = None):
@@ -303,7 +434,7 @@ class _DiskAPIMixin(object):
     def _diskapi_save_pickle(
         self, obj: object, filename: str, folder: str,
         subfolder: str = None, compress: bool = False,
-        verbose: bool = True
+        verbose: bool = True, _plugin_base_path: str = None,
     ):
       """
       Parameters:
@@ -329,6 +460,10 @@ class _DiskAPIMixin(object):
         Controls logging when saving the object
         The default value is True
 
+      _plugin_base_path: str, optional
+        Absolute path of the plugin's own instance folder. When provided,
+        paths outside this folder emit a deprecation warning (tier-2 isolation).
+
       Returns:
       --------
       str
@@ -337,6 +472,7 @@ class _DiskAPIMixin(object):
       assert_folder(folder)
       self.assert_legal_file_location(
         filename=filename, folder=folder, subfolder=subfolder,
+        plugin_base_path=_plugin_base_path,
       )
 
       full_path = self.log.save_pickle(
@@ -354,10 +490,17 @@ class _DiskAPIMixin(object):
     ):
       """
       Shortcut to _diskapi_save_pickle.
+
+      When called from a plugin context, the file is routed under
+      `pipelines_data/{stream_id}/{instance_id}/plugin_data/` (default) or
+      under a sibling directory if `subfolder` is provided (e.g.
+      `subfolder='logs'` → `.../{instance_id}/logs/`).
       """
+      resolved_subfolder = self._resolve_data_subfolder(subfolder)
       return self._diskapi_save_pickle(
-        obj=obj, filename=filename, subfolder=subfolder,
-        folder='data', compress=compress, verbose=verbose
+        obj=obj, filename=filename, subfolder=resolved_subfolder,
+        folder='data', compress=compress, verbose=verbose,
+        _plugin_base_path=self._get_plugin_absolute_base(),
       )
 
     def diskapi_save_pickle_to_models(
@@ -386,7 +529,8 @@ class _DiskAPIMixin(object):
 
     def _diskapi_load_pickle(
         self, filename: str, folder: str, subfolder: str = None,
-        decompress: bool = False, verbose: bool = True
+        decompress: bool = False, verbose: bool = True,
+        _plugin_base_path: str = None,
     ):
       """
       Parameters:
@@ -407,6 +551,10 @@ class _DiskAPIMixin(object):
         Controls logging when loading the object
         The default value is True
 
+      _plugin_base_path: str, optional
+        Absolute path of the plugin's own instance folder. When provided,
+        paths outside this folder emit a deprecation warning (tier-2 isolation).
+
       Returns:
       --------
       object
@@ -414,6 +562,7 @@ class _DiskAPIMixin(object):
       assert_folder(folder)
       self.assert_legal_file_location(
         filename=filename, folder=folder, subfolder=subfolder,
+        plugin_base_path=_plugin_base_path,
       )
 
       obj = self.log.load_pickle(
@@ -430,11 +579,42 @@ class _DiskAPIMixin(object):
     ):
       """
       Shortcut to _diskapi_load_pickle.
+
+      Tries the new plugin-scoped path first
+      (`pipelines_data/{sid}/{iid}/{plugin_data or subfolder}/`). When not
+      found AND the caller passed no explicit subfolder, falls back once to
+      the flat `{data_folder}/{filename}` layout (legacy behavior for
+      plugins that never used subfolders) and emits a deprecation warning.
+      Outside a plugin context, behaves as before.
       """
-      return self._diskapi_load_pickle(
-        filename=filename, folder='data', subfolder=subfolder,
-        decompress=decompress, verbose=verbose
+      plugin_base = self._get_plugin_absolute_base()
+      if plugin_base is None:
+        return self._diskapi_load_pickle(
+          filename=filename, folder='data', subfolder=subfolder,
+          decompress=decompress, verbose=verbose,
+        )
+      # Try new path first
+      resolved = self._resolve_data_subfolder(subfolder)
+      obj = self._diskapi_load_pickle(
+        filename=filename, folder='data', subfolder=resolved,
+        decompress=decompress, verbose=verbose,
+        _plugin_base_path=plugin_base,
       )
+      if obj is not None:
+        return obj
+      # Fallback to flat path only when caller passed no subfolder
+      if subfolder is None:
+        obj = self._diskapi_load_pickle(
+          filename=filename, folder='data', subfolder=None,
+          decompress=decompress, verbose=verbose,
+        )
+        if obj is not None:
+          self._diskapi_warn(
+            f"DEPRECATION: Loaded '{filename}' from flat data folder. "
+            f"Re-save to migrate it under `{resolved}/`."
+          )
+        return obj
+      return None
 
     def diskapi_load_pickle_from_models(
         self, filename: str, subfolder: str = None,
@@ -463,7 +643,10 @@ class _DiskAPIMixin(object):
 
   # JSON serialization section
   if True:
-    def _diskapi_save_json(self, dct, filename : str, folder : str, indent : bool = True):
+    def _diskapi_save_json(
+        self, dct, filename : str, folder : str, indent : bool = True,
+        subfolder: str = None, _plugin_base_path: str = None,
+    ):
       """
       Parameters:
       -----------
@@ -481,16 +664,28 @@ class _DiskAPIMixin(object):
         Flag that controls the indentation in the output file
         The default value is False
 
+      subfolder: str, optional
+        A subfolder in `folder` where the json should be saved.
+
+      _plugin_base_path: str, optional
+        Absolute path of the plugin's own instance folder. Triggers tier-2
+        isolation deprecation warning when the resolved path escapes it.
+
       Returns:
       --------
       str
         full_path to the saved json
       """
       assert_folder(folder)
-      self.assert_legal_file_location(filename=filename, folder=folder)
+      self.assert_legal_file_location(
+        filename=filename, folder=folder, subfolder=subfolder,
+        plugin_base_path=_plugin_base_path,
+      )
 
+      # thread_safe_save has no subfolder_path arg; bake it into datafile.
+      datafile = filename if subfolder is None else os.path.join(subfolder, filename)
       full_path = self.log.thread_safe_save(
-        datafile=filename,
+        datafile=datafile,
         data_json=dct,
         folder=folder,
         indent=indent,
@@ -499,11 +694,22 @@ class _DiskAPIMixin(object):
 
       return full_path
 
-    def diskapi_save_json_to_data(self, dct, filename : str, indent : bool = True):
+    def diskapi_save_json_to_data(
+        self, dct, filename : str, subfolder: str = None, indent : bool = True,
+    ):
       """
-      Shortcut to _diskapi_save_json
+      Shortcut to _diskapi_save_json.
+
+      In a plugin context, auto-routes to
+      `pipelines_data/{sid}/{iid}/plugin_data/{filename}` (default) or to
+      the `{subfolder}/` sibling when provided.
       """
-      return self._diskapi_save_json(dct=dct, filename=filename, folder='data', indent=indent)
+      resolved_subfolder = self._resolve_data_subfolder(subfolder)
+      return self._diskapi_save_json(
+        dct=dct, filename=filename, folder='data',
+        subfolder=resolved_subfolder, indent=indent,
+        _plugin_base_path=self._get_plugin_absolute_base(),
+      )
 
     def diskapi_save_json_to_models(self, dct, filename : str, indent : bool = True):
       """
@@ -624,11 +830,12 @@ class _DiskAPIMixin(object):
       }
 
     def _diskapi_load_json(
-      self, 
-      filename : str, 
-      folder : str, 
+      self,
+      filename : str,
+      folder : str,
       subfolder : str = None,
-      verbose : bool = True
+      verbose : bool = True,
+      _plugin_base_path : str = None,
     ):
       """
       Load one JSON payload from the local cache.
@@ -652,13 +859,20 @@ class _DiskAPIMixin(object):
         Controls logger verbosity while loading the JSON payload. The default
         value is `True`.
 
+      _plugin_base_path : str, optional
+        Absolute path of the plugin's own instance folder. Triggers tier-2
+        isolation deprecation warning when the resolved path escapes it.
+
       Returns
       -------
       Any
         Decoded JSON payload, or `None` when the file is missing or unreadable.
       """
       assert_folder(folder)
-      self.assert_legal_file_location(filename=filename, folder=folder, subfolder=subfolder)
+      self.assert_legal_file_location(
+        filename=filename, folder=folder, subfolder=subfolder,
+        plugin_base_path=_plugin_base_path,
+      )
 
       dct = self.log.load_json(
         fname=filename, folder=folder, subfolder_path=subfolder, numeric_keys=True,
@@ -870,11 +1084,41 @@ class _DiskAPIMixin(object):
       return dct
     
 
-    def diskapi_load_json_from_data(self, filename : str, verbose : bool = True):
+    def diskapi_load_json_from_data(
+        self, filename : str, subfolder: str = None, verbose : bool = True,
+    ):
       """
       Shortcut to _diskapi_load_json.
+
+      Tries the new plugin-scoped path first
+      (`pipelines_data/{sid}/{iid}/{plugin_data or subfolder}/`). When not
+      found AND the caller passed no explicit subfolder, falls back once
+      to the flat `{data_folder}/{filename}` layout (legacy behavior) and
+      emits a deprecation warning. Outside a plugin context, behaves as before.
       """
-      return self._diskapi_load_json(filename=filename, folder='data', verbose=verbose)
+      plugin_base = self._get_plugin_absolute_base()
+      if plugin_base is None:
+        return self._diskapi_load_json(
+          filename=filename, folder='data', subfolder=subfolder, verbose=verbose,
+        )
+      resolved = self._resolve_data_subfolder(subfolder)
+      dct = self._diskapi_load_json(
+        filename=filename, folder='data', subfolder=resolved, verbose=verbose,
+        _plugin_base_path=plugin_base,
+      )
+      if dct is not None:
+        return dct
+      if subfolder is None:
+        dct = self._diskapi_load_json(
+          filename=filename, folder='data', subfolder=None, verbose=verbose,
+        )
+        if dct is not None:
+          self._diskapi_warn(
+            f"DEPRECATION: Loaded '{filename}' from flat data folder. "
+            f"Re-save to migrate it under `{resolved}/`."
+          )
+        return dct
+      return None
 
     def diskapi_load_json_from_models(self, filename : str, verbose : bool = True):
       """

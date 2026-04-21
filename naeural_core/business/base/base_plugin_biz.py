@@ -925,6 +925,35 @@ class BasePluginExecutor(
     )
     return self.sanitize_name(str_name)
 
+  def _get_instance_data_subfolder(self):
+    """
+    Instance-specific subfolder for persistent data under the data folder.
+    All per-instance artifacts (plugin_data, logs, file_volumes, fixed_volumes)
+    live under this path.
+
+    Components are sanitized (non-alphanum replaced with '_') then verified
+    with a realpath containment check so pathological stream_id or instance_id
+    values cannot escape the pipelines_data root.
+
+    Returns
+    -------
+    str
+        Subfolder path: pipelines_data/{safe_stream_id}/{safe_instance_id}
+    """
+    import re
+
+    def _safe(raw):
+      s = re.sub(r'[^\w.\-]', '_', str(raw))
+      _parent = '/.__probe__'
+      _expected = os.path.join(_parent, s)
+      if not s or os.path.realpath(_expected) != _expected:
+        s = '_'
+      return s
+
+    sid = _safe(self._stream_id)
+    iid = _safe(self.cfg_instance_id)
+    return "pipelines_data/{}/{}".format(sid, iid)
+
   @property
   def str_unique_identification(self):
     return str(self.unique_identification)

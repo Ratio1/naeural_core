@@ -159,7 +159,10 @@ class SendSMSHeavyOp(BaseHeavyOp):
 
     api_key = self._require_non_blank_text(sms_config.get(ct.SMS_NOTIFICATION.API_KEY, None), ct.SMS_NOTIFICATION.API_KEY)
     signature = self._require_non_blank_text(sms_config.get(ct.SMS_NOTIFICATION.SIGNATURE, None), ct.SMS_NOTIFICATION.SIGNATURE)
-    sender = self._require_non_blank_text(sms_config.get(ct.SMS_NOTIFICATION.SENDER, None), ct.SMS_NOTIFICATION.SENDER)
+    # `web2sms` documents `sender` as optional, so the dispatcher trims the
+    # value here and leaves any provider-specific optional-field handling to
+    # the transport implementation.
+    sender = str(sms_config.get(ct.SMS_NOTIFICATION.SENDER, "") or "").strip()
     sms_message = self._require_non_blank_text(sms_message, "_H_SMS_MESSAGE")
     recipients = self._normalize_recipients(sms_config.get(ct.SMS_NOTIFICATION.TO, None))
     if len(recipients) == 0:
@@ -207,7 +210,9 @@ class SendSMSHeavyOp(BaseHeavyOp):
       Trimmed signature secret used as the HTTP Basic auth password.
     sender : str, optional
       Trimmed sender identifier that is echoed in the request body and signed
-      by the provider contract.
+      by the provider contract when present. The provider allows an empty
+      sender field, so the transport preserves that empty slot instead of
+      rejecting it locally.
 
     Returns
     -------
@@ -222,10 +227,7 @@ class SendSMSHeavyOp(BaseHeavyOp):
       api_key if api_key is not None else config.get(ct.SMS_NOTIFICATION.API_KEY, None),
       ct.SMS_NOTIFICATION.API_KEY,
     )
-    sender = self._require_non_blank_text(
-      sender if sender is not None else config.get(ct.SMS_NOTIFICATION.SENDER, None),
-      ct.SMS_NOTIFICATION.SENDER,
-    )
+    sender = str(sender if sender is not None else config.get(ct.SMS_NOTIFICATION.SENDER, "") or "").strip()
     signature = self._require_non_blank_text(
       signature if signature is not None else config.get(ct.SMS_NOTIFICATION.SIGNATURE, None),
       ct.SMS_NOTIFICATION.SIGNATURE,

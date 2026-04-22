@@ -495,11 +495,97 @@ def test_send_sms_dispatches_each_recipient():
     assert "IMG_ORIG" not in call["json"]
 
 
+def test_send_sms_allows_blank_sender_for_web2sms():
+  """Verify web2sms accepts a blank sender field.
+
+  The provider contract marks `sender` as optional, so the runtime must keep
+  the empty slot in the signature source instead of failing before the HTTP
+  request is issued. This regression locks down that provider-specific rule.
+  """
+  class _FakeResponse:
+    """Minimal fake response that records `raise_for_status()` usage."""
+
+    def __init__(self):
+      self.raise_for_status_called = False
+
+    def raise_for_status(self):
+      """Mark the fake response as checked for HTTP errors."""
+      self.raise_for_status_called = True
+
+  captured = []
+
+  def _fake_post(url, auth=None, json=None, timeout=None):
+    """Record the web2sms request contract and return a fake response."""
+    response = _FakeResponse()
+    captured.append({
+      "url": url,
+      "auth": auth,
+      "json": json,
+      "timeout": timeout,
+      "response": response,
+    })
+    return response
+
+  original_post = send_sms_mod.requests.post
+  original_time = send_sms_mod.time.time
+  send_sms_mod.requests.post = _fake_post
+  send_sms_mod.time.time = lambda: 1730000001
+  try:
+    op = object.__new__(SendSMSHeavyOp)
+    op._process_dct_operation({
+      ct.SEND_SMS: True,
+      "_H_SMS_CONFIG": {
+        "PROVIDER": "web2sms",
+        "API_KEY": "test-api-key",
+        "SIGNATURE": "secret-value",
+        "SENDER": "   ",
+        "TO": ["+40711111111"],
+      },
+      "_H_SMS_MESSAGE": "Sender optional test",
+    })
+  finally:
+    send_sms_mod.requests.post = original_post
+    send_sms_mod.time.time = original_time
+
+  assert len(captured) == 1
+  call = captured[0]
+  expected_signature = hashlib.sha512(
+    (
+      "test-api-key"
+      + "1730000001"
+      + "POST"
+      + "/prepaid/message"
+      + ""
+      + "+40711111111"
+      + "Sender optional test"
+      + "Sender optional test"
+      + ""
+      + ""
+      + ""
+      + "secret-value"
+    ).encode("utf-8")
+  ).hexdigest()
+
+  assert call["url"] == "https://www.web2sms.ro/prepaid/message"
+  assert call["auth"] == ("test-api-key", expected_signature)
+  assert call["timeout"] == 30
+  assert call["response"].raise_for_status_called is True
+  assert call["json"] == {
+    "apiKey": "test-api-key",
+    "sender": "",
+    "recipient": "+40711111111",
+    "message": "Sender optional test",
+    "visibleMessage": "Sender optional test",
+    "nonce": "1730000001",
+    "signature": expected_signature,
+  }
+
+
 def test_send_sms_rejects_blank_mandatory_values():
   """Verify blank mandatory SMS values fail before any outbound request.
 
   The regression protects the transport boundary from emitting HTTP requests
-  with empty credentials, sender data, recipient entries, or message content.
+  with empty credentials, recipient entries, or message content.
   Each case must raise locally and leave the request stub untouched.
   """
   op = object.__new__(SendSMSHeavyOp)
@@ -522,17 +608,6 @@ def test_send_sms_rejects_blank_mandatory_values():
         "API_KEY": "test-api-key",
         "SIGNATURE": "",
         "SENDER": "alerts",
-        "TO": ["+40711111111"],
-      },
-      "_H_SMS_MESSAGE": "System alert",
-    }),
-    ("blank sender", {
-      ct.SEND_SMS: True,
-      "_H_SMS_CONFIG": {
-        "PROVIDER": "web2sms",
-        "API_KEY": "test-api-key",
-        "SIGNATURE": "secret-value",
-        "SENDER": " ",
         "TO": ["+40711111111"],
       },
       "_H_SMS_MESSAGE": "System alert",
@@ -591,6 +666,7 @@ TEST_FUNCTIONS = (
   test_send_mail_dispatches_to_provider_slug_and_builds_attachments,
   test_send_sms_register_scrubs_live_payload,
   test_send_sms_dispatches_each_recipient,
+  test_send_sms_allows_blank_sender_for_web2sms,
   test_send_sms_rejects_blank_mandatory_values,
 )
 

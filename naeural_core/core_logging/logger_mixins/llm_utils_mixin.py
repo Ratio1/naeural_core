@@ -111,6 +111,10 @@ class _LlmUtilsMixin(object):
       'device_map': device_map
     }
     if use_flash_attention:
-      model_params['attn_implementation'] = 'flash_attention_2'
+      if th.cuda.is_available() and th.cuda.get_device_capability(0) >= (8, 0):
+        model_params['attn_implementation'] = 'flash_attention_2'
+      else:
+        self.P("flash-attention requested but GPU compute capability < 8.0 (sm_70 Volta or older); falling back to SDPA.", color='y')
+        model_params['attn_implementation'] = 'sdpa'
     return model_params, quantization_params
 

@@ -73,6 +73,15 @@ class Orchestrator(DecentrAIObject,
                    ):
 
   def __init__(self, log : Logger, **kwargs):
+    """Initialize orchestrator runtime state and manager placeholders.
+
+    Parameters
+    ----------
+    log : Logger
+      Runtime logger.
+    **kwargs
+      Additional object initialization arguments.
+    """
     if __APP_VER__ is None:
       self.__version__ = __CORE_VER__
       # This is a bit ambiguous, but we want to use __version__ as the default 
@@ -140,9 +149,15 @@ class Orchestrator(DecentrAIObject,
     self._return_code = None
     self._thread_async_comm = None
     self._thread_node_oracle_refresh = None
+    self._thread_admin_pipeline_collect = None
     self._in_shutdown = False
     self._non_business_payloads = deque(maxlen=100)
     self.__node_oracle_refresh_lock = Lock()
+    self.__capture_manager_lock = Lock()
+    self._admin_pipeline_collect_last_loop_ts = None
+    self._admin_pipeline_collect_last_progress_ts = None
+    self._admin_pipeline_collect_last_warning_ts = 0
+    self._admin_pipeline_collect_consecutive_failures = 0
     self.__cached_node_oracles = []
     self.__node_oracle_refresh_version = 0
     self.__node_oracle_apply_version = 0
@@ -386,6 +401,9 @@ class Orchestrator(DecentrAIObject,
     )
 
     self._thread_async_comm.start()
+
+    if self.cfg_admin_pipeline_async_dispatch:
+      self._start_admin_pipeline_collection_thread()
 
     self._thread_node_oracle_refresh = Thread(
       target=self.node_oracle_refresh_loop,
@@ -791,6 +809,42 @@ class Orchestrator(DecentrAIObject,
     return self.config_data.get('PLUGINS_ON_THREADS', True)
 
   @property
+  def cfg_admin_pipeline_async_dispatch(self):
+    """Return whether admin-pipeline collection/dispatch is isolated.
+
+    Returns
+    -------
+    bool
+        `True` by default unless explicitly disabled in runtime config.
+    """
+    return self.config_data.get("ADMIN_PIPELINE_ASYNC_DISPATCH", True)
+
+  @property
+  def cfg_admin_pipeline_dispatch_poll_seconds(self):
+    """Return the admin-pipeline collection polling interval.
+
+    Returns
+    -------
+    float
+        Polling interval in seconds.
+    """
+    return self.config_data.get("ADMIN_PIPELINE_DISPATCH_POLL_SECONDS", 0.05)
+
+  @property
+  def cfg_admin_pipeline_stall_warning_seconds(self):
+    """Return the warning threshold for stalled admin-pipeline threads.
+
+    Returns
+    -------
+    float
+        Seconds without progress before a warning is emitted.
+    """
+    return self.config_data.get(
+      "ADMIN_PIPELINE_STALL_WARNING_SECONDS",
+      max(1.0, 10 * self.cfg_admin_pipeline_dispatch_poll_seconds),
+    )
+
+  @property
   def cfg_default_email_config(self):
     return self.config_data.get('DEFAULT_EMAIL_CONFIG', None)
 
@@ -845,6 +899,10 @@ class Orchestrator(DecentrAIObject,
     if _thread_async_comm is not None and _thread_async_comm.is_alive():
       _thread_async_comm.join()
       self.P("Asynchronous communication thread joined.", color='y')
+    _thread_admin_pipeline_collect = vars(self).get('_thread_admin_pipeline_collect')
+    if _thread_admin_pipeline_collect is not None and _thread_admin_pipeline_collect.is_alive():
+      _thread_admin_pipeline_collect.join()
+      self.P("Admin pipeline collection thread joined.", color='y')
     _thread_node_oracle_refresh = vars(self).get('_thread_node_oracle_refresh')
     if _thread_node_oracle_refresh is not None and _thread_node_oracle_refresh.is_alive():
       _thread_node_oracle_refresh.join()
@@ -1326,52 +1384,75 @@ class Orchestrator(DecentrAIObject,
     None.
 
     """
-    with self.log.managed_lock_resource(ct.LOCK_CMD):
-
-      try:
-        if self.cfg_sequential_streams:
-          streams = list(self._config_manager.dct_config_streams.keys())
-          if len(streams) > 0:
-            s = streams[0]
-            self._current_dct_config_streams = {s : deepcopy(self._config_manager.dct_config_streams[s])}
-          else:
-            self._current_dct_config_streams = {}
-          #endif
-        else:
-          if self._current_dct_config_streams != self._config_manager.dct_config_streams:
-            self._current_dct_config_streams = deepcopy(self._config_manager.dct_config_streams)
-        #endif
-      except:
-        msg = "CRITICAL error in `choose_current_running_streams`"      
-        self.P(msg, color='r')
-        self._create_notification(
-          notif=ct.STATUS_TYPE.STATUS_EXCEPTION, 
-          msg=msg, autocomplete_info=True,
-          displayed=True,
-        )
-      #end try-except
-    # endwith lock
+    try:
+      running_streams = self._get_running_streams_snapshot()
+      if self._current_dct_config_streams != running_streams:
+        self._current_dct_config_streams = running_streams
+    except:
+      msg = "CRITICAL error in `choose_current_running_streams`"      
+      self.P(msg, color='r')
+      self._create_notification(
+        notif=ct.STATUS_TYPE.STATUS_EXCEPTION, 
+        msg=msg, autocomplete_info=True,
+        displayed=True,
+      )
+    # end try-except
     return
+
+  def _get_running_streams_snapshot(self):
+    """Return a thread-safe snapshot of currently configured streams.
+
+    Returns
+    -------
+    dict
+        Deep-copied stream configuration snapshot, respecting sequential-stream
+        execution when enabled.
+    """
+    with self.log.managed_lock_resource(ct.LOCK_CMD):
+      if self.cfg_sequential_streams:
+        streams = list(self._config_manager.dct_config_streams.keys())
+        if len(streams) > 0:
+          stream_name = streams[0]
+          return {stream_name: deepcopy(self._config_manager.dct_config_streams[stream_name])}
+        return {}
+      return deepcopy(self._config_manager.dct_config_streams)
+    return
+
+  def _get_admin_pipeline_running_streams_snapshot(self):
+    """Return a running-stream snapshot limited to `admin_pipeline`.
+
+    Returns
+    -------
+    dict
+        Single-entry admin-pipeline snapshot, or an empty dict when absent.
+    """
+    running_streams = self._get_running_streams_snapshot()
+    if ct.CONST_ADMIN_PIPELINE_NAME not in running_streams:
+      return {}
+    return {
+      ct.CONST_ADMIN_PIPELINE_NAME: running_streams[ct.CONST_ADMIN_PIPELINE_NAME]
+    }
 
   def collect_data(self):
     """
     Main loop step:
       Collects data from all streams
     """
-    # update the streams to know which captures are done
-    self.__loop_stage = '4.collect.update_streams'
-    self._capture_manager.update_streams(self._current_dct_config_streams)
-    
-    self.__loop_stage = '4.collect.get_all_cap'
-    dct_captures = self._capture_manager.get_all_captured_data()
+    with self.__capture_manager_lock:
+      # update the streams to know which captures are done
+      self.__loop_stage = '4.collect.update_streams'
+      self._capture_manager.update_streams(self._current_dct_config_streams)
+      
+      self.__loop_stage = '4.collect.get_all_cap'
+      dct_captures = self._capture_manager.get_all_captured_data()
 
-    self.__loop_stage = '4.collect.add_data_info'
-    self._app_monitor.add_data_info(val=len(dct_captures), stage=ct.NR_STREAMS_DATA)
+      self.__loop_stage = '4.collect.add_data_info'
+      self._app_monitor.add_data_info(val=len(dct_captures), stage=ct.NR_STREAMS_DATA)
 
-    # after capturing, archive the streams that are completely finished (excluded those)    
-    # that are keep-alive
-    self.__loop_stage = '4.collect.get_finished_streams'
-    finished_stream_names = self._capture_manager.get_finished_streams()
+      # after capturing, archive the streams that are completely finished (excluded those)    
+      # that are keep-alive
+      self.__loop_stage = '4.collect.get_finished_streams'
+      finished_stream_names = self._capture_manager.get_finished_streams()
     
     self.__loop_stage = '4.collect.archive_streams'
     self._config_manager.archive_streams(finished_stream_names, initiator_id="SELF", session_id="MAIN_LOOP")
@@ -1402,6 +1483,135 @@ class Orchestrator(DecentrAIObject,
       Append captures to the corresponding plugins
     """
     self._data_handler.append_captures()
+    return
+
+  def dispatch_admin_pipeline_inputs(self, dct_business_inputs):
+    """
+    Main loop step:
+      Queue `admin_pipeline` plugin inputs before the serving-gated wait path.
+
+    Parameters
+    ----------
+    dct_business_inputs : dict
+        Capture-derived business inputs keyed by admin plugin instance hash.
+
+    Returns
+    -------
+    int
+        Number of admin deliveries successfully queued.
+    """
+    return self._business_manager.dispatch_admin_pipeline_inputs(dct_business_inputs)
+
+  def _start_admin_pipeline_collection_thread(self):
+    """Start the isolated admin-pipeline collection thread.
+
+    Returns
+    -------
+    None
+        Creates and starts the daemon collection thread when needed.
+    """
+    if self._thread_admin_pipeline_collect is not None and self._thread_admin_pipeline_collect.is_alive():
+      return
+
+    now = time()
+    self._admin_pipeline_collect_last_loop_ts = now
+    self._admin_pipeline_collect_last_progress_ts = now
+    self._admin_pipeline_collect_consecutive_failures = 0
+    self._thread_admin_pipeline_collect = Thread(
+      target=self.admin_pipeline_collection_loop,
+      args=(),
+      name=ct.THREADS_PREFIX + 'admin_pipeline_collect',
+      daemon=True,
+    )
+    self._thread_admin_pipeline_collect.start()
+    self.P("Started admin pipeline collection thread.", color='b')
+    return
+
+  def _ensure_admin_pipeline_collection_health(self):
+    """Ensure the admin-pipeline collection thread is alive and progressing.
+
+    Returns
+    -------
+    None
+        Restarts the thread when missing/dead and emits throttled stall
+        warnings when progress stops.
+    """
+    if not self.cfg_admin_pipeline_async_dispatch or self.__done:
+      return
+
+    if self._thread_admin_pipeline_collect is None or not self._thread_admin_pipeline_collect.is_alive():
+      self.P("Admin pipeline collection thread is not alive. Restarting.", color='y')
+      self._start_admin_pipeline_collection_thread()
+      return
+
+    now = time()
+    last_progress = self._admin_pipeline_collect_last_progress_ts or self._admin_pipeline_collect_last_loop_ts or now
+    if (
+      now - last_progress >= self.cfg_admin_pipeline_stall_warning_seconds and
+      now - self._admin_pipeline_collect_last_warning_ts >= self.cfg_admin_pipeline_stall_warning_seconds
+    ):
+      self.P(
+        "Admin pipeline collection thread appears stalled: no progress for {:.1f}s, consecutive_failures={}.".format(
+          now - last_progress,
+          self._admin_pipeline_collect_consecutive_failures,
+        ),
+        color='y',
+      )
+      self._admin_pipeline_collect_last_warning_ts = now
+    return
+
+  def _collect_admin_pipeline_inputs_once(self, running_streams=None):
+    """Collect and enqueue one admin-pipeline input snapshot.
+
+    Parameters
+    ----------
+    running_streams : dict or None, optional
+        Optional precomputed running-stream snapshot.
+
+    Returns
+    -------
+    int
+        Number of admin deliveries queued.
+    """
+    if not self.cfg_admin_pipeline_async_dispatch:
+      return 0
+
+    if running_streams is None:
+      running_streams = self._get_admin_pipeline_running_streams_snapshot()
+    if len(running_streams) == 0:
+      return 0
+
+    admin_stream_config = running_streams.get(ct.CONST_ADMIN_PIPELINE_NAME)
+    if admin_stream_config is None:
+      return 0
+
+    with self.__capture_manager_lock:
+      self._capture_manager.ensure_stream_capture(admin_stream_config, verbose=False)
+      dct_captures = self._capture_manager.get_single_stream_captured_data(
+        ct.CONST_ADMIN_PIPELINE_NAME
+      )
+
+    dct_business_inputs = self._business_manager.build_admin_capture_inputs(dct_captures)
+    return self.dispatch_admin_pipeline_inputs(dct_business_inputs=dct_business_inputs)
+
+  def admin_pipeline_collection_loop(self):
+    """Run the isolated admin-pipeline collection loop.
+
+    Returns
+    -------
+    None
+        Exits when the orchestrator shutdown flag is set.
+    """
+    while not self.__done:
+      self._admin_pipeline_collect_last_loop_ts = time()
+      try:
+        self._collect_admin_pipeline_inputs_once()
+        self._admin_pipeline_collect_last_progress_ts = time()
+        self._admin_pipeline_collect_consecutive_failures = 0
+      except Exception:
+        self._admin_pipeline_collect_consecutive_failures += 1
+        self.P("Exception in admin pipeline collection loop:\n{}".format(traceback.format_exc()), color='r')
+      sleep(self.cfg_admin_pipeline_dispatch_poll_seconds)
     return
 
   def aggregate_collected_data_for_serving_manager(self):
@@ -1760,7 +1970,73 @@ class Orchestrator(DecentrAIObject,
       full_info=True,
       send_log=False,
     )
+    self._bootstrap_admin_pipeline_startup()
     self.maybe_start_serving_processes(warmup=True)
+    return
+
+  def _bootstrap_admin_pipeline_startup(self):
+    """
+    Prime the async admin lane before serving warmup runs.
+
+    Returns
+    -------
+    None
+        Starts admin capture/plugin state and queues one initial admin delivery
+        when async admin dispatch is enabled and `admin_pipeline` is present.
+
+    Notes
+    -----
+    This keeps the global startup ordering intact for the normal node path, but
+    ensures `admin_pipeline` instances, capture threads, and one initial admin
+    delivery are ready as early as possible on cold boot.
+    """
+    if not self.cfg_admin_pipeline_async_dispatch:
+      return
+
+    self.P("Admin bootstrap entry: selecting running streams before serving warmup.", color='b')
+    self.choose_current_running_streams()
+    current_stream_keys = sorted(list((self._current_dct_config_streams or {}).keys()))
+    self.P(
+      "Admin bootstrap current running streams after selection: {}.".format(current_stream_keys),
+      color='b',
+    )
+    admin_running_streams = self._get_admin_pipeline_running_streams_snapshot()
+    self.P(
+      "Admin bootstrap admin-only running streams snapshot: {}.".format(
+        sorted(list(admin_running_streams.keys()))
+      ),
+      color='b',
+    )
+    if len(admin_running_streams) == 0:
+      self.P("Admin bootstrap skipped: admin_pipeline is not present in running streams.", color='y')
+      return
+
+    admin_stream_config = admin_running_streams[ct.CONST_ADMIN_PIPELINE_NAME]
+    self.P(
+      "Admin bootstrap: priming '{}' capture and admin instances before serving warmup.".format(
+        ct.CONST_ADMIN_PIPELINE_NAME
+      ),
+      color='b',
+    )
+    with self.__capture_manager_lock:
+      self.P(
+        "Admin bootstrap: calling ensure_stream_capture('{}').".format(
+          ct.CONST_ADMIN_PIPELINE_NAME
+        ),
+        color='b',
+      )
+      capture_ready = self._capture_manager.ensure_stream_capture(admin_stream_config)
+    self.P(
+      "Admin bootstrap capture state for '{}': ready={}.".format(
+        ct.CONST_ADMIN_PIPELINE_NAME,
+        capture_ready,
+      ),
+      color='b',
+    )
+
+    self._business_manager.bootstrap_admin_pipeline_instances(admin_running_streams)
+    self._collect_admin_pipeline_inputs_once(running_streams=admin_running_streams)
+    self.P("Admin bootstrap completed before serving warmup.", color='b')
     return
 
 
@@ -1939,6 +2215,7 @@ class Orchestrator(DecentrAIObject,
         self._maybe_delay_main_loop()
         self.__loop_stage = "0.save_info"
         self._maybe_save_local_info()
+        self._ensure_admin_pipeline_collection_health()
         self._main_loop_counts['ITER'] += 1
         
         #1. Choose only the streams that should be run this step - copy from ConfigManager

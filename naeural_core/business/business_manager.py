@@ -8,6 +8,9 @@ import traceback
 from collections import OrderedDict
 
 from time import time, sleep, perf_counter
+from threading import Event, Lock, Thread
+from queue import Queue, Empty, Full
+from copy import deepcopy
 from naeural_core import constants as ct
 from naeural_core import Logger
 from naeural_core.manager import Manager
@@ -17,6 +20,23 @@ from collections import deque, defaultdict
 class BusinessManager(Manager):
 
   def __init__(self, log : Logger, owner, shmem, environment_variables=None, run_on_threads=True, **kwargs):
+    """Initialize business-plugin runtime state.
+
+    Parameters
+    ----------
+    log : Logger
+      Runtime logger.
+    owner : object
+      Owning orchestrator-like object.
+    shmem : dict
+      Shared-memory dictionary used across managers and plugins.
+    environment_variables : dict or None, optional
+      Environment variables exposed to business plugins.
+    run_on_threads : bool, optional
+      Whether business plugins execute on dedicated threads.
+    **kwargs
+      Additional manager initialization arguments.
+    """
     self.shmem = shmem
     self.shmem['get_active_plugins_instances'] = self.get_active_plugins_instances
     self.plugins_shmem = {}
@@ -46,6 +66,21 @@ class BusinessManager(Manager):
     self._dct_stop_timings = {}
     self._dct_instance_hash_log = OrderedDict()
 
+    self._admin_dispatch_queue = None
+    self._admin_dispatch_thread = None
+    self._admin_dispatch_stop = Event()
+    self._admin_dispatch_lock = Lock()
+    self._admin_instance_hashes = set()
+    self._admin_dispatch_counters = {
+      "enqueued": 0,
+      "dispatched": 0,
+      "dropped_missing_plugin": 0,
+      "dropped_queue_full": 0,
+    }
+    self._admin_dispatch_last_loop_ts = None
+    self._admin_dispatch_last_progress_ts = None
+    self._admin_dispatch_last_warning_ts = 0
+    self._admin_dispatch_consecutive_failures = 0
 
     self._graceful_stop_instances = defaultdict(lambda: 0)
     super(BusinessManager, self).__init__(log=log, prefix_log='[BIZM]', **kwargs)
@@ -66,8 +101,17 @@ class BusinessManager(Manager):
   
 
   def startup(self):
+    """Start the business manager and admin async dispatch lane.
+
+    Returns
+    -------
+    None
+      Initializes manager state, maps current instances to subalterns, and logs
+      plugin timing diagnostics when enabled.
+    """
     super().startup()
     self._dct_current_instances = self._dct_subalterns # this allows usage of `self.get_subaltern(instance_hash)`
+    self._initialize_admin_async_dispatch()
     if self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True):
       self.P(
         "Plugin timing env: python={} dont_write_bytecode={} env_PYTHONDONTWRITEBYTECODE={}".format(
@@ -81,18 +125,377 @@ class BusinessManager(Manager):
 
   @property
   def current_instances(self):
+    """Return currently active business plugin instances.
+
+    Returns
+    -------
+    dict
+      Mapping from instance hash to plugin instance.
+    """
     return self._dct_current_instances
 
+  @property
+  def cfg_admin_pipeline_async_dispatch(self):
+    """Return whether admin-pipeline inputs use the async dispatch lane.
+
+    Returns
+    -------
+    bool
+        `True` by default unless explicitly disabled in runtime config.
+    """
+    return self.config_data.get("ADMIN_PIPELINE_ASYNC_DISPATCH", True)
+
+  @property
+  def cfg_admin_pipeline_dispatch_poll_seconds(self):
+    """Return the async admin dispatcher queue polling interval.
+
+    Returns
+    -------
+    float
+        Queue polling interval in seconds.
+    """
+    return self.config_data.get("ADMIN_PIPELINE_DISPATCH_POLL_SECONDS", 0.05)
+
+  @property
+  def cfg_admin_pipeline_queue_maxlen(self):
+    """Return the maximum async admin dispatch queue length.
+
+    Returns
+    -------
+    int
+        Queue capacity used when creating the dispatcher queue.
+    """
+    return self.config_data.get("ADMIN_PIPELINE_QUEUE_MAXLEN", 1024)
+
+  @property
+  def cfg_admin_pipeline_stall_warning_seconds(self):
+    """Return the health-check threshold for dispatcher stalls.
+
+    Returns
+    -------
+    float
+        Seconds without progress before the dispatcher is considered stalled.
+    """
+    return self.config_data.get(
+      "ADMIN_PIPELINE_STALL_WARNING_SECONDS",
+      max(1.0, 10 * self.cfg_admin_pipeline_dispatch_poll_seconds),
+    )
+
+  def _initialize_admin_async_dispatch(self):
+    """
+    Initialize the optional async delivery lane for `admin_pipeline` plugins.
+
+    Returns
+    -------
+    None
+        Starts or disables the dispatcher according to configuration.
+
+    Raises
+    ------
+    ValueError
+        If async dispatch is enabled while plugins are configured to run inline.
+
+    Notes
+    -----
+    The dispatcher only owns pre-serving capture/control-plane deliveries. It
+    does not execute plugins directly and it is intentionally unsupported when
+    plugin execution is configured to run inline on the main thread.
+    """
+    if not self.cfg_admin_pipeline_async_dispatch:
+      self._stop_admin_dispatch_thread()
+      self._admin_dispatch_queue = None
+      return
+
+    if not self._run_on_threads:
+      raise ValueError("ADMIN_PIPELINE_ASYNC_DISPATCH requires PLUGINS_ON_THREADS=true.")
+
+    with self._admin_dispatch_lock:
+      if self._admin_dispatch_queue is None:
+        self._admin_dispatch_queue = Queue(maxsize=self.cfg_admin_pipeline_queue_maxlen)
+      self._admin_dispatch_stop.clear()
+      self._start_admin_dispatch_thread()
+    return
+
+  def _start_admin_dispatch_thread(self):
+    """Start the async admin dispatch thread when it is not alive.
+
+    Returns
+    -------
+    None
+        Creates and starts the daemon dispatcher thread.
+    """
+    if self._admin_dispatch_thread is not None and self._admin_dispatch_thread.is_alive():
+      return
+
+    now = time()
+    self._admin_dispatch_last_loop_ts = now
+    self._admin_dispatch_last_progress_ts = now
+    self._admin_dispatch_consecutive_failures = 0
+    self._admin_dispatch_thread = Thread(
+      target=self._admin_dispatch_loop,
+      name="admin_pipeline_dispatcher",
+      daemon=True,
+    )
+    self._admin_dispatch_thread.start()
+    self.P("Started admin pipeline async dispatcher thread.", color='b')
+    return
+
+  def _stop_admin_dispatch_thread(self):
+    """Stop the async admin dispatch thread if it exists.
+
+    Returns
+    -------
+    None
+        Signals the thread to stop and joins it with a bounded timeout.
+    """
+    thread = self._admin_dispatch_thread
+    if thread is None:
+      return
+
+    self._admin_dispatch_stop.set()
+    thread.join(timeout=max(1.0, 4 * self.cfg_admin_pipeline_dispatch_poll_seconds))
+    if thread.is_alive():
+      self.P("Admin pipeline async dispatcher thread did not stop before timeout.", color='r')
+    else:
+      self.P("Admin pipeline async dispatcher thread joined.", color='b')
+    self._admin_dispatch_thread = None
+    return
+
+  def _admin_dispatch_loop(self):
+    """Run the async admin input delivery loop.
+
+    Returns
+    -------
+    None
+        Exits when the dispatcher stop event is set or the queue is removed.
+    """
+    while not self._admin_dispatch_stop.is_set():
+      if self._admin_dispatch_queue is None:
+        return
+      self._admin_dispatch_last_loop_ts = time()
+      try:
+        queue_item = self._admin_dispatch_queue.get(timeout=self.cfg_admin_pipeline_dispatch_poll_seconds)
+      except Empty:
+        continue
+      try:
+        self._dispatch_admin_queue_item(queue_item)
+        self._admin_dispatch_last_progress_ts = time()
+        self._admin_dispatch_consecutive_failures = 0
+      except Exception:
+        self._admin_dispatch_consecutive_failures += 1
+        self.P(
+          "Exception in admin pipeline async dispatcher loop:\n{}".format(traceback.format_exc()),
+          color='r',
+        )
+    return
+
+  def _ensure_admin_async_dispatch_health(self):
+    """Ensure the async admin dispatcher is configured and healthy.
+
+    Returns
+    -------
+    None
+        Restarts the dispatcher when it is missing, dead, or stalled.
+    """
+    if not self.cfg_admin_pipeline_async_dispatch:
+      return
+
+    with self._admin_dispatch_lock:
+      if self._admin_dispatch_queue is None:
+        self._admin_dispatch_queue = Queue(maxsize=self.cfg_admin_pipeline_queue_maxlen)
+      if self._admin_dispatch_thread is None or not self._admin_dispatch_thread.is_alive():
+        self.P("Admin pipeline async dispatcher thread is not alive. Restarting.", color='y')
+        self._admin_dispatch_stop.clear()
+        self._start_admin_dispatch_thread()
+        return
+
+    now = time()
+    last_progress = self._admin_dispatch_last_progress_ts or self._admin_dispatch_last_loop_ts or now
+    queue_depth = self._admin_dispatch_queue.qsize() if self._admin_dispatch_queue is not None else 0
+    if queue_depth == 0 and self._admin_dispatch_consecutive_failures == 0:
+      self._admin_dispatch_last_progress_ts = now
+      return
+
+    if (
+      now - last_progress >= self.cfg_admin_pipeline_stall_warning_seconds and
+      now - self._admin_dispatch_last_warning_ts >= self.cfg_admin_pipeline_stall_warning_seconds
+    ):
+      self.P(
+        "Admin pipeline async dispatcher appears stalled: no progress for {:.1f}s, queue_depth={}, consecutive_failures={}.".format(
+          now - last_progress,
+          queue_depth,
+          self._admin_dispatch_consecutive_failures,
+        ),
+        color='y',
+      )
+      self._admin_dispatch_last_warning_ts = now
+    return
+
+  def _dispatch_admin_queue_item(self, queue_item):
+    """Deliver one queued admin-pipeline input snapshot to its plugin.
+
+    Parameters
+    ----------
+    queue_item : tuple[str, dict]
+        Pair of plugin instance hash and input snapshot.
+
+    Returns
+    -------
+    None
+        Drops stale entries for missing plugins and updates dispatcher counters.
+    """
+    instance_hash, inputs = queue_item
+    plugin = self.get_subaltern(instance_hash)
+    if plugin is None:
+      self._admin_dispatch_counters["dropped_missing_plugin"] += 1
+      self.P("Dropping queued admin delivery for missing plugin instance '{}'.".format(instance_hash), color='y')
+      return
+
+    if inputs is not None and self._should_filter_network_inputs(plugin, inputs):
+      inputs = self._filter_network_inputs(plugin, inputs)
+      if inputs is None:
+        return
+
+    plugin.add_inputs(inputs)
+    self._admin_dispatch_counters["dispatched"] += 1
+    return
+
+  def _refresh_admin_instance_hashes(self, current_instances):
+    """
+    Refresh the set of currently active `admin_pipeline` instance hashes.
+
+    Parameters
+    ----------
+    current_instances : list[str]
+        Active instance hashes produced by the normal business-manager refresh.
+
+    Returns
+    -------
+    None
+        Updates the in-memory admin instance hash set.
+    """
+    admin_hashes = set()
+    for instance_hash in current_instances:
+      stream_name, _, _ = self._dct_hash_mappings.get(instance_hash, (None, None, None))
+      if stream_name == ct.CONST_ADMIN_PIPELINE_NAME:
+        admin_hashes.add(instance_hash)
+    self._admin_instance_hashes = admin_hashes
+    return
+
+  def dispatch_admin_pipeline_inputs(self, dct_business_inputs):
+    """
+    Enqueue snapshot-owned admin inputs for async delivery.
+
+    Parameters
+    ----------
+    dct_business_inputs : dict
+        Capture-derived business inputs keyed by plugin instance hash.
+
+    Returns
+    -------
+    int
+        Number of admin deliveries successfully queued.
+    """
+    if not self.cfg_admin_pipeline_async_dispatch or self._admin_dispatch_queue is None:
+      return 0
+
+    enqueued = 0
+    for instance_hash in self._admin_instance_hashes:
+      inputs = dct_business_inputs.get(instance_hash)
+      if not inputs:
+        continue
+      snapshot = deepcopy(inputs)
+      try:
+        self._admin_dispatch_queue.put_nowait((instance_hash, snapshot))
+      except Full:
+        self._admin_dispatch_counters["dropped_queue_full"] += 1
+        self.P("Admin pipeline async dispatcher queue is full. Dropping delivery for '{}'.".format(instance_hash), color='r')
+        continue
+      self._admin_dispatch_counters["enqueued"] += 1
+      enqueued += 1
+    return enqueued
+
+  def build_admin_capture_inputs(self, dct_captures):
+    """
+    Build capture-derived business inputs for the currently active
+    `admin_pipeline` plugin instances.
+
+    Parameters
+    ----------
+    dct_captures : dict
+        Capture snapshot keyed by stream name.
+
+    Returns
+    -------
+    dict
+        Capture-only business inputs keyed by admin plugin instance hash.
+    """
+    dct_business_inputs = {}
+    for instance_hash in self._admin_instance_hashes:
+      stream_name, _, _ = self._dct_hash_mappings.get(instance_hash, (None, None, None))
+      stream_capture = dct_captures.get(stream_name, {})
+      inputs = stream_capture.get("INPUTS")
+      if not isinstance(inputs, list) or len(inputs) == 0:
+        continue
+      normalized_inputs = [inp for inp in inputs if isinstance(inp, dict)]
+      if len(normalized_inputs) == 0:
+        continue
+      stream_name = stream_capture.get("STREAM_NAME")
+      if stream_name is None:
+        continue
+      dct_business_inputs[instance_hash] = {
+        "STREAM_NAME": stream_name,
+        "STREAM_METADATA": stream_capture.get("STREAM_METADATA") or {},
+        "INPUTS": normalized_inputs,
+      }
+    return dct_business_inputs
+
   def update_streams(self, dct_config_streams):
+    """Refresh business plugin instances from stream configuration.
+
+    Parameters
+    ----------
+    dct_config_streams : dict
+      Current stream configuration map.
+
+    Returns
+    -------
+    Any
+      AI engine usage information returned by `fetch_ai_engines`.
+    """
+    self._ensure_admin_async_dispatch_health()
     self.owner.set_loop_stage('2.bm.refresh.entry_update_streams')
     self._dct_config_streams = dct_config_streams
     self.owner.set_loop_stage('2.bm.refresh._check_instances')
     current_instances = self._check_instances()
+    self._refresh_admin_instance_hashes(current_instances)
     self.owner.set_loop_stage('2.bm.refresh._deallocate_unused_instances')
     self._deallocate_unused_instances(current_instances)
     self.owner.set_loop_stage('2.bm.refresh.fetch_ai_engines')
     in_use_ai_engines = self.fetch_ai_engines()
     return in_use_ai_engines
+
+  def bootstrap_admin_pipeline_instances(self, dct_config_streams):
+    """
+    Start or refresh only `admin_pipeline` business instances during early startup.
+
+    Parameters
+    ----------
+    dct_config_streams : dict
+        Full stream configuration map.
+
+    Returns
+    -------
+    list[str]
+        Current admin-pipeline instance hashes after refresh.
+    """
+    self._ensure_admin_async_dispatch_health()
+    self.owner.set_loop_stage('2.bm.bootstrap_admin.entry_update_streams')
+    self._dct_config_streams = dct_config_streams
+    self.owner.set_loop_stage('2.bm.bootstrap_admin._check_instances')
+    current_instances = self._check_instances(stream_names={ct.CONST_ADMIN_PIPELINE_NAME})
+    self._refresh_admin_instance_hashes(current_instances)
+    return current_instances
     
 
   def get_active_plugins_instances(self, as_dict=True):
@@ -186,8 +589,24 @@ class BusinessManager(Manager):
     dct_inv = {v : k for k,v in self._dct_hash_mappings.items()}
     return dct_inv.get((stream_name, signature, instance_id))
 
-  def get_current_jobs(self):
+  def get_current_jobs(self, stream_names=None):
+    """Build plugin instance jobs from the current stream configuration.
+
+    Parameters
+    ----------
+    stream_names : set[str] or None, optional
+        Optional stream-name filter used for admin-only bootstrap.
+
+    Returns
+    -------
+    list[tuple]
+        Plugin startup/update jobs with initiator, session, stream, signature,
+        instance id, and upstream config data.
+    """
     current_pipeline_names = list(self._dct_config_streams.keys())
+    if stream_names is not None:
+      allowed_streams = set(stream_names)
+      current_pipeline_names = [name for name in current_pipeline_names if name in allowed_streams]
     # now prioritize the "admin_pipeline" (ct.CONST_ADMIN_PIPELINE_NAME) to be the first one
     if ct.CONST_ADMIN_PIPELINE_NAME in current_pipeline_names:
       current_pipeline_names.remove(ct.CONST_ADMIN_PIPELINE_NAME)
@@ -248,13 +667,24 @@ class BusinessManager(Manager):
     #endif
     return
 
-  def _check_instances(self):
+  def _check_instances(self, stream_names=None):
     """
     IMPORTANT: this code section is critical wrt overall main loop functioning!
+
+    Parameters
+    ----------
+    stream_names : set[str] or None, optional
+        Optional stream-name filter limiting which pipeline instances are
+        checked or started.
+
+    Returns
+    -------
+    list[str]
+        Instance hashes that should remain active after this refresh.
     """
     current_instances = []
     self.set_loop_stage('2.bm.refresh._check_instances.get_current_jobs')
-    all_jobs = self.get_current_jobs()
+    all_jobs = self.get_current_jobs(stream_names=stream_names)
     n_all_jobs = len(all_jobs)
     debug_load_timings = self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True)
     total_start = perf_counter()
@@ -530,6 +960,7 @@ class BusinessManager(Manager):
 
   def close(self):
     self.P("Stopping all business plugins...", color='y')
+    self._stop_admin_dispatch_thread()
     # First, shutdown special instances
     self.__maybe_shutdown_special_instances()
     # Now, we can shutdown normal instances
@@ -668,6 +1099,8 @@ class BusinessManager(Manager):
     self.log.start_timer('execute_all_business_plugins')
     all_instance_hashes = list(dct_business_inputs.keys())
     for instance_hash in all_instance_hashes:
+      if self.cfg_admin_pipeline_async_dispatch and instance_hash in self._admin_instance_hashes:
+        continue
       inputs = dct_business_inputs.get(instance_hash)
       plugin = self.get_subaltern(instance_hash) # this or `self._dct_current_instances[instance_hash]`
       if plugin is None:

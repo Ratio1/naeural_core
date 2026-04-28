@@ -522,7 +522,8 @@ class _BasePluginAPIMixin:
         if debug:
           self.P("Setting data: {} -> {}".format(key, value), color="green")
         result = func(
-          key, value, 
+          key, value,
+          owner=self.get_instance_path(),
           readonly=readonly,
           token=token,
           peers=specific_peers,

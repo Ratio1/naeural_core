@@ -21,10 +21,11 @@ def get_serving_process_given_ai_engine(ai_engine):
 
   config_ai_engine = AI_ENGINES.get(ai_engine, {'SERVING_PROCESS': ai_engine})
   serving_process = config_ai_engine['SERVING_PROCESS']
-  if config_ai_engine.get('REQUIRES_INSTANCE', False):
-    # in this case we must code the serving process as CLASS, NAME particularly
-    # for custom downloadable models
-    # TODO: however the support seems to be lost downstream!
+  if instance_id != 'DEFAULT' or config_ai_engine.get('REQUIRES_INSTANCE', False):
+    # Preserve model-instance identity in the serving handle whenever upstream
+    # routing requested one. The downstream ServingManager and orchestrator
+    # paths already accept `(CLASS, NAME)` handles and use them to build unique
+    # server names.
     serving_process = serving_process, instance_id
   return serving_process
 

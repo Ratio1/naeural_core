@@ -56,6 +56,88 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
       self._deallocate_unused_captures(current_captures)
     #endif
     return
+
+  def ensure_stream_capture(self, config_stream, verbose=True):
+    """
+    Start or refresh exactly one capture without mutating the manager-wide stream set.
+
+    Parameters
+    ----------
+    config_stream : dict or None
+      Stream configuration for the capture to start or refresh.
+    verbose : bool, optional
+      If True, emit bootstrap loop-stage and diagnostic logs.
+
+    Returns
+    -------
+    bool
+      True when the capture exists or was started successfully, otherwise False.
+
+    Notes
+    -----
+    This is used by the orchestrator admin bootstrap path so `admin_pipeline`
+    capture startup can be forced early without running the full capture
+    reconciliation pass for every stream.
+    """
+    if config_stream is None:
+      return False
+
+    if config_stream[ct.TYPE].lower() == 'void':
+      return False
+
+    key = config_stream[ct.NAME]
+    if verbose and key == ct.CONST_ADMIN_PIPELINE_NAME:
+      self.P(
+        "ensure_stream_capture('{}'): type={}, exists={}.".format(
+          key,
+          config_stream[ct.TYPE],
+          key in self._dct_captures,
+        ),
+        color='b',
+      )
+    if key not in self._dct_captures:
+      if verbose:
+        self.owner.set_loop_stage('4.collect.bootstrap_admin.start_capture.' + key)
+      if verbose and key == ct.CONST_ADMIN_PIPELINE_NAME:
+        self.P("ensure_stream_capture('{}'): starting capture now.".format(key), color='b')
+      return self.start_capture(config_stream)
+
+    capture = self._dct_captures[key]
+    if verbose:
+      self.owner.set_loop_stage('4.collect.bootstrap_admin.maybe_update_config.' + key)
+    if verbose and key == ct.CONST_ADMIN_PIPELINE_NAME:
+      self.P("ensure_stream_capture('{}'): capture already exists, updating config.".format(key), color='b')
+    capture.maybe_update_config(config_stream)
+    return True
+
+  def get_single_stream_captured_data(self, stream_name):
+    """
+    Read one capture's available data without reconciling the global capture set.
+
+    Parameters
+    ----------
+    stream_name : str
+      Name of the capture stream to read.
+
+    Returns
+    -------
+    dict
+      Single-stream capture data keyed by stream name, or an empty dict when no
+      data is available.
+
+    Notes
+    -----
+    This is used by the async admin collector, which must not call
+    `update_streams()` with an admin-only subset because that API treats missing
+    streams as unused and deallocates them.
+    """
+    if stream_name not in self._dct_captures:
+      return {}
+
+    has_data, captured_data = self.get_captured_data(stream_name, update_loop_stage=False)
+    if not has_data:
+      return {}
+    return {stream_name: captured_data}
   
   def _maybe_log_dataflow_errors(self, msg=''):
     msg1, msg2 = None, None
@@ -312,7 +394,7 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
     return
 
 
-  def get_captured_data(self, key):
+  def get_captured_data(self, key, update_loop_stage=True):
     """
     This handles only a DCT based on `key` that is not a metastream. Metastreams
     are handled in `get_all_captured_data` post the call of this function
@@ -321,6 +403,8 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
     ----------
     key : str
       name of the DCT.
+    update_loop_stage : bool, optional
+      If True, update the owner loop-stage before reading the capture.
 
     Returns
     -------
@@ -337,22 +421,35 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
     if key in self._dct_captures:
       capture = self._dct_captures[key]
       if capture is not None and capture.cfg_is_thread and capture.has_data:
-        self.owner.set_loop_stage('4.collect.get_all_cap.get_captured_data.' + key)
+        if update_loop_stage:
+          self.owner.set_loop_stage('4.collect.get_all_cap.get_captured_data.' + key)
         captured_data = capture.get_data_capture()
         has_data = True
       #endif
     #endif
     return has_data, captured_data
 
-  def _aggregate_captured_data_in_metastreams(self, dct_captured_data):
+  def _aggregate_captured_data_in_metastreams(self, dct_captured_data, timer_section=None):
     """
     This function populates meta-streams with data from normal DCTs
+
+    Parameters
+    ----------
+    dct_captured_data : dict
+      Captured data keyed by stream name.
+    timer_section : str or None, optional
+      Optional logger timer section, used by non-main collection threads.
+
+    Returns
+    -------
+    dict
+      Captured data enriched with available metastream outputs.
     """
-    self.log.start_timer('aggregate_meta')
+    self.log.start_timer('aggregate_meta', section=timer_section)
     for key in self._dct_captures:
       capture = self._dct_captures[key]
       if capture is not None and not capture.cfg_is_thread:
-        self.log.start_timer('prepare_meta_capture')
+        self.log.start_timer('prepare_meta_capture', section=timer_section)
         # is_thread will return True for normal DCT threads while form meta 
         # streams False will return (as it will be simple DataCapture instanaces)
         inputs = []
@@ -371,7 +468,7 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
           #endif
 
           crt_inputs = dct_captured_data[collected_stream]['INPUTS']
-          self.log.start_timer('prepare_meta_capture_data')
+          self.log.start_timer('prepare_meta_capture_data', section=timer_section)
           for dct_inp in crt_inputs:
             # we take each input and deep-copy it
             dct_res = deepcopy(dct_inp)
@@ -382,7 +479,7 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
               **{'SOURCE_STREAM_NAME' : dct_captured_data[collected_stream]['STREAM_NAME']}
             }
             lst_datas.append(dct_res)
-          self.log.stop_timer('prepare_meta_capture_data')
+          self.log.stop_timer('prepare_meta_capture_data', section=timer_section)
         # endfor each collected stream (if any)
         if call_metastream_post_process:
           """
@@ -391,9 +488,9 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
           """
           if hasattr(capture, 'post_process_inputs'):
             # we post-process original inputs if required
-            self.log.start_timer('prepare_meta_capture_post_proc')
+            self.log.start_timer('prepare_meta_capture_post_proc', section=timer_section)
             lst_metastream_inputs = capture.post_process_inputs(lst_datas)
-            self.log.stop_timer('prepare_meta_capture_post_proc')
+            self.log.stop_timer('prepare_meta_capture_post_proc', section=timer_section)
             # finally we add the inputs to the list of inputs
             inputs += lst_metastream_inputs
         # endif call_metastream_post_process
@@ -404,64 +501,82 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
               .get('METADATA', {})
               .get('cap_time', 0)
           })
-        self.log.stop_timer('prepare_meta_capture')
+        self.log.stop_timer('prepare_meta_capture', section=timer_section)
       #endif is meta-stream
     #endfor
-    self.log.stop_timer('aggregate_meta')
+    self.log.stop_timer('aggregate_meta', section=timer_section)
     return dct_captured_data
 
-  def get_all_captured_data(self):
-    self.log.start_timer('get_all_captures_full')
+  def get_all_captured_data(self, timer_section=None, display_status=True):
+    """
+    Collect available data from all active captures and metastreams.
+
+    Parameters
+    ----------
+    timer_section : str or None, optional
+      Optional logger timer section, used by non-main collection threads.
+    display_status : bool, optional
+      If True, periodically display capture status summaries.
+
+    Returns
+    -------
+    dict
+      Captured data keyed by stream name.
+    """
+    self.log.start_timer('get_all_captures_full', section=timer_section)
     
-    self.log.start_timer('get_all_captures_stage1')
+    self.log.start_timer('get_all_captures_stage1', section=timer_section)
     self.owner.set_loop_stage('4.collect.get_all_cap.start')
     dct_captured_data = {}
     needs_skip = self._needs_skip_acquisition()
-    self.log.stop_timer('get_all_captures_stage1')
+    self.log.stop_timer('get_all_captures_stage1', section=timer_section)
     
     if needs_skip:
-      self.log.start_timer('get_all_captures_skip')
+      self.log.start_timer('get_all_captures_skip', section=timer_section)
       self.owner.set_loop_stage('4.collect.get_all_cap.data_flow_stopped')
       if not self.data_flow_stopped:
         self._nr_data_flow_stops += 1
         self._maybe_log_dataflow_errors(msg="Data flow STOPPED.")
       self.data_flow_stopped = True
-      self.log.stop_timer('get_all_captures_skip')
+      self.log.stop_timer('get_all_captures_skip', section=timer_section)
     else:
-      self.log.start_timer('get_all_captures_stage2')
+      self.log.start_timer('get_all_captures_stage2', section=timer_section)
       self.owner.set_loop_stage('4.collect.get_all_cap.data_flow_working')
       if self.data_flow_stopped:
         self._maybe_log_dataflow_errors(msg="Data flow RESTARTED.")        
       self.data_flow_stopped = False      
       self.owner.set_loop_stage('4.collect.get_all_cap.get_captured_data')
-      self.log.stop_timer('get_all_captures_stage2')
+      self.log.stop_timer('get_all_captures_stage2', section=timer_section)
 
-      self.log.start_timer('get_all_captures_stage3')      
+      self.log.start_timer('get_all_captures_stage3', section=timer_section)
       lst_avail = [k for k in self._dct_captures if self._dct_captures[k] is not None]
       n = len(lst_avail)
       str_stage = 'get_captured_n{}'.format(n)
-      self.log.start_timer(str_stage)
+      self.log.start_timer(str_stage, section=timer_section)
       self.owner.set_loop_stage('4.collect.get_all_cap.get_captured_data.' + str_stage)
       dct_captured_data_raw = {k: self.get_captured_data(k) for k in lst_avail}
-      self.log.stop_timer(str_stage)
+      self.log.stop_timer(str_stage, section=timer_section)
       
       self.owner.set_loop_stage('4.collect.get_all_cap.dct_captured_data_raw')
       dct_captured_data = {
         name: captured_data for name, (has_data, captured_data) in dct_captured_data_raw.items() if has_data
       }      
-      self.log.stop_timer('get_all_captures_stage3')   
+      self.log.stop_timer('get_all_captures_stage3', section=timer_section)
          
-      self.log.start_timer('get_all_captures_stage4')
+      self.log.start_timer('get_all_captures_stage4', section=timer_section)
       # aggredate date where we have streams
       self.owner.set_loop_stage('4.collect.get_all_cap.aggregate_metastreams')
-      dct_captured_data = self._aggregate_captured_data_in_metastreams(dct_captured_data)
-      self.log.stop_timer('get_all_captures_stage4')
+      dct_captured_data = self._aggregate_captured_data_in_metastreams(
+        dct_captured_data,
+        timer_section=timer_section,
+      )
+      self.log.stop_timer('get_all_captures_stage4', section=timer_section)
 
       # TODO(S+AID): check all `dct_captured_data` images and raise warning if images are not `uint8`!
 
-      self.log.start_timer('get_all_captures_stage_status')
+      self.log.start_timer('get_all_captures_stage_status', section=timer_section)
       display_status_each = self.log.config_data.get(ct.CAPTURE_STATS_DISPLAY,  ct.CAPTURE_STATS_DISPLAY_DEFAULT)
-      if (self._last_gather_summary is None) or (time() - self._last_gather_summary > display_status_each):
+      if display_status and ((self._last_gather_summary is None) or (time() - self._last_gather_summary > display_status_each)):
         self._last_gather_summary = time()
         self.owner.set_loop_stage('4.collect.get_all_cap.get_captures_status')
         _ = self.get_captures_status(display=True)
@@ -472,9 +587,9 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
         self.is_data_available  = True
       else:
         self.is_data_available = False
-      self.log.stop_timer('get_all_captures_stage_status')
+      self.log.stop_timer('get_all_captures_stage_status', section=timer_section)
     #endif needs skip
-    self.log.stop_timer('get_all_captures_full')
+    self.log.stop_timer('get_all_captures_full', section=timer_section)
     return dct_captured_data
   
   
@@ -596,6 +711,8 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
           section=self.log.default_timers_section,
           was_recently_seen=True,
         )
+        if not isinstance(all_cap_timer, str):
+          all_cap_timer = ""
         prec = pd.get_option('display.float_format')
         _format = '{:.1f}'
         pd.set_option('display.float_format', lambda x: _format.format(x))        

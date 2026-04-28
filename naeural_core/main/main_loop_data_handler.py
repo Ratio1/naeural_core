@@ -224,9 +224,9 @@ class MainLoopDataHandler(DecentrAIObject):
       serving_process = get_serving_process_given_ai_engine(ai_engine)
       # next we get params from AI ENGINE config
       ai_engine_params = get_params_given_ai_engine(ai_engine)
-      dct_servers_inputs[serving_process] = []
-      self._dct_models_stream_idx[serving_process] = {}
-      i = 0
+      dct_servers_inputs.setdefault(serving_process, [])
+      self._dct_models_stream_idx.setdefault(serving_process, {})
+      i = len(dct_servers_inputs[serving_process])
       for _, (stream, biz_plugin_model_params_json) in enumerate(list(dct.keys())):
         server_input = self._get_stream_captured_data(stream)
         ### make sure that data was collected on this particular stream
@@ -260,7 +260,9 @@ class MainLoopDataHandler(DecentrAIObject):
   def append_inferences(self, dct_models_outputs):
     """
     
-    TODO: this does not correctly support multiple instances of the same serving process
+    Supports multiple serving handles for the same serving class, including
+    `(serving_process, model_instance_id)` tuples used to target distinct model
+    instances on the same node.
     
     Parameters:
     ----------

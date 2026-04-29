@@ -266,6 +266,8 @@ def test_send_mail_dispatches_to_provider_slug_and_builds_attachments():
 
     def __init__(self):
       self.raise_for_status_called = False
+      self.status_code = 200
+      self.text = '{"id":"email-id"}'
 
     def raise_for_status(self):
       """Mark the fake response as checked for HTTP errors."""
@@ -289,6 +291,8 @@ def test_send_mail_dispatches_to_provider_slug_and_builds_attachments():
   send_mail_mod.requests.post = _fake_post
   try:
     op = object.__new__(SendMailHeavyOp)
+    logs = []
+    op.P = lambda message, **kwargs: logs.append((message, kwargs))
 
     payload = {
       ct.SEND_EMAIL: True,
@@ -348,6 +352,14 @@ def test_send_mail_dispatches_to_provider_slug_and_builds_attachments():
   assert "_H_EMAIL_CONFIG" not in fallback_body
   assert "_H_EMAIL_SUBJECT" not in fallback_body
   assert "_H_SEND_EMAIL" not in fallback_body
+  assert len(logs) == 2
+  assert "EMAIL_SEND_ATTEMPT" in logs[0][0]
+  assert "provider=resend" in logs[0][0]
+  assert "EMAIL_SEND_RESPONSE" in logs[1][0]
+  assert "status_code=200" in logs[1][0]
+  assert "email-id" in logs[1][0]
+  assert "test-api-key" not in logs[0][0]
+  assert "test-api-key" not in logs[1][0]
 
 
 def test_send_sms_register_scrubs_live_payload():
@@ -406,6 +418,8 @@ def test_send_sms_dispatches_each_recipient():
 
     def __init__(self):
       self.raise_for_status_called = False
+      self.status_code = 201
+      self.text = '{"id":"sms-id","error":{"code":0}}'
 
     def raise_for_status(self):
       """Mark the fake response as checked for HTTP errors."""
@@ -431,6 +445,8 @@ def test_send_sms_dispatches_each_recipient():
   send_sms_mod.time.time = lambda: 1730000000
   try:
     op = object.__new__(SendSMSHeavyOp)
+    logs = []
+    op.P = lambda message, **kwargs: logs.append((message, kwargs))
 
     payload = {
       ct.SEND_SMS: True,
@@ -494,6 +510,17 @@ def test_send_sms_dispatches_each_recipient():
     assert "IMG" not in call["json"]
     assert "IMG_ORIG" not in call["json"]
 
+  assert len(logs) == 4
+  assert "SMS_SEND_ATTEMPT" in logs[0][0]
+  assert "provider=web2sms" in logs[0][0]
+  assert "+40711111111" not in logs[0][0]
+  assert "SMS_SEND_RESPONSE" in logs[1][0]
+  assert "status_code=201" in logs[1][0]
+  assert "sms-id" in logs[1][0]
+  assert "test-api-key" not in logs[0][0]
+  assert "secret-value" not in logs[0][0]
+  assert expected_signature not in logs[1][0]
+
 
 def test_send_sms_allows_blank_sender_for_web2sms():
   """Verify web2sms accepts a blank sender field.
@@ -532,6 +559,7 @@ def test_send_sms_allows_blank_sender_for_web2sms():
   send_sms_mod.time.time = lambda: 1730000001
   try:
     op = object.__new__(SendSMSHeavyOp)
+    op.P = lambda message, **kwargs: None
     op._process_dct_operation({
       ct.SEND_SMS: True,
       "_H_SMS_CONFIG": {

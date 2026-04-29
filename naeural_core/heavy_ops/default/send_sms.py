@@ -130,6 +130,31 @@ class SendSMSHeavyOp(BaseHeavyOp):
       recipients.append(recipient_text)
     return recipients
 
+  @staticmethod
+  def _format_response_body_for_log(response, max_length=1000):
+    """Return a bounded provider response body for operational logs.
+
+    Parameters
+    ----------
+    response : requests.Response
+      HTTP response returned by the provider.
+    max_length : int, optional
+      Maximum number of characters to keep in the log message.
+
+    Returns
+    -------
+    str
+      Compact response body text with newlines collapsed and long bodies
+      truncated. Empty or unavailable bodies are reported as ``<empty>``.
+    """
+    body = str(getattr(response, "text", "") or "")
+    body = body.replace("\r", " ").replace("\n", " ").strip()
+    if body == "":
+      return "<empty>"
+    if len(body) > max_length:
+      return "{}...<truncated>".format(body[:max_length])
+    return body
+
   def _process_dct_operation(self, dct):
     """Validate and dispatch SMS delivery work.
 
@@ -271,8 +296,22 @@ class SendSMSHeavyOp(BaseHeavyOp):
       "signature": signature,
     }
 
+    # Log the operational envelope only. API keys, web2sms secrets, computed
+    # signatures, recipient addresses, and message text must never reach logs.
+    self.P(
+      "SMS_SEND_ATTEMPT provider=web2sms url={} sender_present={} recipient=redacted".format(
+        _WEB2SMS_URL,
+        sender != "",
+      )
+    )
     # Use HTTP Basic auth for the provider credential layer while preserving
     # the signed JSON body that the remote API still expects for delivery.
     response = requests.post(_WEB2SMS_URL, auth=(api_key, signature), json=payload, timeout=30)
+    self.P(
+      "SMS_SEND_RESPONSE provider=web2sms status_code={} body={}".format(
+        getattr(response, "status_code", "unknown"),
+        self._format_response_body_for_log(response),
+      )
+    )
     response.raise_for_status()
     return response

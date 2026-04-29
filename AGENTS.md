@@ -82,6 +82,7 @@ This file is "alive." `AGENTS.md` is the authoritative source for repository pur
 - Validate external payloads using the filters defined in `naeural_core.constants` when extending comms modules.
 - Do not embed credential defaults in plugin code or docs.
 - Treat new operator commands, deployment paths, auth flows, and incident semantics as `AGENTS.md` update triggers.
+- Heavy-op startup keeps `send_mail` and `send_sms` default-enabled even when `HEAVY_OPS_CONFIG.ACTIVE_COMM_ASYNC` is overridden; operators must set `DISABLE_DEFAULT_SEND_MAIL` or `DISABLE_DEFAULT_SEND_SMS` to opt out of default notification dispatch.
 - `EE_DISABLE_ADDRESSED_PAYLOAD_SUBS=true` disables addressed payload-topic subscriptions and forces broadcast-only payload receive during rollout/rollback of targeted payload routing; `EE_DISABLE_ADDRESSED_PAYLOAD_SENDS=true` separately disables targeted payload fanout on send and downgrades addressed payloads to one broadcast publish without warning spam.
 
 ## Agent Cards

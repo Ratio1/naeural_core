@@ -287,6 +287,47 @@ class TestAdminPipelineAsyncDispatch(unittest.TestCase):
     self.assertEqual(enqueued, 2)
     self.assertEqual(manager._admin_dispatch_queue.qsize(), 2)
 
+  def test_admin_hash_refresh_excludes_configured_but_skipped_plugins(self):
+    manager = self._make_manager(async_enabled=True)
+    admin_plugin = _FakePlugin()
+    skipped_admin_hash = "skipped_admin"
+    manager._dct_current_instances[self.ADMIN_HASH] = admin_plugin
+    manager._dct_current_instances[skipped_admin_hash] = None
+    manager._dct_hash_mappings[skipped_admin_hash] = (
+      ct.CONST_ADMIN_PIPELINE_NAME,
+      "SUPERVISOR_ONLY_ADMIN",
+      "SUPERVISOR_ONLY_ADMIN_INST",
+    )
+
+    manager._refresh_admin_instance_hashes([self.ADMIN_HASH, skipped_admin_hash])
+
+    self.assertEqual(manager._admin_instance_hashes, {self.ADMIN_HASH})
+
+  def test_async_dispatch_does_not_enqueue_skipped_admin_plugins(self):
+    manager = self._make_manager(async_enabled=True)
+    manager._initialize_admin_async_dispatch()
+    skipped_admin_hash = "skipped_admin"
+    manager._dct_current_instances[self.ADMIN_HASH] = _FakePlugin()
+    manager._dct_current_instances[skipped_admin_hash] = None
+    manager._dct_hash_mappings[skipped_admin_hash] = (
+      ct.CONST_ADMIN_PIPELINE_NAME,
+      "SUPERVISOR_ONLY_ADMIN",
+      "SUPERVISOR_ONLY_ADMIN_INST",
+    )
+    manager._refresh_admin_instance_hashes([self.ADMIN_HASH, skipped_admin_hash])
+
+    enqueued = manager.dispatch_admin_pipeline_inputs({
+      self.ADMIN_HASH: {
+        "INPUTS": [{"TYPE": "STRUCT_DATA", "STRUCT_DATA": {"value": "admin"}}],
+      },
+      skipped_admin_hash: {
+        "INPUTS": [{"TYPE": "STRUCT_DATA", "STRUCT_DATA": {"value": "skipped"}}],
+      },
+    })
+
+    self.assertEqual(enqueued, 1)
+    self.assertEqual(manager._admin_dispatch_queue.qsize(), 1)
+
   def test_async_dispatch_requires_threaded_plugins(self):
     manager = self._make_manager(async_enabled=True, run_on_threads=False)
 

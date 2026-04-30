@@ -368,20 +368,24 @@ class BusinessManager(Manager):
 
   def _refresh_admin_instance_hashes(self, current_instances):
     """
-    Refresh the set of currently active `admin_pipeline` instance hashes.
+    Refresh the set of currently dispatchable `admin_pipeline` instance hashes.
 
     Parameters
     ----------
     current_instances : list[str]
-        Active instance hashes produced by the normal business-manager refresh.
+        Instance hashes produced by the normal business-manager refresh.
+        Supervisor-only admin jobs may be present in this list even when they
+        were skipped locally and have no live plugin object.
 
     Returns
     -------
     None
-        Updates the in-memory admin instance hash set.
+        Updates the in-memory admin instance hash set with live plugin hashes.
     """
     admin_hashes = set()
     for instance_hash in current_instances:
+      if self._dct_current_instances.get(instance_hash) is None:
+        continue
       stream_name, _, _ = self._dct_hash_mappings.get(instance_hash, (None, None, None))
       if stream_name == ct.CONST_ADMIN_PIPELINE_NAME:
         admin_hashes.add(instance_hash)

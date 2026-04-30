@@ -178,6 +178,52 @@ class SendMailHeavyOp(BaseHeavyOp):
       })
     return attachments
 
+  @staticmethod
+  def _count_recipients(value):
+    """Count configured recipients without exposing recipient addresses.
+
+    Parameters
+    ----------
+    value : Any
+      Normalized recipient value passed to the provider request. The value may
+      be ``None``, a scalar address, or a list/tuple of addresses.
+
+    Returns
+    -------
+    int
+      Number of recipient entries represented by ``value``.
+    """
+    if value is None:
+      return 0
+    if isinstance(value, (list, tuple)):
+      return len(value)
+    return 1
+
+  @staticmethod
+  def _format_response_body_for_log(response, max_length=1000):
+    """Return a bounded provider response body for operational logs.
+
+    Parameters
+    ----------
+    response : requests.Response
+      HTTP response returned by the provider.
+    max_length : int, optional
+      Maximum number of characters to keep in the log message.
+
+    Returns
+    -------
+    str
+      Compact response body text with newlines collapsed and long bodies
+      truncated. Empty or unavailable bodies are reported as ``<empty>``.
+    """
+    body = str(getattr(response, "text", "") or "")
+    body = body.replace("\r", " ").replace("\n", " ").strip()
+    if body == "":
+      return "<empty>"
+    if len(body) > max_length:
+      return "{}...<truncated>".format(body[:max_length])
+    return body
+
   def _process_dct_operation(self, dct):
     """Dispatch queued notification work to a provider-specific sender.
 
@@ -278,11 +324,28 @@ class SendMailHeavyOp(BaseHeavyOp):
       "Authorization": "Bearer {}".format(api_key),
       "Content-Type": "application/json",
     }
+    # Log the operational envelope only. Credentials, recipient addresses,
+    # message text, and attachment bodies are intentionally excluded from E2 logs.
+    self.P(
+      "EMAIL_SEND_ATTEMPT provider=resend url={} to_count={} cc_count={} bcc_count={} attachment_count={}".format(
+        _RESEND_EMAILS_URL,
+        self._count_recipients(to),
+        self._count_recipients(cc),
+        self._count_recipients(bcc),
+        len(attachments or []),
+      )
+    )
     response = requests.post(
       _RESEND_EMAILS_URL,
       headers=headers,
       json=payload,
       timeout=30,
+    )
+    self.P(
+      "EMAIL_SEND_RESPONSE provider=resend status_code={} body={}".format(
+        getattr(response, "status_code", "unknown"),
+        self._format_response_body_for_log(response),
+      )
     )
     response.raise_for_status()
     return response

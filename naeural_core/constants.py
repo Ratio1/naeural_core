@@ -355,6 +355,26 @@ class PLUGIN_SEARCH:
   SUFFIX_TESTING_FRAMEWORK_SCORING_PLUGINS = 'ScoringPlugin'
 
 
+class HEAVY_OPS:
+  """Configuration keys and built-in operation names for heavy-op startup.
+
+  Notes
+  -----
+  Keep these startup keys centralized because heavy-op initialization is a
+  deployment-facing contract: edge-node configs may override the active
+  operation lists, while notification dispatchers remain default-enabled unless
+  their explicit disable flags are set.
+  """
+
+  HEAVY_OPS_CONFIG = 'HEAVY_OPS_CONFIG'
+  ACTIVE_COMM_ASYNC = 'ACTIVE_COMM_ASYNC'
+  ACTIVE_ON_COMM_THREAD = 'ACTIVE_ON_COMM_THREAD'
+  DISABLE_DEFAULT_SEND_MAIL = 'DISABLE_DEFAULT_SEND_MAIL'
+  DISABLE_DEFAULT_SEND_SMS = 'DISABLE_DEFAULT_SEND_SMS'
+  SEND_MAIL = 'send_mail'
+  SEND_SMS = 'send_sms'
+
+
 class RETURN_CODES:
   CODE_RESTART = 10
   CODE_EXCEPTION = 11

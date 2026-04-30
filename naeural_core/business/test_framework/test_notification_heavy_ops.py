@@ -12,6 +12,7 @@ if str(_PACKAGE_ROOT) not in sys.path:
   sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from naeural_core.heavy_ops.base.base_heavy_op import BaseHeavyOp
+from naeural_core.heavy_ops.heavy_ops_manager import resolve_heavy_ops_config
 from naeural_core.heavy_ops.default.send_mail import SendMailHeavyOp
 from naeural_core.heavy_ops.default import send_mail as send_mail_mod
 from naeural_core.heavy_ops.default.send_sms import SendSMSHeavyOp
@@ -197,6 +198,48 @@ def test_process_payload_runs_sync_only_for_real_work():
   assert op.heavy_op_count == 1
 
 
+def test_heavy_ops_config_keeps_default_notification_dispatchers_enabled():
+  """Verify custom async heavy ops cannot accidentally drop mail/SMS dispatch.
+
+  The regression captures the startup contract for notification heavy ops:
+  deployments may list extra asynchronous operations in ``ACTIVE_COMM_ASYNC``,
+  but the default mail and SMS dispatchers remain enabled unless their
+  explicit disable switches are set.
+  """
+  config = resolve_heavy_ops_config({
+    "ACTIVE_COMM_ASYNC": ["save_image_dataset"],
+    "ACTIVE_ON_COMM_THREAD": ["image_compression"],
+  })
+
+  assert config["ACTIVE_COMM_ASYNC"] == ["send_mail", "send_sms", "save_image_dataset"]
+  assert config["ACTIVE_ON_COMM_THREAD"] == ["image_compression"]
+
+
+def test_heavy_ops_config_honors_default_notification_disable_flags():
+  """Verify each default notification dispatcher has an explicit opt-out.
+
+  The disable flags are intentionally channel-specific so operators can keep
+  email enabled while disabling SMS, or vice versa. The regression also covers
+  the default-list path where an operator sets only a disable flag and does
+  not restate ``ACTIVE_COMM_ASYNC``.
+  """
+  custom_config = resolve_heavy_ops_config({
+    "DISABLE_DEFAULT_SEND_MAIL": True,
+    "DISABLE_DEFAULT_SEND_SMS": True,
+    "ACTIVE_COMM_ASYNC": ["save_image_dataset"],
+  })
+  default_list_config = resolve_heavy_ops_config({
+    "DISABLE_DEFAULT_SEND_SMS": True,
+  })
+
+  assert custom_config["ACTIVE_COMM_ASYNC"] == ["save_image_dataset"]
+  assert custom_config["DISABLE_DEFAULT_SEND_MAIL"] is True
+  assert custom_config["DISABLE_DEFAULT_SEND_SMS"] is True
+  assert default_list_config["ACTIVE_COMM_ASYNC"] == ["send_mail", "save_image_dataset"]
+  assert default_list_config["DISABLE_DEFAULT_SEND_MAIL"] is False
+  assert default_list_config["DISABLE_DEFAULT_SEND_SMS"] is True
+
+
 def test_send_mail_register_scrubs_live_payload_and_keeps_queued_copy():
   """Verify registration scrubs the live payload while preserving the queue copy.
 
@@ -266,6 +309,8 @@ def test_send_mail_dispatches_to_provider_slug_and_builds_attachments():
 
     def __init__(self):
       self.raise_for_status_called = False
+      self.status_code = 200
+      self.text = '{"id":"email-id"}'
 
     def raise_for_status(self):
       """Mark the fake response as checked for HTTP errors."""
@@ -289,6 +334,8 @@ def test_send_mail_dispatches_to_provider_slug_and_builds_attachments():
   send_mail_mod.requests.post = _fake_post
   try:
     op = object.__new__(SendMailHeavyOp)
+    logs = []
+    op.P = lambda message, **kwargs: logs.append((message, kwargs))
 
     payload = {
       ct.SEND_EMAIL: True,
@@ -348,6 +395,14 @@ def test_send_mail_dispatches_to_provider_slug_and_builds_attachments():
   assert "_H_EMAIL_CONFIG" not in fallback_body
   assert "_H_EMAIL_SUBJECT" not in fallback_body
   assert "_H_SEND_EMAIL" not in fallback_body
+  assert len(logs) == 2
+  assert "EMAIL_SEND_ATTEMPT" in logs[0][0]
+  assert "provider=resend" in logs[0][0]
+  assert "EMAIL_SEND_RESPONSE" in logs[1][0]
+  assert "status_code=200" in logs[1][0]
+  assert "email-id" in logs[1][0]
+  assert "test-api-key" not in logs[0][0]
+  assert "test-api-key" not in logs[1][0]
 
 
 def test_send_sms_register_scrubs_live_payload():
@@ -406,6 +461,8 @@ def test_send_sms_dispatches_each_recipient():
 
     def __init__(self):
       self.raise_for_status_called = False
+      self.status_code = 201
+      self.text = '{"id":"sms-id","error":{"code":0}}'
 
     def raise_for_status(self):
       """Mark the fake response as checked for HTTP errors."""
@@ -431,6 +488,8 @@ def test_send_sms_dispatches_each_recipient():
   send_sms_mod.time.time = lambda: 1730000000
   try:
     op = object.__new__(SendSMSHeavyOp)
+    logs = []
+    op.P = lambda message, **kwargs: logs.append((message, kwargs))
 
     payload = {
       ct.SEND_SMS: True,
@@ -494,6 +553,17 @@ def test_send_sms_dispatches_each_recipient():
     assert "IMG" not in call["json"]
     assert "IMG_ORIG" not in call["json"]
 
+  assert len(logs) == 4
+  assert "SMS_SEND_ATTEMPT" in logs[0][0]
+  assert "provider=web2sms" in logs[0][0]
+  assert "+40711111111" not in logs[0][0]
+  assert "SMS_SEND_RESPONSE" in logs[1][0]
+  assert "status_code=201" in logs[1][0]
+  assert "sms-id" in logs[1][0]
+  assert "test-api-key" not in logs[0][0]
+  assert "secret-value" not in logs[0][0]
+  assert expected_signature not in logs[1][0]
+
 
 def test_send_sms_allows_blank_sender_for_web2sms():
   """Verify web2sms accepts a blank sender field.
@@ -532,6 +602,7 @@ def test_send_sms_allows_blank_sender_for_web2sms():
   send_sms_mod.time.time = lambda: 1730000001
   try:
     op = object.__new__(SendSMSHeavyOp)
+    op.P = lambda message, **kwargs: None
     op._process_dct_operation({
       ct.SEND_SMS: True,
       "_H_SMS_CONFIG": {
@@ -661,6 +732,8 @@ def test_send_sms_rejects_blank_mandatory_values():
 TEST_FUNCTIONS = (
   test_process_payload_skips_none_registration,
   test_process_payload_runs_sync_only_for_real_work,
+  test_heavy_ops_config_keeps_default_notification_dispatchers_enabled,
+  test_heavy_ops_config_honors_default_notification_disable_flags,
   test_send_mail_register_scrubs_live_payload_and_keeps_queued_copy,
   test_send_mail_register_skips_payloads_without_email_flag,
   test_send_mail_dispatches_to_provider_slug_and_builds_attachments,
@@ -672,7 +745,7 @@ TEST_FUNCTIONS = (
 
 
 def load_tests(loader, tests, pattern):
-  """Return the seven standalone regression functions as discoverable test cases.
+  """Return the standalone regression functions as discoverable test cases.
 
   Parameters
   ----------

@@ -1,32 +1,176 @@
-"""
- "HEAVY_OPS_CONFIG" : {
-    "ACTIVE_COMM_ASYNC" : [
-      'send_mail',
-      'debug_save',
-      'save_image_dataset',
-      'a_dummy'
-    ],
-    
-    "ACTIVE_ON_COMM_THREAD" : [
-      'image_compression',
-    ]
+"""Heavy-operation startup manager.
+
+This module owns the runtime merge contract for startup ``HEAVY_OPS_CONFIG``.
+Deployments can add asynchronous or communication-thread operations, but the
+notification dispatchers are treated as safe runtime defaults:
+
+.. code-block:: json
+
+  {
+    "HEAVY_OPS_CONFIG": {
+      "DISABLE_DEFAULT_SEND_MAIL": false,
+      "DISABLE_DEFAULT_SEND_SMS": false,
+      "ACTIVE_COMM_ASYNC": [
+        "send_mail",
+        "send_sms",
+        "save_image_dataset"
+      ],
+      "ACTIVE_ON_COMM_THREAD": []
+    }
   }
-  
+
+``send_mail`` and ``send_sms`` stay enabled even when
+``ACTIVE_COMM_ASYNC`` is overridden with custom operations. Operators must use
+``DISABLE_DEFAULT_SEND_MAIL`` or ``DISABLE_DEFAULT_SEND_SMS`` to opt out of
+runtime auto-injection. If an operator explicitly lists a disabled operation in
+``ACTIVE_COMM_ASYNC``, the explicit list wins; the disable flag only prevents
+default insertion.
 """
-
-DEFAULT_HEAVY_OPS_CONFIG = {
-  "ACTIVE_COMM_ASYNC" : [
-    "send_mail",
-    "send_sms",
-    "save_image_dataset",
-  ],
-
-  "ACTIVE_ON_COMM_THREAD" : [
-  ]     
-}
 
 from naeural_core.manager import Manager
 from naeural_core import constants as ct
+
+
+DEFAULT_COMM_ASYNC_NOTIFICATION_OPS = (
+  (ct.HEAVY_OPS.SEND_MAIL, ct.HEAVY_OPS.DISABLE_DEFAULT_SEND_MAIL),
+  (ct.HEAVY_OPS.SEND_SMS, ct.HEAVY_OPS.DISABLE_DEFAULT_SEND_SMS),
+)
+
+DEFAULT_HEAVY_OPS_CONFIG = {
+  ct.HEAVY_OPS.DISABLE_DEFAULT_SEND_MAIL : False,
+  ct.HEAVY_OPS.DISABLE_DEFAULT_SEND_SMS : False,
+
+  ct.HEAVY_OPS.ACTIVE_COMM_ASYNC : [
+    ct.HEAVY_OPS.SEND_MAIL,
+    ct.HEAVY_OPS.SEND_SMS,
+    "save_image_dataset",
+  ],
+
+  ct.HEAVY_OPS.ACTIVE_ON_COMM_THREAD : [
+  ]     
+}
+
+
+def _as_list(value):
+  """Return ``value`` as a list while preserving list-like config values.
+
+  Parameters
+  ----------
+  value : Any
+    Raw config value read from the startup configuration.
+
+  Returns
+  -------
+  list
+    Empty list for ``None``, a shallow list copy for list/tuple inputs, or a
+    single-item list for scalar values. The scalar fallback keeps startup
+    normalization defensive without hiding malformed values later in plugin
+    loading.
+  """
+  if value is None:
+    return []
+  if isinstance(value, (list, tuple)):
+    return list(value)
+  return [value]
+
+
+def _is_truthy_config_value(value):
+  """Return whether a startup-config value explicitly enables a boolean flag.
+
+  Parameters
+  ----------
+  value : Any
+    Raw value from JSON or env-expanded startup config.
+
+  Returns
+  -------
+  bool
+    ``True`` for boolean true, non-zero numbers, and common textual true
+    spellings. Empty strings and false-like strings return ``False``.
+  """
+  if isinstance(value, str):
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
+  return bool(value)
+
+
+def _dedupe_preserving_order(values):
+  """Remove duplicate operation names while preserving first occurrence order.
+
+  Parameters
+  ----------
+  values : list
+    Operation names assembled from default notification operations and the
+    configured custom operation list.
+
+  Returns
+  -------
+  list
+    De-duplicated operation names in the order they should be initialized.
+  """
+  result = []
+  seen = set()
+  for value in values:
+    if value in seen:
+      continue
+    seen.add(value)
+    result.append(value)
+  return result
+
+
+def resolve_heavy_ops_config(config):
+  """Merge startup heavy-op config with default notification dispatchers.
+
+  Parameters
+  ----------
+  config : dict or None
+    Raw ``HEAVY_OPS_CONFIG`` value from startup config. A deployment may
+    provide custom async operations, but mail and SMS remain default-enabled
+    unless ``DISABLE_DEFAULT_SEND_MAIL`` or ``DISABLE_DEFAULT_SEND_SMS`` is set.
+
+  Returns
+  -------
+  dict
+    Normalized heavy-op configuration with ``ACTIVE_COMM_ASYNC`` containing
+    default notification dispatchers plus any configured custom operations.
+
+  Notes
+  -----
+  The merge is intentionally performed inside the runtime instead of relying
+  on every deployment config to repeat notification operations. This prevents
+  an unrelated override such as ``["save_image_dataset"]`` from silently
+  disabling alert email or SMS delivery.
+  """
+  config = {} if config is None else dict(config)
+  result = {
+    key: _as_list(value) if key in (
+      ct.HEAVY_OPS.ACTIVE_COMM_ASYNC,
+      ct.HEAVY_OPS.ACTIVE_ON_COMM_THREAD,
+    ) else value
+    for key, value in DEFAULT_HEAVY_OPS_CONFIG.items()
+  }
+
+  for key, value in config.items():
+    if key in (ct.HEAVY_OPS.ACTIVE_COMM_ASYNC, ct.HEAVY_OPS.ACTIVE_ON_COMM_THREAD):
+      result[key] = _as_list(value)
+    else:
+      result[key] = value
+
+  has_configured_async_ops = ct.HEAVY_OPS.ACTIVE_COMM_ASYNC in config
+  active_comm_async = list(result[ct.HEAVY_OPS.ACTIVE_COMM_ASYNC])
+  default_comm_async = []
+  for operation_name, disable_key in DEFAULT_COMM_ASYNC_NOTIFICATION_OPS:
+    if _is_truthy_config_value(result.get(disable_key, False)) and not has_configured_async_ops:
+      active_comm_async = [value for value in active_comm_async if value != operation_name]
+      continue
+
+    # The flag disables only runtime auto-injection of the default operation.
+    # Operators can still list the operation explicitly in ACTIVE_COMM_ASYNC if
+    # they need a transitional config that documents the final active list.
+    if not _is_truthy_config_value(result.get(disable_key, False)) and operation_name not in active_comm_async:
+      default_comm_async.append(operation_name)
+
+  result[ct.HEAVY_OPS.ACTIVE_COMM_ASYNC] = _dedupe_preserving_order(default_comm_async + active_comm_async)
+  return result
 
 
 class HeavyOpsManager(Manager):
@@ -39,16 +183,18 @@ class HeavyOpsManager(Manager):
 
   def startup(self):
     super().startup()
-    self.config_data = self.config_data.get('HEAVY_OPS_CONFIG', DEFAULT_HEAVY_OPS_CONFIG)
+    self.config_data = resolve_heavy_ops_config(
+      self.config_data.get(ct.HEAVY_OPS.HEAVY_OPS_CONFIG, DEFAULT_HEAVY_OPS_CONFIG)
+    )
     self._dct_ops = self._dct_subalterns
     # 1st category as heavy ops that run on separate individual threads without (usually)
     # affecting inplace the payload
-    for operation_name in self.config_data.get("ACTIVE_COMM_ASYNC", []):
+    for operation_name in self.config_data.get(ct.HEAVY_OPS.ACTIVE_COMM_ASYNC, []):
       self.create_heavy_operation(operation_name, comm_async=True)
       
     # 2nd category are heavy ops that do not use separate thread and run on comms thread
     # this second category is usually for plugins that change inplace the payload
-    for operation_name in self.config_data.get("ACTIVE_ON_COMM_THREAD", []):
+    for operation_name in self.config_data.get(ct.HEAVY_OPS.ACTIVE_ON_COMM_THREAD, []):
       self.create_heavy_operation(operation_name, comm_async=False)
     return
 

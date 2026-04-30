@@ -188,7 +188,10 @@ class _DataAPIMixin(object):
       list[dict]
         the inputs of the stream that sends data to the current plugin instance
       """
-      return self.dataapi_full_input().get('INPUTS', [])
+      inputs = self.dataapi_full_input().get('INPUTS', [])
+      if not isinstance(inputs, list):
+        return []
+      return [inp for inp in inputs if isinstance(inp, dict)]
 
     def dataapi_inferences(self, squeeze=False):
       """

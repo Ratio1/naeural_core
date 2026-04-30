@@ -221,6 +221,7 @@ class EpochsManager(Singleton):
 
     loaded = self._load_status()
     self.__initialize_signature_save_cache()
+    self.__ensure_current_node_registered()
     self.maybe_close_epoch()
 
     self.P(
@@ -741,6 +742,33 @@ class EpochsManager(Singleton):
       if full_data_key not in self.__full_data:
         self.__full_data[full_data_key] = template2[full_data_key]
     return
+
+  def __ensure_current_node_registered(self):
+    """
+    Ensure the runtime owner node exists in the loaded epochs state.
+
+    Persisted snapshots can legitimately omit the current node, for example when
+    a cache directory is reused across node identities or when the current node
+    has not yet emitted persisted epoch state. Startup flows still expect the
+    owner node to exist before ``maybe_close_epoch`` runs, so backfill a fresh
+    runtime template instead of crashing on missing-key access.
+
+    Returns
+    -------
+    bool
+      True when a runtime node entry was created, otherwise False.
+    """
+    node_addr = getattr(self.owner, "node_addr", None)
+    if not node_addr or node_addr in self.__data:
+      return False
+
+    self.P(
+      "Current node {} missing from persisted epochs state. Initializing fresh runtime entry.".format(node_addr),
+      color='y',
+    )
+    self.__initialize_new_node(node_addr)
+    self.__full_data[SYNC_NODES] = self.__data
+    return True
 
   def get_epoch_id(self, date : any):
     """

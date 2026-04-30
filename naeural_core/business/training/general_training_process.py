@@ -92,11 +92,32 @@ class GeneralTrainingProcessPlugin(BasePlugin):
   def auto_deploy(self):
     return
 
+  def _resolve_model_export_path(self):
+    """
+    Resolve the exported serving artifact path across legacy and structured pipelines.
+
+    Returns
+    -------
+    str or None
+      Local path to the exported serving artifact, if available.
+    """
+    export_meta = (self.training_output.get('METADATA') or {}).get('MODEL_EXPORT')
+    if export_meta is None:
+      return None
+    if isinstance(export_meta, str):
+      return export_meta
+    if isinstance(export_meta, dict):
+      torchscript_entry = (export_meta.get('formats') or {}).get('torchscript') or {}
+      if torchscript_entry.get('status') == 'pass':
+        return torchscript_entry.get('artifact_path')
+      return torchscript_entry.get('artifact_path')
+    return None
+
   def on_training_finish(self, model_id):
     training_subdir = 'training'
     # Model
     best_weights = (self.training_output['STATUS']['BEST'] or {}).get('best_file')
-    traced_model_path = (self.training_output['METADATA'] or {}).get('MODEL_EXPORT')
+    traced_model_path = self._resolve_model_export_path()
     if best_weights is None:
       self.P("Best weights not found, aborting upload", color='r')
       return False

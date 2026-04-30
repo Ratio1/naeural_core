@@ -98,6 +98,23 @@ class LoopbackDataCapture(DataCaptureThread):
 
 
   def _build_inputs(self, payloads: List[Any]):
+    """Build capture inputs from queued loopback payloads.
+
+    Parameters
+    ----------
+    payloads : list[Any]
+      Raw payloads drained from the loopback queue.
+
+    Returns
+    -------
+    list
+      Capture input dictionaries created through `_new_input`.
+
+    Notes
+    -----
+    Dictionary payloads that include explicit `STRUCT_DATA` keep that
+    structured value even when image data is missing or empty.
+    """
     inputs = []
     for payload in payloads:
       if isinstance(payload, GeneralPayload):
@@ -105,6 +122,7 @@ class LoopbackDataCapture(DataCaptureThread):
 
       if isinstance(payload, dict):
         img = payload.get("IMG")
+        struct_data = payload.get("STRUCT_DATA")
         if isinstance(img, np.ndarray):
           inputs.append(
             self._new_input(img=img, struct_data=None, metadata=self._metadata.__dict__.copy())
@@ -118,10 +136,26 @@ class LoopbackDataCapture(DataCaptureThread):
             inputs.append(
               self._new_input(img=img, struct_data=None, metadata=self._metadata.__dict__.copy())
             )
+          elif struct_data is not None:
+            inputs.append(
+              self._new_input(
+                img=None,
+                struct_data=struct_data,
+                metadata=self._metadata.__dict__.copy(),
+              )
+            )
           else:
             inputs.append(
               self._new_input(img=None, struct_data=payload, metadata=self._metadata.__dict__.copy())
             )
+        elif struct_data is not None:
+          inputs.append(
+            self._new_input(
+              img=None,
+              struct_data=struct_data,
+              metadata=self._metadata.__dict__.copy(),
+            )
+          )
         else:
           inputs.append(
             self._new_input(img=None, struct_data=payload, metadata=self._metadata.__dict__.copy())

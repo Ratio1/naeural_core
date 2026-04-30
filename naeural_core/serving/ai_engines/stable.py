@@ -102,6 +102,11 @@ AI_ENGINES['th_training'] = {
   'REQUIRES_INSTANCE': True
 }
 
+AI_ENGINES['th_structured'] = {
+  'SERVING_PROCESS': 'th_structured',
+  'REQUIRES_INSTANCE': True
+}
+
 try:
   from extensions.serving.ai_engines.stable import AI_ENGINES as EXT_AI_ENGINES
   AI_ENGINES = {

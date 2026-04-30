@@ -1,5 +1,9 @@
 import unittest
+import importlib.util
+import sys
+import types
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,51 +24,55 @@ class _FakeLogger:
 
 
 def _load_utils_functions():
+  """Load `utils.py` through the import system with stubbed dependencies."""
   source_path = ROOT / "serving" / "ai_engines" / "utils.py"
-  source = source_path.read_text(encoding="utf-8")
-  source = source.replace("from naeural_core.serving.ai_engines import AI_ENGINES\n", "")
-  namespace = {
-    "AI_ENGINES": {
-      "text_classifier": {"SERVING_PROCESS": "th_text_classifier"},
-    },
-    "__name__": "loaded_ai_engines_utils",
+  fake_ai_engines_module = types.ModuleType("naeural_core.serving.ai_engines")
+  fake_ai_engines_module.AI_ENGINES = {
+    "text_classifier": {"SERVING_PROCESS": "th_text_classifier"},
   }
-  exec(compile(source, str(source_path), "exec"), namespace)  # noqa: S102
-  return (
-    namespace["get_serving_process_given_ai_engine"],
-    namespace["get_ai_engine_given_serving_process"],
-    namespace["get_params_given_ai_engine"],
-  )
+  module_name = "naeural_core.serving.ai_engines.utils_under_test"
+  spec = importlib.util.spec_from_file_location(module_name, source_path)
+  module = importlib.util.module_from_spec(spec)
+  assert spec is not None and spec.loader is not None
+  with patch.dict(
+    sys.modules,
+    {
+      "naeural_core.serving.ai_engines": fake_ai_engines_module,
+    },
+  ):
+    spec.loader.exec_module(module)
+  return module
 
 
 def _load_main_loop_data_handler():
+  """Load `main_loop_data_handler.py` with stubbed `naeural_core` imports."""
   source_path = ROOT / "main" / "main_loop_data_handler.py"
-  source = source_path.read_text(encoding="utf-8")
-  source = source.replace("from naeural_core import DecentrAIObject\n", "")
-  source = source.replace("from naeural_core import Logger\n", "")
-  source = source.replace(
-    "from naeural_core.serving.ai_engines.utils import (\n"
-    "  get_serving_process_given_ai_engine,\n"
-    "  get_ai_engine_given_serving_process,\n"
-    "  get_params_given_ai_engine\n"
-    ")\n",
-    "",
-  )
-  (
-    get_serving_process_given_ai_engine,
-    get_ai_engine_given_serving_process,
-    get_params_given_ai_engine,
-  ) = _load_utils_functions()
-  namespace = {
-    "DecentrAIObject": _FakeDecentrAIObject,
-    "Logger": _FakeLogger,
-    "get_serving_process_given_ai_engine": get_serving_process_given_ai_engine,
-    "get_ai_engine_given_serving_process": get_ai_engine_given_serving_process,
-    "get_params_given_ai_engine": get_params_given_ai_engine,
-    "__name__": "loaded_main_loop_data_handler",
-  }
-  exec(compile(source, str(source_path), "exec"), namespace)  # noqa: S102
-  return namespace["MainLoopDataHandler"], get_serving_process_given_ai_engine
+  utils_module = _load_utils_functions()
+
+  fake_core = types.ModuleType("naeural_core")
+  fake_core.DecentrAIObject = _FakeDecentrAIObject
+  fake_core.Logger = _FakeLogger
+  fake_core.__path__ = []  # type: ignore[attr-defined]
+  fake_serving = types.ModuleType("naeural_core.serving")
+  fake_serving.__path__ = []  # type: ignore[attr-defined]
+  fake_ai_engines_pkg = types.ModuleType("naeural_core.serving.ai_engines")
+  fake_ai_engines_pkg.__path__ = []  # type: ignore[attr-defined]
+
+  module_name = "naeural_core.main.main_loop_data_handler_under_test"
+  spec = importlib.util.spec_from_file_location(module_name, source_path)
+  module = importlib.util.module_from_spec(spec)
+  assert spec is not None and spec.loader is not None
+  with patch.dict(
+    sys.modules,
+    {
+      "naeural_core": fake_core,
+      "naeural_core.serving": fake_serving,
+      "naeural_core.serving.ai_engines": fake_ai_engines_pkg,
+      "naeural_core.serving.ai_engines.utils": utils_module,
+    },
+  ):
+    spec.loader.exec_module(module)
+  return module.MainLoopDataHandler, utils_module.get_serving_process_given_ai_engine
 
 
 MainLoopDataHandler, get_serving_process_given_ai_engine = _load_main_loop_data_handler()

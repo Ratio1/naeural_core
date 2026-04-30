@@ -176,6 +176,8 @@ class BusinessManager(Manager):
     float
         Seconds without progress before the dispatcher is considered stalled.
     """
+    # Keep the dispatcher and orchestrator collection lane on the same
+    # operator-facing stall threshold unless they are intentionally split later.
     return self.config_data.get(
       "ADMIN_PIPELINE_STALL_WARNING_SECONDS",
       max(1.0, 10 * self.cfg_admin_pipeline_dispatch_poll_seconds),
@@ -301,6 +303,10 @@ class BusinessManager(Manager):
       return
 
     with self._admin_dispatch_lock:
+      # This intentionally mirrors the orchestrator-side admin collection
+      # health checks, but it also owns queue lifecycle and queue-specific
+      # stall context, so we keep the logic local instead of forcing a shared
+      # abstraction prematurely.
       if self._admin_dispatch_queue is None:
         self._admin_dispatch_queue = Queue(maxsize=self.cfg_admin_pipeline_queue_maxlen)
       if self._admin_dispatch_thread is None or not self._admin_dispatch_thread.is_alive():
@@ -379,7 +385,8 @@ class BusinessManager(Manager):
       stream_name, _, _ = self._dct_hash_mappings.get(instance_hash, (None, None, None))
       if stream_name == ct.CONST_ADMIN_PIPELINE_NAME:
         admin_hashes.add(instance_hash)
-    self._admin_instance_hashes = admin_hashes
+    with self._admin_dispatch_lock:
+      self._admin_instance_hashes = admin_hashes
     return
 
   def dispatch_admin_pipeline_inputs(self, dct_business_inputs):
@@ -396,17 +403,24 @@ class BusinessManager(Manager):
     int
         Number of admin deliveries successfully queued.
     """
-    if not self.cfg_admin_pipeline_async_dispatch or self._admin_dispatch_queue is None:
+    if not self.cfg_admin_pipeline_async_dispatch:
+      return 0
+
+    with self._admin_dispatch_lock:
+      queue = self._admin_dispatch_queue
+      admin_instance_hashes = frozenset(self._admin_instance_hashes)
+
+    if queue is None:
       return 0
 
     enqueued = 0
-    for instance_hash in self._admin_instance_hashes:
+    for instance_hash in admin_instance_hashes:
       inputs = dct_business_inputs.get(instance_hash)
       if not inputs:
         continue
       snapshot = deepcopy(inputs)
       try:
-        self._admin_dispatch_queue.put_nowait((instance_hash, snapshot))
+        queue.put_nowait((instance_hash, snapshot))
       except Full:
         self._admin_dispatch_counters["dropped_queue_full"] += 1
         self.P("Admin pipeline async dispatcher queue is full. Dropping delivery for '{}'.".format(instance_hash), color='r')

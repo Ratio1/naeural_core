@@ -4,9 +4,11 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 def _load_loopback_module():
+  """Load `loopback.py` through the import system with stubbed dependencies."""
   fake_core = types.ModuleType("naeural_core")
   fake_core.__path__ = []  # type: ignore[attr-defined]
   fake_constants = types.ModuleType("naeural_core.constants")
@@ -36,17 +38,21 @@ def _load_loopback_module():
 
   fake_data_structures.GeneralPayload = _FakeGeneralPayload
 
-  sys.modules["naeural_core"] = fake_core
-  sys.modules["naeural_core.constants"] = fake_constants
-  sys.modules["naeural_core.data"] = fake_core.data
-  sys.modules["naeural_core.data.base"] = fake_data_base
-  sys.modules["naeural_core.data_structures"] = fake_data_structures
-
   module_path = Path(__file__).resolve().with_name("loopback.py")
   spec = importlib.util.spec_from_file_location("loopback_under_test", module_path)
   module = importlib.util.module_from_spec(spec)
   assert spec is not None and spec.loader is not None
-  spec.loader.exec_module(module)
+  with patch.dict(
+    sys.modules,
+    {
+      "naeural_core": fake_core,
+      "naeural_core.constants": fake_constants,
+      "naeural_core.data": fake_core.data,
+      "naeural_core.data.base": fake_data_base,
+      "naeural_core.data_structures": fake_data_structures,
+    },
+  ):
+    spec.loader.exec_module(module)
   return module
 
 

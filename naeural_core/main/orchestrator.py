@@ -839,6 +839,8 @@ class Orchestrator(DecentrAIObject,
     float
         Seconds without progress before a warning is emitted.
     """
+    # Keep the collection and dispatcher lanes on the same operator-facing
+    # stall threshold unless they are intentionally split later.
     return self.config_data.get(
       "ADMIN_PIPELINE_STALL_WARNING_SECONDS",
       max(1.0, 10 * self.cfg_admin_pipeline_dispatch_poll_seconds),
@@ -1536,6 +1538,9 @@ class Orchestrator(DecentrAIObject,
         Restarts the thread when missing/dead and emits throttled stall
         warnings when progress stops.
     """
+    # This intentionally mirrors the business-manager dispatcher health checks,
+    # but the collection lane has different state and no queue ownership, so we
+    # keep the logic separate instead of forcing a shared abstraction now.
     if not self.cfg_admin_pipeline_async_dispatch or self.__done:
       return
 

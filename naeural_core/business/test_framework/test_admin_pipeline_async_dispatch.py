@@ -124,7 +124,7 @@ class TestAdminPipelineAsyncDispatch(unittest.TestCase):
     manager.P = lambda *args, **kwargs: None
     manager.config_data = {
       "ADMIN_PIPELINE_ASYNC_DISPATCH": async_enabled,
-      "ADMIN_PIPELINE_DISPATCH_POLL_SECONDS": 0.01,
+      "ADMIN_PIPELINE_DISPATCH_POLL_SECONDS": 0.001,
       "ADMIN_PIPELINE_QUEUE_MAXLEN": 8,
     }
     manager._run_on_threads = run_on_threads
@@ -249,6 +249,43 @@ class TestAdminPipelineAsyncDispatch(unittest.TestCase):
     delivered_payload = admin_plugin.added_inputs[0]["INPUTS"][0]["STRUCT_DATA"]["payload"]
     self.assertEqual(delivered_payload["subject"], "Original subject")
     self.assertEqual(delivered_payload["body"], ["line-1", "line-2"])
+
+  def test_async_dispatch_snapshots_admin_hashes_before_iteration(self):
+    manager = self._make_manager(async_enabled=True)
+    manager._initialize_admin_async_dispatch()
+    second_admin_hash = "admin_hash_2"
+    manager._dct_hash_mappings[second_admin_hash] = (ct.CONST_ADMIN_PIPELINE_NAME, "ADMIN_SIG", "ADMIN_02")
+    manager._admin_instance_hashes = {self.ADMIN_HASH, second_admin_hash}
+
+    class _MutatingBusinessInputs(dict):
+      def __init__(self, owner, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._owner = owner
+        self._mutated = False
+
+      def get(self, key, default=None):
+        if not self._mutated:
+          self._mutated = True
+          with self._owner._admin_dispatch_lock:
+            self._owner._admin_instance_hashes = {second_admin_hash}
+        return super().get(key, default)
+
+    dct_business_inputs = _MutatingBusinessInputs(
+      manager,
+      {
+        self.ADMIN_HASH: {
+          "INPUTS": [{"TYPE": "STRUCT_DATA", "STRUCT_DATA": {"value": "admin"}}],
+        },
+        second_admin_hash: {
+          "INPUTS": [{"TYPE": "STRUCT_DATA", "STRUCT_DATA": {"value": "admin-2"}}],
+        },
+      },
+    )
+
+    enqueued = manager.dispatch_admin_pipeline_inputs(dct_business_inputs)
+
+    self.assertEqual(enqueued, 2)
+    self.assertEqual(manager._admin_dispatch_queue.qsize(), 2)
 
   def test_async_dispatch_requires_threaded_plugins(self):
     manager = self._make_manager(async_enabled=True, run_on_threads=False)

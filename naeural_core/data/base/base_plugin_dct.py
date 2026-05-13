@@ -730,11 +730,21 @@ class DataCaptureThread(BaseDataCapture,
   
   def stop(self, join_time=10):
     self._stop = True
-    if join_time:
+    stopped = True
+    if self._thread is not None and join_time:
       self._thread.join(join_time)
-    self._deque.clear()
-    self._reset_state()
-    return  
+      if self._thread.is_alive():
+        stopped = False
+        self.P(
+          "DCT thread did not stop after {:.1f}s; continuing shutdown.".format(join_time),
+          color='r',
+        )
+    if stopped:
+      self._deque.clear()
+      self._reset_state()
+    else:
+      self.P("DCT state left intact because the thread is still alive.", color='r')
+    return stopped
     
     
   def _download(self, url, file_name=None, progress=False, verbose=False, notify_download=None, unzip=False):

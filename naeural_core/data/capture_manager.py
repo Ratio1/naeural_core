@@ -362,22 +362,27 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
 
 
   def stop_capture(self, key, shutdown=False):
-    capture = self._dct_captures.pop(key)
+    capture = self._dct_captures.get(key)
     if capture is None:
       self.P("  Capture '{}' already stopped!".format(key), color='r')      
+      return True
     else:
       cap_type = capture.cfg_type
       self.P("  Stopping capture/pipeline '{}'  ({})...".format(key, cap_type), color='y')
       
       if capture is None:
-        return
+        return True
       self.owner.set_loop_stage('4.collect.capture_stop_{}'.format(key))
       jointime = 0.1 if shutdown else 10 
-      capture.stop(join_time=jointime)
+      stopped = capture.stop(join_time=jointime)
+      if not stopped:
+        self.P("  Capture '{}' did not stop cleanly; keeping handle for retry.".format(key), color='r')
+        return False
+      self._dct_captures.pop(key, None)
       self._dct_killed_captures[key] = None
       self.P("  Stopped capture '{}'".format(key), color='y')
     #endif capture already stopped or not
-    return
+    return True
 
 
   def close(self):

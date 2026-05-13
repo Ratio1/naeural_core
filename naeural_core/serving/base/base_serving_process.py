@@ -815,8 +815,8 @@ class ModelServingProcess(
             self.P("Received unknown command '{}'".format(cmd.upper()), color='r')
           # endif select cmd type
         else:
-          # TODO: add on_idle method here
           # now we are on IDLE - no cmd received so we can do quick internal kitchen
+          self.__on_idle()
           if tm_last_timers_dump is None or (time() - tm_last_timers_dump) > self.serving_timers_idle_dump:
             self.P("Idle timers dump {}s reached. Dumping timers".format(self.serving_timers_idle_dump))
             tm_last_timers_dump = time()
@@ -872,6 +872,19 @@ class ModelServingProcess(
 
     self._on_init()
     return
+
+  def __on_idle(self):
+    """Run serving-loop idle hooks when no command is available.
+
+    Returns
+    -------
+    None
+        The method forwards control to subclass idle hooks while keeping the
+        serving loop's private method boundary consistent with startup/init.
+    """
+
+    self._on_idle()
+    return
   
   def __startup(self):
     return self._startup()    
@@ -896,6 +909,30 @@ class ModelServingProcess(
     
   def _on_init(self):
     self.on_init()
+    return
+
+  def on_idle(self):
+    """Run lightweight work while no serving command is pending.
+
+    Returns
+    -------
+    None
+        Subclasses may override this method for throttled observability or
+        housekeeping that must not depend on predict callbacks.
+    """
+
+    return
+
+  def _on_idle(self):
+    """Dispatch the serving-loop idle hook to the subclass override.
+
+    Returns
+    -------
+    None
+        The default implementation calls :meth:`on_idle`.
+    """
+
+    self.on_idle()
     return
 
   def get_additional_metadata(self):

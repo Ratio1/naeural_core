@@ -6,7 +6,7 @@ import traceback
 import numpy as np
 import uuid
 
-from time import time
+from time import perf_counter, time
 
 
 from collections import deque
@@ -29,6 +29,7 @@ from naeural_core.comm.mixins import (
 )
 
 from naeural_core.local_libraries import _ConfigHandlerMixin
+from .comm_loop_timing_debug import _CommLoopTimingDebugMixin
 
 
 RUN_ON_THREAD = True
@@ -50,6 +51,10 @@ _CONFIG = {
 
   'DEBUG_SAVE_MESSAGE_STAGES': False,
 
+  'DEBUG_COMM_LOOP_TIMINGS': False,
+  'DEBUG_COMM_LOOP_TIMINGS_INTERVAL': 30,
+  'DEBUG_COMM_LOOP_TIMINGS_SLOW_SECONDS': 0.25,
+
   'DISABLE_ADDRESSED_PAYLOAD_SENDS': False,
 
   'VALIDATION_RULES': {
@@ -67,6 +72,7 @@ class BaseCommThread(
   _HeartbeatsCommMixin,
   _ConfigHandlerMixin,
   _UtilsBaseMixin,
+  _CommLoopTimingDebugMixin,
 ):
 
   __metaclass__ = abc.ABCMeta
@@ -131,6 +137,12 @@ class BaseCommThread(
 
     self._msg_id = 0
     self.loop_timings = deque(maxlen=10)
+    self._debug_comm_loop_timings_enabled = False
+    self._debug_comm_loop_timings_interval = 30.0
+    self._debug_comm_loop_timings_slow_seconds = 0.25
+    self._debug_comm_loop_timings_since = perf_counter()
+    self._debug_comm_loop_timing_stats = {}
+    self._debug_comm_loop_timing_counters = {}
 
     self._incoming_lens = deque(maxlen=100)
     self._incoming_times = deque(maxlen=100)
@@ -167,6 +179,7 @@ class BaseCommThread(
     self._formatter, self._formatter_name = self._io_formatter_manager.get_formatter()
     if self._formatter_name is not None:
       self._formatter_name = self._formatter_name.lower()
+    self._configure_comm_loop_timing_debug()
     return
 
   @property

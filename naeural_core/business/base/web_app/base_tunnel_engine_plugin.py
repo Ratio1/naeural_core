@@ -219,7 +219,14 @@ class BaseTunnelEnginePlugin(
       return True
 
     self.P(f"{label} did not stop after terminate; killing it.", color='r')
-    if not send_signal(signal.SIGKILL, process.kill):
+    # Windows does not define SIGKILL. Select the POSIX signal only when it can
+    # be used; otherwise fall back directly to Popen.kill().
+    kill_signal = getattr(signal, "SIGKILL", None)
+    if os.name != "nt" and kill_signal is not None:
+      killed = send_signal(kill_signal, process.kill)
+    else:
+      killed = send_signal(None, process.kill)
+    if not killed:
       return False
     if wait_process_tree(kill_timeout):
       return True

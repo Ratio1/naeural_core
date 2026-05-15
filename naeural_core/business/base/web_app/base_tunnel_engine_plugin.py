@@ -175,7 +175,7 @@ class BaseTunnelEnginePlugin(
         return None
       try:
         pid_names = os.listdir(proc_root)
-      except Exception as exc:
+      except OSError as exc:
         self.P(f"Could not inspect {label} process group {pgid}: {exc}", color='r')
         return None
 
@@ -193,10 +193,11 @@ class BaseTunnelEnginePlugin(
           continue
         except Exception as exc:
           self.P(f"Could not inspect {label} process {pid_name}: {exc}", color='r')
-          return None
+          continue
         if member_pgid != pgid:
           continue
         found_member = True
+        # Stopped/traced members can resume later, so only zombies are treated as inert.
         if state != "Z":
           return True
       return False if found_member else None

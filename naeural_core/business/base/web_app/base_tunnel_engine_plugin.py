@@ -160,17 +160,62 @@ class BaseTunnelEnginePlugin(
 
     pgid = getattr(process, "_r1_process_group_id", None)
 
+    def process_group_has_live_members():
+      """
+      Return True only when the process group still has non-zombie members.
+
+      POSIX keeps zombie processes addressable until their parent reaps them.
+      ``killpg(pgid, 0)`` therefore reports a group as alive even when the
+      remaining members are defunct and cannot serve traffic or receive more
+      useful signals. Treating zombie-only groups as stopped prevents shutdown
+      cleanup from retrying forever on unreapable tunnel children.
+      """
+      proc_root = "/proc"
+      if os.name == "nt" or pgid is None or not os.path.isdir(proc_root):
+        return None
+      try:
+        pid_names = os.listdir(proc_root)
+      except OSError as exc:
+        self.P(f"Could not inspect {label} process group {pgid}: {exc}", color='r')
+        return None
+
+      found_member = False
+      for pid_name in pid_names:
+        if not pid_name.isdigit():
+          continue
+        try:
+          with open(os.path.join(proc_root, pid_name, "stat"), "r") as fh:
+            stat = fh.read()
+          stat_tail = stat.rsplit(")", 1)[1].strip().split()
+          state = stat_tail[0]
+          member_pgid = int(stat_tail[2])
+        except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
+          continue
+        except Exception as exc:
+          self.P(f"Could not inspect {label} process {pid_name}: {exc}", color='r')
+          continue
+        if member_pgid != pgid:
+          continue
+        found_member = True
+        # Stopped/traced members can resume later, so only zombies are treated as inert.
+        if state != "Z":
+          return True
+      return False if found_member else None
+
     def is_process_group_alive():
       if os.name == "nt" or pgid is None:
         return False
       try:
         os.killpg(pgid, 0)
-        return True
       except ProcessLookupError:
         return False
       except Exception as exc:
         self.P(f"Could not probe {label} process group {pgid}: {exc}", color='r')
         return True
+      live_members = process_group_has_live_members()
+      if live_members is not None:
+        return live_members
+      return True
 
     def wait_process_tree(timeout):
       deadline = time.monotonic() + timeout

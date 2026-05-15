@@ -7,8 +7,93 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from naeural_core import constants as ct
-from naeural_core.data.capture_manager import CaptureManager
+
+def _load_capture_manager_module():
+  """Load CaptureManager with lightweight stubs for focused cleanup tests."""
+  path = pathlib.Path(__file__).resolve().parents[2] / "data" / "capture_manager.py"
+  module_name = "capture_manager_under_test"
+  module = importlib.util.module_from_spec(
+    importlib.util.spec_from_file_location(module_name, path)
+  )
+
+  ct = SimpleNamespace(
+    CAPTURE_MANAGER="CAPTURE_MANAGER",
+    NR_CAPTURES="NR_CAPTURES",
+    TYPE="TYPE",
+    NAME="NAME",
+    URL="URL",
+    CONST_ADMIN_PIPELINE_NAME="admin_pipeline",
+    CAPTURE_STATS_DISPLAY="CAPTURE_STATS_DISPLAY",
+    CAPTURE_STATS_DISPLAY_DEFAULT=60,
+    EE_ALIAS_MAX_SIZE=20,
+    STATUS_TYPE=SimpleNamespace(
+      STATUS_NORMAL="STATUS_NORMAL",
+      STATUS_EXCEPTION="STATUS_EXCEPTION",
+      STATUS_ABNORMAL_FUNCTIONING="STATUS_ABNORMAL_FUNCTIONING",
+    ),
+    NOTIFICATION_CODES=SimpleNamespace(
+      PIPELINE_OK="PIPELINE_OK",
+      PIPELINE_FAILED="PIPELINE_FAILED",
+    ),
+    PAYLOAD_DATA=SimpleNamespace(
+      SESSION_ID="SESSION_ID",
+      INITIATOR_ID="INITIATOR_ID",
+    ),
+    PLUGIN_SEARCH=SimpleNamespace(
+      LOC_DATA_ACQUISITION_PLUGINS=[],
+      SUFFIX_DATA_ACQUISITION_PLUGINS="",
+      SAFE_LOC_DATA_ACQUISITION_PLUGINS=[],
+      SAFE_LOC_DATA_ACQUISITION_IMPORTS=[],
+    ),
+    CONFIG_STARTUP_v2=SimpleNamespace(K_EE_ID="EE_ID"),
+  )
+
+  class _Manager:
+    pass
+
+  class _ConfigHandlerMixin:
+    pass
+
+  class _Logger:
+    pass
+
+  pandas_mod = types.ModuleType("pandas")
+  pandas_mod.DataFrame = lambda obj: obj
+  pandas_mod.set_option = lambda *args, **kwargs: None
+
+  ct_mod = types.ModuleType("naeural_core.constants")
+  for name, value in ct.__dict__.items():
+    setattr(ct_mod, name, value)
+
+  core_mod = types.ModuleType("naeural_core")
+  core_mod.constants = ct_mod
+  core_mod.Logger = _Logger
+  manager_mod = types.ModuleType("naeural_core.manager")
+  manager_mod.Manager = _Manager
+  libraries_mod = types.ModuleType("naeural_core.local_libraries")
+  libraries_mod._ConfigHandlerMixin = _ConfigHandlerMixin
+
+  stubs = {
+    "pandas": pandas_mod,
+    "naeural_core": core_mod,
+    "naeural_core.constants": ct_mod,
+    "naeural_core.manager": manager_mod,
+    "naeural_core.local_libraries": libraries_mod,
+  }
+  old_modules = {
+    name: sys.modules.get(name)
+    for name in stubs
+  }
+  try:
+    sys.modules.update(stubs)
+    module.__spec__.loader.exec_module(module)
+  finally:
+    for name, old_module in old_modules.items():
+      if old_module is None:
+        sys.modules.pop(name, None)
+      else:
+        sys.modules[name] = old_module
+  return module
 
 
 def _load_base_tunnel_module():
@@ -31,14 +116,23 @@ def _load_base_tunnel_module():
   class _CloudflareMixinPlugin:
     pass
 
+  core_mod = types.ModuleType("naeural_core")
+  business_mod = types.ModuleType("naeural_core.business")
+  base_mod = types.ModuleType("naeural_core.business.base")
+  base_mod.BasePluginExecutor = _BasePluginExecutor
+  mixins_mod = types.ModuleType("naeural_core.business.mixins_libs")
+  ngrok_mod = types.ModuleType("naeural_core.business.mixins_libs.ngrok_mixin")
+  ngrok_mod._NgrokMixinPlugin = _NgrokMixinPlugin
+  cloudflare_mod = types.ModuleType("naeural_core.business.mixins_libs.cloudflare_mixin")
+  cloudflare_mod._CloudflareMixinPlugin = _CloudflareMixinPlugin
+
   stubs = {
-    "naeural_core.business.base": types.SimpleNamespace(BasePluginExecutor=_BasePluginExecutor),
-    "naeural_core.business.mixins_libs.ngrok_mixin": types.SimpleNamespace(
-      _NgrokMixinPlugin=_NgrokMixinPlugin,
-    ),
-    "naeural_core.business.mixins_libs.cloudflare_mixin": types.SimpleNamespace(
-      _CloudflareMixinPlugin=_CloudflareMixinPlugin,
-    ),
+    "naeural_core": core_mod,
+    "naeural_core.business": business_mod,
+    "naeural_core.business.base": base_mod,
+    "naeural_core.business.mixins_libs": mixins_mod,
+    "naeural_core.business.mixins_libs.ngrok_mixin": ngrok_mod,
+    "naeural_core.business.mixins_libs.cloudflare_mixin": cloudflare_mod,
   }
   old_modules = {
     name: sys.modules.get(name)
@@ -56,6 +150,9 @@ def _load_base_tunnel_module():
   return module
 
 
+_CAPTURE_MANAGER_MODULE = _load_capture_manager_module()
+ct = _CAPTURE_MANAGER_MODULE.ct
+CaptureManager = _CAPTURE_MANAGER_MODULE.CaptureManager
 _TUNNEL_MODULE = _load_base_tunnel_module()
 BaseTunnelEnginePlugin = _TUNNEL_MODULE.BaseTunnelEnginePlugin
 
@@ -144,6 +241,33 @@ class TestCaptureShutdownHardening(unittest.TestCase):
 
     self.assertIs(manager._dct_captures["stream"], fresh)
     self.assertEqual(stale.update_calls, 0)
+    return
+
+  def test_update_streams_retries_pending_killed_capture_cleanup(self):
+    pending = _Capture([True])
+    manager = _make_capture_manager({})
+    manager._dct_config_streams = {}
+    manager._dct_killed_captures["stream"] = pending
+
+    manager.update_streams({})
+
+    self.assertIsNone(manager._dct_killed_captures["stream"])
+    self.assertEqual(pending.stop_calls, [10])
+    return
+
+  def test_update_streams_throttles_repeated_pending_cleanup_failures(self):
+    pending = _Capture([False, True])
+    manager = _make_capture_manager({})
+    manager._dct_config_streams = {}
+    manager._dct_killed_captures["stream"] = pending
+
+    with mock.patch.object(_CAPTURE_MANAGER_MODULE, "time", side_effect=[100, 101, 131]):
+      manager.update_streams({})
+      manager.update_streams({})
+      manager.update_streams({})
+
+    self.assertIsNone(manager._dct_killed_captures["stream"])
+    self.assertEqual(pending.stop_calls, [10, 10])
     return
 
   def test_stop_captures_reports_pending_cleanup_failure(self):

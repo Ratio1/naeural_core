@@ -1,4 +1,7 @@
+import os
+import signal
 import subprocess
+import time
 
 from naeural_core.business.base import BasePluginExecutor
 from naeural_core.business.mixins_libs.ngrok_mixin import _NgrokMixinPlugin
@@ -108,13 +111,17 @@ class BaseTunnelEnginePlugin(
     
     try:
       self.P(f"Running tunnel command: {command}")
-      process = subprocess.Popen(
-        command,
+      popen_kwargs = dict(
+        args=command,
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        bufsize=0  # this is important for real-time output
+        bufsize=0,  # this is important for real-time output
       )
+      if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
+      process = subprocess.Popen(**popen_kwargs)
+      self._remember_process_group(process)
       
       logs_reader = self.LogReader(process.stdout, size=100, daemon=None)
       err_logs_reader = self.LogReader(process.stderr, size=100, daemon=None)
@@ -133,50 +140,159 @@ class BaseTunnelEnginePlugin(
       self.P(f"Error running tunnel command: {e}")
       return None
 
+  def _remember_process_group(self, process):
+    """
+    Store the process group id for later tree termination.
+    """
+    if process is not None and os.name != "nt":
+      try:
+        process._r1_process_group_id = os.getpgid(process.pid)
+      except Exception as exc:
+        self.P(f"Could not record tunnel process group: {exc}", color='r')
+    return process
+
+  def _terminate_subprocess_tree(self, process, label="subprocess", terminate_timeout=5, kill_timeout=5):
+    """
+    Terminate a subprocess and, on POSIX, its process group.
+    """
+    if process is None:
+      return True
+
+    pgid = getattr(process, "_r1_process_group_id", None)
+
+    def is_process_group_alive():
+      if os.name == "nt" or pgid is None:
+        return False
+      try:
+        os.killpg(pgid, 0)
+        return True
+      except ProcessLookupError:
+        return False
+      except Exception as exc:
+        self.P(f"Could not probe {label} process group {pgid}: {exc}", color='r')
+        return True
+
+    def wait_process_tree(timeout):
+      deadline = time.monotonic() + timeout
+      process_stopped = process.poll() is not None
+      if not process_stopped:
+        try:
+          process.wait(timeout=timeout)
+          process_stopped = True
+        except subprocess.TimeoutExpired:
+          process_stopped = False
+        except Exception as exc:
+          self.P(f"Error waiting for {label}: {exc}", color='r')
+          process_stopped = process.poll() is not None
+
+      if os.name == "nt" or pgid is None:
+        return process_stopped
+
+      while time.monotonic() < deadline:
+        if not is_process_group_alive():
+          return process_stopped
+        time.sleep(0.05)
+      return process_stopped and not is_process_group_alive()
+
+    def send_signal(sig, fallback):
+      if os.name != "nt" and pgid is not None:
+        try:
+          os.killpg(pgid, sig)
+          return True
+        except ProcessLookupError:
+          return True
+        except Exception as exc:
+          self.P(f"Error signaling {label} process group {pgid}: {exc}", color='r')
+      if process.poll() is None:
+        try:
+          fallback()
+          return True
+        except Exception as exc:
+          self.P(f"Error signaling {label}: {exc}", color='r')
+          return False
+      return True
+
+    if process.poll() is None or is_process_group_alive():
+      if not send_signal(signal.SIGTERM, process.terminate):
+        return False
+    if wait_process_tree(terminate_timeout):
+      return True
+
+    self.P(f"{label} did not stop after terminate; killing it.", color='r')
+    # Windows does not define SIGKILL. Select the POSIX signal only when it can
+    # be used; otherwise fall back directly to Popen.kill().
+    kill_signal = getattr(signal, "SIGKILL", None)
+    if os.name != "nt" and kill_signal is not None:
+      killed = send_signal(kill_signal, process.kill)
+    else:
+      killed = send_signal(None, process.kill)
+    if not killed:
+      return False
+    if wait_process_tree(kill_timeout):
+      return True
+    self.P(f"{label} did not exit after kill; continuing shutdown.", color='r')
+    return False
+
   def stop_tunnel_command(self, process):
     """
     Stop a running tunnel command process and clean up LogReaders.
     """
-    if process and process.poll() is None:
+    process_stopped = True
+    readers_stopped = True
+    try:
+      process_stopped = self._terminate_subprocess_tree(process, label="Tunnel command")
+    finally:
+      # LogReader cleanup must not be skipped when process termination fails.
       try:
-        process.terminate()
-        process.wait(timeout=5)
-      except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-      except Exception as e:
-        self.P(f"Error stopping tunnel command: {e}")
-    
-    # Clean up LogReaders
-    self._cleanup_tunnel_log_readers()
-    return
+        readers_stopped = self._cleanup_tunnel_log_readers()
+      except Exception as exc:
+        readers_stopped = False
+        self.P(f"Error cleaning tunnel log readers: {exc}", color='r')
+    return process_stopped and readers_stopped
 
   def _cleanup_tunnel_log_readers(self):
     """
     Clean up tunnel LogReaders like in base web app.
     """
+    result = True
     if hasattr(self, 'dct_logs_reader') and 'tunnel' in self.dct_logs_reader:
       logs_reader = self.dct_logs_reader.get('tunnel')
+      reader_stopped = True
       if logs_reader is not None:
-        logs_reader.stop()
-        # Read any remaining logs
-        logs = logs_reader.get_next_characters()
-        if len(logs) > 0:
-          self.on_log_handler(logs)
+        try:
+          reader_stopped = logs_reader.stop()
+          result = reader_stopped and result
+          # Read any remaining logs
+          logs = logs_reader.get_next_characters()
+          if len(logs) > 0:
+            self.on_log_handler(logs)
+        except Exception as exc:
+          reader_stopped = False
+          result = False
+          self.P(f"Error stopping tunnel stdout reader: {exc}", color='r')
       # end if logs_reader
-      self.dct_logs_reader.pop('tunnel', None)
+      if reader_stopped:
+        self.dct_logs_reader.pop('tunnel', None)
 
     if hasattr(self, 'dct_err_logs_reader') and 'tunnel' in self.dct_err_logs_reader:
       err_logs_reader = self.dct_err_logs_reader.get('tunnel')
+      reader_stopped = True
       if err_logs_reader is not None:
-        err_logs_reader.stop()
-        # Read any remaining error logs
-        err_logs = err_logs_reader.get_next_characters()
-        if len(err_logs) > 0:
-          self.P(f"[stderr][tunnel]: {err_logs}")
-      self.dct_err_logs_reader.pop('tunnel', None)
+        try:
+          reader_stopped = err_logs_reader.stop()
+          result = reader_stopped and result
+          # Read any remaining error logs
+          err_logs = err_logs_reader.get_next_characters()
+          if len(err_logs) > 0:
+            self.P(f"[stderr][tunnel]: {err_logs}")
+        except Exception as exc:
+          reader_stopped = False
+          result = False
+          self.P(f"Error stopping tunnel stderr reader: {exc}", color='r')
+      if reader_stopped:
+        self.dct_err_logs_reader.pop('tunnel', None)
       # end if err_logs_reader
-    return
+    return result
 
   def read_tunnel_logs(self):
     """

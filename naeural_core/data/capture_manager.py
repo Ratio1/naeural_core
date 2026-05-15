@@ -12,6 +12,7 @@ from naeural_core.local_libraries import _ConfigHandlerMixin
 
 DEFAULT_DISALLOWED_URL_DUPLICATES = ['VIDEOSTREAM']
 WARNING_REDISPLAY_TIME = 30
+KILLED_CAPTURE_RETRY_INTERVAL = 30
 
 class CaptureManager(Manager, _ConfigHandlerMixin):
   def __init__(self, log : Logger, shmem, owner, environment_variables=None, **kwargs):
@@ -26,6 +27,7 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
     self._dct_config_streams = None
     self._dct_captures = None
     self._dct_killed_captures = None
+    self._last_killed_captures_retry = 0
     self._last_gather_summary = None
     self.is_data_available = False
     
@@ -46,6 +48,7 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
     return
 
   def update_streams(self, dct_config_streams):
+    self._retry_pending_killed_captures()
     if self._dct_config_streams != dct_config_streams:
       self.owner.set_loop_stage('4.collect.update_streams.start')
       self._dct_config_streams = dct_config_streams
@@ -349,6 +352,86 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
     ok_capture = capture is not None
     return ok_capture
 
+  def _get_pending_killed_captures(self, key):
+    value = self._dct_killed_captures.get(key)
+    if value is None:
+      return []
+    if isinstance(value, list):
+      return [capture for capture in value if capture is not None]
+    return [value]
+
+  def _set_pending_killed_captures(self, key, captures):
+    captures = [capture for capture in captures if capture is not None]
+    if len(captures) == 0:
+      self._dct_killed_captures[key] = None
+    elif len(captures) == 1:
+      self._dct_killed_captures[key] = captures[0]
+    else:
+      self._dct_killed_captures[key] = captures
+    return
+
+  def _add_pending_killed_capture(self, key, capture):
+    pending = self._get_pending_killed_captures(key)
+    pending.append(capture)
+    self._set_pending_killed_captures(key, pending)
+    return
+
+  def _retry_pending_killed_captures(self, shutdown=False, keys=None, force=False):
+    if self._dct_killed_captures is None:
+      self._dct_killed_captures = {}
+    if keys is None:
+      keys = list(self._dct_killed_captures.keys())
+
+    pending_cleanup = {
+      k: self._get_pending_killed_captures(k)
+      for k in list(keys)
+    }
+    pending_cleanup = {
+      k: captures
+      for k, captures in pending_cleanup.items()
+      if len(captures) > 0
+    }
+    if len(pending_cleanup) == 0:
+      return True
+
+    if not shutdown and not force:
+      now = time()
+      last_retry = getattr(self, '_last_killed_captures_retry', 0)
+      if last_retry and now - last_retry < KILLED_CAPTURE_RETRY_INTERVAL:
+        return False
+      self._last_killed_captures_retry = now
+
+    result = True
+    jointime = 0.1 if shutdown else 10
+    for k, captures in pending_cleanup.items():
+      for capture in captures:
+        current_pending = self._get_pending_killed_captures(k)
+        if not any(pending_capture is capture for pending_capture in current_pending):
+          continue
+        try:
+          stopped = capture.stop(join_time=jointime)
+        except Exception as exc:
+          stopped = False
+          self.P("  Retrying stop for capture '{}' failed: {}".format(k, exc), color='r')
+        if stopped is False:
+          result = False
+          self.P("  Capture '{}' is still pending cleanup retry.".format(k), color='r')
+        else:
+          current_pending = [
+            pending_capture for pending_capture in current_pending
+            if pending_capture is not capture
+          ]
+          self._set_pending_killed_captures(k, current_pending)
+          self.P("  Retried cleanup for capture '{}' succeeded.".format(k), color='y')
+    return result
+
+  def _mark_capture_cleanup_done(self, key):
+    # Do not overwrite an older same-key handle that is still pending cleanup.
+    # This can happen when a stream is re-added before the old DCT thread exits.
+    if len(self._get_pending_killed_captures(key)) == 0:
+      self._dct_killed_captures[key] = None
+    return
+
   def _get_plugin_class(self, signature):
     _module_name, _class_name, _class_def, _class_config = self._get_module_name_and_class(
       locations=ct.PLUGIN_SEARCH.LOC_DATA_ACQUISITION_PLUGINS,
@@ -362,36 +445,70 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
 
 
   def stop_capture(self, key, shutdown=False):
-    capture = self._dct_captures.pop(key)
+    if self._dct_killed_captures is None:
+      self._dct_killed_captures = {}
+    if key not in self._dct_captures:
+      self.P("  Capture '{}' already stopped!".format(key), color='r')
+      return True
+
+    capture = self._dct_captures[key]
     if capture is None:
-      self.P("  Capture '{}' already stopped!".format(key), color='r')      
+      # Failed capture construction is represented as an existing key with a
+      # None value so get_finished_streams() can archive it. Once stop_capture()
+      # handles that marker, remove it from active captures so it is reported
+      # only once and does not become permanent stale manager state.
+      self._dct_captures.pop(key, None)
+      self._mark_capture_cleanup_done(key)
+      self.P("  Removed failed capture marker '{}'".format(key), color='r')
+      return True
     else:
       cap_type = capture.cfg_type
       self.P("  Stopping capture/pipeline '{}'  ({})...".format(key, cap_type), color='y')
       
-      if capture is None:
-        return
       self.owner.set_loop_stage('4.collect.capture_stop_{}'.format(key))
       jointime = 0.1 if shutdown else 10 
-      capture.stop(join_time=jointime)
-      self._dct_killed_captures[key] = None
+      stopped = capture.stop(join_time=jointime)
+      if stopped is False:
+        self._dct_captures.pop(key, None)
+        self._add_pending_killed_capture(key, capture)
+        self.P(
+          "  Capture '{}' did not stop cleanly; moved handle to cleanup retry state.".format(key),
+          color='r',
+        )
+        return False
+      self._dct_captures.pop(key, None)
+      self._mark_capture_cleanup_done(key)
       self.P("  Stopped capture '{}'".format(key), color='y')
     #endif capture already stopped or not
-    return
+    return True
 
 
   def close(self):
     self.P("Stopping all DCTs...", color='y')
-    self.stop_captures(shutdown=True)
+    stopped = self.stop_captures(shutdown=True)
+    if not stopped:
+      self.P("Some DCTs did not stop cleanly before CaptureManager close returned.", color='r')
     self.P("Dope stopping all DCTs...", color='y')
-    return
+    return stopped
 
 
   def stop_captures(self, shutdown=False):
+    if self._dct_killed_captures is None:
+      self._dct_killed_captures = {}
+    result = True
+    pending_keys = list(self._dct_killed_captures.keys())
     keys = list(self._dct_captures.keys())
     for k in keys:
-      self.stop_capture(k, shutdown=shutdown)
-    return
+      result = self.stop_capture(k, shutdown=shutdown) and result
+
+    # Retry only the pending handles that existed before active captures were
+    # stopped; newly failed active captures remain retryable on the next pass.
+    result = self._retry_pending_killed_captures(
+      shutdown=shutdown,
+      keys=pending_keys,
+      force=True,
+    ) and result
+    return result
 
 
   def get_captured_data(self, key, update_loop_stage=True):

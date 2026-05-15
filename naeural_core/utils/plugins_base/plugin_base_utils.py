@@ -22,8 +22,6 @@ import shutil
 import tempfile
 from typing import List, Tuple, Dict, Optional
 
-from naeural_core.utils.thread_raise import ctype_async_raise
-
 try:
   # Temporarily guard the bs4 import until we can be sure
   # that it's available in all environments.
@@ -277,37 +275,35 @@ class LogReader():
   # Public methods
   def stop(self):
     if self.done:
-      return
+      return not self.thread.is_alive()
     self.done = True
     self.P("Stopping log reader thread...")
 
     if not self.exited:
-      seconds = 5
-      self.P(f"Waiting {seconds} for log reader thread to stop...")
-      self.owner.sleep(seconds)
+      seconds = 1
+      self.P(f"Waiting {seconds}s for log reader thread to stop...")
+      self.thread.join(timeout=seconds)
     # end if
 
     if not self.exited:
-      self.P("Forcing log reader thread to stop...")
+      self.P("Closing log reader buffer to unblock reader thread...")
       self.maybe_close_buffer()
-
-      with self.owner.log.managed_lock_logger():
-        ctype_async_raise(self.thread.ident, ct.ForceStopException)
-      self.owner.sleep(0.2)
-      self.P("Log reader stopped forcefully.")
+      self.thread.join(timeout=1)
+      if self.thread.is_alive():
+        self.P("Log reader thread is still alive after buffer close; continuing shutdown.", color='r')
     # end if
 
     self.P("Joining log reader thread...")
     self.thread.join(timeout=0.1)
-    self.P("Log reader thread joined.")
 
-    if self.thread.is_alive():
+    result = not self.thread.is_alive()
+    if not result:
       self.P("Log reader thread is still alive.", color='r')
     else:
       self.P("Log reader thread joined gracefully.")
     # end if
 
-    return
+    return result
 
   def get_next_characters(self, max_characters=-1, decode='utf-8', decode_errors='replace'):
     result = []

@@ -1304,18 +1304,24 @@ class BasePluginExecutor(
     return
 
   def stop_thread(self):
-    TIMEOUT = 15
+    DEFAULT_TIMEOUT = 15
+    timeout = getattr(self, 'cfg_plugin_stop_timeout', DEFAULT_TIMEOUT)
+    try:
+      timeout = float(timeout)
+    except Exception:
+      timeout = DEFAULT_TIMEOUT
+    timeout = max(0, timeout)
     self.P(ct.BM_PLUGIN_END_PREFIX +
            "[main-thr] Received STOP {} thread command...".format(self.instance_hash), color='b')
     self.done_loop = True
-    self.thread.join(timeout=TIMEOUT)
+    self.thread.join(timeout=timeout)
     is_alive = self.thread.is_alive()
     self.plugins_shared_mem.clean_instance()
     if not is_alive:
       self.P(ct.BM_PLUGIN_END_PREFIX + "[main-thr] thread {} stopped/joined ok.".format(self.instance_hash), color='b')
     else:
       self.P(ct.BM_PLUGIN_END_PREFIX +
-             "[main-thr] Cannot gracefully stop thread {} after {}s".format(self.instance_hash, TIMEOUT), color='r')
+             "[main-thr] Cannot gracefully stop thread {} after {}s".format(self.instance_hash, timeout), color='r')
     return
 
   def get_stream_id(self):

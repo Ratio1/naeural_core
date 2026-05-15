@@ -99,8 +99,17 @@ class NetworkMonitor(DecentrAIObject):
 
   @property
   def all_heartbeats(self):
-    result = self.__network_heartbeats
-    return result
+    # Public callers must not receive the live heartbeat cache: mutating the
+    # returned structure would otherwise corrupt netmon state for all readers.
+    with self.log.managed_lock_resource(NETMON_MUTEX):
+      snapshot = {
+        addr: (list(hb_deque), hb_deque.maxlen)
+        for addr, hb_deque in self.__network_heartbeats.items()
+      }
+    return {
+      addr: deque((deepcopy(hb) for hb in heartbeats), maxlen=maxlen)
+      for addr, (heartbeats, maxlen) in snapshot.items()
+    }
 
 
   @property
@@ -284,10 +293,61 @@ class NetworkMonitor(DecentrAIObject):
     hb_deque = self.__network_heartbeats[__addr_no_prefix]
     if len(hb_deque) < 2:
       return
-    hb_copy = deepcopy(hb_deque[-2])
-    self.__pop_repeating_info_from_heartbeat(hb_copy)
-    hb_deque[-2] = hb_copy
+    hb_deque[-2] = self.__build_compacted_history_heartbeat(hb_deque[-2])
     return
+
+
+  def __decode_heartbeat_data(self, data):
+    """
+    Build the heartbeat dict used by netmon without consuming the caller payload.
+
+    MQTT/communication code may still pass the original payload to other
+    subsystems after netmon registration. Work on a local envelope copy so the
+    compressed ``ENCODED_DATA`` field is not popped from caller-owned data.
+    """
+    hb_data = dict(data)
+    owned_keys = set()
+    missing = object()
+    str_data = hb_data.pop(ct.HB.ENCODED_DATA, missing)
+    if str_data is not missing:
+      dct_hb = json.loads(self.log.decompress_text(str_data))
+      hb_data.update(dct_hb)
+      # json.loads creates fresh containers, so these values are already
+      # detached from the communication payload and can be stored directly.
+      owned_keys.update(dct_hb.keys())
+    return hb_data, owned_keys
+
+
+  def __build_hb_storage_snapshot(self, hb, owned_keys=None):
+    """
+    Detach a heartbeat before storing it in history.
+
+    For compressed heartbeats most large values come from freshly decoded JSON
+    and are owned by this call. Only values inherited from the caller envelope
+    still need a deepcopy to preserve the old no-aliasing contract.
+    """
+    owned_keys = owned_keys or set()
+    return {
+      key: value if key in owned_keys else deepcopy(value)
+      for key, value in hb.items()
+    }
+
+
+  def __build_compacted_history_heartbeat(self, hb):
+    """
+    Return a compacted replacement for a historical heartbeat.
+
+    Do not mutate the existing stored dict in-place: readers may already hold a
+    reference returned by ``network_node_last_heartbeat`` / history helpers. A
+    shallow dict copy lets us drop bulky keys cheaply, then we only deepcopy the
+    smaller retained values to avoid sharing nested objects with old readers.
+    """
+    hb_compact = dict(hb)
+    self.__pop_repeating_info_from_heartbeat(hb_compact)
+    return {
+      key: deepcopy(value)
+      for key, value in hb_compact.items()
+    }
   
   
   def __register_node_pipelines(self, addr, pipelines, plugins_statuses=None, verbose=False):
@@ -335,19 +395,11 @@ class NetworkMonitor(DecentrAIObject):
 
     Returns
     -------
-    bool
-      True when the heartbeat is accepted and stored, False when it is
-      dropped as a recent duplicate.
+    dict or None
+      The decoded heartbeat view when the heartbeat is accepted and stored.
+      None when it is dropped as a recent duplicate.
     """
-    # first check if data is encoded (as it always should be)
-    if ct.HB.ENCODED_DATA in data:
-      str_data = data.pop(ct.HB.ENCODED_DATA)
-      dct_hb = json.loads(self.log.decompress_text(str_data))
-      data = {
-        **data,
-        **dct_hb,
-      }
-    #endif encoded data
+    data, owned_keys = self.__decode_heartbeat_data(data)
 
     __eeid = data.get(ct.EE_ID, MISSING_ID)
     __addr_no_prefix = self.__remove_address_prefix(addr) 
@@ -370,9 +422,11 @@ class NetworkMonitor(DecentrAIObject):
         # strictly necessary, but it avoids maintaining extra dedup state.
         for prev_hb in islice(reversed(hb_deque), NETMON_DUPLICATE_TS_CHECK_LAST):
           if prev_hb.get(ct.PAYLOAD_DATA.EE_TIMESTAMP) == remote_ts:
-            return False
-      # Work on a copy to avoid mutating the stored heartbeat after append.
-      hb_work = deepcopy(data)
+            return None
+      # Store a detached snapshot. For normal compressed heartbeats this avoids
+      # deep-copying the freshly decoded payload while still protecting against
+      # caller-owned envelope objects being mutated elsewhere.
+      hb_work = self.__build_hb_storage_snapshot(data, owned_keys=owned_keys)
       if update_received_time:
         # save the timestamp when received the heartbeat,
         # helpful to know when computing the availability score
@@ -387,12 +441,18 @@ class NetworkMonitor(DecentrAIObject):
       # this is done to avoid having the same info in multiple sequential heartbeats
       self.__pop_repeating_info_from_previous_heartbeat(addr)
     # endwith lock
-    return True
+    return data
 
 
-  def get_box_heartbeats(self, addr):
+  def get_box_heartbeats(self, addr, return_copy=True):
     __addr_no_prefix = self.__remove_address_prefix(addr) 
-    box_heartbeats = deque(self.all_heartbeats[__addr_no_prefix], maxlen=self.HB_HISTORY)
+    with self.log.managed_lock_resource(NETMON_MUTEX):
+      heartbeats = list(self.__network_heartbeats[__addr_no_prefix])
+    if return_copy:
+      # This is a public API. Keep copies outside the lock to avoid blocking
+      # heartbeat registration while large histories are cloned for callers.
+      heartbeats = [deepcopy(hb) for hb in heartbeats]
+    box_heartbeats = deque(heartbeats, maxlen=self.HB_HISTORY)
     return box_heartbeats
 
   def start_timer(self, tmr_id):
@@ -404,20 +464,21 @@ class NetworkMonitor(DecentrAIObject):
   # Helper protected methods section
   if True:
     def __network_nodes_list(self, from_hb=False):
-      if self.all_heartbeats is None:
+      if self.__network_heartbeats is None:
         return []
 
-      nodes_addrs = list(self.all_heartbeats.keys())
-      if from_hb:
-        collected_addrs = []
-        for key in nodes_addrs:
-          hb = self.all_heartbeats.get(key, [{}])[-1]
-          addr = hb.get(ct.HB.EE_ADDR, None)
-          if addr is not None:
-            collected_addrs.append(addr)
-        # end for
-        nodes_addrs = collected_addrs
-      # endif from_hb
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        nodes_addrs = list(self.__network_heartbeats.keys())
+        if from_hb:
+          collected_addrs = []
+          for key in nodes_addrs:
+            hb = self.__network_heartbeats.get(key, [{}])[-1]
+            addr = hb.get(ct.HB.EE_ADDR, None)
+            if addr is not None:
+              collected_addrs.append(addr)
+          # end for
+          nodes_addrs = collected_addrs
+        # endif from_hb
 
       return nodes_addrs
 
@@ -427,7 +488,7 @@ class NetworkMonitor(DecentrAIObject):
         self.P("`_network_node_past_hearbeats_by_number`: ADDR '{}' not available".format(addr))
         return
       
-      box_heartbeats = self.get_box_heartbeats(addr)
+      box_heartbeats = self.get_box_heartbeats(addr, return_copy=False)
       if reverse_order:
         lst_heartbeats = list(reversed(box_heartbeats))[:nr]
       else:
@@ -448,7 +509,7 @@ class NetworkMonitor(DecentrAIObject):
         dt_now = dt.now()
         
       lst_heartbeats = []
-      box_heartbeats = self.get_box_heartbeats(addr)
+      box_heartbeats = self.get_box_heartbeats(addr, return_copy=False)
       for heartbeat in reversed(box_heartbeats):
         ts = heartbeat.get(ct.HB.RECEIVED_TIME)
         if ts is None:
@@ -473,17 +534,22 @@ class NetworkMonitor(DecentrAIObject):
         return_copy: bool = False
     ):
       __addr_no_prefix = self.__remove_address_prefix(addr) 
-      if __addr_no_prefix not in self.__network_nodes_list():
-        msg = "`_network_node_last_heartbeat`: ADDR '{}' not available".format(addr)
-        if not return_empty_dict:
-          raise ValueError(msg)
-        else:
-          if debug_unavailable:
-            self.P(msg, color='r')
-          return {}
-        #endif raise or return
-      res = self.all_heartbeats[__addr_no_prefix][-1]
-      return deepcopy(res) if return_copy else res
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        if __addr_no_prefix not in self.__network_heartbeats:
+          msg = "`_network_node_last_heartbeat`: ADDR '{}' not available".format(addr)
+          if not return_empty_dict:
+            raise ValueError(msg)
+          else:
+            if debug_unavailable:
+              self.P(msg, color='r')
+            return {}
+          #endif raise or return
+        res = self.__network_heartbeats[__addr_no_prefix][-1]
+      if return_copy:
+        # Copy outside NETMON_MUTEX so a large public snapshot cannot block
+        # heartbeat registration while deepcopy traverses nested payload data.
+        res = deepcopy(res)
+      return res
 
     def __network_node_last_valid_heartbeat(self, addr, minutes=3):
       past_heartbeats = self.__network_node_past_heartbeats_by_interval(addr=addr, minutes=minutes, )
@@ -934,12 +1000,13 @@ class NetworkMonitor(DecentrAIObject):
     
     
     def network_node_last_heartbeat(self, addr):
-      return self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)    
+      return self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True, return_copy=True)
     
     
     def register_node_pipelines(self, addr, pipelines, plugins_statuses=None, verbose=False):
-      self.__register_node_pipelines(addr, pipelines, plugins_statuses=plugins_statuses, verbose=verbose)
-      self.__registered_direct_pipelines += 1
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        self.__register_node_pipelines(addr, pipelines, plugins_statuses=plugins_statuses, verbose=verbose)
+        self.__registered_direct_pipelines += 1
       return
     
     def get_hb_vs_direct_pipeline_sources(self):
@@ -947,9 +1014,11 @@ class NetworkMonitor(DecentrAIObject):
 
 
     def register_heartbeat(self, addr, data):
-      accepted = self.__register_heartbeat(addr, data, update_received_time=True)
-      if accepted:
-        self.epoch_manager.register_data(addr, data) # TODO: change this?
+      epoch_data = self.__register_heartbeat(addr, data, update_received_time=True)
+      if epoch_data is not None:
+        # Epochs must observe the same decoded heartbeat view that netmon stores;
+        # the compressed MQTT envelope may not carry every canonical HB field.
+        self.epoch_manager.register_data(addr, epoch_data)
       return
         
     def network_nodes_status(self):
@@ -968,10 +1037,24 @@ class NetworkMonitor(DecentrAIObject):
       Return a dict with the known nodes and their last timestamp and pipeline config
       The addresses are without the prefix
       """
-      return self.__nodes_pipelines
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        snapshot = {
+          addr: dict(node_info)
+          for addr, node_info in self.__nodes_pipelines.items()
+        }
+      return deepcopy(snapshot)
 
     def network_known_configs(self):
-      return {x: self.__nodes_pipelines[x]['pipelines'] for x in self.__nodes_pipelines}
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        snapshot = {
+          addr: node_info[NetMonCt.PIPELINES]
+          for addr, node_info in self.__nodes_pipelines.items()
+          if NetMonCt.PIPELINES in node_info
+        }
+      return {
+        addr: deepcopy(pipelines)
+        for addr, pipelines in snapshot.items()
+      }
     
     
     def network_node_main_loop(self, addr):
@@ -1574,7 +1657,7 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_past_temperatures_history(
       self, addr, minutes=60, dt_now=None, 
-      reverse_order=True, return_timestamps=False
+      reverse_order=True, return_timestamps=False, return_copy=True
     ):
       """
       Returns the temperature history of a remote node in the last `minutes` minutes.
@@ -1603,7 +1686,7 @@ class NetworkMonitor(DecentrAIObject):
       max_temp_sensor = [x['max_temp_sensor'] for x in temperatures if x is not None]
 
       result = {
-        'all_sensors' : temperatures,
+        'all_sensors' : deepcopy(temperatures) if return_copy else temperatures,
         'max_temp'   : max_temps,
         'max_temp_sensor' :  max_temp_sensor[-1] if len(max_temp_sensor) > 0 else None,
       }
@@ -1637,7 +1720,7 @@ class NetworkMonitor(DecentrAIObject):
         device_id = self.__network_node_default_cuda(addr=addr)
         if not isinstance(device_id, int):
           device_id = 0
-        result = gpus[device_id]
+        result = deepcopy(gpus[device_id])
       return result
     
 
@@ -1690,7 +1773,7 @@ class NetworkMonitor(DecentrAIObject):
       If no GPU is available, returns None.
       """
       gpus = self.__network_node_last_gpus(addr=addr)
-      return gpus
+      return deepcopy(gpus)
     
     
     def network_node_gpu_summary(self, addr):
@@ -1700,13 +1783,13 @@ class NetworkMonitor(DecentrAIObject):
       """
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       gpu_info = hb.get(ct.HB.GPU_INFO, None)
-      return gpu_info
+      return deepcopy(gpu_info)
 
     
       
     def network_node_default_gpu_history(
       self, addr, minutes=60, dt_now=None, 
-      reverse_order=True, return_timestamps=False
+      reverse_order=True, return_timestamps=False, return_copy=True
     ):
       device_id = self.__network_node_default_cuda(addr=addr)
       lst_statuses, timestamps = [], []
@@ -1727,13 +1810,15 @@ class NetworkMonitor(DecentrAIObject):
           pass
       
       if return_timestamps:
-        return lst_statuses, timestamps
-      return lst_statuses
+        return deepcopy(lst_statuses) if return_copy else lst_statuses, timestamps
+      return deepcopy(lst_statuses) if return_copy else lst_statuses
       
     
     def network_node_default_gpu_average_avail_mem(self, addr, minutes=60, dt_now=None):
       result = None
-      lst_statuses = self.network_node_default_gpu_history(addr=addr, minutes=minutes, dt_now=dt_now)
+      lst_statuses = self.network_node_default_gpu_history(
+        addr=addr, minutes=minutes, dt_now=dt_now, return_copy=False
+      )
       mem = [x['FREE_MEM'] for x in lst_statuses]
       try:
         val = np.mean(mem)
@@ -1745,7 +1830,9 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_default_gpu_average_load(self, addr, minutes=60, dt_now=None):
       result = None
-      lst_statuses = self.network_node_default_gpu_history(addr=addr, minutes=minutes, dt_now=dt_now)      
+      lst_statuses = self.network_node_default_gpu_history(
+        addr=addr, minutes=minutes, dt_now=dt_now, return_copy=False
+      )
       try:
         gpuload = [x['GPU_USED'] for x in lst_statuses]
         val = np.mean(gpuload)
@@ -1814,7 +1901,7 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_whitelist(self, addr):
       """Returns the whitelist of a remote node exactly as it was received in the heartbeat - naturally without any prefix."""
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
-      return hb.get(ct.HB.EE_WHITELIST, ['<abnormal list>'])
+      return deepcopy(hb.get(ct.HB.EE_WHITELIST, ['<abnormal list>']))
     
     def network_node_local_tz(self, addr, as_zone=True):
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
@@ -1837,12 +1924,18 @@ class NetworkMonitor(DecentrAIObject):
       if dt_now is None:
         dt_now = dt.now()
       dt_now = dt_now.replace(hour=0, minute=0, second=0, microsecond=0)
-      hbs = self.__network_heartbeats[addr]
+      __addr_no_prefix = self.__remove_address_prefix(addr)
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        hbs = list(self.__network_heartbeats[__addr_no_prefix])
       for hb in hbs:
         ts = hb[ct.PAYLOAD_DATA.EE_TIMESTAMP]
-        dt_ts = self.log.utc_to_local(ts, fmt=ct.HB.TIMESTAMP_FORMAT)
+        dt_ts = self.log.utc_to_local(
+          ts,
+          remote_utc=hb.get(ct.PAYLOAD_DATA.EE_TIMEZONE),
+          fmt=ct.HB.TIMESTAMP_FORMAT,
+        )
         if dt_ts >= dt_now:
-          yield hb
+          yield deepcopy(hb)
       
             
     def network_node_is_secured(self, addr):
@@ -1860,8 +1953,9 @@ class NetworkMonitor(DecentrAIObject):
       
       """
       __addr_no_prefix = self.__remove_address_prefix(addr)
-      node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
-      return node_info.get(NetMonCt.PIPELINES, [])
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        pipelines = self.__nodes_pipelines.get(__addr_no_prefix, {}).get(NetMonCt.PIPELINES, [])
+      return deepcopy(pipelines)
     
     
     def network_node_pipeline_info(self, addr, pipeline):
@@ -1888,9 +1982,15 @@ class NetworkMonitor(DecentrAIObject):
       on the cached information.
       """
       __addr_no_prefix = self.__remove_address_prefix(addr)
-      node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
-      plugins_statuses = node_info.get(NetMonCt.PLUGINS_STATUSES, [])
-      pipelines = node_info.get(NetMonCt.PIPELINES, [])
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        node_info = self.__nodes_pipelines.get(__addr_no_prefix, {})
+        plugins_statuses = node_info.get(NetMonCt.PLUGINS_STATUSES, [])
+        pipelines = node_info.get(NetMonCt.PIPELINES, [])
+      # Copy cached pipeline data before shaping it into the public app view.
+      # Otherwise callers could mutate INSTANCE_CONF / pipeline objects and
+      # silently corrupt the monitor cache used by later status calls.
+      plugins_statuses = deepcopy(plugins_statuses)
+      pipelines = deepcopy(pipelines)
       apps = {}
       
       if isinstance(pipelines, list) and len(pipelines) > 0:
@@ -1972,7 +2072,8 @@ class NetworkMonitor(DecentrAIObject):
       apps = {}
       fails = {}
       if target_nodes is None:
-        target_nodes = list(self.__nodes_pipelines.keys())
+        with self.log.managed_lock_resource(NETMON_MUTEX):
+          target_nodes = list(self.__nodes_pipelines.keys())
       for addr in target_nodes:
         if self.network_node_is_online(addr=addr):
           node_apps = self.network_node_apps(addr=addr)
@@ -1994,7 +2095,8 @@ class NetworkMonitor(DecentrAIObject):
       apps = {}
       fails = {}
       if target_nodes is None:
-        target_nodes = list(self.__nodes_pipelines.keys())
+        with self.log.managed_lock_resource(NETMON_MUTEX):
+          target_nodes = list(self.__nodes_pipelines.keys())
       for addr in target_nodes:
         if self.network_node_is_online(addr=addr):
           node_apps = self.network_node_pipelines(addr=addr)
@@ -2070,7 +2172,7 @@ class NetworkMonitor(DecentrAIObject):
         # Cpu temperature history analysis
         temp_hist = self.network_node_past_temperatures_history(
           addr=addr, minutes=60, dt_now=dt_now,
-          reverse_order=True,
+          reverse_order=True, return_copy=False,
         )
 
         max_temperature = temp_hist['max_temp'] # get pre-processed max temperatures
@@ -2080,7 +2182,7 @@ class NetworkMonitor(DecentrAIObject):
         
         # Gpu temperature history analysis
         gpu_hist = self.network_node_default_gpu_history(
-          addr=addr, minutes=60, dt_now=dt_now, reverse_order=True)
+          addr=addr, minutes=60, dt_now=dt_now, reverse_order=True, return_copy=False)
 
         gpu_temp_hist = [x['GPU_TEMP'] for x in gpu_hist]
         gpu_temp = gpu_temp_hist[-1] if len(gpu_temp_hist) > 0 else None

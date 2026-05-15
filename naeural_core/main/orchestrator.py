@@ -899,16 +899,37 @@ class Orchestrator(DecentrAIObject,
     self.__done = True
     _thread_async_comm = vars(self).get('_thread_async_comm')
     if _thread_async_comm is not None and _thread_async_comm.is_alive():
-      _thread_async_comm.join()
-      self.P("Asynchronous communication thread joined.", color='y')
+      join_timeout = min(10.0, max(5.0, 4 * self.cfg_admin_pipeline_dispatch_poll_seconds))
+      _thread_async_comm.join(timeout=join_timeout)
+      if _thread_async_comm.is_alive():
+        self.P(
+          "Asynchronous communication thread did not stop after {:.1f}s; continuing shutdown.".format(join_timeout),
+          color='r',
+        )
+      else:
+        self.P("Asynchronous communication thread joined.", color='y')
     _thread_admin_pipeline_collect = vars(self).get('_thread_admin_pipeline_collect')
     if _thread_admin_pipeline_collect is not None and _thread_admin_pipeline_collect.is_alive():
-      _thread_admin_pipeline_collect.join()
-      self.P("Admin pipeline collection thread joined.", color='y')
+      join_timeout = min(5.0, max(1.0, 4 * self.cfg_admin_pipeline_dispatch_poll_seconds))
+      _thread_admin_pipeline_collect.join(timeout=join_timeout)
+      if _thread_admin_pipeline_collect.is_alive():
+        self.P(
+          "Admin pipeline collection thread did not stop after {:.1f}s; continuing shutdown.".format(join_timeout),
+          color='r',
+        )
+      else:
+        self.P("Admin pipeline collection thread joined.", color='y')
     _thread_node_oracle_refresh = vars(self).get('_thread_node_oracle_refresh')
     if _thread_node_oracle_refresh is not None and _thread_node_oracle_refresh.is_alive():
-      _thread_node_oracle_refresh.join()
-      self.P("Node oracle refresh thread joined.", color='y')
+      join_timeout = min(5.0, max(1.0, 4 * self.cfg_admin_pipeline_dispatch_poll_seconds))
+      _thread_node_oracle_refresh.join(timeout=join_timeout)
+      if _thread_node_oracle_refresh.is_alive():
+        self.P(
+          "Node oracle refresh thread did not stop after {:.1f}s; continuing shutdown.".format(join_timeout),
+          color='r',
+        )
+      else:
+        self.P("Node oracle refresh thread joined.", color='y')
     return
 
   def _maybe_gracefull_stop(self):
@@ -1361,10 +1382,10 @@ class Orchestrator(DecentrAIObject,
       self._comm_manager.close()
     if self._business_manager is not None:
       self._business_manager.close()
-    if self._capture_manager is not None:
-      self._capture_manager.close()
     if self._serving_manager is not None:
       self._serving_manager.stop_all_servers()
+    if self._capture_manager is not None:
+      self._capture_manager.close()
     return
 
   def refresh_business_plugins(self):

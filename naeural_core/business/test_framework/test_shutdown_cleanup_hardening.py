@@ -321,6 +321,42 @@ class _FakeProcess:
     return 0
 
 
+class _StoppedProcess:
+  def __init__(self, pgid):
+    self.pid = pgid
+    self._r1_process_group_id = pgid
+    self.terminated = False
+    self.killed = False
+
+  def poll(self):
+    return 0
+
+  def terminate(self):
+    self.terminated = True
+    return
+
+  def kill(self):
+    self.killed = True
+    return
+
+  def wait(self, timeout=None):
+    return 0
+
+
+def _fake_proc_stat_open(proc_entries):
+  def fake_open(path, *args, **kwargs):
+    pid_name = pathlib.Path(path).parent.name
+    entry = proc_entries[pid_name]
+    if len(entry) == 2:
+      state, pgid = entry
+      comm = "cloudflared"
+    else:
+      state, pgid, comm = entry
+    stat = f"{pid_name} ({comm}) {state} 1 {pgid} 0 0\n"
+    return mock.mock_open(read_data=stat)()
+  return fake_open
+
+
 class TestTunnelShutdownHardening(unittest.TestCase):
 
   def test_windows_fallback_kills_process_without_sigkill(self):
@@ -335,6 +371,69 @@ class TestTunnelShutdownHardening(unittest.TestCase):
 
     self.assertTrue(process.terminated)
     self.assertTrue(process.killed)
+    return
+
+  def test_zombie_only_process_group_is_treated_as_stopped(self):
+    plugin = BaseTunnelEnginePlugin.__new__(BaseTunnelEnginePlugin)
+    plugin.messages = []
+    plugin.P = lambda msg, *args, **kwargs: plugin.messages.append(str(msg))
+    process = _StoppedProcess(pgid=123)
+    proc_entries = {"456": ("Z", 123)}
+
+    with mock.patch.object(_TUNNEL_MODULE.os, "name", "posix"), \
+         mock.patch.object(_TUNNEL_MODULE.os.path, "isdir", return_value=True), \
+         mock.patch.object(_TUNNEL_MODULE.os, "listdir", return_value=list(proc_entries)), \
+         mock.patch.object(_TUNNEL_MODULE.os, "killpg", return_value=None), \
+         mock.patch("builtins.open", _fake_proc_stat_open(proc_entries)):
+      self.assertTrue(plugin._terminate_subprocess_tree(process, terminate_timeout=0, kill_timeout=0))
+
+    self.assertFalse(process.terminated)
+    self.assertFalse(process.killed)
+    return
+
+  def test_live_process_group_member_keeps_shutdown_failed(self):
+    plugin = BaseTunnelEnginePlugin.__new__(BaseTunnelEnginePlugin)
+    plugin.messages = []
+    plugin.P = lambda msg, *args, **kwargs: plugin.messages.append(str(msg))
+    process = _StoppedProcess(pgid=123)
+    proc_entries = {"456": ("S", 123)}
+
+    with mock.patch.object(_TUNNEL_MODULE.os, "name", "posix"), \
+         mock.patch.object(_TUNNEL_MODULE.os.path, "isdir", return_value=True), \
+         mock.patch.object(_TUNNEL_MODULE.os, "listdir", return_value=list(proc_entries)), \
+         mock.patch.object(_TUNNEL_MODULE.os, "killpg", return_value=None), \
+         mock.patch("builtins.open", _fake_proc_stat_open(proc_entries)):
+      self.assertFalse(plugin._terminate_subprocess_tree(process, terminate_timeout=0, kill_timeout=0))
+
+    self.assertFalse(process.terminated)
+    self.assertFalse(process.killed)
+    return
+
+  def test_proc_stat_parser_handles_command_names_with_parentheses(self):
+    plugin = BaseTunnelEnginePlugin.__new__(BaseTunnelEnginePlugin)
+    plugin.messages = []
+    plugin.P = lambda msg, *args, **kwargs: plugin.messages.append(str(msg))
+    process = _StoppedProcess(pgid=123)
+    proc_entries = {"456": ("Z", 123, "cloud flared (worker)")}
+
+    with mock.patch.object(_TUNNEL_MODULE.os, "name", "posix"), \
+         mock.patch.object(_TUNNEL_MODULE.os.path, "isdir", return_value=True), \
+         mock.patch.object(_TUNNEL_MODULE.os, "listdir", return_value=list(proc_entries)), \
+         mock.patch.object(_TUNNEL_MODULE.os, "killpg", return_value=None), \
+         mock.patch("builtins.open", _fake_proc_stat_open(proc_entries)):
+      self.assertTrue(plugin._terminate_subprocess_tree(process, terminate_timeout=0, kill_timeout=0))
+    return
+
+  def test_proc_unavailable_keeps_process_group_conservatively_failed(self):
+    plugin = BaseTunnelEnginePlugin.__new__(BaseTunnelEnginePlugin)
+    plugin.messages = []
+    plugin.P = lambda msg, *args, **kwargs: plugin.messages.append(str(msg))
+    process = _StoppedProcess(pgid=123)
+
+    with mock.patch.object(_TUNNEL_MODULE.os, "name", "posix"), \
+         mock.patch.object(_TUNNEL_MODULE.os.path, "isdir", return_value=False), \
+         mock.patch.object(_TUNNEL_MODULE.os, "killpg", return_value=None):
+      self.assertFalse(plugin._terminate_subprocess_tree(process, terminate_timeout=0, kill_timeout=0))
     return
 
 

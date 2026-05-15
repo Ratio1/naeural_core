@@ -11,7 +11,14 @@ __VER__ = "0.1.0"
 
 _CONFIG = {
   **DataCaptureThread.CONFIG,
-  "LOOPBACK_QUEUE_SIZE": 32,
+  # Keep more local request payloads before dropping old entries during short bursts.
+  "LOOPBACK_QUEUE_SIZE": 128,
+  # Poll the local loopback queue often enough to avoid the old ~1s request latency floor.
+  "CAP_RESOLUTION": 32,
+  # Loopback carries discrete requests, so keep buffered request order instead of latest-only live behavior.
+  "LIVE_FEED": False,
+  # Let the manager consume several buffered request batches per pass without flooding downstream plugins.
+  "STREAM_WINDOW": 8,
   "VALIDATION_RULES": {
     **DataCaptureThread.CONFIG["VALIDATION_RULES"],
     "LOOPBACK_QUEUE_SIZE": {

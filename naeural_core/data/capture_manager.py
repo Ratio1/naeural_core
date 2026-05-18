@@ -624,7 +624,12 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
     self.log.stop_timer('aggregate_meta', section=timer_section)
     return dct_captured_data
 
-  def get_all_captured_data(self, timer_section=None, display_status=True):
+  def get_all_captured_data(
+    self,
+    timer_section=None,
+    display_status=True,
+    excluded_stream_names=None,
+  ):
     """
     Collect available data from all active captures and metastreams.
 
@@ -634,12 +639,15 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
       Optional logger timer section, used by non-main collection threads.
     display_status : bool, optional
       If True, periodically display capture status summaries.
+    excluded_stream_names : iterable or None, optional
+      Capture stream names that must not be drained by this call.
 
     Returns
     -------
     dict
       Captured data keyed by stream name.
     """
+    excluded_stream_names = set(excluded_stream_names or [])
     self.log.start_timer('get_all_captures_full', section=timer_section)
     
     self.log.start_timer('get_all_captures_stage1', section=timer_section)
@@ -666,7 +674,10 @@ class CaptureManager(Manager, _ConfigHandlerMixin):
       self.log.stop_timer('get_all_captures_stage2', section=timer_section)
 
       self.log.start_timer('get_all_captures_stage3', section=timer_section)
-      lst_avail = [k for k in self._dct_captures if self._dct_captures[k] is not None]
+      lst_avail = [
+        k for k in self._dct_captures
+        if self._dct_captures[k] is not None and k not in excluded_stream_names
+      ]
       n = len(lst_avail)
       str_stage = 'get_captured_n{}'.format(n)
       self.log.start_timer(str_stage, section=timer_section)

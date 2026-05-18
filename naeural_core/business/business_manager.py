@@ -395,7 +395,11 @@ class BusinessManager(Manager):
 
   def dispatch_admin_pipeline_inputs(self, dct_business_inputs):
     """
-    Enqueue snapshot-owned admin inputs for async delivery.
+    Enqueue routed admin inputs for async delivery.
+
+    Handler-based routing is applied before queueing so unrelated admin
+    instances do not amplify high-volume network payloads. Deep snapshots are
+    only needed when the same capture batch fans out to multiple instances.
 
     Parameters
     ----------
@@ -417,12 +421,28 @@ class BusinessManager(Manager):
     if queue is None:
       return 0
 
-    enqueued = 0
+    deliveries = []
     for instance_hash in admin_instance_hashes:
       inputs = dct_business_inputs.get(instance_hash)
       if not inputs:
         continue
-      snapshot = deepcopy(inputs)
+
+      plugin = self.get_subaltern(instance_hash)
+      if plugin is None:
+        self._admin_dispatch_counters["dropped_missing_plugin"] += 1
+        continue
+
+      if self._should_filter_network_inputs(plugin, inputs):
+        inputs = self._filter_network_inputs(plugin, inputs)
+        if inputs is None:
+          continue
+
+      deliveries.append((instance_hash, inputs))
+
+    enqueued = 0
+    copy_deliveries = len(deliveries) > 1
+    for instance_hash, inputs in deliveries:
+      snapshot = deepcopy(inputs) if copy_deliveries else inputs
       try:
         queue.put_nowait((instance_hash, snapshot))
       except Full:

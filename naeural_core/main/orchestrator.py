@@ -1467,7 +1467,14 @@ class Orchestrator(DecentrAIObject,
       self._capture_manager.update_streams(self._current_dct_config_streams)
       
       self.__loop_stage = '4.collect.get_all_cap'
-      dct_captures = self._capture_manager.get_all_captured_data()
+      excluded_stream_names = (
+        {ct.CONST_ADMIN_PIPELINE_NAME}
+        if self.cfg_admin_pipeline_async_dispatch
+        else None
+      )
+      dct_captures = self._capture_manager.get_all_captured_data(
+        excluded_stream_names=excluded_stream_names,
+      )
 
       self.__loop_stage = '4.collect.add_data_info'
       self._app_monitor.add_data_info(val=len(dct_captures), stage=ct.NR_STREAMS_DATA)

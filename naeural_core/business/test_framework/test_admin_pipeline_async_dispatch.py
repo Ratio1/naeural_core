@@ -10,6 +10,7 @@ from time import time
 
 from naeural_core import constants as ct
 from naeural_core.business.business_manager import BusinessManager
+from naeural_core.data.capture_manager import CaptureManager
 from naeural_core.main.orchestrator import Orchestrator
 
 
@@ -17,7 +18,7 @@ class _FakeLog:
   def __init__(self):
     self.config_data = {}
 
-  def start_timer(self, _name):
+  def start_timer(self, _name, **_kwargs):
     return
 
   def stop_timer(self, _name, **_kwargs):
@@ -52,6 +53,11 @@ class _FakePlugin:
 class _FakeConfigManager:
   def __init__(self, streams):
     self.dct_config_streams = streams
+    self.archived_streams = []
+
+  def archive_streams(self, stream_names, initiator_id=None, session_id=None):
+    self.archived_streams.append((deepcopy(stream_names), initiator_id, session_id))
+    return
 
 
 class _FakeCaptureManager:
@@ -70,15 +76,23 @@ class _FakeCaptureManager:
     self.ensure_calls.append(deepcopy(config_stream))
     return True
 
-  def get_all_captured_data(self, timer_section=None, display_status=True):
-    self.get_all_calls.append((timer_section, display_status))
-    return deepcopy(self._captures)
+  def get_all_captured_data(self, timer_section=None, display_status=True, excluded_stream_names=None):
+    excluded_stream_names = set(excluded_stream_names or [])
+    self.get_all_calls.append((timer_section, display_status, excluded_stream_names))
+    return {
+      stream_name: deepcopy(capture)
+      for stream_name, capture in self._captures.items()
+      if stream_name not in excluded_stream_names
+    }
 
   def get_single_stream_captured_data(self, stream_name):
     self.get_stream_calls.append(stream_name)
     if stream_name not in self._captures:
       return {}
     return {stream_name: deepcopy(self._captures[stream_name])}
+
+  def get_finished_streams(self):
+    return []
 
 
 class _FakeAdminBusinessManager:
@@ -221,41 +235,81 @@ class TestAdminPipelineAsyncDispatch(unittest.TestCase):
     self.assertEqual(len(admin_plugin.added_inputs), 1)
     self.assertEqual(len(non_admin_plugin.added_inputs), 1)
 
-  def test_async_dispatch_uses_snapshot_owned_inputs(self):
+  def test_async_dispatch_skips_deepcopy_for_single_routed_recipient(self):
     manager = self._make_manager(async_enabled=True)
-    manager._initialize_admin_async_dispatch()
+    manager._admin_dispatch_queue = Queue(maxsize=8)
     admin_plugin = _FakePlugin()
     manager._dct_subalterns[self.ADMIN_HASH] = admin_plugin
 
-    dct_business_inputs = {
-      self.ADMIN_HASH: {
-        "INPUTS": [{
-          "TYPE": "STRUCT_DATA",
-          "STRUCT_DATA": {
-            "payload": {
-              "subject": "Original subject",
-              "body": ["line-1", "line-2"],
-            },
-          },
-        }],
+    payload = {
+      "payload": {
+        "subject": "Original subject",
+        "body": ["line-1", "line-2"],
       },
     }
+    inputs = {
+      "INPUTS": [{
+        "TYPE": "STRUCT_DATA",
+        "STRUCT_DATA": payload,
+      }],
+    }
+    dct_business_inputs = {
+      self.ADMIN_HASH: inputs,
+    }
 
-    manager.dispatch_admin_pipeline_inputs(dct_business_inputs)
-    dct_business_inputs[self.ADMIN_HASH]["INPUTS"][0]["STRUCT_DATA"]["payload"]["subject"] = "Mutated subject"
-    dct_business_inputs[self.ADMIN_HASH]["INPUTS"][0]["STRUCT_DATA"]["payload"]["body"].append("line-3")
+    enqueued = manager.dispatch_admin_pipeline_inputs(dct_business_inputs)
 
-    self.assertTrue(admin_plugin.added_event.wait(1.0))
-    delivered_payload = admin_plugin.added_inputs[0]["INPUTS"][0]["STRUCT_DATA"]["payload"]
-    self.assertEqual(delivered_payload["subject"], "Original subject")
-    self.assertEqual(delivered_payload["body"], ["line-1", "line-2"])
+    self.assertEqual(enqueued, 1)
+    queued_hash, queued_inputs = manager._admin_dispatch_queue.get_nowait()
+    self.assertEqual(queued_hash, self.ADMIN_HASH)
+    self.assertIs(queued_inputs, inputs)
+    self.assertIs(queued_inputs["INPUTS"][0]["STRUCT_DATA"], payload)
 
-  def test_async_dispatch_snapshots_admin_hashes_before_iteration(self):
+  def test_async_dispatch_uses_snapshot_owned_inputs_for_multiple_recipients(self):
     manager = self._make_manager(async_enabled=True)
-    manager._initialize_admin_async_dispatch()
+    manager._admin_dispatch_queue = Queue(maxsize=8)
     second_admin_hash = "admin_hash_2"
     manager._dct_hash_mappings[second_admin_hash] = (ct.CONST_ADMIN_PIPELINE_NAME, "ADMIN_SIG", "ADMIN_02")
     manager._admin_instance_hashes = {self.ADMIN_HASH, second_admin_hash}
+    manager._dct_subalterns[self.ADMIN_HASH] = _FakePlugin()
+    manager._dct_subalterns[second_admin_hash] = _FakePlugin()
+
+    shared_inputs = {
+      "INPUTS": [{
+        "TYPE": "STRUCT_DATA",
+        "STRUCT_DATA": {
+          "payload": {
+            "subject": "Original subject",
+            "body": ["line-1", "line-2"],
+          },
+        },
+      }],
+    }
+    dct_business_inputs = {
+      self.ADMIN_HASH: shared_inputs,
+      second_admin_hash: shared_inputs,
+    }
+
+    enqueued = manager.dispatch_admin_pipeline_inputs(dct_business_inputs)
+    shared_inputs["INPUTS"][0]["STRUCT_DATA"]["payload"]["subject"] = "Mutated subject"
+    shared_inputs["INPUTS"][0]["STRUCT_DATA"]["payload"]["body"].append("line-3")
+
+    self.assertEqual(enqueued, 2)
+    queued = dict(manager._admin_dispatch_queue.get_nowait() for _ in range(2))
+    for queued_inputs in queued.values():
+      delivered_payload = queued_inputs["INPUTS"][0]["STRUCT_DATA"]["payload"]
+      self.assertEqual(delivered_payload["subject"], "Original subject")
+      self.assertEqual(delivered_payload["body"], ["line-1", "line-2"])
+      self.assertIsNot(queued_inputs, shared_inputs)
+
+  def test_async_dispatch_snapshots_admin_hashes_before_iteration(self):
+    manager = self._make_manager(async_enabled=True)
+    manager._admin_dispatch_queue = Queue(maxsize=8)
+    second_admin_hash = "admin_hash_2"
+    manager._dct_hash_mappings[second_admin_hash] = (ct.CONST_ADMIN_PIPELINE_NAME, "ADMIN_SIG", "ADMIN_02")
+    manager._admin_instance_hashes = {self.ADMIN_HASH, second_admin_hash}
+    manager._dct_subalterns[self.ADMIN_HASH] = _FakePlugin()
+    manager._dct_subalterns[second_admin_hash] = _FakePlugin()
 
     class _MutatingBusinessInputs(dict):
       def __init__(self, owner, *args, **kwargs):
@@ -364,6 +418,56 @@ class TestAdminPipelineAsyncDispatch(unittest.TestCase):
     self.assertEqual(len(delivered_inputs), 1)
     self.assertEqual(delivered_inputs[0]["STRUCT_DATA"][ct.PAYLOAD_DATA.EE_PAYLOAD_PATH][2], "KEEP_ME")
 
+  def test_async_dispatch_filters_by_handler_before_enqueue(self):
+    manager = self._make_manager(async_enabled=True)
+    manager._admin_dispatch_queue = Queue(maxsize=8)
+    chain_store_hash = "chain_store_admin"
+    net_config_hash = "net_config_admin"
+    manager._dct_hash_mappings[chain_store_hash] = (
+      ct.CONST_ADMIN_PIPELINE_NAME,
+      "CHAIN_STORE_BASE",
+      "CHAIN_STORE_BASE_INST",
+    )
+    manager._dct_hash_mappings[net_config_hash] = (
+      ct.CONST_ADMIN_PIPELINE_NAME,
+      "NET_CONFIG_MONITOR",
+      "NET_CONFIG_MONITOR_INST",
+    )
+    manager._admin_instance_hashes = {chain_store_hash, net_config_hash}
+    manager._dct_subalterns[chain_store_hash] = _FakePlugin(
+      network_route_by_handler=True,
+      handlers={"CHAIN_STORE_BASE"},
+    )
+    manager._dct_subalterns[net_config_hash] = _FakePlugin(
+      network_route_by_handler=True,
+      handlers={"NET_CONFIG_MONITOR"},
+    )
+
+    chain_store_inputs = {
+      "INPUTS": [{
+        "TYPE": "STRUCT_DATA",
+        "STRUCT_DATA": {
+          ct.PAYLOAD_DATA.EE_PAYLOAD_PATH: [
+            "sender",
+            ct.CONST_ADMIN_PIPELINE_NAME,
+            "CHAIN_STORE_BASE",
+            "inst",
+          ],
+        },
+      }],
+    }
+
+    enqueued = manager.dispatch_admin_pipeline_inputs({
+      chain_store_hash: chain_store_inputs,
+      net_config_hash: chain_store_inputs,
+    })
+
+    self.assertEqual(enqueued, 1)
+    self.assertEqual(manager._admin_dispatch_queue.qsize(), 1)
+    queued_hash, queued_inputs = manager._admin_dispatch_queue.get_nowait()
+    self.assertEqual(queued_hash, chain_store_hash)
+    self.assertIs(queued_inputs, chain_store_inputs)
+
   def test_dead_dispatch_thread_is_restarted_by_health_check(self):
     manager = self._make_manager(async_enabled=True)
     restarted = []
@@ -443,15 +547,50 @@ class TestAdminPipelineCollectionLane(unittest.TestCase):
       },
     })
     orchestrator._business_manager = _FakeAdminBusinessManager()
+    orchestrator._app_monitor = SimpleNamespace(add_data_info=lambda **kwargs: None)
     orchestrator._Orchestrator__capture_manager_lock = Lock()
     setattr(orchestrator, "_Orchestrator__done", False)
     orchestrator._current_dct_config_streams = {}
+    orchestrator._main_loop_counts = defaultdict(int)
+    orchestrator._reset_timers = False
     orchestrator._thread_admin_pipeline_collect = None
     orchestrator._admin_pipeline_collect_last_loop_ts = None
     orchestrator._admin_pipeline_collect_last_progress_ts = None
     orchestrator._admin_pipeline_collect_last_warning_ts = 0
     orchestrator._admin_pipeline_collect_consecutive_failures = 0
     return orchestrator
+
+  def test_main_loop_collect_excludes_admin_pipeline_when_async_dispatch_is_enabled(self):
+    orchestrator = self._make_orchestrator()
+    orchestrator._capture_manager._captures["regular_pipeline"] = {
+      "STREAM_NAME": "regular_pipeline",
+      "STREAM_METADATA": {"source": "regular"},
+      "INPUTS": [{"TYPE": "STRUCT_DATA", "STRUCT_DATA": {"payload": "regular"}}],
+    }
+    orchestrator._current_dct_config_streams = deepcopy(
+      orchestrator._config_manager.dct_config_streams
+    )
+
+    dct_captures = orchestrator.collect_data()
+
+    self.assertNotIn(ct.CONST_ADMIN_PIPELINE_NAME, dct_captures)
+    self.assertIn("regular_pipeline", dct_captures)
+    self.assertEqual(
+      orchestrator._capture_manager.get_all_calls,
+      [(None, True, {ct.CONST_ADMIN_PIPELINE_NAME})],
+    )
+
+  def test_main_loop_collect_keeps_admin_pipeline_when_async_dispatch_is_disabled(self):
+    orchestrator = self._make_orchestrator()
+    orchestrator.config_data["ADMIN_PIPELINE_ASYNC_DISPATCH"] = False
+    orchestrator._current_dct_config_streams = deepcopy(
+      orchestrator._config_manager.dct_config_streams
+    )
+
+    dct_captures = orchestrator.collect_data()
+
+    self.assertIn(ct.CONST_ADMIN_PIPELINE_NAME, dct_captures)
+    self.assertEqual(orchestrator._capture_manager.get_all_calls, [(None, True, set())])
 
   def test_collect_once_builds_and_dispatches_admin_inputs(self):
     orchestrator = self._make_orchestrator()
@@ -558,6 +697,40 @@ class TestAdminPipelineCollectionLane(unittest.TestCase):
     orchestrator.config_data.pop("ADMIN_PIPELINE_ASYNC_DISPATCH", None)
 
     self.assertTrue(orchestrator.cfg_admin_pipeline_async_dispatch)
+
+
+class TestCaptureManagerCollectionExclusions(unittest.TestCase):
+  def test_get_all_captured_data_does_not_drain_excluded_streams(self):
+    manager = CaptureManager.__new__(CaptureManager)
+    manager.log = _FakeLog()
+    manager.owner = SimpleNamespace(set_loop_stage=lambda *args, **kwargs: None)
+    manager.data_flow_stopped = False
+    manager._nr_data_flow_stops = 0
+    manager._last_gather_summary = None
+    manager.is_data_available = False
+    manager._dct_captures = {
+      ct.CONST_ADMIN_PIPELINE_NAME: object(),
+      "regular_pipeline": object(),
+    }
+    manager._needs_skip_acquisition = lambda: False
+    manager._aggregate_captured_data_in_metastreams = (
+      lambda dct_captured_data, timer_section=None: dct_captured_data
+    )
+    drained_streams = []
+
+    def get_captured_data(stream_name):
+      drained_streams.append(stream_name)
+      return True, {"STREAM_NAME": stream_name, "INPUTS": []}
+
+    manager.get_captured_data = get_captured_data
+
+    dct_captures = manager.get_all_captured_data(
+      display_status=False,
+      excluded_stream_names={ct.CONST_ADMIN_PIPELINE_NAME},
+    )
+
+    self.assertEqual(drained_streams, ["regular_pipeline"])
+    self.assertEqual(list(dct_captures.keys()), ["regular_pipeline"])
 
 
 if __name__ == "__main__":

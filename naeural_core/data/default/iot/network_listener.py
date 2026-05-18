@@ -33,6 +33,9 @@ _CONFIG = {
   
   'DEBUG_IOT_PAYLOADS' : False,
   "FILTER_BY_DESTINATION": True,
+  # TODO: Make NetworkListener QoS configurable per traffic class. Targeted
+  # CStore/admin payloads may benefit from QoS 1 delivery hardening, but do not
+  # switch broadcast or high-volume soft-state traffic without separate load tests.
   
   
 

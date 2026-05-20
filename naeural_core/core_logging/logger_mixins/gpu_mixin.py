@@ -137,25 +137,50 @@ class _GPUMixin(object):
     return processes_by_uuid
 
   def _get_uuid_by_index(self, timeout=1.5):
-    import subprocess, shutil
+    """
+    Return the best-effort ``nvidia-smi`` UUID mapping keyed by GPU index.
+
+    Parameters
+    ----------
+    timeout : float, optional
+      Maximum number of seconds allowed for the optional ``nvidia-smi`` query.
+
+    Returns
+    -------
+    dict
+      Mapping from numeric GPU index to NVML UUID.  An empty mapping means the
+      caller should fall back to direct NVML index lookup.
+
+    Notes
+    -----
+    ``nvidia-smi`` is only used to preserve CUDA-to-NVML ordering when possible.
+    Slow or unhealthy drivers must not turn this optional lookup into a
+    top-level ``gpu_info`` failure, because the primary NVML index path can
+    still provide useful heartbeat telemetry.
+    """
     smi = shutil.which("nvidia-smi")
     if not smi:
       return {}
 
-    out = subprocess.run(
-      [smi, "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
-      capture_output=True, text=True, timeout=timeout
-    )
-    if out.returncode != 0:
+    try:
+      out = subprocess.run(
+        [smi, "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, timeout=timeout
+      )
+      if out.returncode != 0:
+        return {}
+
+      d = {}
+      for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line:
+          continue
+        # A malformed optional telemetry row should not abort GPU monitoring.
+        idx_s, uuid = [p.strip() for p in line.split(",", 1)]
+        d[int(idx_s)] = uuid
+    except Exception:
       return {}
 
-    d = {}
-    for line in out.stdout.splitlines():
-      line = line.strip()
-      if not line:
-        continue
-      idx_s, uuid = [p.strip() for p in line.split(",", 1)]
-      d[int(idx_s)] = uuid
     return d
 
   def gpu_info(self, show=False, mb=False, current_pid=False):

@@ -4,9 +4,10 @@ Module: multi_class_tracker_mixin.py
 This module provides the _MultiClassTrackerMixin class, which handles tracking of 
 multiple object classes using the CentroidObjectTracker.
 
-IMPORTANT: 
-	This class should be modified/tuned within individual implementations of complex ecosystems. It is recommended to
-	create a `extensions.business.mixin_base.multi_class_tracker_mixin` unit that will automaticaly replace the current file
+IMPORTANT:
+    This class is the canonical multi-class tracker mixin for HyFy-E2. Do not
+    reintroduce a deployment-specific override unless the runtime import path
+    and duplicate maintenance cost are explicitly accepted.
 
 It is intended to be used as a mixin in classes that provide certain attributes and methods, including:
 
@@ -21,6 +22,10 @@ It is intended to be used as a mixin in classes that provide certain attributes 
 - self.cfg_linear_max_dist_scale
 - self.cfg_linear_center_dist_weight
 - self.cfg_linear_hw_dist_weight
+- self.cfg_linear_recovery_enabled
+- self.cfg_linear_recovery_max_age
+- self.cfg_linear_recovery_max_relative_dist
+- self.cfg_linear_recovery_center_scale
 - self.cfg_linear_reset_minutes
 - self._get_detector_ai_engines()
 - self.dataapi_image()
@@ -193,6 +198,10 @@ class _MultiClassTrackerMixin:
                   max_dist_scale=self.cfg_linear_max_dist_scale,
                   center_dist_weight=self.cfg_linear_center_dist_weight,
                   hw_dist_weight=self.cfg_linear_hw_dist_weight,
+                  linear_recovery_enabled=self.cfg_linear_recovery_enabled,
+                  linear_recovery_max_age=self.cfg_linear_recovery_max_age,
+                  linear_recovery_max_relative_dist=self.cfg_linear_recovery_max_relative_dist,
+                  linear_recovery_center_scale=self.cfg_linear_recovery_center_scale,
                   linear_reset_minutes=self.cfg_linear_reset_minutes,
                   moved_delta_ratio=0.005  # TODO: Implement moved_delta_ratio functionality
               )
@@ -482,10 +491,11 @@ class _MultiClassTrackerMixin:
       """
       tracker = self._get_tracker(object_type)
       if not tracker:
-          raise ValueError(f"No tracker found for object type '{object_type}'")
-      positions = tracker.get_object_history(object_id)[-number_of_points:]
-      if len(positions) < 2:
           return (0, 0)
+      positions = tracker.get_object_history(object_id)
+      if positions is None or len(positions) < 2:
+          return (0, 0)
+      positions = positions[-number_of_points:]
       point1 = positions[0]
       point2 = positions[-1]
       return (point2[0] - point1[0], point2[1] - point1[1])
@@ -903,6 +913,5 @@ class _MultiClassTrackerMixin:
 
 
 if __name__ == '__main__':
-  
+
   eng = _MultiClassTrackerMixin()
-  

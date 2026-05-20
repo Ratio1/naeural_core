@@ -17,12 +17,7 @@ from naeural_core.utils import nms
 from decentra_vision.draw_utils import DrawUtils
 
 from naeural_core.business.mixins_base import _LimitedDataMixin
-
-# TODO: this will be moved or replaced
-try:
-  from extensions.business.mixins_base.multi_class_tracker_mixin import _MultiClassTrackerMixin
-except:
-  from naeural_core.business.mixins_base.multi_class_tracker_mixin import _MultiClassTrackerMixin
+from naeural_core.business.mixins_base.multi_class_tracker_mixin import _MultiClassTrackerMixin
 
 from naeural_core.business.mixins_libs import _AlertWitnessMixin
 
@@ -41,6 +36,10 @@ _CONFIG = {
   'LINEAR_CENTER_DIST_WEIGHT': 1,
   'LINEAR_HW_DIST_WEIGHT': 0.8,
   'LINEAR_MAX_AGE': 4,
+  'LINEAR_RECOVERY_ENABLED': False,
+  'LINEAR_RECOVERY_MAX_AGE': 2,
+  'LINEAR_RECOVERY_MAX_RELATIVE_DIST': 3.0,
+  'LINEAR_RECOVERY_CENTER_SCALE': 1.25,
   'SORT_MIN_IOU': 0,
   'SORT_MAX_AGE': 3,
   'SORT_MIN_HITS': 1,
@@ -158,6 +157,26 @@ _CONFIG = {
     'LINEAR_MAX_AGE': {
       'TYPE': 'int',
       'DESCRIPTION': 'Number of untracked frames until the object id is no loger tracked. Only for linear tracking mode'
+    },
+
+    'LINEAR_RECOVERY_ENABLED': {
+      'TYPE': 'bool',
+      'DESCRIPTION': 'Enable bounded velocity-based recovery for short linear-tracker id churn. Only for linear tracking mode'
+    },
+
+    'LINEAR_RECOVERY_MAX_AGE': {
+      'TYPE': 'int',
+      'DESCRIPTION': 'Maximum disappeared-frame count eligible for bounded linear recovery. Only for linear tracking mode'
+    },
+
+    'LINEAR_RECOVERY_MAX_RELATIVE_DIST': {
+      'TYPE': 'float',
+      'DESCRIPTION': 'Maximum predicted-relative distance accepted by bounded linear recovery. Only for linear tracking mode'
+    },
+
+    'LINEAR_RECOVERY_CENTER_SCALE': {
+      'TYPE': 'float',
+      'DESCRIPTION': 'Scale applied to the normal center-distance gate for bounded linear recovery. Only for linear tracking mode'
     },
 
     'SORT_MIN_IOU': {

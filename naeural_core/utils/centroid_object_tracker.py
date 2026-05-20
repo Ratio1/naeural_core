@@ -4,13 +4,42 @@ Module: centroid_object_tracker.py
 This module provides the CentroidObjectTracker class, which implements object tracking using 
 centroid-based linear tracking and the SORT algorithm.
 
-IMPORTANT / WARNING: 
-	This class should be modified/tuned within individual implementations of complex ecosystems. It is recommended to
-	create a `extensions.utils.centroid_object_tracker` unit that will automaticaly replace the current file
+IMPORTANT / WARNING:
+    This class is the canonical linear tracker implementation for HyFy-E2. Do
+    not reintroduce a deployment-specific override unless the runtime import
+    path and duplicate maintenance cost are explicitly accepted.
 
 The tracker can be configured to use linear tracking, SORT tracking, or both for debugging purposes. 
 It maintains the history of detected objects, updates their positions, and handles object registration 
 and deregistration based on specified criteria.
+
+Algorithm overview:
+    In linear mode, each input rectangle is converted to a centroid and matched
+    against active tracker objects with a greedy one-to-one assignment. Candidate
+    pairs are ranked by a weighted distance that combines centroid movement and
+    rectangle size change. A normal match must pass all configured gates: total
+    weighted distance, absolute centroid distance, size distance, and relative
+    centroid distance normalized by the largest side of either rectangle.
+
+    Unmatched existing objects have their disappearance count incremented and
+    are deregistered after ``linear_max_age`` missing frames. Unmatched input
+    rectangles are registered as new object ids. Each accepted match appends to
+    ``centroid_history``, updates the stored rectangle, resets disappearance
+    count, and increments appearances through the history length.
+
+    Optional linear recovery is disabled by default. When enabled, recovery is
+    considered only after the normal gates reject a candidate. It predicts the
+    next centroid from the last two accepted centroids, scales the prediction by
+    the number of missed frames, and accepts the candidate only when the track is
+    recent, the size gate still passes, the predicted center is within a bounded
+    center limit, and the predicted-relative distance is within
+    ``linear_recovery_max_relative_dist``. This is intended for short tracker-id
+    gaps caused by fast approach motion or rapid object scale changes, not for
+    long-range re-identification.
+
+    SORT mode delegates assignment to ``naeural_core.utils.sort.Sort`` and keeps
+    its output separate by suffixing ids with ``_SORT``. Mode ``2`` runs both
+    algorithms only for diagnostics.
 
 """
 
@@ -39,6 +68,10 @@ class CentroidObjectTracker:
         sort_min_iou=0,
         moved_delta_ratio=0.005,
         linear_reset_minutes=60,
+        linear_recovery_enabled=False,
+        linear_recovery_max_age=2,
+        linear_recovery_max_relative_dist=3.0,
+        linear_recovery_center_scale=1.25,
         **kwargs
     ):
         """
@@ -86,6 +119,26 @@ class CentroidObjectTracker:
         linear_reset_minutes : int, optional
             Maximum number of minutes to track an object before resetting.
 
+        linear_recovery_enabled : bool, optional
+            Enables bounded linear recovery when normal centroid matching gates
+            reject a candidate that is still plausible under velocity
+            prediction.
+
+        linear_recovery_max_age : int, optional
+            Maximum disappeared-frame count that can be recovered. This is
+            separate from ``linear_max_age`` so stale tracks can remain visible
+            for diagnostics without being revived by recovery.
+
+        linear_recovery_max_relative_dist : float, optional
+            Maximum predicted-relative distance accepted by recovery. The
+            distance is divided by the largest side of the previous or current
+            rectangle, mirroring the normal relative-distance gate.
+
+        linear_recovery_center_scale : float, optional
+            Scale applied to the normal center-distance gate for recovery.
+            Recovery still requires predicted center distance to stay under
+            this bounded limit.
+
         **kwargs
             Additional keyword arguments.
 
@@ -100,6 +153,10 @@ class CentroidObjectTracker:
         self.linear_max_distance = linear_max_distance
         self.linear_max_relative_distance = linear_max_relative_distance
         self.linear_reset_minutes = linear_reset_minutes
+        self.linear_recovery_enabled = bool(linear_recovery_enabled)
+        self.linear_recovery_max_age = max(int(linear_recovery_max_age), 0)
+        self.linear_recovery_max_relative_dist = float(linear_recovery_max_relative_dist)
+        self.linear_recovery_center_scale = float(linear_recovery_center_scale)
 
         self.center_dist_weight = center_dist_weight
         self.hw_dist_weight = hw_dist_weight
@@ -192,6 +249,103 @@ class CentroidObjectTracker:
 
         for objectID in to_be_removed:
             self.deregister(objectID)
+
+    def _get_linear_recovery_prediction(self, objectID):
+        """
+        Predict the next centroid for bounded linear recovery.
+
+        Parameters
+        ----------
+        objectID : int
+            Tracked object identifier whose centroid history is used for
+            velocity prediction.
+
+        Returns
+        -------
+        ndarray or None
+            Predicted centroid, or ``None`` when there is not enough history to
+            compute a velocity.
+
+        Notes
+        -----
+        The prediction intentionally uses only the last two tracker centroids.
+        This keeps recovery local, deterministic, and independent of any scene
+        model. The elapsed frame multiplier includes disappeared frames, so a
+        one-frame miss predicts one additional velocity step.
+        """
+        if objectID not in self.objects:
+            return None
+        centroid_history = self.objects[objectID].get('centroid_history')
+        if centroid_history is None or len(centroid_history) < 2:
+            return None
+        last_centroid = np.array(centroid_history[-1], dtype=float)
+        previous_centroid = np.array(centroid_history[-2], dtype=float)
+        elapsed_frames = max(int(self.disappeared.get(objectID, 0)) + 1, 1)
+        return last_centroid + (last_centroid - previous_centroid) * elapsed_frames
+
+    def _linear_recovery_match_allowed(
+        self,
+        objectID,
+        object_rectangle,
+        candidate_rectangle,
+        candidate_centroid,
+        hw_distance,
+    ):
+        """
+        Decide whether a normally rejected linear match can be recovered.
+
+        Parameters
+        ----------
+        objectID : int
+            Existing tracker object id.
+        object_rectangle : ndarray
+            Last rectangle associated with the existing object.
+        candidate_rectangle : ndarray
+            Current unmatched detection rectangle.
+        candidate_centroid : ndarray
+            Current unmatched detection centroid.
+        hw_distance : float
+            Size-distance component already computed by the normal matcher.
+        Returns
+        -------
+        bool
+            ``True`` when the candidate is a bounded velocity-continuity match.
+
+        Notes
+        -----
+        Recovery is intentionally narrower than normal matching in one respect:
+        it requires enough history to predict velocity. It is broader only for
+        fast approach motion where the last-center relative-distance gate is too
+        strict for a growing plate box.
+        """
+        if not self.linear_recovery_enabled:
+            return False
+        if int(self.disappeared.get(objectID, 0)) > self.linear_recovery_max_age:
+            return False
+        if hw_distance > self.linear_max_distance_hw:
+            return False
+
+        predicted_centroid = self._get_linear_recovery_prediction(objectID)
+        if predicted_centroid is None:
+            return False
+
+        predicted_distance = np.linalg.norm(predicted_centroid - candidate_centroid)
+        recovery_center_limit = self.linear_max_distance_center * self.linear_recovery_center_scale
+        if predicted_distance > recovery_center_limit:
+            return False
+
+        max_size = max(
+            object_rectangle[2] - object_rectangle[0],
+            object_rectangle[3] - object_rectangle[1],
+            candidate_rectangle[2] - candidate_rectangle[0],
+            candidate_rectangle[3] - candidate_rectangle[1],
+        )
+        if max_size <= 0:
+            return False
+
+        if predicted_distance / max_size > self.linear_recovery_max_relative_dist:
+            return False
+        return True
 
     def update_tracker(self, rectangles):
         """
@@ -316,12 +470,6 @@ class CentroidObjectTracker:
             col = D.argmin(axis=1)[row]
             if row in usedRows or col in usedCols:
                 continue
-            if D[row, col] > self.linear_max_distance:
-                continue
-            if centroid_D[row, col] > self.linear_max_distance_center:
-                continue
-            if hw_D[row, col] > self.linear_max_distance_hw:
-                continue
 
             max_size = max(
                 objectRectangles[row][2] - objectRectangles[row][0],
@@ -329,10 +477,24 @@ class CentroidObjectTracker:
                 rectangles[col][2] - rectangles[col][0],
                 rectangles[col][3] - rectangles[col][1]
             )
-            if centroid_D[row, col] / max_size > self.linear_max_relative_distance:
-                continue
+            normal_match_allowed = (
+                D[row, col] <= self.linear_max_distance
+                and centroid_D[row, col] <= self.linear_max_distance_center
+                and hw_D[row, col] <= self.linear_max_distance_hw
+                and max_size > 0
+                and centroid_D[row, col] / max_size <= self.linear_max_relative_distance
+            )
 
             objectID = objectIDs[row]
+            if not normal_match_allowed and not self._linear_recovery_match_allowed(
+                objectID=objectID,
+                object_rectangle=objectRectangles[row],
+                candidate_rectangle=rectangles[col],
+                candidate_centroid=inputCentroids[col],
+                hw_distance=hw_D[row, col],
+            ):
+                continue
+
             self.objects[objectID]['centroid_history'].append(inputCentroids[col])
             self.objects[objectID]['last_update'] = datetime.now()
             self.objects[objectID]['appearances'] = len(self.objects[objectID]['centroid_history'])

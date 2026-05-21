@@ -672,6 +672,48 @@ class BCWrapper:
       raise_if_error=raise_if_error,
       verify_safe=verify_safe,
     )
+
+  def eth_verify_text_signature(
+    self,
+    text: str,
+    signature: str,
+    no_hash: bool = False,
+    message_prefix: str = "",
+    raise_if_error: bool = False,
+    expected_signer: str = None,
+  ):
+    """
+    Verify an EVM text signature through the underlying blockchain engine.
+
+    Parameters
+    ----------
+    text : str
+        Text that was signed by the wallet.
+    signature : str
+        Hex-encoded EVM signature.
+    no_hash : bool, optional
+        If True, verify the raw text bytes using the wallet-signing envelope.
+    message_prefix : str, optional
+        Prefix to prepend before verification.
+    raise_if_error : bool, optional
+        If True, propagate verifier errors.
+    expected_signer : str, optional
+        Claimed signer address. When supported by the blockchain engine, this
+        enables Safe/EIP-1271 verification if EOA recovery does not match.
+
+    Returns
+    -------
+    str or None
+        Recovered signer address, or None when verification fails.
+    """
+    return self.__bc.eth_verify_text_signature(
+      text=text,
+      signature=signature,
+      no_hash=no_hash,
+      message_prefix=message_prefix,
+      raise_if_error=raise_if_error,
+      expected_signer=expected_signer,
+    )
   
   @property
   def eth_types(self):

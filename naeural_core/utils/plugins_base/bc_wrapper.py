@@ -672,6 +672,36 @@ class BCWrapper:
       raise_if_error=raise_if_error,
       verify_safe=verify_safe,
     )
+
+  def eth_verify_text_signature(
+    self,
+    text: str,
+    signature: str,
+    no_hash: bool = False,
+    message_prefix: str = "",
+    raise_if_error: bool = False,
+    expected_signer: str = None,
+  ):
+    """
+    Verifies an EVM text signature using the current blockchain engine.
+    """
+    return self.__bc.eth_verify_text_signature(
+      text=text,
+      signature=signature,
+      no_hash=no_hash,
+      message_prefix=message_prefix,
+      raise_if_error=raise_if_error,
+      expected_signer=expected_signer,
+    )
+
+  def compute_hash(self, dct_data: dict, replace_nan: bool = True):
+    """
+    Computes the canonical payload hash using the current blockchain engine.
+    """
+    return self.__bc.compute_hash(
+      dct_data=dct_data,
+      replace_nan=replace_nan,
+    )
   
   @property
   def eth_types(self):

@@ -376,6 +376,50 @@ class BCWrapper:
     return self.__bc.eth_verify_message_signature(
       types=types, values=values, signature=signature
     )
+
+  def eth_verify_text_signature(
+    self,
+    text: str,
+    signature: str,
+    no_hash: bool = False,
+    message_prefix: str = "",
+    raise_if_error: bool = False,
+    expected_signer: str = None,
+  ):
+    """
+    Verify an EVM text signature using the wrapped blockchain engine.
+
+    Parameters
+    ----------
+    text : str
+        Exact text that was presented to the wallet for signing.
+    signature : str
+        EVM signature in hex form.
+    no_hash : bool, optional
+        When True, verify the raw wallet message text rather than a typed
+        solidity hash.
+    message_prefix : str, optional
+        Prefix applied before verification. Deeploy v3 passes an empty prefix
+        because the human-readable wrapper already contains all visible text.
+    raise_if_error : bool, optional
+        Raise verification errors instead of returning None.
+    expected_signer : str, optional
+        Claimed signer address. When provided, the underlying engine can also
+        attempt Safe/EIP-1271 verification for contract wallets.
+
+    Returns
+    -------
+    str or None
+        Recovered signer address, or None when verification fails.
+    """
+    return self.__bc.eth_verify_text_signature(
+      text=text,
+      signature=signature,
+      no_hash=no_hash,
+      message_prefix=message_prefix,
+      raise_if_error=raise_if_error,
+      expected_signer=expected_signer,
+    )
   
   def eth_sign_node_epochs(self, node: str, epochs: list, epochs_vals: list, signature_only: bool = True):
     """
@@ -672,6 +716,22 @@ class BCWrapper:
       raise_if_error=raise_if_error,
       verify_safe=verify_safe,
     )
+
+  def compact_canonical_json(self, value):
+    """
+    Serialize a JSON-compatible value with the wrapped compact canonicalizer.
+
+    Parameters
+    ----------
+    value : Any
+        JSON-compatible value to serialize.
+
+    Returns
+    -------
+    str
+        Compact canonical JSON text suitable for Deeploy v3 payload hashing.
+    """
+    return self.__bc.compact_canonical_json(value)
   
   @property
   def eth_types(self):

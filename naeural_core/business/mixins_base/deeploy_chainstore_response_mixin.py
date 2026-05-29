@@ -1,5 +1,5 @@
 """
-chainstore_response_mixin.py
+deeploy_chainstore_response_mixin.py
 
 A reusable mixin that provides chainstore response functionality for plugins.
 

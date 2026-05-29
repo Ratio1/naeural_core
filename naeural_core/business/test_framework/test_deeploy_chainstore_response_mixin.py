@@ -6,7 +6,7 @@ import types
 import unittest
 
 
-def _load_chainstore_response_mixin_module():
+def _load_deeploy_chainstore_response_mixin_module():
   """
   Load the mixin module without importing the full `naeural_core` package.
 
@@ -36,10 +36,10 @@ def _load_chainstore_response_mixin_module():
     module_path = (
       Path(__file__).resolve().parents[1]
       / "mixins_base"
-      / "chainstore_response_mixin.py"
+      / "deeploy_chainstore_response_mixin.py"
     )
     spec = importlib.util.spec_from_file_location(
-      "chainstore_response_mixin_under_test",
+      "deeploy_chainstore_response_mixin_under_test",
       module_path,
     )
     module = importlib.util.module_from_spec(spec)
@@ -56,9 +56,9 @@ def _load_chainstore_response_mixin_module():
       sys.modules["naeural_core.constants"] = previous_constants
 
 
-_CHAINSTORE_RESPONSE_MIXIN_MODULE = _load_chainstore_response_mixin_module()
+_DEEPLOY_CHAINSTORE_RESPONSE_MIXIN_MODULE = _load_deeploy_chainstore_response_mixin_module()
 _DeeployChainstoreResponseMixin = (
-  _CHAINSTORE_RESPONSE_MIXIN_MODULE._DeeployChainstoreResponseMixin
+  _DEEPLOY_CHAINSTORE_RESPONSE_MIXIN_MODULE._DeeployChainstoreResponseMixin
 )
 
 
@@ -67,7 +67,7 @@ class _DummyBase:
     self.base_initialized = True
 
 
-class _ChainstoreResponseHarness(_DeeployChainstoreResponseMixin, _DummyBase):
+class _DeeployChainstoreResponseHarness(_DeeployChainstoreResponseMixin, _DummyBase):
   def __init__(self):
     self.calls = []
     self.logs = []
@@ -118,7 +118,7 @@ class _ChainstoreResponseHarness(_DeeployChainstoreResponseMixin, _DummyBase):
 
 class DeeployChainstoreResponseMixinTests(unittest.TestCase):
   def test_response_peers_include_initiator_and_one_seed(self):
-    harness = _ChainstoreResponseHarness()
+    harness = _DeeployChainstoreResponseHarness()
 
     peers = harness._get_chainstore_response_peers()
 
@@ -126,7 +126,7 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
     self.assertEqual(harness.selection_inputs, [["seed-1", "seed-2"]])
 
   def test_response_peers_prefer_seed_distinct_from_initiator(self):
-    harness = _ChainstoreResponseHarness()
+    harness = _DeeployChainstoreResponseHarness()
     harness.seed_nodes = ["initiator-addr", "seed-2"]
     harness.selected_seed = "seed-2"
 
@@ -136,7 +136,7 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
     self.assertEqual(harness.selection_inputs, [["seed-2"]])
 
   def test_response_peers_do_not_duplicate_initiator_when_only_seed_matches(self):
-    harness = _ChainstoreResponseHarness()
+    harness = _DeeployChainstoreResponseHarness()
     harness.seed_nodes = ["initiator-addr"]
     harness.selected_seed = "initiator-addr"
 
@@ -146,7 +146,7 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
     self.assertEqual(harness.selection_inputs, [["initiator-addr"]])
 
   def test_response_peers_fall_back_to_initiator_when_seed_list_empty(self):
-    harness = _ChainstoreResponseHarness()
+    harness = _DeeployChainstoreResponseHarness()
     harness.seed_nodes = []
 
     peers = harness._get_chainstore_response_peers()
@@ -159,7 +159,7 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
     )
 
   def test_send_chainstore_response_uses_restricted_peers(self):
-    harness = _ChainstoreResponseHarness()
+    harness = _DeeployChainstoreResponseHarness()
 
     self.assertTrue(harness._send_chainstore_response())
 
@@ -172,7 +172,7 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
     self.assertEqual(kwargs["debug"], True)
 
   def test_reset_chainstore_response_uses_restricted_peers(self):
-    harness = _ChainstoreResponseHarness()
+    harness = _DeeployChainstoreResponseHarness()
 
     self.assertTrue(harness._reset_chainstore_response())
 
@@ -184,7 +184,7 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
     self.assertEqual(kwargs["debug"], True)
 
   def test_local_reset_peers_use_one_seed_oracle_only(self):
-    harness = _ChainstoreResponseHarness()
+    harness = _DeeployChainstoreResponseHarness()
     harness.seed_nodes = ["node-addr", "seed-2"]
     harness.selected_seed = "seed-2"
 
@@ -194,7 +194,7 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
     self.assertEqual(harness.selection_inputs, [["seed-2"]])
 
   def test_reset_explicit_chainstore_response_key_uses_provided_kwargs(self):
-    harness = _ChainstoreResponseHarness()
+    harness = _DeeployChainstoreResponseHarness()
     reset_kwargs = harness._get_chainstore_response_local_reset_write_kwargs()
 
     self.assertTrue(

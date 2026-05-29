@@ -39,7 +39,7 @@ from naeural_core.business.mixins_base import (
 )
 from naeural_core.business.mixins_base.plugin_readiness_mixin import _PluginReadinessMixin
 from naeural_core.business.mixins_base.semaphored_paired_plugin_mixin import _SemaphoredPairedPluginMixin
-from naeural_core.business.mixins_base.chainstore_response_mixin import _ChainstoreResponseMixin
+from naeural_core.business.mixins_base.chainstore_response_mixin import _DeeployChainstoreResponseMixin
 
 from naeural_core.utils.mixins.code_executor import _CodeExecutorMixin
 
@@ -361,7 +361,7 @@ class BasePluginExecutor(
   _StateMachineAPIMixin,
   _PluginReadinessMixin,
   _SemaphoredPairedPluginMixin,
-  _ChainstoreResponseMixin,
+  _DeeployChainstoreResponseMixin,
 ):
   CONFIG = _CONFIG
 

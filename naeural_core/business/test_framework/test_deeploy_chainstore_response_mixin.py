@@ -57,7 +57,6 @@ def _load_chainstore_response_mixin_module():
 
 
 _CHAINSTORE_RESPONSE_MIXIN_MODULE = _load_chainstore_response_mixin_module()
-_ChainstoreResponseMixin = _CHAINSTORE_RESPONSE_MIXIN_MODULE._ChainstoreResponseMixin
 _DeeployChainstoreResponseMixin = (
   _CHAINSTORE_RESPONSE_MIXIN_MODULE._DeeployChainstoreResponseMixin
 )
@@ -118,9 +117,6 @@ class _ChainstoreResponseHarness(_DeeployChainstoreResponseMixin, _DummyBase):
 
 
 class DeeployChainstoreResponseMixinTests(unittest.TestCase):
-  def test_legacy_mixin_name_is_compatible_alias(self):
-    self.assertIs(_ChainstoreResponseMixin, _DeeployChainstoreResponseMixin)
-
   def test_response_peers_include_initiator_and_one_seed(self):
     harness = _ChainstoreResponseHarness()
 

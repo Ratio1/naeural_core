@@ -483,6 +483,3 @@ class _DeeployChainstoreResponseMixin:
     except Exception as e:
       self.P(f"Error sending chainstore response: {e}", color='r')
       return False
-
-
-_ChainstoreResponseMixin = _DeeployChainstoreResponseMixin

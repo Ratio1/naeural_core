@@ -39,7 +39,7 @@ from naeural_core.business.mixins_base import (
 )
 from naeural_core.business.mixins_base.plugin_readiness_mixin import _PluginReadinessMixin
 from naeural_core.business.mixins_base.semaphored_paired_plugin_mixin import _SemaphoredPairedPluginMixin
-from naeural_core.business.mixins_base.chainstore_response_mixin import _ChainstoreResponseMixin
+from naeural_core.business.mixins_base.deeploy_chainstore_response_mixin import _DeeployChainstoreResponseMixin
 
 from naeural_core.utils.mixins.code_executor import _CodeExecutorMixin
 
@@ -361,7 +361,7 @@ class BasePluginExecutor(
   _StateMachineAPIMixin,
   _PluginReadinessMixin,
   _SemaphoredPairedPluginMixin,
-  _ChainstoreResponseMixin,
+  _DeeployChainstoreResponseMixin,
 ):
   CONFIG = _CONFIG
 
@@ -376,6 +376,8 @@ class BasePluginExecutor(
                version="0.0.0",
                initiator_id=None,
                initiator_addr=None,
+               modified_by_id=None,
+               modified_by_addr=None,
                session_id=None,
                threaded_execution_chain=True,
                payloads_deque=None,
@@ -416,8 +418,8 @@ class BasePluginExecutor(
     self._environment_variables = environment_variables
     self.__initiator_id = initiator_id
     self.__initiator_addr = initiator_addr
-    self.__modified_by_id = self.__initiator_id  # default modified by is the initiator
-    self.__modified_by_addr = self.__initiator_addr  # default modified by is the initiator
+    self.__modified_by_id = modified_by_id if modified_by_id is not None else self.__initiator_id
+    self.__modified_by_addr = modified_by_addr if modified_by_addr is not None else self.__initiator_addr
     self._session_id = session_id
     self._signature_hash = None
     self._threaded_execution_chain = threaded_execution_chain

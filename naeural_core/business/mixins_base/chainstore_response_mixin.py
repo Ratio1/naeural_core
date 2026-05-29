@@ -304,17 +304,36 @@ class _DeeployChainstoreResponseMixin:
       return False
 
     response_key = self._get_chainstore_response_key()
-    self.P(f"Resetting chainstore response key '{response_key}'")
-
     # Reset the sent flag to allow re-sending after reset
     self._chainstore_response_sent = False
+    return self._reset_chainstore_response_key(response_key)
+
+  def _reset_chainstore_response_key(self, response_key, write_kwargs=None):
+    """
+    Reset an explicit chainstore response key.
+
+    This is the reusable primitive for both the plugin's configured
+    `CHAINSTORE_RESPONSE_KEY` and Deeploy's pre-dispatch batch reset of
+    arbitrary response keys.
+    """
+    if not isinstance(response_key, str) or len(response_key) == 0:
+      self.P(
+        f"Invalid chainstore response key for reset: {response_key}",
+        color='r',
+      )
+      return False
+
+    self.P(f"Resetting chainstore response key '{response_key}'")
+
+    if write_kwargs is None:
+      write_kwargs = self._get_chainstore_response_write_kwargs()
 
     try:
       # Set to None to signal "initializing" state
       result = self.chainstore_set(
         response_key,
         None,
-        **self._get_chainstore_response_write_kwargs()
+        **write_kwargs
       )
       if result:
         self.P(f"Successfully reset chainstore key '{response_key}'")
@@ -402,6 +421,45 @@ class _DeeployChainstoreResponseMixin:
     if seed_peer and seed_peer not in peers:
       peers.append(seed_peer)
     return peers
+
+  def _get_chainstore_response_local_reset_peers(self):
+    """
+    Build explicit peers for response-key reset writes sent by the initiator.
+
+    The local ChainStore write clears the initiating oracle. The explicit peer
+    list adds one seed oracle and intentionally excludes app chainstore peers,
+    configured chainstore peers, and backend default peers.
+    """
+    seed_nodes = [
+      peer
+      for peer in self._get_chainstore_response_seed_nodes()
+      if isinstance(peer, str) and len(peer) > 0
+    ]
+    if len(seed_nodes) == 0:
+      self.P(
+        "No seed oracle addresses configured for chainstore response reset routing",
+        color='y'
+      )
+      return []
+
+    current_addr = getattr(self, 'ee_addr', None)
+    candidate_seed_nodes = [peer for peer in seed_nodes if peer != current_addr]
+    if len(candidate_seed_nodes) == 0:
+      candidate_seed_nodes = seed_nodes
+
+    seed_peer = self._select_chainstore_response_seed_peer(candidate_seed_nodes)
+    return [seed_peer] if seed_peer else []
+
+  def _get_chainstore_response_local_reset_write_kwargs(self):
+    """
+    Return restricted ChainStore write arguments for local response-key resets.
+    """
+    return {
+      'extra_peers': self._get_chainstore_response_local_reset_peers(),
+      'include_default_peers': False,
+      'include_configured_peers': False,
+      'debug': True,
+    }
 
   def _get_chainstore_response_write_kwargs(self):
     """

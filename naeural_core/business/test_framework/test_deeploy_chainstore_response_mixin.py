@@ -183,6 +183,34 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
     self.assertEqual(kwargs["include_configured_peers"], False)
     self.assertEqual(kwargs["debug"], True)
 
+  def test_local_reset_peers_use_one_seed_oracle_only(self):
+    harness = _ChainstoreResponseHarness()
+    harness.seed_nodes = ["node-addr", "seed-2"]
+    harness.selected_seed = "seed-2"
+
+    peers = harness._get_chainstore_response_local_reset_peers()
+
+    self.assertEqual(peers, ["seed-2"])
+    self.assertEqual(harness.selection_inputs, [["seed-2"]])
+
+  def test_reset_explicit_chainstore_response_key_uses_provided_kwargs(self):
+    harness = _ChainstoreResponseHarness()
+    reset_kwargs = harness._get_chainstore_response_local_reset_write_kwargs()
+
+    self.assertTrue(
+      harness._reset_chainstore_response_key(
+        "explicit-response-key",
+        write_kwargs=reset_kwargs,
+      )
+    )
+
+    args, kwargs = harness.calls[-1]
+    self.assertEqual(args, ("explicit-response-key", None))
+    self.assertEqual(kwargs["extra_peers"], ["seed-1"])
+    self.assertEqual(kwargs["include_default_peers"], False)
+    self.assertEqual(kwargs["include_configured_peers"], False)
+    self.assertEqual(kwargs["debug"], True)
+
 
 if __name__ == "__main__":
   unittest.main()

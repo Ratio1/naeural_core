@@ -814,6 +814,8 @@ class BusinessManager(Manager):
               environment_variables=self._environment_variables,
               initiator_id=initiator_id,
               initiator_addr=initiator_addr,
+              modified_by_id=modified_by_id,
+              modified_by_addr=modified_by_addr,
               session_id=session_id,
               threaded_execution_chain=self._run_on_threads,
               payloads_deque=self.comm_shared_memory['payloads'][instance_hash],

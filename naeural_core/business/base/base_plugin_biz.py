@@ -376,6 +376,8 @@ class BasePluginExecutor(
                version="0.0.0",
                initiator_id=None,
                initiator_addr=None,
+               modified_by_id=None,
+               modified_by_addr=None,
                session_id=None,
                threaded_execution_chain=True,
                payloads_deque=None,
@@ -416,8 +418,8 @@ class BasePluginExecutor(
     self._environment_variables = environment_variables
     self.__initiator_id = initiator_id
     self.__initiator_addr = initiator_addr
-    self.__modified_by_id = self.__initiator_id  # default modified by is the initiator
-    self.__modified_by_addr = self.__initiator_addr  # default modified by is the initiator
+    self.__modified_by_id = modified_by_id if modified_by_id is not None else self.__initiator_id
+    self.__modified_by_addr = modified_by_addr if modified_by_addr is not None else self.__initiator_addr
     self._session_id = session_id
     self._signature_hash = None
     self._threaded_execution_chain = threaded_execution_chain

@@ -395,11 +395,22 @@ class _DeeployChainstoreResponseMixin:
     """
     peers = []
 
-    modified_by_addr = getattr(self, 'modified_by_addr', None)
-    if modified_by_addr:
-      peers.append(modified_by_addr)
-    else:
-      self.P("Missing modified_by_addr for chainstore response peer routing", color='y')
+    response_addr = getattr(self, 'modified_by_addr', None)
+    if not response_addr:
+      response_addr = getattr(self, 'initiator_addr', None)
+      if response_addr:
+        self.P(
+          "Missing modified_by_addr for chainstore response peer routing; using initiator_addr",
+          color='y'
+        )
+      else:
+        self.P(
+          "Missing modified_by_addr and initiator_addr for chainstore response peer routing",
+          color='y'
+        )
+
+    if response_addr:
+      peers.append(response_addr)
 
     seed_nodes = [
       peer

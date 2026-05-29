@@ -76,6 +76,7 @@ class _DeeployChainstoreResponseHarness(_DeeployChainstoreResponseMixin, _DummyB
     self.selected_seed = "seed-1"
     self.cfg_chainstore_response_key = "response-key"
     self.modified_by_addr = "initiator-addr"
+    self.initiator_addr = "initiator-addr"
     self.ee_id = "node-id"
     self.ee_addr = "node-addr"
     self.__version__ = "test-version"
@@ -124,6 +125,23 @@ class DeeployChainstoreResponseMixinTests(unittest.TestCase):
 
     self.assertEqual(peers, ["initiator-addr", "seed-1"])
     self.assertEqual(harness.selection_inputs, [["seed-1", "seed-2"]])
+
+  def test_response_peers_fall_back_to_initiator_when_modified_by_missing(self):
+    harness = _DeeployChainstoreResponseHarness()
+    harness.modified_by_addr = None
+    harness.initiator_addr = "creator-addr"
+
+    peers = harness._get_chainstore_response_peers()
+
+    self.assertEqual(peers, ["creator-addr", "seed-1"])
+    self.assertEqual(harness.selection_inputs, [["seed-1", "seed-2"]])
+    self.assertIn(
+      (
+        "Missing modified_by_addr for chainstore response peer routing; using initiator_addr",
+        "y",
+      ),
+      harness.logs,
+    )
 
   def test_response_peers_prefer_seed_distinct_from_initiator(self):
     harness = _DeeployChainstoreResponseHarness()

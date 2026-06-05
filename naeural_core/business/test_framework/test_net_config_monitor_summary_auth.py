@@ -1,9 +1,11 @@
 import importlib.util
+import os
 import pathlib
 import sys
 import types
 import unittest
 from collections import OrderedDict
+from datetime import datetime
 from unittest import mock
 
 from naeural_core import constants as ct
@@ -22,6 +24,14 @@ def _load_net_config_monitor_class():
       def decorator(fn):
         return fn
       return decorator
+
+    @property
+    def os_environ(self):
+      return os.environ.copy()
+
+    @property
+    def datetime(self):
+      return datetime
 
   fake_business = types.ModuleType("naeural_core.business")
   fake_business.__path__ = []

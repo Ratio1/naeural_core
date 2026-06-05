@@ -24,9 +24,6 @@
 
 
 """
-import os
-from datetime import datetime as dt
-
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
 from naeural_core.constants import NET_CONFIG_MONITOR_SHOW_EACH
 
@@ -336,7 +333,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       # Non-EVM deployments do not have the contract oracle registry. Keep this
       # fail-closed unless an isolated local testbed explicitly opts into trusting
       # supervisor-marked NET_MON_01 summaries.
-      local_opt_in = os.environ.get("EE_NETMON_ACCEPT_LOCAL_SUPERVISOR_SUMMARY", "0")
+      local_opt_in = self.os_environ.get("EE_NETMON_ACCEPT_LOCAL_SUPERVISOR_SUMMARY", "0")
       return str(local_opt_in).strip().lower() in ["1", "true", "yes", "y", "on"]
 
     try:
@@ -483,7 +480,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
           reporter_addr=sender_addr,
           current_network=current_network,
           reporter_is_authorized=authorized_reporter,
-          received_at=dt.now(),
+          received_at=self.datetime.now(),
           full_coverage=False,
         )
       if not authorized_reporter:

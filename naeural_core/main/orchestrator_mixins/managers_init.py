@@ -63,7 +63,10 @@ class _ManagersInitMixin(object):
       config=self._config_manager.cfg_app_communication,
       shmem=self.app_shmem,
       device_version=self.__version__,
-      environment_variables=self.cfg_communication_environment,
+      environment_variables={
+        **(self.cfg_communication_environment or {}),
+        "IS_SUPERVISOR_NODE": self.is_supervisor_node,
+      },
       avail_commands=avail_cmds,
       DEBUG=self.DEBUG
     )
@@ -220,4 +223,3 @@ class _ManagersInitMixin(object):
   @property
   def app_shmem(self):
     return self._app_shmem
-

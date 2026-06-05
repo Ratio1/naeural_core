@@ -5,6 +5,7 @@ IMPORTANT:
 
 import json
 import os
+from copy import deepcopy
 from time import time
 
 import numpy as np
@@ -42,6 +43,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
 
     self.__local_communication_enabled = False # controls if we should start the local communication
     self.__local_communication_active = False # flag that tells us if the local communication has been started
+    self.__heartbeat_receive_disabled_by_policy = False
 
     super(CommunicationManager, self).__init__(log=log, prefix_log='[COMM]', **kwargs)
     return
@@ -68,6 +70,110 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
   @property
   def is_secured(self):
     return self.log.config_data.get(ct.CONFIG_STARTUP_v2.K_SECURED, False)
+
+  def __runtime_value(self, *keys, default=None):
+    env = self._environment_variables or {}
+    for key in keys:
+      if key in env:
+        return env[key]
+      if key in os.environ:
+        return os.environ[key]
+    return default
+
+  def __runtime_bool(self, *keys, default=False):
+    value = self.__runtime_value(*keys, default=default)
+    if hasattr(self.log, "str_to_bool"):
+      return self.log.str_to_bool(value)
+    if isinstance(value, str):
+      return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+  def __runtime_qos(self, *keys):
+    value = self.__runtime_value(*keys, default=None)
+    if value is None or value == "":
+      return None
+    value = int(value)
+    if value not in [0, 1, 2]:
+      raise ValueError("Invalid MQTT QoS {}. Expected one of 0, 1, 2.".format(value))
+    return value
+
+  @property
+  def is_supervisor_node(self):
+    return self.__runtime_bool("IS_SUPERVISOR_NODE", "EE_SUPERVISOR", default=False)
+
+  @property
+  def oracle_only_heartbeat_receive_enabled(self):
+    return self.__runtime_bool(
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE",
+      "NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE",
+      default=False,
+    )
+
+  @property
+  def should_register_local_self_heartbeat(self):
+    # Non-supervisors that intentionally skip CTRL subscriptions still need
+    # their own heartbeat in NetMon for self-address API calls. Do not enable
+    # this on supervisors, otherwise their self heartbeat can bypass epoch
+    # registration when the broker echo later arrives as a duplicate.
+    return getattr(self, "_CommunicationManager__heartbeat_receive_disabled_by_policy", False)
+
+  def __has_channel_qos_config(self, config_instance):
+    return any(
+      isinstance(channel_cfg, dict) and ct.COMMS.QOS in channel_cfg
+      for channel_cfg in config_instance.values()
+    )
+
+  def _prepare_comm_config_instance(self, config_instance):
+    config_instance = deepcopy(config_instance)
+    qos_overrides = [
+      (
+        ct.COMMS.COMMUNICATION_CTRL_CHANNEL,
+        self.__runtime_qos("EE_MQTT_HEARTBEAT_QOS", "MQTT_HEARTBEAT_QOS"),
+      ),
+      (
+        ct.COMMS.COMMUNICATION_CONFIG_CHANNEL,
+        self.__runtime_qos("EE_MQTT_COMMAND_QOS", "MQTT_COMMAND_QOS"),
+      ),
+    ]
+    if self.__has_channel_qos_config(config_instance) or any(qos is not None for _, qos in qos_overrides):
+      from naeural_core.comm import MQTTWrapper
+      if not callable(getattr(MQTTWrapper, "get_channel_qos", None)):
+        # Channel-level QoS requires the paired SDK wrapper. Without this guard,
+        # a mixed rollout can silently keep using the legacy top-level QoS for
+        # both heartbeat and command topics.
+        raise RuntimeError(
+          "MQTT channel QoS overrides require ratio1.comm.MQTTWrapper.get_channel_qos. "
+          "Deploy the matching ratio1/naeural_client update before enabling "
+          "EE_MQTT_HEARTBEAT_QOS or EE_MQTT_COMMAND_QOS."
+        )
+    for channel_name, qos in qos_overrides:
+      if qos is None:
+        continue
+      channel_cfg = config_instance.get(channel_name)
+      if not isinstance(channel_cfg, dict):
+        raise ValueError("Cannot set QoS for missing MQTT channel '{}'".format(channel_name))
+      # Only add/replace QOS inside the existing channel dictionary. Replacing
+      # the whole dict would drop TOPIC/TARGETED_TOPIC and silently break routing.
+      channel_cfg[ct.COMMS.QOS] = qos
+    return config_instance
+
+  def _prepare_comm_instance_paths(self, comm_type, paths):
+    paths = dict(paths)
+    comm_type = comm_type.upper()
+    recv_channel = paths.get("RECV_FROM")
+    normalized_recv_channel = recv_channel.upper() if isinstance(recv_channel, str) else recv_channel
+    if (
+      self.oracle_only_heartbeat_receive_enabled
+      and not self.is_supervisor_node
+      and normalized_recv_channel == ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+    ):
+      # In the current topology COMMANDCONTROL receives heartbeats from CTRL,
+      # but custom deployments can rename/move instances. Key the rollout policy
+      # to the actual CTRL subscription so command receive on CONFIG is not
+      # accidentally disabled by communicator name.
+      paths["RECV_FROM"] = None
+      self.__heartbeat_receive_disabled_by_policy = True
+    return paths
 
   @property
   def _device_id(self):
@@ -193,6 +299,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
 
   def __start_communication(self, config_instance, is_local=False):
     plugin_name = self.config["TYPE"]
+    config_instance = self._prepare_comm_config_instance(config_instance)
     config_instance[ct.EE_ID] = self._device_id
     config_instance[ct.EE_ADDR] = self.blockchain_manager.address
 
@@ -200,13 +307,15 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     id_comm = 0
     for comm_type, paths in self.config["INSTANCES"].items():
       id_comm += 1
+      comm_type = comm_type.upper()
+      paths = self._prepare_comm_instance_paths(comm_type, paths)
 
       if not is_local:
         # the default connection, used to communicate with the network
-        comm_type = comm_type.upper()
+        comm_type = comm_type
       else:
         # the local connection, used for local communication
-        comm_type = "L_" + comm_type.upper()
+        comm_type = "L_" + comm_type
       send_channel_name = paths.get("SEND_TO", None)
       recv_channel_name = paths.get("RECV_FROM", None)
       if send_channel_name is not None:
@@ -437,6 +546,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         dct_stats[name] = {
           'SVR': comm.has_server_conn,
           'RCV': comm.has_recv_conn,
+          'RCV_DISABLED': getattr(comm, "receive_disabled", False),
           'SND': comm.has_send_conn,
           'ACT': comm.last_activity_time,
           'ADDR': comm.server_address,

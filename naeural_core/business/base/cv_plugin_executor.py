@@ -60,7 +60,10 @@ _CONFIG = {
   'DEBUG_INFO_ACTIVE_ALERTER_TIME': 30,  # seconds, used to reduce the data dumped by alerters
   'DEBUG_SHOW_DEFAULT_ALERTER': True,
 
-  'ALPHA_OUTER_ZONE': True,
+  # Witness zone overlays are opt-in by default; backend and frontend schema
+  # defaults mirror this runtime contract so new plugin instances stay quiet
+  # unless an operator explicitly enables the outer-area alpha mask.
+  'ALPHA_OUTER_ZONE': False,
 
   'ALPHA_OUTER_ZONE_INTENSITY': 170,
 

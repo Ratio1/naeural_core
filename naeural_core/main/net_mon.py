@@ -100,8 +100,36 @@ class NetworkMonitor(DecentrAIObject):
 
   @property
   def network_summary_status_enabled(self):
-    value = os.environ.get("EE_NETMON_USE_SUMMARY_STATUS", "0")
-    return str(value).strip().lower() in ["1", "true", "yes", "y", "on"]
+    explicit_value = self.__env_value("EE_NETMON_USE_SUMMARY_STATUS", "NETMON_USE_SUMMARY_STATUS")
+    if explicit_value is not None:
+      return self.__env_bool(value=explicit_value)
+    return self.__env_bool(
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE",
+      "NETMON_ORACLE_ONLY_HEARTBEAT_MODE",
+      default=False,
+    ) and not self.__is_supervisor_node
+
+
+  @property
+  def __is_supervisor_node(self):
+    return self.__env_bool("EE_SUPERVISOR", "IS_SUPERVISOR_NODE", default=False)
+
+
+  def __env_value(self, *keys, default=None):
+    for key in keys:
+      if key in os.environ:
+        return os.environ[key]
+    return default
+
+
+  def __env_bool(self, *keys, value=None, default=False):
+    if value is None:
+      value = self.__env_value(*keys, default=default)
+    if hasattr(self.log, "str_to_bool"):
+      return self.log.str_to_bool(value)
+    if isinstance(value, str):
+      return value.strip().lower() in ["1", "true", "yes", "y", "on"]
+    return bool(value)
 
 
   @property

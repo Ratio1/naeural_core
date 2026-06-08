@@ -127,6 +127,63 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertEqual(heartbeat_paths["RECV_FROM"], ct.COMMS.COMMUNICATION_CONFIG_CHANNEL)
     self.assertEqual(heartbeat_paths["SEND_TO"], ct.COMMS.COMMUNICATION_CTRL_CHANNEL)
 
+  def test_high_level_policy_enables_receive_reduction_and_summary_for_normal_node(self):
+    harness = _PolicyHarness({
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+      "IS_SUPERVISOR_NODE": False,
+    })
+
+    command_paths = harness.manager._prepare_comm_instance_paths(
+      ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+      {
+        "RECV_FROM": ct.COMMS.COMMUNICATION_CTRL_CHANNEL,
+        "SEND_TO": ct.COMMS.COMMUNICATION_CONFIG_CHANNEL,
+      },
+    )
+
+    self.assertIsNone(command_paths["RECV_FROM"])
+    self.assertTrue(harness.manager.should_register_local_self_heartbeat)
+    self.assertTrue(harness.manager.oracle_only_heartbeat_receive_enabled)
+    self.assertTrue(harness.manager.netmon_summary_status_enabled)
+
+  def test_low_level_receive_flag_overrides_high_level_policy(self):
+    harness = _PolicyHarness({
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE": "0",
+      "IS_SUPERVISOR_NODE": False,
+    })
+
+    command_paths = harness.manager._prepare_comm_instance_paths(
+      ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+      {
+        "RECV_FROM": ct.COMMS.COMMUNICATION_CTRL_CHANNEL,
+        "SEND_TO": ct.COMMS.COMMUNICATION_CONFIG_CHANNEL,
+      },
+    )
+
+    self.assertEqual(command_paths["RECV_FROM"], ct.COMMS.COMMUNICATION_CTRL_CHANNEL)
+    self.assertFalse(harness.manager.oracle_only_heartbeat_receive_enabled)
+    self.assertTrue(harness.manager.netmon_summary_status_enabled)
+
+  def test_low_level_summary_flag_overrides_high_level_policy(self):
+    harness = _PolicyHarness({
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+      "EE_NETMON_USE_SUMMARY_STATUS": "0",
+      "IS_SUPERVISOR_NODE": False,
+    })
+
+    command_paths = harness.manager._prepare_comm_instance_paths(
+      ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+      {
+        "RECV_FROM": ct.COMMS.COMMUNICATION_CTRL_CHANNEL,
+        "SEND_TO": ct.COMMS.COMMUNICATION_CONFIG_CHANNEL,
+      },
+    )
+
+    self.assertIsNone(command_paths["RECV_FROM"])
+    self.assertFalse(harness.manager.netmon_summary_status_enabled)
+    self.assertTrue(any("summary status is disabled" in msg for msg, _ in harness.manager.messages))
+
   def test_non_supervisor_policy_follows_ctrl_channel_not_instance_name(self):
     harness = _PolicyHarness({
       "EE_NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE": "1",
@@ -200,6 +257,24 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
 
     self.assertEqual(command_paths["RECV_FROM"], ct.COMMS.COMMUNICATION_CTRL_CHANNEL)
     self.assertEqual(command_paths["SEND_TO"], ct.COMMS.COMMUNICATION_CONFIG_CHANNEL)
+
+  def test_supervisor_keeps_ctrl_receive_and_no_derived_summary_in_policy_mode(self):
+    harness = _PolicyHarness({
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+      "IS_SUPERVISOR_NODE": True,
+    })
+
+    command_paths = harness.manager._prepare_comm_instance_paths(
+      ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+      {
+        "RECV_FROM": ct.COMMS.COMMUNICATION_CTRL_CHANNEL,
+        "SEND_TO": ct.COMMS.COMMUNICATION_CONFIG_CHANNEL,
+      },
+    )
+
+    self.assertEqual(command_paths["RECV_FROM"], ct.COMMS.COMMUNICATION_CTRL_CHANNEL)
+    self.assertFalse(harness.manager.oracle_only_heartbeat_receive_enabled)
+    self.assertFalse(harness.manager.netmon_summary_status_enabled)
 
   def test_disabled_flag_keeps_default_ctrl_receive_for_normal_nodes(self):
     harness = _PolicyHarness({

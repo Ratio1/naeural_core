@@ -102,12 +102,42 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     return self.__runtime_bool("IS_SUPERVISOR_NODE", "EE_SUPERVISOR", default=False)
 
   @property
-  def oracle_only_heartbeat_receive_enabled(self):
+  def oracle_only_heartbeat_mode_enabled(self):
     return self.__runtime_bool(
-      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE",
-      "NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE",
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE",
+      "NETMON_ORACLE_ONLY_HEARTBEAT_MODE",
       default=False,
     )
+
+  @property
+  def oracle_only_heartbeat_receive_enabled(self):
+    explicit_value = self.__runtime_value(
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE",
+      "NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE",
+      default=None,
+    )
+    if explicit_value is not None:
+      return self.__runtime_bool(
+        "EE_NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE",
+        "NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE",
+        default=False,
+      )
+    return self.oracle_only_heartbeat_mode_enabled and not self.is_supervisor_node
+
+  @property
+  def netmon_summary_status_enabled(self):
+    explicit_value = self.__runtime_value(
+      "EE_NETMON_USE_SUMMARY_STATUS",
+      "NETMON_USE_SUMMARY_STATUS",
+      default=None,
+    )
+    if explicit_value is not None:
+      return self.__runtime_bool(
+        "EE_NETMON_USE_SUMMARY_STATUS",
+        "NETMON_USE_SUMMARY_STATUS",
+        default=False,
+      )
+    return self.oracle_only_heartbeat_mode_enabled and not self.is_supervisor_node
 
   @property
   def should_register_local_self_heartbeat(self):
@@ -173,6 +203,12 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
       # accidentally disabled by communicator name.
       paths["RECV_FROM"] = None
       self.__heartbeat_receive_disabled_by_policy = True
+      if not self.netmon_summary_status_enabled:
+        self.P(
+          "Oracle-only heartbeat receive is enabled but NetMon summary status is disabled. "
+          "Remote NetMon display/status APIs will not have a replacement data source.",
+          color='r',
+        )
     return paths
 
   @property

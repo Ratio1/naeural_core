@@ -30,12 +30,15 @@ class _CountingEpochManager:
     self.calls += 1
 
 
-def _make_netmon(summary_enabled=True, ttl_seconds=120):
+def _make_netmon(summary_enabled=True, ttl_seconds=120, extra_env=None, clear_env=False):
   env = {
-    "EE_NETMON_USE_SUMMARY_STATUS": "1" if summary_enabled else "0",
     "EE_NETMON_SUMMARY_TTL_SECONDS": str(ttl_seconds),
   }
-  patcher = mock.patch.dict(os.environ, env)
+  if summary_enabled is not None:
+    env["EE_NETMON_USE_SUMMARY_STATUS"] = "1" if summary_enabled else "0"
+  if extra_env:
+    env.update(extra_env)
+  patcher = mock.patch.dict(os.environ, env, clear=clear_env)
   patcher.start()
   log = Logger(
     lib_name="TEST_NMON_SUMMARY",
@@ -80,6 +83,58 @@ def _summary_node(addr="0xai_REMOTE", eeid="remote", working=ct.DEVICE_STATUS_ON
 
 
 class TestNetmonSummaryStatus(unittest.TestCase):
+
+  def test_policy_mode_derives_summary_status_for_non_supervisor(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=None,
+      extra_env={
+        "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+        "EE_SUPERVISOR": "false",
+      },
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+
+    self.assertTrue(netmon.network_summary_status_enabled)
+
+  def test_policy_mode_does_not_derive_summary_status_for_supervisor(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=None,
+      extra_env={
+        "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+        "EE_SUPERVISOR": "true",
+      },
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+
+    self.assertFalse(netmon.network_summary_status_enabled)
+
+  def test_explicit_summary_flag_overrides_policy_mode(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=False,
+      extra_env={
+        "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+        "EE_SUPERVISOR": "false",
+      },
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+
+    self.assertFalse(netmon.network_summary_status_enabled)
+
+  def test_explicit_summary_flag_can_enable_supervisor_debug_mode(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={
+        "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+        "EE_SUPERVISOR": "true",
+      },
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+
+    self.assertTrue(netmon.network_summary_status_enabled)
 
   def test_authorized_summary_populates_status_without_heartbeat_history(self):
     netmon, patcher = _make_netmon(summary_enabled=True)

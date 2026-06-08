@@ -80,9 +80,19 @@ class NetworkMonitor(DecentrAIObject):
   
 
 
-  def __init__(self, log, node_name, node_addr, epoch_manager=None, blockchain_manager=None, **kwargs):
+  def __init__(
+    self,
+    log,
+    node_name,
+    node_addr,
+    epoch_manager=None,
+    blockchain_manager=None,
+    environment_variables=None,
+    **kwargs,
+  ):
     self.node_name = node_name
     self.node_addr = node_addr
+    self._environment_variables = environment_variables or {}
     self.__network_heartbeats = {}
     self.network_hashinfo = {}
     self.__network_summary_statuses = {}
@@ -116,7 +126,10 @@ class NetworkMonitor(DecentrAIObject):
 
 
   def __env_value(self, *keys, default=None):
+    env = self._environment_variables or {}
     for key in keys:
+      if key in env:
+        return env[key]
       if key in os.environ:
         return os.environ[key]
     return default

@@ -30,7 +30,13 @@ class _CountingEpochManager:
     self.calls += 1
 
 
-def _make_netmon(summary_enabled=True, ttl_seconds=120, extra_env=None, clear_env=False):
+def _make_netmon(
+  summary_enabled=True,
+  ttl_seconds=120,
+  extra_env=None,
+  clear_env=False,
+  runtime_env=None,
+):
   env = {
     "EE_NETMON_SUMMARY_TTL_SECONDS": str(ttl_seconds),
   }
@@ -53,6 +59,7 @@ def _make_netmon(summary_enabled=True, ttl_seconds=120, extra_env=None, clear_en
     node_addr="0xai_SELF",
     epoch_manager=_CountingEpochManager(),
     blockchain_manager=_StubBlockEngine(),
+    environment_variables=runtime_env,
   )
   return netmon, patcher
 
@@ -135,6 +142,33 @@ class TestNetmonSummaryStatus(unittest.TestCase):
     self.addCleanup(patcher.stop)
 
     self.assertTrue(netmon.network_summary_status_enabled)
+
+  def test_policy_mode_derives_summary_status_from_runtime_environment(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=None,
+      clear_env=True,
+      runtime_env={
+        "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+        "IS_SUPERVISOR_NODE": False,
+      },
+    )
+    self.addCleanup(patcher.stop)
+
+    self.assertTrue(netmon.network_summary_status_enabled)
+
+  def test_runtime_environment_summary_override_wins_over_policy_mode(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=None,
+      clear_env=True,
+      runtime_env={
+        "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "1",
+        "EE_NETMON_USE_SUMMARY_STATUS": "0",
+        "IS_SUPERVISOR_NODE": False,
+      },
+    )
+    self.addCleanup(patcher.stop)
+
+    self.assertFalse(netmon.network_summary_status_enabled)
 
   def test_authorized_summary_populates_status_without_heartbeat_history(self):
     netmon, patcher = _make_netmon(summary_enabled=True)

@@ -50,6 +50,10 @@ class MQTTCommThread(BaseCommThread):
   def connection(self):
     return self._controller.connection
 
+  @property
+  def receive_disabled(self):
+    return self._recv_channel_name is None
+
   def _get_errors(self):
     dct_errs = self._controller.get_connection_issues()
     err_msgs, err_times = [], []
@@ -120,6 +124,14 @@ class MQTTCommThread(BaseCommThread):
     return
 
   def _maybe_reconnect_recv(self):
+    if self.receive_disabled:
+      if not self.has_recv_conn:
+        self.has_recv_conn = True
+        self._create_notification(
+          notif=ct.STATUS_TYPE.STATUS_NORMAL,
+          msg="MQTT receive disabled for this communicator.",
+        )
+      return
     self._maybe_reconnect_to_server()
     if self.has_server_conn and not self.has_recv_conn:
       dct_ret = self._controller.subscribe()

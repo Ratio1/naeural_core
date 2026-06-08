@@ -56,13 +56,13 @@ def _env_bool(name, default):
 
 class _StubBlockEngine:
   def maybe_remove_prefix(self, addr):
-    return addr
+    return addr.replace("0xai_", "", 1)
 
   def maybe_remove_addr_prefix(self, addr):
-    return addr
+    return self.maybe_remove_prefix(addr)
 
   def _add_prefix(self, addr):
-    return addr
+    return addr if addr.startswith("0xai_") else "0xai_" + addr
 
   def node_address_to_eth_address(self, addr):
     return f"eth_{addr}"
@@ -764,6 +764,55 @@ class TestNetmonRegisterHeartbeatProfile(unittest.TestCase):
     self.assertEqual(len(history["max_temperature"]), 3)
     self.assertEqual(status["working"], ct.DEVICE_STATUS_ONLINE)
     self.assertEqual(status["main_loop_freq"], 8.33)
+
+  def test_history_reader_handles_cpu_only_nodes(self):
+    harness = _NetmonHarness()
+    addr = "0xNODE_CPU_ONLY"
+    body = harness.make_heartbeat_body(addr, 0, 0, payload_scale=4)
+    body[ct.HB.GPUS] = []
+    body.pop(ct.HB.GPU_INFO, None)
+    body.pop(ct.HB.DEFAULT_CUDA, None)
+    hb = {
+      ct.HB.ENCODED_DATA: harness.log.compress_text(json.dumps(body)),
+      ct.EE_ID: body[ct.EE_ID],
+      ct.HB.EE_ADDR: addr,
+      ct.PAYLOAD_DATA.EE_TIMESTAMP: body[ct.PAYLOAD_DATA.EE_TIMESTAMP],
+      ct.PAYLOAD_DATA.EE_TIMEZONE: body[ct.PAYLOAD_DATA.EE_TIMEZONE],
+      ct.PAYLOAD_DATA.EE_EVENT_TYPE: ct.HEARTBEAT,
+    }
+
+    harness.netmon.register_heartbeat(addr, hb)
+
+    history = harness.netmon.network_node_history(
+      addr=addr,
+      minutes=2,
+      dt_now=datetime.now(),
+      reverse_order=True,
+      hb_step=1,
+    )
+
+    self.assertEqual(len(history["cpu_hist"]), 1)
+    self.assertEqual(history["gpu_load_hist"], [])
+    self.assertEqual(history["gpu_mem_avail_hist"], [])
+    self.assertIsNone(history["gpu_temp_max_allowed"])
+
+  def test_history_reader_keeps_direct_history_for_prefixed_addresses(self):
+    harness = _NetmonHarness()
+    addr = "0xai_NODE_PREFIXED"
+    hb = harness.make_heartbeat(addr, 0, 0, payload_scale=4)
+
+    harness.netmon.register_heartbeat(addr, hb)
+
+    history = harness.netmon.network_node_history(
+      addr=addr,
+      minutes=2,
+      dt_now=datetime.now(),
+      reverse_order=True,
+      hb_step=1,
+    )
+
+    self.assertEqual(len(history["cpu_hist"]), 1)
+    self.assertEqual(history["timestamps"], ["2026-01-01 00:00:00"])
 
 
 if __name__ == "__main__":

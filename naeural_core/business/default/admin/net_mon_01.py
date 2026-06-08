@@ -40,6 +40,8 @@ _CONFIG = {
   "LOG_INFO"            : False,
   "LOG_FULL_INFO"       : False,
   "EXCLUDE_SELF"        : False,
+  "SAVE_STATUS_SNAPSHOT": False,
+  "STATUS_SNAPSHOT_FILE": "netmon_status.json",
   #
   # The SAVE_NMON_EACH is used to save the network status to the database and should trigger
   # enough so that the network status "often enough" meaning if there are 5-6 restarts per day
@@ -275,6 +277,25 @@ class NetMon01Plugin(
       )
     return
 
+  def _maybe_save_status_snapshot(self, current_nodes):
+    """
+    Persist a read-only diagnostic view of ``network_nodes_status`` when asked.
+
+    The option is disabled by default. It is primarily used by isolated
+    communication testbeds where an external command needs to inspect NetMon's
+    in-process view without issuing mutating commands to the node.
+    """
+    if not self.cfg_save_status_snapshot:
+      return
+    if not isinstance(current_nodes, dict):
+      return
+    self.log.save_json_to_data(
+      dct=current_nodes,
+      fname=self.cfg_status_snapshot_file,
+      indent=True,
+    )
+    return
+
   
   def process_whitelists(self, current_network):
     """
@@ -305,6 +326,7 @@ class NetMon01Plugin(
     
     # TODO: change to addresses later
     current_nodes, new_nodes = self._add_to_history()       
+    self._maybe_save_status_snapshot(current_nodes)
     ranking = self._get_rankings()    
     
     str_ranking = ", ".join(["{}:{:.0f}:{:.1f}s".format(a,b,c) for a,b,c in ranking])

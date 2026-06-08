@@ -118,23 +118,36 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
 
 
   def __preprocess_current_network_data(self, current_network):
-    for _, v in current_network.items():
-      addr = v.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS)
-      if addr is None:
+    result = {}
+    if not isinstance(current_network, dict):
+      return result
+    for key, v in current_network.items():
+      if not isinstance(v, dict):
         continue
+      addr = v.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS)
+      if not isinstance(addr, str) or len(addr) == 0:
+        continue
+      v = dict(v)
+      # Keep downstream NET_MON_01 side effects on canonical no-prefix
+      # addresses, but skip malformed entries before older helpers see them.
       v[self.const.PAYLOAD_DATA.NETMON_ADDRESS] = self.bc.maybe_remove_addr_prefix(addr)
-    return current_network
+      result[key] = v
+    return result
 
 
   def __get_active_nodes(self, netmon_current_network : dict) -> dict:
     """
     Returns a dictionary with the active nodes in the network.
     """
-    active_network = {
-      v[self.const.PAYLOAD_DATA.NETMON_ADDRESS] : v 
-      for k, v in netmon_current_network.items() 
-      if v.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) == self.const.DEVICE_STATUS_ONLINE
-    }    
+    active_network = {}
+    for _, v in netmon_current_network.items():
+      if not isinstance(v, dict):
+        continue
+      addr = v.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS)
+      if not isinstance(addr, str) or len(addr) == 0:
+        continue
+      if v.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) == self.const.DEVICE_STATUS_ONLINE:
+        active_network[addr] = v
     return active_network
 
 
@@ -304,6 +317,37 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     if node_addr not in allowed_list:
       result = False
     return result
+
+
+  def __is_authorized_netmon_reporter(self, sender_addr, data):
+    if not isinstance(sender_addr, str) or len(sender_addr) == 0:
+      return False
+    is_supervisor_report = data.get("IS_SUPERVISOR", False)
+    if isinstance(is_supervisor_report, str):
+      is_supervisor_report = is_supervisor_report.strip().lower() in ["1", "true", "yes", "y", "on"]
+    if not is_supervisor_report:
+      return False
+
+    sender_no_prefix = self.bc.maybe_remove_addr_prefix(sender_addr)
+    if not self.const.ETH_ENABLED:
+      # Non-EVM deployments do not have the contract oracle registry. Keep this
+      # fail-closed unless an isolated local testbed explicitly opts into trusting
+      # supervisor-marked NET_MON_01 summaries.
+      local_opt_in = self.os_environ.get("EE_NETMON_ACCEPT_LOCAL_SUPERVISOR_SUMMARY", "0")
+      return str(local_opt_in).strip().lower() in ["1", "true", "yes", "y", "on"]
+
+    try:
+      sender_eth = self.bc.node_address_to_eth_address(sender_addr)
+      sender_eth = self.bc.eth_addr_to_checksum_address(sender_eth).lower()
+      oracle_eth_addrs = self.bc.get_eth_oracles()
+      oracle_eth_addrs = [self.bc.eth_addr_to_checksum_address(addr).lower() for addr in oracle_eth_addrs]
+      # ETH-enabled networks must fail closed: general command whitelist status
+      # is not enough authority to publish summary NetMon state for everyone.
+      # Compare in ETH address space so clean non-supervisors do not need a
+      # heartbeat-derived epoch reverse mapping before accepting oracle summaries.
+      return sender_eth in oracle_eth_addrs
+    except Exception:
+      return False
   
   
   def __maybe_send_configuration_to_allowed(self):
@@ -412,24 +456,54 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     The objective is to keep track of the nodes that we are allowed to send requests to.
     """
     data = self.const.PAYLOAD_DATA.maybe_decode_netmon_payload(data, log=self.log)
+    if not isinstance(data, dict):
+      self.P("[netmon_handler] Received malformed NET_MON_01 payload.", color='r ')
+      return
     current_network = data.get(self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK, {})
+    current_network = self.__preprocess_current_network_data(current_network)
     if len(current_network) == 0:
       self.P(f"[netmon_handler] Received NET_MON_01 data without {self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK}.", color='r ')
     else:
       sender_addr = data.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
       sender_alias = data.get(self.const.PAYLOAD_DATA.EE_ID, None)
+      data[self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK] = current_network
       if self.const.ETH_ENABLED:
         data = self.const.PAYLOAD_DATA.maybe_convert_netmon_whitelist(data)
-      # here we will remove the prefix from each "address" within the nodes info
-      current_network = self.__preprocess_current_network_data(current_network)
+        current_network = data.get(self.const.PAYLOAD_DATA.NETMON_CURRENT_NETWORK, current_network)
+      authorized_reporter = self.__is_authorized_netmon_reporter(sender_addr, data)
+      register_snapshot = getattr(self.netmon, "register_network_status_snapshot", None)
+      if callable(register_snapshot):
+        # NET_MON_01 reports are summary/provenance data, not heartbeat history.
+        # Keep authorization local to the consumer so normal nodes cannot poison
+        # status APIs by publishing forged CURRENT_NETWORK payloads.
+        register_snapshot(
+          reporter_addr=sender_addr,
+          current_network=current_network,
+          reporter_is_authorized=authorized_reporter,
+          received_at=self.datetime.now(),
+          full_coverage=False,
+        )
+      if not authorized_reporter:
+        # CURRENT_NETWORK is used below to update peering/allowed-node state.
+        # Reject the whole side-effect path when the reporter cannot publish
+        # authoritative network summaries; otherwise a forged NET_MON_01 could
+        # make us request configs from or mark offline arbitrary peers.
+        self.P("[netmon_handler] Ignoring unauthorized NET_MON_01 reporter '{}' <{}>.".format(
+          sender_alias, sender_addr
+        ), color='r')
+        return
       # from this point on we will work with the no-prefix addresses      
       self.__new_nodes_this_iter = 0
       peers_status = self.__get_active_nodes_summary_with_peers(current_network)
       
       # mark all nodes that are not online
       non_online = {
-        x.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS) : x.get(self.const.PAYLOAD_DATA.NETMON_EEID) for x in current_network.values() 
-        if x.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) != self.const.DEVICE_STATUS_ONLINE
+        x.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS): x.get(self.const.PAYLOAD_DATA.NETMON_EEID) for x in current_network.values()
+        if (
+          isinstance(x, dict)
+          and isinstance(x.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS), str)
+          and x.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) != self.const.DEVICE_STATUS_ONLINE
+        )
       }
       
       # mark all nodes that are not online

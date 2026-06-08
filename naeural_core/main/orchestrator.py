@@ -379,6 +379,10 @@ class Orchestrator(DecentrAIObject,
       node_name=self.cfg_eeid, node_addr=self.e2_address,
       log=self.log, DEBUG=self.DEBUG,
       blockchain_manager=self._blockchain_manager,
+      environment_variables={
+        **(self.cfg_communication_environment or {}),
+        "IS_SUPERVISOR_NODE": self.is_supervisor_node,
+      },
     )
 
     self._app_shmem['network_monitor'] = self._network_monitor
@@ -1146,6 +1150,14 @@ class Orchestrator(DecentrAIObject,
         if True:
           self.P("Heartbeat preparation took {:.3f}s".format(hb_prep_time))
         self._comm_manager.send(data=hb_payload, event_type=ct.HEARTBEAT)
+        if self._comm_manager.should_register_local_self_heartbeat:
+          local_hb_payload = {
+            ct.EE_ADDR: self.e2_address,
+            ct.EE_ID: self.cfg_eeid,
+            ct.PAYLOAD_DATA.EE_EVENT_TYPE: ct.HEARTBEAT,
+            **hb_payload,
+          }
+          self._network_monitor.register_local_heartbeat(addr=self.e2_address, data=local_hb_payload)
         hb_sent = True
       else:
         hb_sent = False

@@ -148,6 +148,11 @@ class _NetworkMonitorMixin:
   def _exec_netmon_request(self, target_addr, request_type, request_options={}, data={}):
     if not isinstance(request_options, dict):
       request_options = {}
+    if target_addr is not None:
+      # NetMon stores node indexes without the `0xai_` prefix, while SDK users
+      # commonly pass full addresses. Normalize at the command boundary so both
+      # forms exercise the same API path.
+      target_addr = self.bc.maybe_remove_prefix(target_addr)
     payload_params = {}
     elapsed_t = 0
     if target_addr not in self.all_nodes:

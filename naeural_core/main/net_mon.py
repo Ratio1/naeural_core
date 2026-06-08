@@ -10,7 +10,7 @@ from time import time, sleep
 from copy import deepcopy
 from collections import deque, OrderedDict
 from itertools import islice
-from datetime import datetime as dt
+from datetime import datetime as dt, timedelta
 from naeural_core import DecentrAIObject
 from naeural_core import constants as ct
 from naeural_core.bc import DefaultBlockEngine, BCct
@@ -80,11 +80,22 @@ class NetworkMonitor(DecentrAIObject):
   
 
 
-  def __init__(self, log, node_name, node_addr, epoch_manager=None, blockchain_manager=None, **kwargs):
+  def __init__(
+    self,
+    log,
+    node_name,
+    node_addr,
+    epoch_manager=None,
+    blockchain_manager=None,
+    environment_variables=None,
+    **kwargs,
+  ):
     self.node_name = node_name
     self.node_addr = node_addr
+    self._environment_variables = environment_variables or {}
     self.__network_heartbeats = {}
     self.network_hashinfo = {}
+    self.__network_summary_statuses = {}
     # simple pipeline caching mechanism for live node monitoring
     self.__nodes_pipelines = {} 
     self.__registered_hb_pipelines = 0
@@ -95,6 +106,56 @@ class NetworkMonitor(DecentrAIObject):
     self.__blockchain_manager = blockchain_manager
     super(NetworkMonitor, self).__init__(log=log, prefix_log='[NMON]', **kwargs)    
     return
+
+
+  @property
+  def network_summary_status_enabled(self):
+    explicit_value = self.__env_value("EE_NETMON_USE_SUMMARY_STATUS", "NETMON_USE_SUMMARY_STATUS")
+    if explicit_value is not None:
+      return self.__env_bool(value=explicit_value)
+    return self.__env_bool(
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE",
+      "NETMON_ORACLE_ONLY_HEARTBEAT_MODE",
+      default=False,
+    ) and not self.__is_supervisor_node
+
+
+  @property
+  def __is_supervisor_node(self):
+    return self.__env_bool("EE_SUPERVISOR", "IS_SUPERVISOR_NODE", default=False)
+
+
+  def __env_value(self, *keys, default=None):
+    env = self._environment_variables or {}
+    for key in keys:
+      if key in env:
+        return env[key]
+      if key in os.environ:
+        return os.environ[key]
+    return default
+
+
+  def __env_bool(self, *keys, value=None, default=False):
+    if value is None:
+      value = self.__env_value(*keys, default=default)
+    if hasattr(self.log, "str_to_bool"):
+      return self.log.str_to_bool(value)
+    if isinstance(value, str):
+      return value.strip().lower() in ["1", "true", "yes", "y", "on"]
+    return bool(value)
+
+
+  @property
+  def network_summary_ttl_seconds(self):
+    try:
+      value = self.__env_value(
+        "EE_NETMON_SUMMARY_TTL_SECONDS",
+        "NETMON_SUMMARY_TTL_SECONDS",
+        default=180,
+      )
+      return int(value)
+    except Exception:
+      return 180
 
 
   @property
@@ -229,6 +290,16 @@ class NetworkMonitor(DecentrAIObject):
   def __remove_address_prefix(self, addr):
     """Remove the address prefix if it exists"""
     return self.__blockchain_manager.maybe_remove_prefix(addr)
+
+
+  def __remove_summary_address_prefix(self, addr):
+    if not isinstance(addr, str):
+      return None
+    addr_lower = addr.lower()
+    for prefix in ("0xai_", "aixp_"):
+      if addr_lower.startswith(prefix):
+        return addr[len(prefix):]
+    return self.__remove_address_prefix(addr)
   
   
   def _add_address_prefix(self, addr):
@@ -447,7 +518,13 @@ class NetworkMonitor(DecentrAIObject):
   def get_box_heartbeats(self, addr, return_copy=True):
     __addr_no_prefix = self.__remove_address_prefix(addr) 
     with self.log.managed_lock_resource(NETMON_MUTEX):
-      heartbeats = list(self.__network_heartbeats[__addr_no_prefix])
+      if __addr_no_prefix not in self.__network_heartbeats:
+        # Summary-only nodes are intentionally not materialized as fake
+        # heartbeat histories. Callers that ask for history receive an empty
+        # series instead of corrupting consensus evidence or crashing.
+        heartbeats = []
+      else:
+        heartbeats = list(self.__network_heartbeats[__addr_no_prefix])
     if return_copy:
       # This is a public API. Keep copies outside the lock to avoid blocking
       # heartbeat registration while large histories are cloned for callers.
@@ -480,7 +557,10 @@ class NetworkMonitor(DecentrAIObject):
           nodes_addrs = collected_addrs
         # endif from_hb
 
-      return nodes_addrs
+      if not from_hb:
+        nodes_addrs.extend(self.__network_summary_nodes_list())
+
+      return list(dict.fromkeys(nodes_addrs))
 
     def __network_node_past_hearbeats_by_number(self, addr, nr=1, reverse_order=True):
       addr = self.__remove_address_prefix(addr)
@@ -500,7 +580,9 @@ class NetworkMonitor(DecentrAIObject):
       debug_unavailable=False
     ):
       addr = self.__remove_address_prefix(addr)
-      if addr not in self.__network_nodes_list():
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        has_direct_heartbeat = addr in self.__network_heartbeats
+      if not has_direct_heartbeat:
         if debug_unavailable:
           self.P("`_network_node_past_heartbeats_by_interval`: ADDR '{}' not available".format(addr), color='r')
         return []
@@ -996,7 +1078,9 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_info_available(self, addr):
       _addr_no_prefix = self.__remove_address_prefix(addr)
-      return _addr_no_prefix in self.__network_nodes_list()
+      if self.__network_has_direct_node(_addr_no_prefix):
+        return True
+      return self.__network_node_summary_entry(addr=_addr_no_prefix) is not None
     
     
     def network_node_last_heartbeat(self, addr):
@@ -1020,6 +1104,194 @@ class NetworkMonitor(DecentrAIObject):
         # the compressed MQTT envelope may not carry every canonical HB field.
         self.epoch_manager.register_data(addr, epoch_data)
       return
+
+    def register_local_heartbeat(self, addr, data):
+      """
+      Register this node's own heartbeat for local NetMon reads only.
+
+      Non-supervisors can disable CTRL heartbeat receive. In that mode they no
+      longer see their own broker echo, but self-address API calls still need a
+      fresh local heartbeat view. This path intentionally bypasses EpochsManager:
+      consensus availability must come from received heartbeats on supervisors.
+      """
+      self.__register_heartbeat(addr, data, update_received_time=True)
+      return
+
+    def register_network_status_snapshot(
+      self,
+      reporter_addr,
+      current_network,
+      reporter_is_authorized=False,
+      received_at=None,
+      full_coverage=False,
+    ):
+      """
+      Register an authorized NET_MON_01 CURRENT_NETWORK snapshot.
+
+      Summary snapshots are stored outside heartbeat history. They let nodes
+      that do not consume every heartbeat still answer status/display questions,
+      without fabricating heartbeats or epoch availability evidence.
+      """
+      if not self.network_summary_status_enabled:
+        return 0
+      if not reporter_is_authorized:
+        return 0
+      if not isinstance(current_network, dict):
+        return 0
+      if received_at is None:
+        received_at = dt.now()
+
+      reporter_no_prefix = self.__remove_summary_address_prefix(reporter_addr)
+      if not reporter_no_prefix:
+        return 0
+      registered = 0
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        for _, node_info in current_network.items():
+          if not isinstance(node_info, dict):
+            continue
+          node_addr = node_info.get(ct.PAYLOAD_DATA.NETMON_ADDRESS) or node_info.get("address")
+          if node_addr is None:
+            continue
+          node_no_prefix = self.__remove_summary_address_prefix(node_addr)
+          if not node_no_prefix:
+            continue
+          node_snapshot = deepcopy(node_info)
+          node_snapshot[ct.PAYLOAD_DATA.NETMON_ADDRESS] = self._add_address_prefix(node_no_prefix)
+          if node_no_prefix not in self.__network_summary_statuses:
+            self.__network_summary_statuses[node_no_prefix] = {}
+          self.__network_summary_statuses[node_no_prefix][reporter_no_prefix] = {
+            "node": node_snapshot,
+            "reporter": reporter_no_prefix,
+            "received_at": received_at,
+            "full_coverage": bool(full_coverage),
+          }
+          registered += 1
+      return registered
+
+    def __network_has_direct_node(self, addr):
+      addr = self.__remove_address_prefix(addr)
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        return addr in self.__network_heartbeats
+
+    def __network_summary_nodes_list(self, dt_now=None):
+      if not self.network_summary_status_enabled:
+        return []
+      if dt_now is None:
+        dt_now = dt.now()
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        candidates = list(self.__network_summary_statuses.keys())
+      return [
+        addr for addr in candidates
+        if self.__network_node_summary_entry(addr=addr, dt_now=dt_now) is not None
+      ]
+
+    def __network_node_summary_entry(self, addr, dt_now=None):
+      if not self.network_summary_status_enabled:
+        return None
+      if dt_now is None:
+        dt_now = dt.now()
+      addr = self.__remove_address_prefix(addr)
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        entries = list(self.__network_summary_statuses.get(addr, {}).values())
+      if len(entries) == 0:
+        return None
+
+      fresh_entries = []
+      for entry in entries:
+        received_at = entry["received_at"]
+        if (dt_now - received_at).total_seconds() <= self.network_summary_ttl_seconds:
+          fresh_entries.append(entry)
+      if len(fresh_entries) == 0:
+        return None
+      return deepcopy(max(fresh_entries, key=lambda item: item["received_at"]))
+
+    def __network_summary_elapsed_seconds(self, summary_entry, dt_now=None):
+      if dt_now is None:
+        dt_now = dt.now()
+      reporter_age = (dt_now - summary_entry["received_at"]).total_seconds()
+      try:
+        if ct.PAYLOAD_DATA.NETMON_LAST_SEEN not in summary_entry["node"]:
+          return 9999999999
+        node_age = float(summary_entry["node"].get(ct.PAYLOAD_DATA.NETMON_LAST_SEEN))
+      except Exception:
+        # Malformed freshness must fail closed. Otherwise an authorized but
+        # bad summary payload could turn an unknown peer into ONLINE.
+        return 9999999999
+      if node_age < 0:
+        return 9999999999
+      return max(0, node_age + reporter_age)
+
+    def __network_summary_simple_status(
+      self,
+      summary_entry,
+      dt_now=None,
+      max_last_seen_seconds=60,
+    ):
+      elapsed = self.__network_summary_elapsed_seconds(summary_entry, dt_now=dt_now)
+      if elapsed > max_last_seen_seconds:
+        return "LOST STATUS"
+      return summary_entry["node"].get(ct.PAYLOAD_DATA.NETMON_STATUS_KEY, "LOST STATUS")
+
+    def __network_node_direct_last_seen_seconds(self, addr, dt_now=None):
+      hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      if len(hb) == 0:
+        return None
+      ts = hb.get(ct.HB.RECEIVED_TIME)
+      tz = self.log.timezone
+      if ts is None:
+        ts = hb.get(ct.PAYLOAD_DATA.EE_TIMESTAMP)
+        tz = hb.get(ct.PAYLOAD_DATA.EE_TIMEZONE)
+      if ts is None:
+        return None
+      try:
+        dt_remote_to_local = self.log.utc_to_local(ts, tz, fmt=ct.HB.TIMESTAMP_FORMAT)
+      except Exception:
+        return None
+      if dt_now is None:
+        dt_now = dt.now()
+      return dt_now.timestamp() - dt_remote_to_local.timestamp()
+
+    def __network_node_summary_entry_for_status(self, addr, dt_now=None):
+      summary = self.__network_node_summary_entry(addr=addr, dt_now=dt_now)
+      if summary is None:
+        return None
+      if not self.__network_has_direct_node(addr):
+        return summary
+      direct_last_seen = self.__network_node_direct_last_seen_seconds(addr=addr, dt_now=dt_now)
+      if direct_last_seen is None or direct_last_seen > 60:
+        # Stale persisted heartbeat DB entries must not mask fresh oracle status
+        # snapshots during rollout. The summary still stays out of history/epoch
+        # evidence; this only selects the status/display source.
+        return summary
+      return None
+
+    def __network_node_summary_node_for_display(self, addr, dt_now=None):
+      summary = self.__network_node_summary_entry_for_status(addr=addr, dt_now=dt_now)
+      if summary is None:
+        return None
+      return summary["node"]
+
+    def __network_node_summary_status(self, addr, dt_now=None, summary_entry=None):
+      entry = summary_entry or self.__network_node_summary_entry(addr=addr, dt_now=dt_now)
+      if entry is None:
+        return None
+      node = entry["node"]
+      status = deepcopy(node)
+      addr_no_prefix = self.__remove_address_prefix(addr)
+      elapsed = self.__network_summary_elapsed_seconds(entry, dt_now=dt_now)
+      status["address"] = self._add_address_prefix(addr_no_prefix)
+      status.setdefault("eeid", node.get(ct.PAYLOAD_DATA.NETMON_EEID, MISSING_ID))
+      status[ct.PAYLOAD_DATA.NETMON_STATUS_KEY] = self.__network_summary_simple_status(entry, dt_now=dt_now)
+      status[ct.PAYLOAD_DATA.NETMON_LAST_SEEN] = round(elapsed, 2)
+      status["netmon_data_source"] = "summary"
+      status["netmon_reporter"] = entry["reporter"]
+      status["netmon_report_received_at"] = entry["received_at"].strftime(ct.HB.TIMESTAMP_FORMAT)
+      # Summary-only data is useful for display/routing freshness, but it must
+      # not silently become resource-selection trust or consensus evidence.
+      status["trusted"] = False
+      status["trust"] = 0
+      status["SCORE"] = 0
+      return status
         
     def network_nodes_status(self):
       """
@@ -1163,12 +1435,19 @@ class NetworkMonitor(DecentrAIObject):
       if ct.DEVICE_STATUS_EXCEPTION in self.__network_node_past_device_status_by_interval(addr=addr, minutes=60):
         return False
       
-      if self.network_node_last_seen(addr=addr, as_sec=True, dt_now=dt_now) > 60:
+      direct_last_seen = self.__network_node_direct_last_seen_seconds(addr=addr, dt_now=dt_now)
+      if direct_last_seen is None or direct_last_seen > 60:
         return False
 
       return True
 
     def network_node_simple_status(self, addr, dt_now=None, last_exception_check_time_minutes=60):
+      summary = self.__network_node_summary_entry_for_status(addr=addr, dt_now=dt_now)
+      if summary is not None:
+        return self.__network_summary_simple_status(summary, dt_now=dt_now)
+      if not self.__network_has_direct_node(addr):
+        return "LOST STATUS"
+
       # TODO: review this method wrt the timing of the last exception
       if ct.DEVICE_STATUS_EXCEPTION in self.__network_node_past_device_status_by_interval(addr=addr, minutes=last_exception_check_time_minutes):
         return "PAST-EXCEPTION"
@@ -1180,47 +1459,87 @@ class NetworkMonitor(DecentrAIObject):
       return last_status
     
     
-    def network_node_is_online(self, addr, dt_now=None):
-      return self.network_node_simple_status(addr=addr, dt_now=dt_now) == ct.DEVICE_STATUS_ONLINE            
+    def network_node_is_online(self, addr, dt_now=None, allow_summary=False):
+      if allow_summary:
+        return self.network_node_simple_status(addr=addr, dt_now=dt_now) == ct.DEVICE_STATUS_ONLINE
+      # Keep the default predicate direct-heartbeat-only. Many call sites use
+      # this method for operational targeting or consensus-adjacent checks, and
+      # summary snapshots are not heartbeat/epoch evidence.
+      return self.network_node_is_ok_device_status(addr=addr, dt_now=dt_now)
     
     
     def network_node_py_ver(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and "py_ver" in summary_node:
+        return summary_node.get("py_ver")
       result = None
-      hb = self.__network_node_last_heartbeat(addr)
+      hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
       if isinstance(hb, dict):
         result = hb.get(ct.HB.PY_VER)
-      return result    
+      if result is None:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          result = summary["node"].get("py_ver")
+      return result
     
     
     def network_node_r1fs_id(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ID in summary_node:
+        return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ID)
       result = None
-      hb = self.__network_node_last_heartbeat(addr)
+      hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
       if isinstance(hb, dict):
         result = hb.get(ct.HB.R1FS_ID)
+      if result is None:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          result = summary["node"].get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ID)
       return result
     
     
     def network_node_r1fs_online(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE in summary_node:
+        return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE)
       result = None
-      hb = self.__network_node_last_heartbeat(addr)
+      hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
       if isinstance(hb, dict):
         result = hb.get(ct.HB.R1FS_ONLINE)
+      if result is None:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          result = summary["node"].get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE)
       return result
     
     
     def network_node_r1fs_relay(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_R1FS_RELAY in summary_node:
+        return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_RELAY)
       result = None
-      hb = self.__network_node_last_heartbeat(addr)
+      hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
       if isinstance(hb, dict):
         result = hb.get(ct.HB.R1FS_RELAY)
+      if result is None:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          result = summary["node"].get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_RELAY)
       return result
     
     
     def network_node_version(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_VERSION in summary_node:
+        return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_VERSION)
       result = None
-      hb = self.__network_node_last_heartbeat(addr)
+      hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
       if isinstance(hb, dict):
         result = hb.get(ct.HB.VERSION)
+      if result is None:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          result = summary["node"].get(ct.PAYLOAD_DATA.NETMON_NODE_VERSION)
       return result
 
     
@@ -1237,6 +1556,8 @@ class NetworkMonitor(DecentrAIObject):
 
 
     def network_node_is_available(self, addr):
+      if not self.__network_has_direct_node(addr):
+        return False
       ok_loops_timings = self.network_node_is_ok_loops_timings(addr=addr, max_main_loop_timing=5)
       ok_avail_disk = self.network_node_is_ok_available_disk_size(addr=addr, min_gb_available=5)
       ok_avail_mem = self.network_node_is_ok_available_memory_size(addr=addr)
@@ -1261,10 +1582,28 @@ class NetworkMonitor(DecentrAIObject):
       bool
           True if the remote node is accessible, False otherwise
       """
-      is_local = addr == self.node_addr
-      is_allowed = self.__remove_address_prefix(self.node_addr) in self.network_node_whitelist(addr=addr)
-      is_unsecured = not self.network_node_is_secured(addr=addr)
-      return is_allowed or is_local or is_unsecured
+      norm_addr = self.__remove_address_prefix(addr)
+      is_local = norm_addr == self.__remove_address_prefix(self.node_addr)
+      if is_local:
+        return True
+      if not self.network_node_is_online(addr=addr):
+        # Accessibility can be used by targeting paths, so stale direct
+        # heartbeats must not borrow fresh summary display data or old cached
+        # whitelist/security fields.
+        return False
+      hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      whitelist = hb.get(ct.HB.EE_WHITELIST, [])
+      if not isinstance(whitelist, list):
+        whitelist = []
+      node_addr = self.__remove_address_prefix(self.node_addr)
+      whitelist = [
+        self.__remove_address_prefix(allowed)
+        for allowed in whitelist
+        if isinstance(allowed, str)
+      ]
+      is_allowed = node_addr in whitelist
+      is_unsecured = not hb.get(ct.HB.SECURED, False)
+      return is_allowed or is_unsecured
 
     def network_node_gpu_capability(
         self, addr, device_id, min_gpu_used=20, max_gpu_used=90,
@@ -1606,7 +1945,8 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_last_seen(self, addr, as_sec=True, dt_now=None):
       """
       Returns the `datetime` in local time when a particular remote node has last been seen
-      according to its heart-beats.
+      according to its heartbeats or, when heartbeat receive is intentionally disabled,
+      a fresh authorized network-summary snapshot.
 
       Parameters
       ----------
@@ -1631,6 +1971,15 @@ class NetworkMonitor(DecentrAIObject):
       
 
       """
+      summary = self.__network_node_summary_entry_for_status(addr=addr, dt_now=dt_now)
+      if summary is not None:
+        if dt_now is None:
+          dt_now = dt.now()
+        elapsed = self.__network_summary_elapsed_seconds(summary_entry=summary, dt_now=dt_now)
+        if as_sec:
+          return elapsed
+        return dt_now - timedelta(seconds=elapsed)
+
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       if len(hb) == 0:
         return 9999999999 if as_sec else None
@@ -1791,8 +2140,13 @@ class NetworkMonitor(DecentrAIObject):
       self, addr, minutes=60, dt_now=None, 
       reverse_order=True, return_timestamps=False, return_copy=True
     ):
-      device_id = self.__network_node_default_cuda(addr=addr)
       lst_statuses, timestamps = [], []
+      # CPU-only nodes do not have DEFAULT_CUDA. Avoid the diagnostic save path
+      # in __network_node_default_cuda() during normal history API reads.
+      if len(self.__network_node_last_gpus(addr=addr)) == 0:
+        return (lst_statuses, timestamps) if return_timestamps else lst_statuses
+
+      device_id = self.__network_node_default_cuda(addr=addr)
       if device_id is not None:
         result = self.__network_node_past_gpus_by_interval(
           addr=addr, minutes=minutes, dt_now=dt_now, 
@@ -1843,17 +2197,40 @@ class NetworkMonitor(DecentrAIObject):
     
     
     def network_node_remote_time(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and "last_remote_time" in summary_node:
+        return summary_node.get("last_remote_time")
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
-      return hb.get(ct.HB.CURRENT_TIME)
+      result = hb.get(ct.HB.CURRENT_TIME)
+      if result is None:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          result = summary["node"].get("last_remote_time")
+      return result
     
     
     def network_node_deploy_type(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and "deployment" in summary_node:
+        return summary_node.get("deployment")
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
-      return hb.get(ct.HB.GIT_BRANCH)      
+      result = hb.get(ct.HB.GIT_BRANCH)
+      if result is None:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          result = summary["node"].get("deployment")
+      return result
     
 
     def network_node_is_supervisor(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR in summary_node:
+        return bool(summary_node.get(ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR, False))
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      if len(hb) == 0:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          return bool(summary["node"].get(ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR, False))
       res = hb.get(ct.HB.EE_IS_SUPER, False)
       if res is None:
         res = False
@@ -1866,8 +2243,7 @@ class NetworkMonitor(DecentrAIObject):
       addr = None
       candidates = []
       for addr in self.all_nodes:
-        hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
-        if hb.get(ct.EE_ID) == eeid:
+        if self.network_node_eeid(addr) == eeid:
           candidates.append(addr)
       if len(candidates) == 0:
         addr = None
@@ -1885,7 +2261,14 @@ class NetworkMonitor(DecentrAIObject):
 
 
     def network_node_eeid(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_EEID in summary_node:
+        return summary_node.get(ct.PAYLOAD_DATA.NETMON_EEID, MISSING_ID)
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      if len(hb) == 0:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          return summary["node"].get(ct.PAYLOAD_DATA.NETMON_EEID, MISSING_ID)
       return hb.get(ct.EE_ID, MISSING_ID)
 
     def network_node_has_did(self, addr: str):
@@ -1895,20 +2278,44 @@ class NetworkMonitor(DecentrAIObject):
 
     def network_node_comm_relay(self, addr: str):
       """Returns the communication relay of a remote node as indicated in the first heartbeat."""
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_COMM_RELAY in summary_node:
+        return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_COMM_RELAY, '')
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      if len(hb) == 0:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          return summary["node"].get(ct.PAYLOAD_DATA.NETMON_NODE_COMM_RELAY, '')
       return hb.get(ct.HB.COMM_RELAY, '')
 
     def network_node_whitelist(self, addr):
       """Returns the whitelist of a remote node exactly as it was received in the heartbeat - naturally without any prefix."""
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_WHITELIST in summary_node:
+        return deepcopy(summary_node.get(ct.PAYLOAD_DATA.NETMON_WHITELIST, ['<abnormal list>']))
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
+      if len(hb) == 0:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          return deepcopy(summary["node"].get(ct.PAYLOAD_DATA.NETMON_WHITELIST, ['<abnormal list>']))
       return deepcopy(hb.get(ct.HB.EE_WHITELIST, ['<abnormal list>']))
     
     def network_node_local_tz(self, addr, as_zone=True):
+      summary_key = "node_tz" if as_zone else "node_utc"
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and summary_key in summary_node:
+        return summary_node.get(summary_key)
+      result = None
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
-      if as_zone:
-        return hb.get(ct.PAYLOAD_DATA.EE_TZ)
-      else:
-        return hb.get(ct.PAYLOAD_DATA.EE_TIMEZONE)
+      if isinstance(hb, dict):
+        result = hb.get(ct.PAYLOAD_DATA.EE_TZ if as_zone else ct.PAYLOAD_DATA.EE_TIMEZONE)
+      if result is None:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          # NET_MON_01 summaries carry the user-facing status keys produced by
+          # network_node_status(), not the original heartbeat constant names.
+          result = summary["node"].get("node_tz" if as_zone else "node_utc")
+      return result
       
     def network_node_today_heartbeats(self, addr, dt_now=None):
       """
@@ -1924,11 +2331,14 @@ class NetworkMonitor(DecentrAIObject):
       if dt_now is None:
         dt_now = dt.now()
       dt_now = dt_now.replace(hour=0, minute=0, second=0, microsecond=0)
-      __addr_no_prefix = self.__remove_address_prefix(addr)
-      with self.log.managed_lock_resource(NETMON_MUTEX):
-        hbs = list(self.__network_heartbeats[__addr_no_prefix])
+      hbs = list(self.get_box_heartbeats(addr=addr, return_copy=False))
       for hb in hbs:
-        ts = hb[ct.PAYLOAD_DATA.EE_TIMESTAMP]
+        ts = hb.get(ct.PAYLOAD_DATA.EE_TIMESTAMP)
+        if ts is None:
+          # Compact or locally generated records can lack a remote timestamp.
+          # They are not useful for "today" filtering, but one malformed entry
+          # must not make the public reader fail.
+          continue
         dt_ts = self.log.utc_to_local(
           ts,
           remote_utc=hb.get(ct.PAYLOAD_DATA.EE_TIMEZONE),
@@ -1939,8 +2349,15 @@ class NetworkMonitor(DecentrAIObject):
       
             
     def network_node_is_secured(self, addr):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr)
+      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_SECURED in summary_node:
+        return bool(summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_SECURED, False))
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
-      return hb.get(ct.HB.SECURED, False) 
+      if len(hb) == 0:
+        summary = self.__network_node_summary_entry(addr=addr)
+        if summary is not None:
+          return bool(summary["node"].get(ct.PAYLOAD_DATA.NETMON_NODE_SECURED, False))
+      return hb.get(ct.HB.SECURED, False)
     
     
     def network_node_pipelines(self, addr):
@@ -2122,6 +2539,14 @@ class NetworkMonitor(DecentrAIObject):
   
     
     def network_node_status(self, addr, min_uptime=60, dt_now=None):
+      summary = self.__network_node_summary_entry_for_status(addr=addr, dt_now=dt_now)
+      if summary is not None:
+        summary_status = self.__network_node_summary_status(
+          addr=addr, dt_now=dt_now, summary_entry=summary,
+        )
+        if summary_status is not None:
+          return summary_status
+
       node_initial_last_timestamp, node_final_last_timestamp = None, None
       try:
         node_initial_last_timestamp = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True).get(ct.HB.CURRENT_TIME)
@@ -2281,13 +2706,35 @@ class NetworkMonitor(DecentrAIObject):
       return dct_result    
     
     
+    def __empty_network_node_history(self):
+      return OrderedDict(dict(
+        total_disk=None,
+        current_disk=None,
+        total_mem=None,
+        mem_avail_hist=[],
+        cpu_hist=[],
+        gpu_mem_total=None,
+        gpu_load_hist=[],
+        gpu_mem_avail_hist=[],
+        gpu_temp_hist=[],
+        gpu_temp_max_allowed=None,
+        temperatures=[],
+        max_temperature=[],
+        max_temp_sensor=None,
+        timestamps=[],
+      ))
+
+
     def network_node_history(self, addr, minutes=8*60, dt_now=None, reverse_order=True, hb_step=4):
-      # TODO: set HIST_DEBUG to False
-      HIST_DEBUG = True
+      # Keep production history reads non-fatal. CPU-only nodes legitimately
+      # have CPU/memory timestamps without a matching GPU timestamp series.
+      HIST_DEBUG = False
       lst_heartbeats = self.__network_node_past_heartbeats_by_interval(
         addr=addr, minutes=minutes, dt_now=dt_now,
         reverse_order=True,
       )
+      if len(lst_heartbeats) == 0:
+        return self.__empty_network_node_history()
       last_hb = lst_heartbeats[0]
         
       timestamps = self.__get_timestamps(lst_heartbeats)

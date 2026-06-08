@@ -170,6 +170,17 @@ class TestNetmonSummaryStatus(unittest.TestCase):
 
     self.assertFalse(netmon.network_summary_status_enabled)
 
+  def test_runtime_environment_summary_ttl_overrides_process_environment(self):
+    netmon, patcher = _make_netmon(
+      ttl_seconds=120,
+      runtime_env={
+        "EE_NETMON_SUMMARY_TTL_SECONDS": "17",
+      },
+    )
+    self.addCleanup(patcher.stop)
+
+    self.assertEqual(netmon.network_summary_ttl_seconds, 17)
+
   def test_authorized_summary_populates_status_without_heartbeat_history(self):
     netmon, patcher = _make_netmon(summary_enabled=True)
     self.addCleanup(patcher.stop)

@@ -148,7 +148,12 @@ class NetworkMonitor(DecentrAIObject):
   @property
   def network_summary_ttl_seconds(self):
     try:
-      return int(os.environ.get("EE_NETMON_SUMMARY_TTL_SECONDS", 180))
+      value = self.__env_value(
+        "EE_NETMON_SUMMARY_TTL_SECONDS",
+        "NETMON_SUMMARY_TTL_SECONDS",
+        default=180,
+      )
+      return int(value)
     except Exception:
       return 180
 

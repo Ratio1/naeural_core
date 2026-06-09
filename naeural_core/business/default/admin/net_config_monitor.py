@@ -24,6 +24,8 @@
 
 
 """
+import math
+
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
 from naeural_core.constants import NET_CONFIG_MONITOR_SHOW_EACH
 
@@ -71,9 +73,17 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   
   CT_PIPELINE = "PIPELINES"
   CT_PLG_STATUSES = "PLUGIN_STATUSES"
+  NETMON_ACTIVE_MAX_LAST_SEEN_SECONDS = 60
 
   def check_debug_logging_enabled(self):
     return super(NetConfigMonitorPlugin, self).check_debug_logging_enabled() or self.cfg_verbose_netconfig_logs
+
+
+  def __netmon_node_is_online_for_control(self, node_addr):
+    checker = getattr(self.netmon, "network_node_is_online_for_control", None)
+    if callable(checker):
+      return checker(node_addr)
+    return self.netmon.network_node_is_online(node_addr)
 
   def on_init(self):   
     self.P("Network fleet peer configuration monitor initializing...")
@@ -146,9 +156,32 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       addr = v.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS)
       if not isinstance(addr, str) or len(addr) == 0:
         continue
-      if v.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) == self.const.DEVICE_STATUS_ONLINE:
+      if self.__summary_node_is_fresh_online(v):
         active_network[addr] = v
     return active_network
+
+
+  def __summary_node_is_fresh_online(self, node):
+    if node.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) != self.const.DEVICE_STATUS_ONLINE:
+      return False
+    try:
+      last_seen = float(node.get(self.const.PAYLOAD_DATA.NETMON_LAST_SEEN))
+    except (TypeError, ValueError):
+      return False
+    return (
+      math.isfinite(last_seen)
+      and 0 <= last_seen <= self.NETMON_ACTIVE_MAX_LAST_SEEN_SECONDS
+    )
+
+
+  def __safe_summary_whitelist(self, value):
+    if not isinstance(value, list):
+      return []
+    return [
+      self.bc.maybe_remove_addr_prefix(addr)
+      for addr in value
+      if isinstance(addr, str)
+    ]
 
 
   def __get_active_nodes_summary_with_peers(self, netmon_current_network: dict):
@@ -164,7 +197,10 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       node_coverage[addr] = 0
     #endfor initialize node_coverage 
     
-    whitelists = [x.get("whitelist", []) for x in active_network.values()]
+    whitelists = [
+      self.__safe_summary_whitelist(x.get(self.const.PAYLOAD_DATA.NETMON_WHITELIST, []))
+      for x in active_network.values()
+    ]
     for whitelist in whitelists:
       for ee_addr in whitelist:
         if ee_addr not in active_network:
@@ -180,14 +216,17 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     
     for i, (ee_addr, coverage) in enumerate(coverage_list):
       is_online = active_network.get(ee_addr, {}).get("working", False) == self.const.DEVICE_STATUS_ONLINE
+      whitelist = self.__safe_summary_whitelist(
+        active_network.get(ee_addr, {}).get(self.const.PAYLOAD_DATA.NETMON_WHITELIST, [])
+      )
       result[ee_addr] = {
         "peers" : coverage,
         "eeid" : active_network.get(ee_addr, {}).get("eeid", "UNKNOWN"),
         'ver'  : active_network.get(ee_addr, {}).get("version", "UNKNOWN"),
         'is_supervisor' : active_network.get(ee_addr, {}).get("is_supervisor", False),
-        'allows_me' : my_addr in active_network.get(ee_addr, {}).get("whitelist", []),
+        'allows_me' : my_addr in whitelist,
         'online' : is_online,
-        'whitelist' : active_network.get(ee_addr, {}).get("whitelist", []),
+        'whitelist' : whitelist,
       }
     return result
 
@@ -225,9 +264,18 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     Sends a request to a node or a list of nodes to get their configuration.
     """
     if isinstance(node_addr, list):
-      node_addr = [self.bc.maybe_add_prefix(x) for x in node_addr if self.netmon.network_node_is_online(x)]
+      sent_nodes = [
+        self.bc.maybe_remove_addr_prefix(x)
+        for x in node_addr
+        if self.__netmon_node_is_online_for_control(x)
+      ]
+      node_addr = [self.bc.maybe_add_prefix(x) for x in sent_nodes]
+      if len(sent_nodes) == 0:
+        self.Pd("Skipping config request: no control-online destinations remain after filtering.")
+        return []
       node_ee_id = [self.netmon.network_node_eeid(x) for x in node_addr]
     else:
+      sent_nodes = [self.bc.maybe_remove_addr_prefix(node_addr)]
       node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
       node_ee_id = self.netmon.network_node_eeid(node_addr)
 
@@ -239,14 +287,23 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       },
     }
     self.send_encrypted_payload(node_addr=node_addr, **payload)
-    return
+    return sent_nodes
   
-  
+
   def __send_set_cfg(self, node_addr):
     if isinstance(node_addr, list):
-      node_addr = [self.bc.maybe_add_prefix(x) for x in node_addr if self.netmon.network_node_is_online(x)]
+      sent_nodes = [
+        self.bc.maybe_remove_addr_prefix(x)
+        for x in node_addr
+        if self.__netmon_node_is_online_for_control(x)
+      ]
+      node_addr = [self.bc.maybe_add_prefix(x) for x in sent_nodes]
+      if len(sent_nodes) == 0:
+        self.Pd("Skipping config send: no control-online destinations remain after filtering.")
+        return []
       node_ee_id = [self.netmon.network_node_eeid(x) for x in node_addr]
     else:
+      sent_nodes = [self.bc.maybe_remove_addr_prefix(node_addr)]
       node_addr = self.bc.maybe_add_prefix(node_addr) # add prefix if not present otherwise the protocol will fail
       node_ee_id = self.netmon.network_node_eeid(node_addr)
 
@@ -269,7 +326,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       node_addr=node_addr,
       **payload
     )
-    return    
+    return sent_nodes
 
 
   def __maybe_send_requests(self):
@@ -286,7 +343,6 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
         self.Pd("No allowed nodes to send requests to. Waiting for network data...")
         self.__last_data_time = self.time() - self.cfg_send_get_config_each + 10 # we force after 10 seconds to trigger
       else:
-        self.__last_data_time = self.time()
         self.Pd(f"Initiating pipeline requests to {len(self.__allowed_nodes)} allowed nodes...")
         to_send = []
         for node_addr in self.__allowed_nodes:
@@ -295,15 +351,42 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
             to_send.append(node_addr)
           #endif enough time since last request of this node
         #endfor __allowed_nodes
+        due_nodes = list(to_send)
+        to_send = [
+          node_addr for node_addr in to_send
+          if self.__netmon_node_is_online_for_control(node_addr)
+        ]
         if len(to_send) == 0:
-          self.Pd("No nodes need update.")
+          if len(due_nodes) == 0:
+            self.Pd("No nodes need update.")
+            self.__last_data_time = self.time()
+          else:
+            self.Pd("No control-online nodes need update.")
+            # Do not consume the full global request cadence when due nodes were
+            # only filtered by control liveness. A fresh summary may arrive right
+            # after this iteration, so retry soon instead of waiting the whole
+            # SEND_GET_CONFIG_EACH window.
+            self.__last_data_time = self.time() - self.cfg_send_get_config_each + 10
         else:
           self.Pd(f"Sending requests to {len(to_send)} nodes...")        
           # now send some requests
-          self.__send_get_cfg(node_addr=to_send)
-          for node_addr in to_send:
-            self.__allowed_nodes[node_addr]["last_config_get"] = self.time()
-          #endfor to_send
+          sent_nodes = self.__send_get_cfg(node_addr=to_send)
+          if len(sent_nodes) == 0:
+            # Liveness can flip between the request-loop prefilter and the
+            # helper's send-time filter. Treat that like the due-but-filtered
+            # case above so a fresh summary can trigger a near retry.
+            self.__last_data_time = self.time() - self.cfg_send_get_config_each + 10
+          else:
+            for node_addr in sent_nodes:
+              self.__allowed_nodes[node_addr]["last_config_get"] = self.time()
+            #endfor sent_nodes
+            if len(sent_nodes) < len(due_nodes):
+              # Some due nodes were filtered out before or during send. Keep a
+              # short global retry so those nodes are reconsidered quickly while
+              # sent nodes keep their per-node cooldown.
+              self.__last_data_time = self.time() - self.cfg_send_get_config_each + 10
+            else:
+              self.__last_data_time = self.time()
         #endif len(to_send) == 0
       #endif have allowed nodes
     #endif time to send
@@ -378,10 +461,23 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       
     if must_distribute:
       if len(allowed_list) > 0:
-        self.__send_set_cfg(node_addr=allowed_list)
+        sent_nodes = self.__send_set_cfg(node_addr=allowed_list)
+        if len(sent_nodes) == 0:
+          # Whitelist targets can all be filtered out by summary/control
+          # liveness. Do not consume the full distribution cadence for a no-op;
+          # a fresh summary may arrive immediately after this process tick.
+          self.__last_sent_to_allowed = self.time() - self.cfg_send_to_allowed_each + 10
+        else:
+          if len(sent_nodes) < len(allowed_list):
+            # A partial distribution should not make unsent recipients wait the
+            # full cadence. The helper returns no-prefix destinations that were
+            # actually sent, so the length check is enough for retry accounting.
+            self.__last_sent_to_allowed = self.time() - self.cfg_send_to_allowed_each + 10
+          else:
+            self.__last_sent_to_allowed = self.time()
       else:
         self.P("No allowed nodes to send configuration to although we have updated configuration.")
-      self.__last_sent_to_allowed = self.time()      
+        self.__last_sent_to_allowed = self.time()
     #endif must_distribute
     return
     
@@ -498,11 +594,11 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       
       # mark all nodes that are not online
       non_online = {
-        x.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS): x.get(self.const.PAYLOAD_DATA.NETMON_EEID) for x in current_network.values()
+          x.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS): x.get(self.const.PAYLOAD_DATA.NETMON_EEID) for x in current_network.values()
         if (
           isinstance(x, dict)
           and isinstance(x.get(self.const.PAYLOAD_DATA.NETMON_ADDRESS), str)
-          and x.get(self.const.PAYLOAD_DATA.NETMON_STATUS_KEY, False) != self.const.DEVICE_STATUS_ONLINE
+          and not self.__summary_node_is_fresh_online(x)
         )
       }
       

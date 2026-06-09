@@ -102,6 +102,10 @@ class _PeerSelectionHarness(_BasePluginAPIMixin):
     super().__init__()
     self.cfg_chainstore_peers = ["peer-config", "peer-config", "peer-self"]
     self.ee_addr = "peer-self"
+    self.ee_id = "peer-self-id"
+    self._stream_id = "stream"
+    self._signature = "CHAIN_STORE"
+    self.cfg_instance_id = "instance"
     self._now = 0.0
     self.messages = []
     self.calls = []
@@ -172,6 +176,39 @@ class _FakeNetwork:
         "decoded": decoded,
       }
       peer.default_handler(payload)
+
+
+class _WhitelistBlockEngine:
+  def __init__(self, peers):
+    self.peers = list(peers)
+
+  def get_whitelist(self, with_prefix=False):  # pylint: disable=unused-argument
+    return list(self.peers)
+
+
+class _SummaryControlNetmon:
+  def __init__(self, online_for_control):
+    self.online_for_control = set(online_for_control)
+    self.direct_calls = []
+    self.control_calls = []
+
+  def network_node_is_online(self, peer):
+    self.direct_calls.append(peer)
+    return False
+
+  def network_node_is_online_for_control(self, peer):
+    self.control_calls.append(peer)
+    return peer in self.online_for_control
+
+
+class _OldNetmonStub:
+  def __init__(self, online):
+    self.online = set(online)
+    self.calls = []
+
+  def network_node_is_online(self, peer):
+    self.calls.append(peer)
+    return peer in self.online
 
 
 class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
@@ -302,6 +339,29 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
 
 
 class TestChainStoreHsync(unittest.TestCase):
+  def test_default_peer_refresh_uses_summary_control_liveness(self):
+    requester = _ChainStoreRuntimeHarness("peer-requester")
+    requester.bc = _WhitelistBlockEngine(["peer-1", "peer-2"])
+    requester.netmon = _SummaryControlNetmon(online_for_control={"peer-1"})
+    requester._now = 61
+
+    requester._ChainStoreBasePlugin__maybe_refresh_chain_peers()
+
+    self.assertEqual(requester._ChainStoreBasePlugin__get_target_peers(), ["peer-1"])
+    self.assertEqual(requester.netmon.direct_calls, [])
+    self.assertEqual(requester.netmon.control_calls, ["peer-1", "peer-2"])
+
+  def test_default_peer_refresh_falls_back_for_old_netmon_stubs(self):
+    requester = _ChainStoreRuntimeHarness("peer-requester")
+    requester.bc = _WhitelistBlockEngine(["peer-1", "peer-2"])
+    requester.netmon = _OldNetmonStub(online={"peer-2"})
+    requester._now = 61
+
+    requester._ChainStoreBasePlugin__maybe_refresh_chain_peers()
+
+    self.assertEqual(requester._ChainStoreBasePlugin__get_target_peers(), ["peer-2"])
+    self.assertEqual(requester.netmon.calls, ["peer-1", "peer-2"])
+
   def test_chainstore_set_and_hsync_share_peer_selection(self):
     harness = _PeerSelectionHarness()
 

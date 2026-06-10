@@ -8,7 +8,38 @@ from collections import OrderedDict
 from datetime import datetime
 from unittest import mock
 
-from naeural_core import constants as ct
+def _load_constants_module():
+  module = types.ModuleType("_ecomms_test_constants")
+  module.NET_CONFIG_MONITOR_SHOW_EACH = 1
+  module.DEVICE_STATUS_ONLINE = "ONLINE"
+  module.ETH_ENABLED = False
+  module.CONFIG_STREAM = types.SimpleNamespace(K_NAME="NAME")
+  module.NET_CONFIG = types.SimpleNamespace(
+    REQUEST_COMMAND="GET_CONFIG",
+    STORE_COMMAND="SET_CONFIG",
+    NET_CONFIG_DATA="NET_CONFIG_DATA",
+    OPERATION="OP",
+    DESTINATION="DEST",
+  )
+  module.PAYLOAD_DATA = types.SimpleNamespace(
+    EE_SENDER="EE_SENDER",
+    EE_DESTINATION="EE_DEST",
+    EE_PAYLOAD_PATH="EE_PAYLOAD_PATH",
+    EE_IS_ENCRYPTED="EE_IS_ENCRYPTED",
+    EE_ID="EE_ID",
+    NETMON_CURRENT_NETWORK="NETMON_CURRENT_NETWORK",
+    NETMON_ADDRESS="address",
+    NETMON_EEID="eeid",
+    NETMON_STATUS_KEY="working",
+    NETMON_WHITELIST="whitelist",
+    NETMON_LAST_SEEN="last_seen_sec",
+  )
+  module.PAYLOAD_DATA.maybe_decode_netmon_payload = lambda payload, log=None: payload
+  module.PAYLOAD_DATA.maybe_convert_netmon_whitelist = lambda payload: payload
+  return module
+
+
+ct = _load_constants_module()
 
 
 def _load_net_config_monitor_class():
@@ -35,6 +66,8 @@ def _load_net_config_monitor_class():
 
   fake_business = types.ModuleType("naeural_core.business")
   fake_business.__path__ = []
+  fake_core = types.ModuleType("naeural_core")
+  fake_core.constants = ct
   fake_base = types.ModuleType("naeural_core.business.base")
   fake_base.__path__ = []
   fake_network_processor = types.ModuleType("naeural_core.business.base.network_processor")
@@ -43,6 +76,8 @@ def _load_net_config_monitor_class():
   spec = importlib.util.spec_from_file_location(module_name, module_path)
   module = importlib.util.module_from_spec(spec)
   with mock.patch.dict(sys.modules, {
+    "naeural_core": fake_core,
+    "naeural_core.constants": ct,
     "naeural_core.business": fake_business,
     "naeural_core.business.base": fake_base,
     "naeural_core.business.base.network_processor": fake_network_processor,
@@ -153,6 +188,7 @@ def _plugin(oracles=None, eth_oracles=None, whitelist=None, raise_oracles=False)
     raise_oracles=raise_oracles,
   )
   plugin.const = ct
+  plugin.deepcopy = lambda value: value.copy() if isinstance(value, list) else value
   return plugin
 
 
@@ -550,7 +586,7 @@ class TestNetConfigMonitorSummaryAuth(unittest.TestCase):
     self.assertEqual(plugin.netmon.control_calls, [])
     self.assertEqual(plugin._NetConfigMonitorPlugin__last_data_time, 2000)
 
-  def test_set_distribution_control_offline_nodes_do_not_consume_full_cadence(self):
+  def test_set_distribution_initial_no_eligible_retries_soon(self):
     plugin = _plugin(whitelist=["0xai_REMOTE"])
     plugin.netmon = _SummaryControlNetmon(online_for_control=set())
     plugin.P = lambda *args, **kwargs: None
@@ -571,9 +607,197 @@ class TestNetConfigMonitorSummaryAuth(unittest.TestCase):
     self.assertEqual(plugin.send_encrypted_payload_calls, [])
     self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 1410)
 
-  def test_set_distribution_partial_send_retries_unsent_nodes_soon(self):
+  def test_set_distribution_periodic_no_eligible_consumes_full_cadence(self):
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control=set())
+    plugin.P = lambda *args, **kwargs: None
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 0
+    plugin._NetConfigMonitorPlugin__last_pipelines = []
+    plugin.node_pipelines = []
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.netmon.control_calls, ["0xai_REMOTE"])
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2000)
+
+  def test_set_distribution_config_change_no_eligible_retries_until_visible(self):
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control=set())
+    plugin.P = lambda *args, **kwargs: None
+    plugin.Pd = lambda *args, **kwargs: None
+    now = [2000]
+    plugin.time = lambda: now[0]
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = []
+    plugin.node_pipelines = [{ct.CONFIG_STREAM.K_NAME: "admin_pipeline"}]
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 1410)
+
+    plugin.netmon.online_for_control = {"REMOTE"}
+    now[0] = 2011
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE"])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2011)
+
+  def test_set_distribution_config_change_keeps_retrying_within_pending_window(self):
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control=set())
+    plugin.P = lambda *args, **kwargs: None
+    plugin.Pd = lambda *args, **kwargs: None
+    now = [2000]
+    plugin.time = lambda: now[0]
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = []
+    plugin.node_pipelines = [{ct.CONFIG_STREAM.K_NAME: "admin_pipeline"}]
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+    now[0] = 2011
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 1421)
+
+    plugin.netmon.online_for_control = {"REMOTE"}
+    now[0] = 2022
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE"])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2022)
+
+  def test_set_distribution_semantic_retry_expires_to_full_cadence(self):
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control=set())
+    plugin.P = lambda *args, **kwargs: None
+    plugin.Pd = lambda *args, **kwargs: None
+    now = [2000]
+    plugin.time = lambda: now[0]
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = []
+    plugin.node_pipelines = [{ct.CONFIG_STREAM.K_NAME: "admin_pipeline"}]
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+    now[0] = 2061
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2061)
+    self.assertEqual(plugin._NetConfigMonitorPlugin__semantic_distribution_pending_nodes, set())
+
+  def test_set_distribution_config_change_retries_only_skipped_recipient(self):
+    plugin = _plugin(whitelist=["0xai_REMOTE", "0xai_LATE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    plugin.P = lambda *args, **kwargs: None
+    plugin.Pd = lambda *args, **kwargs: None
+    now = [2000]
+    plugin.time = lambda: now[0]
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = []
+    plugin.node_pipelines = [{ct.CONFIG_STREAM.K_NAME: "admin_pipeline"}]
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE"])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 1410)
+
+    plugin.netmon.online_for_control = {"REMOTE", "LATE"}
+    now[0] = 2011
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls[1]["node_addr"], ["0xai_LATE"])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2011)
+
+  def test_set_distribution_initial_partial_retry_keeps_pending_recipient_only(self):
+    plugin = _plugin(whitelist=["0xai_REMOTE", "0xai_LATE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    plugin.P = lambda *args, **kwargs: None
+    plugin.Pd = lambda *args, **kwargs: None
+    now = [2000]
+    plugin.time = lambda: now[0]
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = False
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 0
+    plugin._NetConfigMonitorPlugin__last_pipelines = None
+    plugin.node_pipelines = [{ct.CONFIG_STREAM.K_NAME: "admin_pipeline"}]
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE"])
+    self.assertEqual(
+      plugin._NetConfigMonitorPlugin__last_pipelines,
+      [{ct.CONFIG_STREAM.K_NAME: "admin_pipeline"}],
+    )
+
+    plugin.netmon.online_for_control = {"REMOTE", "LATE"}
+    now[0] = 2011
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls[1]["node_addr"], ["0xai_LATE"])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2011)
+
+  def test_set_distribution_periodic_stable_offline_whitelist_nodes_do_not_retry_soon(self):
     plugin = _plugin(whitelist=["0xai_REMOTE", "0xai_OFFLINE"])
     plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    plugin.P = lambda *args, **kwargs: None
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 0
+    plugin._NetConfigMonitorPlugin__last_pipelines = []
+    plugin.node_pipelines = []
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.netmon.control_calls, ["0xai_REMOTE", "0xai_OFFLINE", "0xai_REMOTE"])
+    self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE"])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2000)
+
+  def test_set_distribution_send_time_control_race_retries_soon(self):
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SequenceControlNetmon([True, False])
     plugin.P = lambda *args, **kwargs: None
     plugin.Pd = lambda *args, **kwargs: None
     plugin.time = lambda: 2000
@@ -588,8 +812,8 @@ class TestNetConfigMonitorSummaryAuth(unittest.TestCase):
 
     plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
 
-    self.assertEqual(plugin.netmon.control_calls, ["0xai_REMOTE", "0xai_OFFLINE"])
-    self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE"])
+    self.assertEqual(plugin.netmon.control_calls, ["0xai_REMOTE", "0xai_REMOTE"])
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
     self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 1410)
 
   def test_set_distribution_success_consumes_full_cadence_once(self):
@@ -609,7 +833,7 @@ class TestNetConfigMonitorSummaryAuth(unittest.TestCase):
 
     plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
 
-    self.assertEqual(plugin.netmon.control_calls, ["0xai_REMOTE", "0xai_OTHER"])
+    self.assertEqual(plugin.netmon.control_calls, ["0xai_REMOTE", "0xai_OTHER", "0xai_REMOTE", "0xai_OTHER"])
     self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE", "0xai_OTHER"])
     self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2000)
 

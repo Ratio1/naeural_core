@@ -123,6 +123,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__maybe_refresh_chain_peers()
     return
   
+
+  def __netmon_node_is_online_for_control(self, peer):
+    checker = getattr(self.netmon, "network_node_is_online_for_control", None)
+    if callable(checker):
+      return checker(peer)
+    return self.netmon.network_node_is_online(peer)
+
   
   def __debug_dump_chain_storage(self):
     if self.cfg_chain_store_debug:
@@ -145,9 +152,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     if (self.time() - self.__last_chain_peers_refresh) > self.cfg_chain_peers_refresh_interval:
       _chain_peers = self.bc.get_whitelist(with_prefix=True)
-      # now check and preserve only online peers
+      # ChainStore routing is not consensus evidence; on normal nodes the
+      # control liveness check may use fresh oracle summaries when peer
+      # heartbeats are intentionally not received.
       self.__chain_peers = [
-        peer for peer in _chain_peers if self.netmon.network_node_is_online(peer)
+        peer for peer in _chain_peers if self.__netmon_node_is_online_for_control(peer)
       ]
       self.__last_chain_peers_refresh = self.time()
     return

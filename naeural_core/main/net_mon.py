@@ -4,6 +4,7 @@ TODO: change from ee_id-based to ee_addr-based
 """
 import json
 import os
+import math
 import numpy as np
 
 from time import time, sleep
@@ -65,6 +66,50 @@ def exponential_score(left, right, val, right_is_better=False, normed=False):
 #enddef
 
 
+def _safe_float(value, default=None, allow_negative=False):
+  if value is None or isinstance(value, bool):
+    return default
+  try:
+    value = float(value)
+  except (TypeError, ValueError):
+    return default
+  if not math.isfinite(value):
+    return default
+  if not allow_negative and value < 0:
+    return default
+  return value
+
+
+def _safe_bool(value, default=False):
+  if isinstance(value, bool):
+    return value
+  if isinstance(value, str):
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "y"}:
+      return True
+    if value in {"0", "false", "no", "n", ""}:
+      return False
+    return default
+  if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if not math.isfinite(value):
+      return default
+    if value in (0, 1):
+      return bool(value)
+  return default
+
+
+def _safe_summary_supervisor_bool(value, default=None):
+  if isinstance(value, str) and value.strip() == "":
+    return default
+  return _safe_bool(value, default=default)
+
+
+def _safe_str_list(value):
+  if not isinstance(value, list):
+    return []
+  return [item for item in value if isinstance(item, str)]
+
+
 NETMON_MUTEX = 'NETMON_MUTEX'
 
 NETMON_DB = 'db.pkl'
@@ -73,6 +118,8 @@ NETMON_DUPLICATE_TS_CHECK_LAST = 10
 
 ERROR_ADDRESS = '0xai_unknownunknownunknown'
 MISSING_ID = 'missing_id'
+SUMMARY_NOT_SELECTED = object()
+SUMMARY_FIELD_MISSING = object()
 
 class NetworkMonitor(DecentrAIObject):
   
@@ -975,6 +1022,13 @@ class NetworkMonitor(DecentrAIObject):
       """
       Returns the number of CPU cores of the node.
       """
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="total_cpu_cores",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
       return hearbeat.get(ct.HB.CPU_NR_CORES)
     
@@ -985,9 +1039,18 @@ class NetworkMonitor(DecentrAIObject):
       The available cores are computed as the total cores weighted by the CPU usage
       in the last heartbeat.
       """
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="avail_cpu_cores",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       hearbeat = self.__network_node_last_heartbeat(addr=addr)
       cpu_used = hearbeat.get(ct.HB.CPU_USED, 0)
       known_cores = self.network_node_total_cpu_cores(addr=addr)
+      if known_cores is None:
+        return None
       avail_cores = (1 - cpu_used / 100) * known_cores
       return avail_cores
 
@@ -1001,6 +1064,17 @@ class NetworkMonitor(DecentrAIObject):
       The available cores are computed as the total cores weighted by the CPU usage
       in the last period.
       """
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="avg_avail_cpu_cores",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        summary_value = self.__network_node_summary_value_for_display(
+          addr=addr, key="avail_cpu_cores",
+        )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       lst_cpu_interval = self.__network_node_past_cpu_used_by_interval(
         addr=addr, minutes=minutes, dt_now=dt_now, reverse_order=reverse_order
       )
@@ -1199,27 +1273,60 @@ class NetworkMonitor(DecentrAIObject):
       fresh_entries = []
       for entry in entries:
         received_at = entry["received_at"]
-        if (dt_now - received_at).total_seconds() <= self.network_summary_ttl_seconds:
+        reporter_age = (dt_now - received_at).total_seconds()
+        if math.isfinite(reporter_age) and 0 <= reporter_age <= self.network_summary_ttl_seconds:
           fresh_entries.append(entry)
       if len(fresh_entries) == 0:
         return None
+      well_formed_entries = [
+        entry for entry in fresh_entries
+        if self.__network_summary_effective_age_seconds(entry, dt_now=dt_now) is not None
+        and isinstance(entry["node"].get(ct.PAYLOAD_DATA.NETMON_STATUS_KEY), str)
+      ]
+      # Pick the freshest effective node view, not merely the newest reporter
+      # packet. A newer oracle packet can already describe an almost-stale node,
+      # so ranking by received_at would mask a fresher valid report.
+      if len(well_formed_entries) > 0:
+        return deepcopy(min(
+          well_formed_entries,
+          key=lambda item: (
+            self.__network_summary_effective_age_seconds(item, dt_now=dt_now),
+            -item["received_at"].timestamp(),
+          )
+        ))
+      # If all reports are malformed, keep the newest one so status APIs still
+      # expose a fail-closed LOST STATUS snapshot.
       return deepcopy(max(fresh_entries, key=lambda item: item["received_at"]))
 
-    def __network_summary_elapsed_seconds(self, summary_entry, dt_now=None):
-      if dt_now is None:
-        dt_now = dt.now()
-      reporter_age = (dt_now - summary_entry["received_at"]).total_seconds()
+    def __network_summary_node_age_seconds(self, summary_entry):
       try:
         if ct.PAYLOAD_DATA.NETMON_LAST_SEEN not in summary_entry["node"]:
-          return 9999999999
+          return None
         node_age = float(summary_entry["node"].get(ct.PAYLOAD_DATA.NETMON_LAST_SEEN))
       except Exception:
         # Malformed freshness must fail closed. Otherwise an authorized but
         # bad summary payload could turn an unknown peer into ONLINE.
-        return 9999999999
-      if node_age < 0:
-        return 9999999999
+        return None
+      if not math.isfinite(node_age) or node_age < 0:
+        return None
+      return node_age
+
+    def __network_summary_effective_age_seconds(self, summary_entry, dt_now=None):
+      if dt_now is None:
+        dt_now = dt.now()
+      reporter_age = (dt_now - summary_entry["received_at"]).total_seconds()
+      if not math.isfinite(reporter_age) or reporter_age < 0:
+        return None
+      node_age = self.__network_summary_node_age_seconds(summary_entry)
+      if node_age is None:
+        return None
       return max(0, node_age + reporter_age)
+
+    def __network_summary_elapsed_seconds(self, summary_entry, dt_now=None):
+      if dt_now is None:
+        dt_now = dt.now()
+      elapsed = self.__network_summary_effective_age_seconds(summary_entry, dt_now=dt_now)
+      return 9999999999 if elapsed is None else elapsed
 
     def __network_summary_simple_status(
       self,
@@ -1230,7 +1337,8 @@ class NetworkMonitor(DecentrAIObject):
       elapsed = self.__network_summary_elapsed_seconds(summary_entry, dt_now=dt_now)
       if elapsed > max_last_seen_seconds:
         return "LOST STATUS"
-      return summary_entry["node"].get(ct.PAYLOAD_DATA.NETMON_STATUS_KEY, "LOST STATUS")
+      status = summary_entry["node"].get(ct.PAYLOAD_DATA.NETMON_STATUS_KEY, "LOST STATUS")
+      return status if isinstance(status, str) else "LOST STATUS"
 
     def __network_node_direct_last_seen_seconds(self, addr, dt_now=None):
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
@@ -1271,12 +1379,76 @@ class NetworkMonitor(DecentrAIObject):
         return None
       return summary["node"]
 
+    def __network_node_summary_value_for_display(
+      self,
+      addr,
+      key,
+      default=SUMMARY_NOT_SELECTED,
+      missing_default=SUMMARY_FIELD_MISSING,
+      dt_now=None,
+    ):
+      summary_node = self.__network_node_summary_node_for_display(addr=addr, dt_now=dt_now)
+      if summary_node is None:
+        return default
+      if key in summary_node:
+        return deepcopy(summary_node.get(key))
+      return missing_default
+
     def __network_node_summary_status(self, addr, dt_now=None, summary_entry=None):
       entry = summary_entry or self.__network_node_summary_entry(addr=addr, dt_now=dt_now)
       if entry is None:
         return None
       node = entry["node"]
-      status = deepcopy(node)
+      # NET_MON_01 summaries are current-status snapshots. Keep only the compact
+      # status/control fields that NetMon owns here; pipeline/config/plugin
+      # payloads remain exclusively owned by the NET_CONFIG_MONITOR cache APIs.
+      allowed_summary_keys = {
+        ct.PAYLOAD_DATA.NETMON_ADDRESS,
+        ct.PAYLOAD_DATA.NETMON_EEID,
+        ct.PAYLOAD_DATA.NETMON_STATUS_KEY,
+        ct.PAYLOAD_DATA.NETMON_LAST_SEEN,
+        ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR,
+        ct.PAYLOAD_DATA.NETMON_NODE_VERSION,
+        ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ID,
+        ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE,
+        ct.PAYLOAD_DATA.NETMON_NODE_R1FS_RELAY,
+        ct.PAYLOAD_DATA.NETMON_NODE_COMM_RELAY,
+        ct.PAYLOAD_DATA.NETMON_NODE_SECURED,
+        ct.PAYLOAD_DATA.NETMON_WHITELIST,
+        "address",
+        "eth_address",
+        "eeid",
+        "working",
+        "version",
+        "py_ver",
+        "last_remote_time",
+        "deployment",
+        "node_tz",
+        "node_utc",
+        "r1fs_id",
+        "r1fs_online",
+        "r1fs_relay",
+        "comm_relay",
+        "main_loop_avg_time",
+        "main_loop_freq",
+        "total_cpu_cores",
+        "avail_cpu_cores",
+        "avg_avail_cpu_cores",
+        "cpu_used",
+        "total_mem",
+        "avail_mem",
+        "avail_mem_prc",
+        "total_disk",
+        "avail_disk",
+        "avail_disk_prc",
+        "has_did",
+        "tags",
+      }
+      status = {
+        key: deepcopy(value)
+        for key, value in node.items()
+        if key in allowed_summary_keys
+      }
       addr_no_prefix = self.__remove_address_prefix(addr)
       elapsed = self.__network_summary_elapsed_seconds(entry, dt_now=dt_now)
       status["address"] = self._add_address_prefix(addr_no_prefix)
@@ -1291,6 +1463,81 @@ class NetworkMonitor(DecentrAIObject):
       status["trusted"] = False
       status["trust"] = 0
       status["SCORE"] = 0
+      summary_defaults = {
+        # Unknown supervisor state must not become "normal worker". Callers
+        # that target non-supervisor nodes need to fail closed on None.
+        ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR: None,
+        ct.PAYLOAD_DATA.NETMON_NODE_SECURED: False,
+        ct.PAYLOAD_DATA.NETMON_WHITELIST: [],
+        ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE: None,
+        "version": None,
+        "py_ver": None,
+        "last_remote_time": None,
+        "deployment": None,
+        "node_tz": None,
+        "node_utc": None,
+        "r1fs_id": None,
+        "r1fs_relay": None,
+        "comm_relay": "",
+        "main_loop_avg_time": 1e10,
+        "main_loop_freq": None,
+        "total_cpu_cores": None,
+        "avail_cpu_cores": None,
+        "avg_avail_cpu_cores": None,
+        "cpu_used": None,
+        "total_mem": None,
+        "avail_mem": None,
+        "avail_mem_prc": None,
+        "total_disk": None,
+        "avail_disk": None,
+        "avail_disk_prc": None,
+        "has_did": False,
+        "tags": [],
+      }
+      for key, value in summary_defaults.items():
+        status.setdefault(key, deepcopy(value))
+      if ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR in status:
+        status[ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR] = _safe_summary_supervisor_bool(
+          status.get(ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR),
+          default=None,
+        )
+      if ct.PAYLOAD_DATA.NETMON_NODE_SECURED in status:
+        status[ct.PAYLOAD_DATA.NETMON_NODE_SECURED] = _safe_bool(
+          status.get(ct.PAYLOAD_DATA.NETMON_NODE_SECURED),
+          default=False,
+        )
+      if ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE in status:
+        r1fs_online = status.get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE)
+        status[ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE] = (
+          None if r1fs_online is None else _safe_bool(r1fs_online, default=False)
+        )
+      if "has_did" in status:
+        status["has_did"] = _safe_bool(status.get("has_did"), default=False)
+      if "tags" in status:
+        status["tags"] = _safe_str_list(status.get("tags"))
+      if ct.PAYLOAD_DATA.NETMON_WHITELIST in status:
+        status[ct.PAYLOAD_DATA.NETMON_WHITELIST] = _safe_str_list(
+          status.get(ct.PAYLOAD_DATA.NETMON_WHITELIST)
+        )
+      numeric_defaults = {
+        "main_loop_avg_time": 1e10,
+      }
+      for key in (
+        "main_loop_avg_time",
+        "main_loop_freq",
+        "total_cpu_cores",
+        "avail_cpu_cores",
+        "avg_avail_cpu_cores",
+        "cpu_used",
+        "total_mem",
+        "avail_mem",
+        "avail_mem_prc",
+        "total_disk",
+        "avail_disk",
+        "avail_disk_prc",
+      ):
+        if key in status:
+          status[key] = _safe_float(status.get(key), default=numeric_defaults.get(key))
       return status
         
     def network_nodes_status(self):
@@ -1330,6 +1577,13 @@ class NetworkMonitor(DecentrAIObject):
     
     
     def network_node_main_loop(self, addr):
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="main_loop_avg_time",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return 1e10
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value, default=1e10)
       try:
         dct_timings = self.__network_node_last_loops_timings(addr=addr)
       except:
@@ -1358,10 +1612,25 @@ class NetworkMonitor(DecentrAIObject):
       """
       Returns the total disk of the node.
       """
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="total_disk",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       total_disk = self.__network_node_total_disk(addr=addr)
       return total_disk
 
     def network_node_available_disk(self, addr, norm=False):
+      summary_key = "avail_disk_prc" if norm else "avail_disk"
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key=summary_key,
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       available_disk = self.__network_node_last_available_disk(addr=addr, norm=norm)
       return available_disk
     
@@ -1376,6 +1645,13 @@ class NetworkMonitor(DecentrAIObject):
 
 
     def network_node_available_disk_prc(self, addr):
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="avail_disk_prc",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       prc_available_disk = self.__network_node_last_available_disk(addr=addr, norm=True)
       return prc_available_disk
 
@@ -1383,21 +1659,36 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_is_ok_available_disk_prc(self, addr, min_prc_available=0.15):
       # can create other heuristics based on what happened on the last x minutes interval (using _network_node_past_available_disk_by_interval)
       prc_available_disk = self.network_node_available_disk_prc(addr=addr)
-      return prc_available_disk >= min_prc_available
+      return prc_available_disk is not None and prc_available_disk >= min_prc_available
 
 
     def network_node_is_ok_available_disk_size(self, addr, min_gb_available=50):
       # can create other heuristics based on what happened on the last x minutes interval (using _network_node_past_available_disk_by_interval)
       available_disk = self.network_node_available_disk(addr=addr)
-      return available_disk >= min_gb_available
+      return available_disk is not None and available_disk >= min_gb_available
 
 
     def network_node_available_memory(self, addr, norm=False):
+      summary_key = "avail_mem_prc" if norm else "avail_mem"
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key=summary_key,
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       available_mem = self.__network_node_last_available_memory(addr=addr, norm=norm)
       return available_mem
 
 
     def network_node_available_memory_prc(self, addr):
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="avail_mem_prc",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       prc_available_mem = self.__network_node_last_available_memory(addr=addr, norm=True)
       return prc_available_mem
 
@@ -1406,6 +1697,13 @@ class NetworkMonitor(DecentrAIObject):
       """
       Returns the total memory of the node.
       """
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="total_mem",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return None
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_float(summary_value)
       return self.__network_node_machine_memory(addr=addr)
     
     
@@ -1420,12 +1718,12 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_is_ok_available_memory_prc(self, addr, min_prc_available=0.20):
       # can create other heuristics based on what happened on the last x minutes interval (using _network_node_past_available_memory_by_interval)
       prc_available_mem = self.network_node_available_memory_prc(addr=addr)
-      return prc_available_mem >= min_prc_available
+      return prc_available_mem is not None and prc_available_mem >= min_prc_available
 
     def network_node_is_ok_available_memory_size(self, addr, min_gb_available=2):
       # can create other heuristics based on what happened on the last x minutes interval (using _network_node_past_available_memory_by_interval)
       available_mem = self.network_node_available_memory(addr=addr)
-      return available_mem >= min_gb_available
+      return available_mem is not None and available_mem >= min_gb_available
 
 
     def network_node_is_ok_device_status(self, addr, dt_now=None):
@@ -1466,11 +1764,23 @@ class NetworkMonitor(DecentrAIObject):
       # this method for operational targeting or consensus-adjacent checks, and
       # summary snapshots are not heartbeat/epoch evidence.
       return self.network_node_is_ok_device_status(addr=addr, dt_now=dt_now)
+
+
+    def network_node_is_online_for_control(self, addr, dt_now=None):
+      """
+      Soft liveness preflight for command/config routing.
+
+      This may use fresh authorized NetMon summaries when normal nodes do not
+      receive peer heartbeats. It must not be treated as heartbeat history,
+      epoch data, or consensus evidence; outbound mutations still need their
+      usual response/timeout handling.
+      """
+      return self.network_node_is_online(addr=addr, dt_now=dt_now, allow_summary=True)
     
     
     def network_node_py_ver(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and "py_ver" in summary_node:
+      if summary_node is not None:
         return summary_node.get("py_ver")
       result = None
       hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
@@ -1485,7 +1795,7 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_r1fs_id(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ID in summary_node:
+      if summary_node is not None:
         return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ID)
       result = None
       hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
@@ -1500,8 +1810,9 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_r1fs_online(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE in summary_node:
-        return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE)
+      if summary_node is not None:
+        value = summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_ONLINE)
+        return None if value is None else _safe_bool(value, default=False)
       result = None
       hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
       if isinstance(hb, dict):
@@ -1515,7 +1826,7 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_r1fs_relay(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_R1FS_RELAY in summary_node:
+      if summary_node is not None:
         return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_R1FS_RELAY)
       result = None
       hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
@@ -1530,7 +1841,7 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_version(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_VERSION in summary_node:
+      if summary_node is not None:
         return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_VERSION)
       result = None
       hb = self.__network_node_last_heartbeat(addr, return_empty_dict=True)
@@ -1552,6 +1863,16 @@ class NetworkMonitor(DecentrAIObject):
 
     def network_node_is_ok_cpu_used(self, addr, max_cpu_used=50):
       # can create other heuristics based on what happened on the last x minutes interval (using _network_node_past_cpu_used_by_interval)
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="cpu_used",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return False
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        summary_value = _safe_float(summary_value)
+        if summary_value is None:
+          return False
+        return summary_value <= max_cpu_used
       return self.__network_node_last_cpu_used(addr=addr) <= max_cpu_used
 
 
@@ -2198,7 +2519,7 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_remote_time(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and "last_remote_time" in summary_node:
+      if summary_node is not None:
         return summary_node.get("last_remote_time")
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       result = hb.get(ct.HB.CURRENT_TIME)
@@ -2211,7 +2532,7 @@ class NetworkMonitor(DecentrAIObject):
     
     def network_node_deploy_type(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and "deployment" in summary_node:
+      if summary_node is not None:
         return summary_node.get("deployment")
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       result = hb.get(ct.HB.GIT_BRANCH)
@@ -2223,14 +2544,16 @@ class NetworkMonitor(DecentrAIObject):
     
 
     def network_node_is_supervisor(self, addr):
-      summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR in summary_node:
-        return bool(summary_node.get(ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR, False))
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key=ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR, missing_default=None,
+      )
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_summary_supervisor_bool(summary_value, default=None)
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       if len(hb) == 0:
         summary = self.__network_node_summary_entry(addr=addr)
         if summary is not None:
-          return bool(summary["node"].get(ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR, False))
+          return _safe_summary_supervisor_bool(summary["node"].get(ct.PAYLOAD_DATA.NETMON_IS_SUPERVISOR), default=None)
       res = hb.get(ct.HB.EE_IS_SUPER, False)
       if res is None:
         res = False
@@ -2262,7 +2585,7 @@ class NetworkMonitor(DecentrAIObject):
 
     def network_node_eeid(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_EEID in summary_node:
+      if summary_node is not None:
         return summary_node.get(ct.PAYLOAD_DATA.NETMON_EEID, MISSING_ID)
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       if len(hb) == 0:
@@ -2273,13 +2596,20 @@ class NetworkMonitor(DecentrAIObject):
 
     def network_node_has_did(self, addr: str):
       """ Returns True if the node has DID (Docker In Docker) enabled in the heartbeat."""
+      summary_value = self.__network_node_summary_value_for_display(
+        addr=addr, key="has_did",
+      )
+      if summary_value is SUMMARY_FIELD_MISSING:
+        return False
+      if summary_value is not SUMMARY_NOT_SELECTED:
+        return _safe_bool(summary_value, default=False)
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       return hb.get(ct.HB.DID, False)
 
     def network_node_comm_relay(self, addr: str):
       """Returns the communication relay of a remote node as indicated in the first heartbeat."""
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_COMM_RELAY in summary_node:
+      if summary_node is not None:
         return summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_COMM_RELAY, '')
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       if len(hb) == 0:
@@ -2291,8 +2621,8 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_whitelist(self, addr):
       """Returns the whitelist of a remote node exactly as it was received in the heartbeat - naturally without any prefix."""
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_WHITELIST in summary_node:
-        return deepcopy(summary_node.get(ct.PAYLOAD_DATA.NETMON_WHITELIST, ['<abnormal list>']))
+      if summary_node is not None:
+        return _safe_str_list(summary_node.get(ct.PAYLOAD_DATA.NETMON_WHITELIST, []))
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       if len(hb) == 0:
         summary = self.__network_node_summary_entry(addr=addr)
@@ -2303,7 +2633,7 @@ class NetworkMonitor(DecentrAIObject):
     def network_node_local_tz(self, addr, as_zone=True):
       summary_key = "node_tz" if as_zone else "node_utc"
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and summary_key in summary_node:
+      if summary_node is not None:
         return summary_node.get(summary_key)
       result = None
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
@@ -2350,13 +2680,13 @@ class NetworkMonitor(DecentrAIObject):
             
     def network_node_is_secured(self, addr):
       summary_node = self.__network_node_summary_node_for_display(addr=addr)
-      if summary_node is not None and ct.PAYLOAD_DATA.NETMON_NODE_SECURED in summary_node:
-        return bool(summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_SECURED, False))
+      if summary_node is not None:
+        return _safe_bool(summary_node.get(ct.PAYLOAD_DATA.NETMON_NODE_SECURED), default=False)
       hb = self.__network_node_last_heartbeat(addr=addr, return_empty_dict=True)
       if len(hb) == 0:
         summary = self.__network_node_summary_entry(addr=addr)
         if summary is not None:
-          return bool(summary["node"].get(ct.PAYLOAD_DATA.NETMON_NODE_SECURED, False))
+          return _safe_bool(summary["node"].get(ct.PAYLOAD_DATA.NETMON_NODE_SECURED), default=False)
       return hb.get(ct.HB.SECURED, False)
     
     
@@ -2492,7 +2822,10 @@ class NetworkMonitor(DecentrAIObject):
         with self.log.managed_lock_resource(NETMON_MUTEX):
           target_nodes = list(self.__nodes_pipelines.keys())
       for addr in target_nodes:
-        if self.network_node_is_online(addr=addr):
+        # Pipeline definitions remain NET_CONFIG_MONITOR-sourced; summary
+        # liveness is only a routing/display preflight for nodes whose
+        # heartbeats are intentionally not consumed locally.
+        if self.network_node_is_online_for_control(addr=addr):
           node_apps = self.network_node_apps(addr=addr)
           if len(node_apps) == 0:
             fails[addr] = self.network_node_pipelines(addr=addr)
@@ -2515,7 +2848,9 @@ class NetworkMonitor(DecentrAIObject):
         with self.log.managed_lock_resource(NETMON_MUTEX):
           target_nodes = list(self.__nodes_pipelines.keys())
       for addr in target_nodes:
-        if self.network_node_is_online(addr=addr):
+        # See network_known_apps(): this only exposes cached NET_CONFIG data
+        # when a node is fresh enough for control routing.
+        if self.network_node_is_online_for_control(addr=addr):
           node_apps = self.network_node_pipelines(addr=addr)
           # Filter out admin_pipeline entries
           filtered_apps = []
@@ -2577,6 +2912,16 @@ class NetworkMonitor(DecentrAIObject):
         is_online = working_status == ct.DEVICE_STATUS_ONLINE
         
         recent = self.network_node_is_recent(addr=addr, dt_now=dt_now)
+        # These compact scalar fields let non-oracle nodes perform command and
+        # deploy preflight from oracle summaries without receiving every peer
+        # heartbeat. They are not trust, epoch, or pipeline/config evidence.
+        total_cpu_cores = self.network_node_total_cpu_cores(addr)
+        avail_cpu_cores = self.network_node_avail_cpu_cores(addr)
+        avg_avail_cpu_cores = self.network_node_get_cpu_avail_cores(addr, minutes=60, dt_now=dt_now)
+        cpu_used = self.__network_node_last_cpu_used(addr=addr)
+        total_mem = self.network_node_total_mem(addr)
+        total_disk = self.network_node_total_disk(addr)
+        has_did = self.network_node_has_did(addr)
 
         trusted = recent and is_online and ok_uptime
         trust_val = exponential_score(left=0, right=min_uptime * 4, val=uptime_min, normed=True, right_is_better=True)
@@ -2666,12 +3011,18 @@ class NetworkMonitor(DecentrAIObject):
           
           avail_disk=avail_disk,
           avail_disk_prc=avail_disk_prc,
+          total_disk=total_disk,
           is_alert_disk=is_alert_disk,
 
+          total_mem=total_mem,
           avail_mem=avail_mem,  
           avail_mem_prc=avail_mem_prc,  
           is_alert_ram=is_alert_ram,    
           
+          total_cpu_cores=total_cpu_cores,
+          avail_cpu_cores=avail_cpu_cores,
+          avg_avail_cpu_cores=avg_avail_cpu_cores,
+          cpu_used=cpu_used,
           cpu_past1h=cpu_past1h,        
           cpu_temp=cpu_temp,
           cpu_temp_past1h=cpu_temp_past1h,
@@ -2689,6 +3040,7 @@ class NetworkMonitor(DecentrAIObject):
           SCORE=score,        
           
           eeid=eeid,
+          has_did=has_did,
           #comms:
           comms=dct_comms,
           #end comms
@@ -2872,6 +3224,16 @@ class NetworkMonitor(DecentrAIObject):
       list: A list of tags associated with the node
         Example: ["KYB","DC:HOSTINGER", "CT:FR", "REG:EU"]
       """
+
+      summary_tags = self.__network_node_summary_value_for_display(
+        addr=node_address, key="tags",
+      )
+      if summary_tags is SUMMARY_FIELD_MISSING:
+        return []
+      if isinstance(summary_tags, list):
+        return [tag for tag in summary_tags if isinstance(tag, str)]
+      if summary_tags is not SUMMARY_NOT_SELECTED:
+        return []
 
       result = []
       hb = self.__network_node_last_heartbeat(node_address, return_copy=True)

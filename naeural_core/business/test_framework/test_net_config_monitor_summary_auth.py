@@ -795,6 +795,47 @@ class TestNetConfigMonitorSummaryAuth(unittest.TestCase):
     self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE"])
     self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2000)
 
+  def test_set_distribution_periodic_live_subset_does_not_enter_short_retry_loop(self):
+    plugin = _plugin(whitelist=[
+      "0xai_ORACLE_A",
+      "0xai_ORACLE_B",
+      "0xai_ORACLE_C",
+      "0xai_ORACLE_D",
+      "0xai_STALE_WORKER",
+      "0xai_STALE_SUPERVISOR",
+    ])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={
+      "ORACLE_A",
+      "ORACLE_B",
+      "ORACLE_C",
+      "ORACLE_D",
+    })
+    plugin.P = lambda *args, **kwargs: None
+    plugin.Pd = lambda *args, **kwargs: None
+    now = [2000]
+    plugin.time = lambda: now[0]
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 0
+    plugin._NetConfigMonitorPlugin__last_pipelines = []
+    plugin.node_pipelines = []
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+    now[0] = 2011
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(len(plugin.send_encrypted_payload_calls), 1)
+    self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], [
+      "0xai_ORACLE_A",
+      "0xai_ORACLE_B",
+      "0xai_ORACLE_C",
+      "0xai_ORACLE_D",
+    ])
+    self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2000)
+
   def test_set_distribution_send_time_control_race_retries_soon(self):
     plugin = _plugin(whitelist=["0xai_REMOTE"])
     plugin.netmon = _SequenceControlNetmon([True, False])

@@ -74,6 +74,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   CT_PIPELINE = "PIPELINES"
   CT_PLG_STATUSES = "PLUGIN_STATUSES"
   NETMON_ACTIVE_MAX_LAST_SEEN_SECONDS = 60
+  SEMANTIC_DISTRIBUTION_RETRY_WINDOW_SECONDS = 60
 
   def check_debug_logging_enabled(self):
     return super(NetConfigMonitorPlugin, self).check_debug_logging_enabled() or self.cfg_verbose_netconfig_logs
@@ -95,6 +96,8 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self.__last_pipelines = None
     self.__allowed_nodes = {} # contains addresses with no prefixes
     self.__last_sent_to_allowed = 0
+    self.__semantic_distribution_pending_nodes = set()
+    self.__semantic_distribution_retry_until = 0
     self.__debug_netmon_count = self.cfg_debug_netmon_count
     self._get_active_plugins_instances = self.global_shmem.get("get_active_plugins_instances")
     if not callable(self._get_active_plugins_instances):
@@ -187,10 +190,10 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   def __get_active_nodes_summary_with_peers(self, netmon_current_network: dict):
     """
     Looks in all whitelists and finds the nodes that is allowed by most other nodes.
-    
+
     """
     node_coverage = {}
-    
+
     active_network = self.__get_active_nodes(netmon_current_network)
     
     for addr in active_network:
@@ -437,12 +440,16 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     """
     This function will send the configuration to all the allowed nodes when the configuration is updated or when the node starts.
     """
+    now = self.time()
     allowed_list = self.bc.get_whitelist(with_prefix=True)
     must_distribute = False    
+    is_semantic_distribution = False
     if not self.__initial_send:
       self.P(f"Sending initial configuration to {len(allowed_list)} allowed nodes.")
       must_distribute = True
+      is_semantic_distribution = True
       self.__initial_send = True
+      self.__last_pipelines = self.deepcopy(self.node_pipelines)
       
     if not must_distribute and self.__last_pipelines != self.node_pipelines:
       # TODO: adapt this to check for changes in the actual pipelines, not just the pipeline names
@@ -453,31 +460,88 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
         new_pipelines), boxed=True
       )
       must_distribute = True
+      is_semantic_distribution = True
       self.__last_pipelines = self.deepcopy(self.node_pipelines)
     
-    if not must_distribute and (self.time() - self.__last_sent_to_allowed > self.cfg_send_to_allowed_each):
+    pending_nodes = getattr(self, "_NetConfigMonitorPlugin__semantic_distribution_pending_nodes", set())
+    pending_until = getattr(self, "_NetConfigMonitorPlugin__semantic_distribution_retry_until", 0)
+    is_semantic_retry = len(pending_nodes) > 0 and now <= pending_until
+    if len(pending_nodes) > 0 and not is_semantic_retry:
+      self.__semantic_distribution_pending_nodes = set()
+      pending_nodes = set()
+
+    if not must_distribute and (now - self.__last_sent_to_allowed > self.cfg_send_to_allowed_each):
       self.P(f"Sending configuration to all allowed nodes at timeout={self.cfg_send_to_allowed_each}.")
-      must_distribute = True      
+      must_distribute = True
+      is_periodic_distribution = not is_semantic_retry
+    else:
+      is_periodic_distribution = False
+
+    if is_semantic_distribution:
+      self.__semantic_distribution_pending_nodes = set([
+        self.bc.maybe_remove_addr_prefix(node_addr)
+        for node_addr in allowed_list
+      ])
+      self.__semantic_distribution_retry_until = now + min(
+        self.cfg_send_to_allowed_each,
+        self.SEMANTIC_DISTRIBUTION_RETRY_WINDOW_SECONDS,
+      )
+      pending_nodes = self.__semantic_distribution_pending_nodes
+      is_semantic_retry = len(pending_nodes) > 0
       
     if must_distribute:
       if len(allowed_list) > 0:
-        sent_nodes = self.__send_set_cfg(node_addr=allowed_list)
-        if len(sent_nodes) == 0:
-          # Whitelist targets can all be filtered out by summary/control
-          # liveness. Do not consume the full distribution cadence for a no-op;
-          # a fresh summary may arrive immediately after this process tick.
-          self.__last_sent_to_allowed = self.time() - self.cfg_send_to_allowed_each + 10
-        else:
-          if len(sent_nodes) < len(allowed_list):
-            # A partial distribution should not make unsent recipients wait the
-            # full cadence. The helper returns no-prefix destinations that were
-            # actually sent, so the length check is enough for retry accounting.
-            self.__last_sent_to_allowed = self.time() - self.cfg_send_to_allowed_each + 10
+        target_allowed = allowed_list
+        if is_semantic_retry:
+          # Semantic initial/config-change sends retry only recipients that have
+          # not yet received the update, and only for a bounded window.
+          target_allowed = [
+            node_addr
+            for node_addr in allowed_list
+            if self.bc.maybe_remove_addr_prefix(node_addr) in pending_nodes
+          ]
+          is_periodic_distribution = False
+        eligible_allowed = [
+          node_addr
+          for node_addr in target_allowed
+          if self.__netmon_node_is_online_for_control(node_addr)
+        ]
+        if len(eligible_allowed) == 0:
+          # Stable offline/control-offline whitelist entries must not force the
+          # periodic timeout path into a permanent 10s distribution loop.
+          self.Pd("Skipping config send: no control-online allowed nodes are currently eligible.")
+          if is_periodic_distribution:
+            self.__last_sent_to_allowed = now
           else:
-            self.__last_sent_to_allowed = self.time()
+            # Initial/config-change sends are semantic updates, not mere
+            # keepalives; retry soon so a node that becomes visible shortly
+            # after this tick does not wait the full periodic cadence.
+            self.__last_sent_to_allowed = now - self.cfg_send_to_allowed_each + 10
+        else:
+          sent_nodes = self.__send_set_cfg(node_addr=eligible_allowed)
+          if len(sent_nodes) == 0:
+            # Eligibility can change between cadence accounting and the send
+            # helper's final safety filter; retry soon for that real race.
+            self.__last_sent_to_allowed = now - self.cfg_send_to_allowed_each + 10
+          else:
+            if is_semantic_retry:
+              pending_nodes = set(pending_nodes) - set(sent_nodes)
+              self.__semantic_distribution_pending_nodes = pending_nodes
+              if len(pending_nodes) > 0:
+                self.__last_sent_to_allowed = now - self.cfg_send_to_allowed_each + 10
+              else:
+                self.__semantic_distribution_retry_until = 0
+                self.__last_sent_to_allowed = now
+            elif len(sent_nodes) < len(eligible_allowed):
+              # Compare against currently eligible nodes, not the whole
+              # whitelist. Permanently offline whitelist members should not
+              # make every successful distribution look partial.
+              self.__last_sent_to_allowed = now - self.cfg_send_to_allowed_each + 10
+            else:
+              self.__last_sent_to_allowed = now
       else:
         self.P("No allowed nodes to send configuration to although we have updated configuration.")
-        self.__last_sent_to_allowed = self.time()
+        self.__last_sent_to_allowed = now
     #endif must_distribute
     return
     

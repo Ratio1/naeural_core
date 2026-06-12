@@ -535,7 +535,9 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
             elif len(sent_nodes) < len(eligible_allowed):
               # Compare against currently eligible nodes, not the whole
               # whitelist. Permanently offline whitelist members should not
-              # make every successful distribution look partial.
+              # make every successful distribution look partial; otherwise
+              # reduced-heartbeat workers can keep entering the short 10s retry
+              # path while stale whitelist entries remain offline.
               self.__last_sent_to_allowed = now - self.cfg_send_to_allowed_each + 10
             else:
               self.__last_sent_to_allowed = now

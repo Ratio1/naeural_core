@@ -1,4 +1,5 @@
 import importlib.util
+import copy
 import os
 import pathlib
 import sys
@@ -13,7 +14,24 @@ def _load_constants_module():
   module.NET_CONFIG_MONITOR_SHOW_EACH = 1
   module.DEVICE_STATUS_ONLINE = "ONLINE"
   module.ETH_ENABLED = False
-  module.CONFIG_STREAM = types.SimpleNamespace(K_NAME="NAME")
+  module.CONST_ADMIN_PIPELINE_NAME = "admin_pipeline"
+  module.CONFIG_STREAM = types.SimpleNamespace(
+    INITIATOR_ID="INITIATOR_ID",
+    K_INITIATOR_ADDR="INITIATOR_ADDR",
+    K_MODIFIED_BY_ADDR="MODIFIED_BY_ADDR",
+    K_MODIFIED_BY_ID="MODIFIED_BY_ID",
+    K_NAME="NAME",
+    K_PLUGINS="PLUGINS",
+    LAST_PIPELINE_COMMAND="LAST_PIPELINE_COMMAND",
+    LAST_UPDATE_TIME="LAST_UPDATE_TIME",
+    PIPELINE_COMMAND="PIPELINE_COMMAND",
+    SESSION_ID="SESSION_ID",
+  )
+  module.BIZ_PLUGIN_DATA = types.SimpleNamespace(INSTANCES="INSTANCES")
+  module.PLUGIN_INFO = types.SimpleNamespace(
+    INSTANCE_ID="INSTANCE_ID",
+    SIGNATURE="SIGNATURE",
+  )
   module.NET_CONFIG = types.SimpleNamespace(
     REQUEST_COMMAND="GET_CONFIG",
     STORE_COMMAND="SET_CONFIG",
@@ -656,6 +674,309 @@ class TestNetConfigMonitorSummaryAuth(unittest.TestCase):
 
     self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE"])
     self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2011)
+
+  def test_set_distribution_raw_metadata_change_does_not_trigger_pipeline_send(self):
+    baseline_pipelines = [{
+      ct.CONFIG_STREAM.K_NAME: "app_a",
+      "LAST_UPDATE_TIME": "2026-06-12 10:00:00",
+      "PLUGINS": [{
+        "SIGNATURE": "CONTAINER_APP_RUNNER",
+        "INSTANCES": [{"INSTANCE_ID": "runner", "IMAGE": "example/app:1"}],
+      }],
+    }]
+    current_pipelines = copy.deepcopy(baseline_pipelines)
+    current_pipelines[0]["LAST_UPDATE_TIME"] = "2026-06-12 10:01:00"
+
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    log_lines = []
+    plugin.P = lambda msg, *args, **kwargs: log_lines.append(str(msg))
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = baseline_pipelines
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_signature = None
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_projection = None
+    plugin.node_pipelines = current_pipelines
+    plugin.deepcopy = copy.deepcopy
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(
+      {p[ct.CONFIG_STREAM.K_NAME] for p in baseline_pipelines},
+      {p[ct.CONFIG_STREAM.K_NAME] for p in current_pipelines},
+    )
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertNotIn("pipeline distribution changed", "\n".join(log_lines))
+
+  def test_set_distribution_raw_runtime_key_change_does_not_trigger_pipeline_send(self):
+    baseline_pipelines = [{
+      ct.CONFIG_STREAM.K_NAME: "app_a",
+      "PLUGINS": [{
+        "SIGNATURE": "CONTAINER_APP_RUNNER",
+        "INSTANCES": [{
+          "INSTANCE_ID": "runner",
+          "IMAGE": "example/app:1",
+          "INSTANCE_COMMAND_LAST": {"COMMAND": "RESTART"},
+        }],
+      }],
+    }]
+    current_pipelines = copy.deepcopy(baseline_pipelines)
+    current_pipelines[0]["PLUGINS"][0]["INSTANCES"][0]["INSTANCE_COMMAND_LAST"] = {}
+
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    log_lines = []
+    plugin.P = lambda msg, *args, **kwargs: log_lines.append(str(msg))
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = baseline_pipelines
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_signature = None
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_projection = None
+    plugin.node_pipelines = current_pipelines
+    plugin.deepcopy = copy.deepcopy
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(
+      {p[ct.CONFIG_STREAM.K_NAME] for p in baseline_pipelines},
+      {p[ct.CONFIG_STREAM.K_NAME] for p in current_pipelines},
+    )
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertNotIn("pipeline distribution changed", "\n".join(log_lines))
+
+  def test_set_distribution_pipeline_command_change_does_not_trigger_pipeline_send(self):
+    baseline_pipelines = [{
+      ct.CONFIG_STREAM.K_NAME: "app_a",
+      ct.CONFIG_STREAM.PIPELINE_COMMAND: {"COMMAND": "ARCHIVE_CONFIG"},
+      ct.CONFIG_STREAM.LAST_PIPELINE_COMMAND: {"COMMAND": "ARCHIVE_CONFIG"},
+      "PLUGINS": [{
+        "SIGNATURE": "CONTAINER_APP_RUNNER",
+        "INSTANCES": [{"INSTANCE_ID": "runner", "IMAGE": "example/app:1"}],
+      }],
+    }]
+    current_pipelines = copy.deepcopy(baseline_pipelines)
+    current_pipelines[0][ct.CONFIG_STREAM.PIPELINE_COMMAND] = {}
+    current_pipelines[0][ct.CONFIG_STREAM.LAST_PIPELINE_COMMAND] = {"COMMAND": "RELOAD"}
+
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    log_lines = []
+    plugin.P = lambda msg, *args, **kwargs: log_lines.append(str(msg))
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = baseline_pipelines
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_signature = None
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_projection = None
+    plugin.node_pipelines = current_pipelines
+    plugin.deepcopy = copy.deepcopy
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertNotIn("pipeline distribution changed", "\n".join(log_lines))
+
+  def test_set_distribution_admin_plugin_reshaping_does_not_trigger_pipeline_send(self):
+    baseline_pipelines = [{
+      ct.CONFIG_STREAM.K_NAME: ct.CONST_ADMIN_PIPELINE_NAME,
+      "PLUGINS": [{
+        "SIGNATURE": "NET_CONFIG_MONITOR",
+        "INSTANCES": [{"INSTANCE_ID": "NET_CONFIG_MONITOR_INST"}],
+      }],
+    }]
+    current_pipelines = copy.deepcopy(baseline_pipelines)
+    current_pipelines[0]["PLUGINS"].append({
+      "SIGNATURE": "NET_MON_01",
+      "INSTANCES": [{"INSTANCE_ID": "NET_MON_01_INST"}],
+    })
+
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    log_lines = []
+    plugin.P = lambda msg, *args, **kwargs: log_lines.append(str(msg))
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = baseline_pipelines
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_signature = None
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_projection = None
+    plugin.node_pipelines = current_pipelines
+    plugin.deepcopy = copy.deepcopy
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertNotIn("pipeline distribution changed", "\n".join(log_lines))
+
+  def test_set_distribution_order_only_change_does_not_trigger_pipeline_send(self):
+    baseline_pipelines = [
+      {
+        ct.CONFIG_STREAM.K_NAME: "app_b",
+        "PLUGINS": [{
+          "SIGNATURE": "CUSTOM_EXEC_01",
+          "INSTANCES": [{"INSTANCE_ID": "b", "IMAGE": "example/b:1"}],
+        }],
+      },
+      {
+        ct.CONFIG_STREAM.K_NAME: "app_a",
+        "PLUGINS": [
+          {
+            "SIGNATURE": "CONTAINER_APP_RUNNER",
+            "INSTANCES": [
+              {"INSTANCE_ID": "runner_b", "IMAGE": "example/b:1"},
+              {"INSTANCE_ID": "runner_a", "IMAGE": "example/a:1"},
+            ],
+          },
+          {
+            "SIGNATURE": "CUSTOM_EXEC_01",
+            "INSTANCES": [{"INSTANCE_ID": "custom", "IMAGE": "example/custom:1"}],
+          },
+        ],
+      },
+    ]
+    current_pipelines = [
+      {
+        ct.CONFIG_STREAM.K_NAME: "app_a",
+        "PLUGINS": [
+          {
+            "SIGNATURE": "CUSTOM_EXEC_01",
+            "INSTANCES": [{"INSTANCE_ID": "custom", "IMAGE": "example/custom:1"}],
+          },
+          {
+            "SIGNATURE": "CONTAINER_APP_RUNNER",
+            "INSTANCES": [
+              {"INSTANCE_ID": "runner_a", "IMAGE": "example/a:1"},
+              {"INSTANCE_ID": "runner_b", "IMAGE": "example/b:1"},
+            ],
+          },
+        ],
+      },
+      {
+        ct.CONFIG_STREAM.K_NAME: "app_b",
+        "PLUGINS": [{
+          "SIGNATURE": "CUSTOM_EXEC_01",
+          "INSTANCES": [{"INSTANCE_ID": "b", "IMAGE": "example/b:1"}],
+        }],
+      },
+    ]
+
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    log_lines = []
+    plugin.P = lambda msg, *args, **kwargs: log_lines.append(str(msg))
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = baseline_pipelines
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_signature = None
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_projection = None
+    plugin.node_pipelines = current_pipelines
+    plugin.deepcopy = copy.deepcopy
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(plugin.send_encrypted_payload_calls, [])
+    self.assertNotIn("pipeline distribution changed", "\n".join(log_lines))
+
+  def test_set_distribution_app_instance_config_change_still_triggers_pipeline_send(self):
+    baseline_pipelines = [{
+      ct.CONFIG_STREAM.K_NAME: "app_a",
+      "PLUGINS": [{
+        "SIGNATURE": "CONTAINER_APP_RUNNER",
+        "INSTANCES": [{"INSTANCE_ID": "runner", "IMAGE": "example/app:1"}],
+      }],
+    }]
+    current_pipelines = copy.deepcopy(baseline_pipelines)
+    current_pipelines[0]["PLUGINS"][0]["INSTANCES"][0]["IMAGE"] = "example/app:2"
+
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    log_lines = []
+    plugin.P = lambda msg, *args, **kwargs: log_lines.append(str(msg))
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = baseline_pipelines
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_signature = None
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_projection = None
+    plugin.node_pipelines = current_pipelines
+    plugin.deepcopy = copy.deepcopy
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(len(plugin.send_encrypted_payload_calls), 1)
+    self.assertIn("pipeline distribution changed", "\n".join(log_lines))
+    self.assertIn("changed=1", "\n".join(log_lines))
+
+  def test_set_distribution_app_plugin_topology_change_still_triggers_pipeline_send(self):
+    baseline_pipelines = [{
+      ct.CONFIG_STREAM.K_NAME: "app_a",
+      "PLUGINS": [{
+        "SIGNATURE": "CONTAINER_APP_RUNNER",
+        "INSTANCES": [{"INSTANCE_ID": "runner", "IMAGE": "example/app:1"}],
+      }],
+    }]
+    current_pipelines = copy.deepcopy(baseline_pipelines)
+    current_pipelines[0]["PLUGINS"].append({
+      "SIGNATURE": "CUSTOM_EXEC_01",
+      "INSTANCES": [{"INSTANCE_ID": "custom", "IMAGE": "example/custom:1"}],
+    })
+
+    plugin = _plugin(whitelist=["0xai_REMOTE"])
+    plugin.netmon = _SummaryControlNetmon(online_for_control={"REMOTE"})
+    log_lines = []
+    plugin.P = lambda msg, *args, **kwargs: log_lines.append(str(msg))
+    plugin.Pd = lambda *args, **kwargs: None
+    plugin.time = lambda: 2000
+    plugin.cfg_send_to_allowed_each = 600
+    plugin._NetConfigMonitorPlugin__initial_send = True
+    plugin._NetConfigMonitorPlugin__last_sent_to_allowed = 2000
+    plugin._NetConfigMonitorPlugin__last_pipelines = baseline_pipelines
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_signature = None
+    plugin._NetConfigMonitorPlugin__last_pipeline_distribution_projection = None
+    plugin.node_pipelines = current_pipelines
+    plugin.deepcopy = copy.deepcopy
+    plugin._get_active_plugins_instances = None
+    plugin.send_encrypted_payload_calls = []
+    plugin.send_encrypted_payload = lambda **kwargs: plugin.send_encrypted_payload_calls.append(kwargs)
+
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed()
+
+    self.assertEqual(len(plugin.send_encrypted_payload_calls), 1)
+    self.assertIn("pipeline distribution changed", "\n".join(log_lines))
+    self.assertIn("changed=1", "\n".join(log_lines))
 
   def test_set_distribution_config_change_keeps_retrying_within_pending_window(self):
     plugin = _plugin(whitelist=["0xai_REMOTE"])

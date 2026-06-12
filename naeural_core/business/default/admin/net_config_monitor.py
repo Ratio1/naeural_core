@@ -24,8 +24,10 @@
 
 
 """
+import json
 import math
 
+from naeural_core import constants as ct
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
 from naeural_core.constants import NET_CONFIG_MONITOR_SHOW_EACH
 
@@ -75,6 +77,24 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   CT_PLG_STATUSES = "PLUGIN_STATUSES"
   NETMON_ACTIVE_MAX_LAST_SEEN_SECONDS = 60
   SEMANTIC_DISTRIBUTION_RETRY_WINDOW_SECONDS = 60
+  PIPELINE_DISTRIBUTION_IGNORED_PIPELINE_KEYS = {
+    ct.CONFIG_STREAM.INITIATOR_ID,
+    ct.CONFIG_STREAM.K_INITIATOR_ADDR,
+    ct.CONFIG_STREAM.K_MODIFIED_BY_ADDR,
+    ct.CONFIG_STREAM.K_MODIFIED_BY_ID,
+    ct.CONFIG_STREAM.LAST_PIPELINE_COMMAND,
+    ct.CONFIG_STREAM.LAST_UPDATE_TIME,
+    ct.CONFIG_STREAM.PIPELINE_COMMAND,
+    ct.CONFIG_STREAM.SESSION_ID,
+    "TIME",
+    "VALIDATED",
+  }
+  PIPELINE_DISTRIBUTION_IGNORED_PLUGIN_KEYS = set()
+  PIPELINE_DISTRIBUTION_IGNORED_INSTANCE_KEYS = {
+    "INSTANCE_COMMAND",
+    "INSTANCE_COMMAND_LAST",
+  }
+  PIPELINE_DISTRIBUTION_DIFF_EXAMPLE_LIMIT = 5
 
   def check_debug_logging_enabled(self):
     return super(NetConfigMonitorPlugin, self).check_debug_logging_enabled() or self.cfg_verbose_netconfig_logs
@@ -94,6 +114,8 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self.__recvs = self.defaultdict(int)
     self.__initial_send = False
     self.__last_pipelines = None
+    self.__last_pipeline_distribution_signature = None
+    self.__last_pipeline_distribution_projection = None
     self.__allowed_nodes = {} # contains addresses with no prefixes
     self.__last_sent_to_allowed = 0
     self.__semantic_distribution_pending_nodes = set()
@@ -109,6 +131,177 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     msg += f'\n  - {self.cfg_send_to_allowed_each=}'
     self.P(msg)
     return
+
+
+  def __pipeline_distribution_sanitize_value(self, value):
+    if isinstance(value, dict):
+      return {
+        str(k): self.__pipeline_distribution_sanitize_value(v)
+        for k, v in value.items()
+      }
+    if isinstance(value, list):
+      return [
+        self.__pipeline_distribution_sanitize_value(v)
+        for v in value
+      ]
+    if isinstance(value, tuple):
+      return [
+        self.__pipeline_distribution_sanitize_value(v)
+        for v in value
+      ]
+    if isinstance(value, set):
+      return sorted([
+        self.__pipeline_distribution_sanitize_value(v)
+        for v in value
+      ], key=lambda x: str(x))
+    if isinstance(value, float):
+      if not math.isfinite(value):
+        return str(value)
+      return value
+    if value is None or isinstance(value, (bool, int, str)):
+      return value
+    return str(value)
+
+
+  def __pipeline_distribution_normalize_instance(self, instance):
+    if not isinstance(instance, dict):
+      return self.__pipeline_distribution_sanitize_value(instance)
+    return {
+      str(k): self.__pipeline_distribution_sanitize_value(v)
+      for k, v in instance.items()
+      if k not in self.PIPELINE_DISTRIBUTION_IGNORED_INSTANCE_KEYS
+    }
+
+
+  def __pipeline_distribution_normalize_plugin(self, plugin):
+    if not isinstance(plugin, dict):
+      return self.__pipeline_distribution_sanitize_value(plugin)
+    normalized = {}
+    for k, v in plugin.items():
+      if k in self.PIPELINE_DISTRIBUTION_IGNORED_PLUGIN_KEYS:
+        continue
+      if k == ct.BIZ_PLUGIN_DATA.INSTANCES and isinstance(v, list):
+        normalized[k] = sorted(
+          [
+            self.__pipeline_distribution_normalize_instance(instance)
+            for instance in v
+          ],
+          key=lambda instance: self.__pipeline_distribution_sort_key(instance, ct.PLUGIN_INFO.INSTANCE_ID),
+        )
+      else:
+        normalized[str(k)] = self.__pipeline_distribution_sanitize_value(v)
+    return normalized
+
+
+  def __pipeline_distribution_normalize_pipeline(self, pipeline):
+    if not isinstance(pipeline, dict):
+      return self.__pipeline_distribution_sanitize_value(pipeline)
+    pipeline_name = pipeline.get(ct.CONFIG_STREAM.K_NAME, "NONAME")
+    is_admin_pipeline = pipeline_name == ct.CONST_ADMIN_PIPELINE_NAME
+    normalized = {}
+    for k, v in pipeline.items():
+      if k in self.PIPELINE_DISTRIBUTION_IGNORED_PIPELINE_KEYS:
+        continue
+      if k == ct.CONFIG_STREAM.K_PLUGINS:
+        if is_admin_pipeline:
+          # NET_CONFIG_MONITOR distributes application topology. Admin-pipeline
+          # plugin reshaping during startup is local control-plane bookkeeping
+          # and should not create network-wide config retry windows.
+          continue
+        if isinstance(v, list):
+          normalized[k] = sorted(
+            [
+              self.__pipeline_distribution_normalize_plugin(plugin)
+              for plugin in v
+            ],
+            key=lambda plugin: self.__pipeline_distribution_sort_key(plugin, ct.PLUGIN_INFO.SIGNATURE),
+          )
+        else:
+          normalized[k] = self.__pipeline_distribution_sanitize_value(v)
+      else:
+        normalized[str(k)] = self.__pipeline_distribution_sanitize_value(v)
+    return normalized
+
+
+  def __pipeline_distribution_projection(self, pipelines):
+    if not isinstance(pipelines, list):
+      return []
+    return sorted(
+      [
+        self.__pipeline_distribution_normalize_pipeline(pipeline)
+        for pipeline in pipelines
+      ],
+      key=lambda pipeline: self.__pipeline_distribution_sort_key(pipeline, ct.CONFIG_STREAM.K_NAME),
+    )
+
+
+  def __pipeline_distribution_sort_key(self, item, preferred_key):
+    if isinstance(item, dict):
+      identifier = str(item.get(preferred_key, ""))
+    else:
+      identifier = str(item)
+    # The serialized projection is a secondary key so duplicate identifiers do
+    # not reintroduce order-only false positives.
+    return (
+      identifier,
+      json.dumps(
+        item,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+      ),
+    )
+
+
+  def __pipeline_distribution_signature(self, pipelines):
+    projection = self.__pipeline_distribution_projection(pipelines)
+    signature = json.dumps(
+      projection,
+      sort_keys=True,
+      separators=(",", ":"),
+      ensure_ascii=False,
+      allow_nan=False,
+    )
+    return signature, projection
+
+
+  def __format_pipeline_distribution_diff(self, previous_projection, current_projection):
+    def _by_name(projection):
+      return {
+        item.get("NAME", "NONAME"): item
+        for item in projection or []
+        if isinstance(item, dict)
+      }
+
+    previous_by_name = _by_name(previous_projection)
+    current_by_name = _by_name(current_projection)
+    previous_names = set(previous_by_name)
+    current_names = set(current_by_name)
+    added = sorted(current_names - previous_names)
+    removed = sorted(previous_names - current_names)
+    changed = sorted([
+      name
+      for name in previous_names & current_names
+      if previous_by_name[name] != current_by_name[name]
+    ])
+    limit = self.PIPELINE_DISTRIBUTION_DIFF_EXAMPLE_LIMIT
+
+    def _sample(values):
+      values = list(values)
+      sample = values[:limit]
+      if len(values) > limit:
+        sample.append(f"...(+{len(values) - limit})")
+      return sample
+
+    return "added={} removed={} changed={} examples_added={} examples_removed={} examples_changed={}".format(
+      len(added),
+      len(removed),
+      len(changed),
+      _sample(added),
+      _sample(removed),
+      _sample(changed),
+    )
   
   
   def __check_dct_metadata(self):
@@ -450,18 +643,27 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       is_semantic_distribution = True
       self.__initial_send = True
       self.__last_pipelines = self.deepcopy(self.node_pipelines)
-      
-    if not must_distribute and self.__last_pipelines != self.node_pipelines:
-      # TODO: adapt this to check for changes in the actual pipelines, not just the pipeline names
-      last_pipelines_name = set([p.get("NAME", "NONAME") for p in self.__last_pipelines]) if self.__last_pipelines is not None else set()
-      current_pipelines_name = set([p.get("NAME", "NONAME") for p in self.node_pipelines])
-      new_pipelines = current_pipelines_name - last_pipelines_name
-      self.P("Sending updated configuration to all allowed nodes due to pipelines changed: {}".format(
-        new_pipelines), boxed=True
+      current_signature, current_projection = self.__pipeline_distribution_signature(self.node_pipelines)
+      self.__last_pipeline_distribution_signature = current_signature
+      self.__last_pipeline_distribution_projection = current_projection
+
+    current_signature, current_projection = self.__pipeline_distribution_signature(self.node_pipelines)
+    last_signature = getattr(self, "_NetConfigMonitorPlugin__last_pipeline_distribution_signature", None)
+    if last_signature is None and self.__last_pipelines is not None:
+      last_signature, last_projection = self.__pipeline_distribution_signature(self.__last_pipelines)
+    else:
+      last_projection = getattr(self, "_NetConfigMonitorPlugin__last_pipeline_distribution_projection", None)
+
+    if not must_distribute and last_signature != current_signature:
+      diff_summary = self.__format_pipeline_distribution_diff(last_projection, current_projection)
+      self.P("Sending updated configuration to all allowed nodes due to pipeline distribution changed: {}".format(
+        diff_summary), boxed=True
       )
       must_distribute = True
       is_semantic_distribution = True
       self.__last_pipelines = self.deepcopy(self.node_pipelines)
+      self.__last_pipeline_distribution_signature = current_signature
+      self.__last_pipeline_distribution_projection = current_projection
     
     pending_nodes = getattr(self, "_NetConfigMonitorPlugin__semantic_distribution_pending_nodes", set())
     pending_until = getattr(self, "_NetConfigMonitorPlugin__semantic_distribution_retry_until", 0)

@@ -952,6 +952,15 @@ class BCWrapper:
     assert self.__bc.is_valid_eth_address(address), "Invalid escrow address"
     return self.__bc.web3_get_escrow_active_job_ids(escrow_address=address)
 
+  def get_csp_escrow_owner_transfer_from_tx(self, tx_hash: str, log_index: int = None):
+    """
+    Resolve a mined CSP escrow owner transfer event and validate current chain ownership.
+    """
+    return self.__bc.web3_get_csp_escrow_owner_transfer_from_tx(
+      tx_hash=tx_hash,
+      log_index=log_index,
+    )
+
   def get_evm_net_data(self):
     evm_net = self.get_evm_network()
     evm_net_data = EVM_NET_DATA.get(evm_net, {})

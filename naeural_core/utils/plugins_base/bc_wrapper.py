@@ -465,6 +465,18 @@ class BCWrapper:
     return self.__bc.web3_get_oracles()
 
 
+  def get_eth_dauth_oracles(self):
+    """
+    Return the list of EVM addresses for the known dAuth oracles.
+
+    Returns
+    -------
+    list
+        The EVM addresses registered as dAuth oracles.
+    """
+    return self.__bc.web3_get_dauth_oracles()
+
+
   def get_oracles(self, include_eth_addrs: bool = False, wait_interval: int = 15):
     """
     Get the oracles node addresses via the current network smart contract and the
@@ -515,6 +527,67 @@ class BCWrapper:
     if include_eth_addrs:
       return wl, names, found
     return wl, names  
+
+  def get_dauth_oracles(self, include_eth_addrs: bool = False, wait_interval: int = 15):
+    """
+    Get dAuth oracle node addresses using registry EVM addresses and known nodes.
+
+    Parameters
+    ----------
+    include_eth_addrs : bool, optional
+        Whether to include the converted EVM dAuth oracle addresses in the result.
+
+    wait_interval : int, optional
+        Maximum number of seconds to wait for EVM-to-internal address conversion.
+
+    Returns
+    -------
+    list, list
+        The internal dAuth oracle addresses and aliases.
+
+    list, list, list
+        Returned when ``include_eth_addrs`` is ``True``; includes converted EVM
+        dAuth oracle addresses as the third item.
+    """
+    wl, names, eth_oracles, found = [], [], [], []
+    try:
+      eth_oracles = self.get_eth_dauth_oracles()
+      n_oracles = len(eth_oracles)
+      if n_oracles == 0:
+        msg = "No dAuth oracles found in the smart-contracts!"
+        raise Exception(msg)
+      min_converted_thr = int(n_oracles * 0.5)
+      _done = False
+      _check_start = time()
+      while not _done:
+        for eth_addr in eth_oracles:
+          if eth_addr in found:
+            continue
+          internal_addr = self.eth_addr_to_internal_addr(eth_addr)
+          if internal_addr is None:
+            continue
+          found.append(eth_addr)
+          wl.append(internal_addr)
+          alias = self.__owner.netmon.network_node_eeid(internal_addr)
+          names.append(alias)
+        #end for
+        if len(found) >= min_converted_thr or time() - _check_start > wait_interval:
+          _done = True
+        else:
+          self.P("Waiting for dAuth oracles to be converted...", color='y')
+          sleep(2)
+        #end if
+      #end while
+      if len(found) < min_converted_thr:
+        msg = "Not enough dAuth oracles found to internal addresses. Retrieved from smart contract: {} / Found: {}".format(
+          eth_oracles, found
+        )
+        raise Exception(msg)
+    except Exception as e:
+      self.P(f"Error getting dAuth oracle data: {e}\n{traceback.format_exc()}", color='r')
+    if include_eth_addrs:
+      return wl, names, found
+    return wl, names
   
   def is_node_licensed(self, node_address: str = None, node_address_eth: str = None):
     """
@@ -540,6 +613,32 @@ class BCWrapper:
       node_address_eth = self.node_address_to_eth_address(node_address)
     is_licensed = self.__bc.web3_is_node_licensed(address=node_address_eth)
     return is_licensed
+
+  def is_dauth_oracle(self, node_address: str = None, node_address_eth: str = None):
+    """
+    Check whether a node is registered as a dAuth oracle.
+
+    Parameters
+    ----------
+    node_address : str, optional
+        The internal node address. When omitted with ``node_address_eth``, the
+        current node EVM address is used.
+
+    node_address_eth : str, optional
+        The EVM address to check instead of converting ``node_address``.
+
+    Returns
+    -------
+    bool
+        True if the node is registered as a dAuth oracle, False otherwise.
+    """
+    if node_address is None and node_address_eth is None:
+      # using the current node's eth address
+      node_address_eth = self.__bc.eth_address
+    elif node_address_eth is None and node_address is not None:
+      node_address_eth = self.node_address_to_eth_address(node_address)
+    is_dauth_oracle = self.__bc.web3_is_dauth_oracle(address=node_address_eth)
+    return is_dauth_oracle
   
   def get_evm_network(self):
     """

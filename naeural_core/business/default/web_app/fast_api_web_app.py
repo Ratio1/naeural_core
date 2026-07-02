@@ -40,6 +40,7 @@ _CONFIG = {
   'API_TITLE': None,  # default is plugin signature
   'API_SUMMARY': None,  # default is f"FastAPI created by {plugin signature}"
   'API_DESCRIPTION': None,  # default is plugin docstring
+  'API_IDENTIFIER': None,
 
   'PAGES': [],
   'STATIC_DIRECTORY': 'assets',
@@ -1169,6 +1170,23 @@ class FastApiWebAppPlugin(BasePlugin):
       self.P(f"Server {self.api_title} started on {found}", boxed=True)
     return
 
+  def _setup_api_identifier_semaphore_env(self):
+    """
+    Export the optional logical API identifier for semaphore consumers.
+
+    Paired container apps use this value to route requests by a stable public
+    identifier instead of deriving an identifier from generated semaphore keys.
+    """
+    api_identifier = self.cfg_api_identifier
+    if api_identifier is None:
+      return
+    api_identifier = str(api_identifier).strip()
+    if not api_identifier or api_identifier.lower() in ["none", "null"]:
+      return
+    self.semaphore_set_env('API_IDENTIFIER', api_identifier)
+    return
+
+
   def _setup_semaphore_env(self):
     """
     Expose the runtime FastAPI endpoint via semaphore for paired plugins.
@@ -1194,6 +1212,7 @@ class FastApiWebAppPlugin(BasePlugin):
         self.semaphore_set_env('API_URL', 'http://{}:{}'.format(localhost_ip, port))
       else:
         self.P("Skipping API_URL semaphore export: localhost IP unavailable", color='y')
+    self._setup_api_identifier_semaphore_env()
     return
 
   @property

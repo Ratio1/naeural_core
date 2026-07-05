@@ -5,7 +5,7 @@
 
 from naeural_core.business.base import CVPluginExecutor as BaseClass
 
-__VER__ = '2.0.1'
+__VER__ = '2.0.2'
 
 _CONFIG = {
   **BaseClass.CONFIG,
@@ -17,7 +17,15 @@ _CONFIG = {
   'MAX_INPUTS_QUEUE_SIZE'       : 1,
 
 
-  "NR_WITNESSES"                : 1200,  
+  # Quiet default (was 1200): `startup()` resets `__witness_count` on every plugin
+  # (re)start, so the plugin re-emits its full witness quota of full-frame images
+  # after each node/pipeline restart. With fleets of cameras each carrying a
+  # `<pipeline>-vs` snapshot instance, a large quota floods MQTT for ~1h per
+  # restart. On-demand snapshots are unaffected: the on-command force path
+  # bypasses this cap entirely. Deployments that need a long witness stream can
+  # still raise NR_WITNESSES explicitly per instance (upstream config wins).
+  # Coordinated with the backend schema default (cavi2 view.scene.01.ts).
+  "NR_WITNESSES"                : 5,
   "PROCESS_DELAY"               : 1,
 
    

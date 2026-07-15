@@ -817,6 +817,44 @@ class BasePluginExecutor(
       return True
     # endif elapsed < delay thus wait more until elapsed >= delay
     return False
+
+  def should_pause(self):
+    """
+    Check whether the plugin should enter its temporary paused state.
+
+    Returns
+    -------
+    bool
+      ``True`` when the plugin should pause.
+    """
+    return False
+
+  def should_resume(self):
+    """
+    Check whether the plugin should leave its temporary paused state.
+
+    Returns
+    -------
+    bool
+      ``True`` when the plugin should resume.
+    """
+    return True
+
+  def on_pause(self):
+    """
+    Handle the transition into the temporary paused state.
+
+    This may run before ``on_init`` when an instance starts disabled.
+    """
+    return
+
+  def on_resume(self):
+    """
+    Handle the transition out of the temporary paused state.
+
+    A failure leaves the plugin paused so this callback can be retried.
+    """
+    return
   
   
   @property
@@ -826,23 +864,36 @@ class BasePluginExecutor(
     notif_code = None
     forced_pause = self.cfg_forced_pause
     disabled = self.cfg_disabled
-    stopped = forced_pause or disabled
+    operator_pause = forced_pause or disabled
+    stopped = operator_pause or (
+      not self.should_resume()
+      if self._was_stopped_last_iter
+      else self.should_pause()
+    )
+    transition_callback = None
     if self._was_stopped_last_iter and not stopped:
       # just received "resume"
       msg = f"WARNING: Plugin will now RESUME. `FORCED_PAUSE`={forced_pause}, `DISABLED`={disabled}"
       status = "RESUMING"
       notif_code = ct.NOTIFICATION_CODES.PLUGIN_RESUME_OK
+      transition_callback = self.on_resume
     elif not self._was_stopped_last_iter and stopped:
       # just received "stop"
       msg = f"WARNING: Plugin will now STOP. `FORCED_PAUSE`={forced_pause}, `DISABLED`={disabled}"
       status = "PAUSING"
       notif_code = ct.NOTIFICATION_CODES.PLUGIN_PAUSE_OK
+      transition_callback = self.on_pause
       if self.cfg_ignore_working_hours:
         msg_working_hours_conflict = "The following ERROR was detected: IGNORE_WORKING_HOURS is set to True and FORCED_PAUSE is set to True. Although FORCED_PAUSE is above WORKING_HOURS this might be a configuration error."
         msg += ". " + msg_working_hours_conflict
         self.P(msg_working_hours_conflict, color='r')
       # endif working hours conflict
     # endif resume or new stop
+    if transition_callback is not None and not stopped:
+      transition_callback()
+      transition_callback = None
+      self._was_stopped_last_iter = stopped
+    # endif resume callback succeeded
     if msg is not None:
       self.P(msg, color='r')
       self._create_notification(
@@ -862,6 +913,8 @@ class BasePluginExecutor(
       )
     # end if process just resumed or just stopped
     self._was_stopped_last_iter = stopped
+    if transition_callback is not None:
+      transition_callback()
     return stopped
 
   @property

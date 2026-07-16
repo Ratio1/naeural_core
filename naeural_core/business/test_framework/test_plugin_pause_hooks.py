@@ -26,6 +26,7 @@ class PluginPauseHookTests(unittest.TestCase):
     plugin.cfg_disabled = False
     plugin.cfg_ignore_working_hours = False
     plugin._was_stopped_last_iter = False
+    plugin._pause_transition_in_progress = False
     plugin.pause_events = []
     plugin.notifications = []
     plugin.payloads = []
@@ -113,6 +114,7 @@ class PluginPauseHookTests(unittest.TestCase):
       plugin.is_plugin_temporary_stopped
 
     self.assertTrue(plugin.is_plugin_temporary_stopped)
+    self.assertFalse(plugin._pause_transition_in_progress)
     self.assertEqual(callback_calls, ["pause"])
 
   def test_resume_callback_failure_keeps_plugin_paused_until_retry_succeeds(self):
@@ -133,6 +135,7 @@ class PluginPauseHookTests(unittest.TestCase):
       plugin.is_plugin_temporary_stopped
 
     self.assertTrue(plugin._was_stopped_last_iter)
+    self.assertFalse(plugin._pause_transition_in_progress)
     self.assertEqual(len(plugin.notifications), 1)
     plugin.on_resume = lambda: callback_calls.append("resume")
     self.assertFalse(plugin.is_plugin_temporary_stopped)
@@ -140,6 +143,52 @@ class PluginPauseHookTests(unittest.TestCase):
     self.assertEqual(
       [item["notif_code"] for item in plugin.notifications],
       ["PLUGIN_PAUSE_OK", "PLUGIN_RESUME_OK"],
+    )
+
+  def test_reentrant_resume_check_stays_paused_without_repeating_transition(self):
+    plugin = self._make_plugin()
+    plugin.should_pause = lambda: True
+    plugin.should_resume = lambda: False
+    self.assertTrue(plugin.is_plugin_temporary_stopped)
+
+    nested_states = []
+    callback_calls = []
+
+    def on_resume():
+      callback_calls.append("resume")
+      nested_states.append(plugin.is_plugin_temporary_stopped)
+
+    plugin.on_resume = on_resume
+    plugin.should_resume = lambda: True
+
+    self.assertFalse(plugin.is_plugin_temporary_stopped)
+    self.assertEqual(nested_states, [True])
+    self.assertEqual(callback_calls, ["resume"])
+    self.assertEqual(
+      [item["notif_code"] for item in plugin.notifications],
+      ["PLUGIN_PAUSE_OK", "PLUGIN_RESUME_OK"],
+    )
+
+  def test_reentrant_pause_check_cannot_trigger_resume(self):
+    plugin = self._make_plugin()
+    plugin.should_pause = lambda: True
+    plugin.should_resume = lambda: True
+    nested_states = []
+    callback_calls = []
+
+    def on_pause():
+      callback_calls.append("pause")
+      nested_states.append(plugin.is_plugin_temporary_stopped)
+
+    plugin.on_pause = on_pause
+    plugin.on_resume = lambda: callback_calls.append("resume")
+
+    self.assertTrue(plugin.is_plugin_temporary_stopped)
+    self.assertEqual(nested_states, [True])
+    self.assertEqual(callback_calls, ["pause"])
+    self.assertEqual(
+      [item["notif_code"] for item in plugin.notifications],
+      ["PLUGIN_PAUSE_OK"],
     )
 
   def test_initial_disabled_state_calls_pause_before_initialization(self):

@@ -466,6 +466,7 @@ class BasePluginExecutor(
     self.done_loop = False
 
     self._was_stopped_last_iter = False  # for `FORCED_PAUSE`
+    self._pause_transition_in_progress = False
 
     self._plugin_loop_in_exec = False
 
@@ -859,6 +860,9 @@ class BasePluginExecutor(
   
   @property
   def is_plugin_temporary_stopped(self):
+    if self._pause_transition_in_progress:
+      return self._was_stopped_last_iter
+
     msg = None
     status = None
     notif_code = None
@@ -890,7 +894,11 @@ class BasePluginExecutor(
       # endif working hours conflict
     # endif resume or new stop
     if transition_callback is not None and not stopped:
-      transition_callback()
+      self._pause_transition_in_progress = True
+      try:
+        transition_callback()
+      finally:
+        self._pause_transition_in_progress = False
       transition_callback = None
       self._was_stopped_last_iter = stopped
     # endif resume callback succeeded
@@ -914,7 +922,11 @@ class BasePluginExecutor(
     # end if process just resumed or just stopped
     self._was_stopped_last_iter = stopped
     if transition_callback is not None:
-      transition_callback()
+      self._pause_transition_in_progress = True
+      try:
+        transition_callback()
+      finally:
+        self._pause_transition_in_progress = False
     return stopped
 
   @property

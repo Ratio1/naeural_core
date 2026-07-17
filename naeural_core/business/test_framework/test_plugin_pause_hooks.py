@@ -264,13 +264,60 @@ class PluginPauseHookTests(unittest.TestCase):
       ["PLUGIN_PAUSE_OK"],
     )
 
-  def test_initial_disabled_state_calls_pause_before_initialization(self):
+  def test_initially_disabled_plugin_initializes_before_resume_hooks(self):
     plugin = self._make_plugin()
     plugin._init_process_finalized = False
     plugin.cfg_disabled = True
-
     self.assertTrue(plugin.is_plugin_temporary_stopped)
-    self.assertEqual(plugin.pause_events, ["pause"])
+
+    plugin.cfg_instance_id = "instance"
+    plugin.loop_paused = False
+    plugin.time = lambda: 0
+    plugin._BasePluginExecutor__set_loop_stage = lambda **_kwargs: None
+    plugin._on_config = lambda: None
+    plugin.reset_exec_counter_after_config = lambda: None
+    disabled_cleared = threading.Event()
+    finish_config = threading.Event()
+    state_started = threading.Event()
+    states = []
+
+    def update_instance_config():
+      plugin.cfg_disabled = False
+      disabled_cleared.set()
+      finish_config.wait(timeout=2)
+
+    def initialize():
+      plugin.resume_ready = True
+
+    def check_state():
+      state_started.set()
+      states.append(plugin.is_plugin_temporary_stopped)
+
+    plugin._update_instance_config = update_instance_config
+    plugin._on_init = initialize
+    plugin.should_resume = lambda: plugin.resume_ready
+    config_thread = threading.Thread(
+      target=lambda: plugin.maybe_update_instance_config({"DISABLED": False})
+    )
+    state_thread = threading.Thread(target=check_state)
+
+    config_thread.start()
+    self.assertTrue(disabled_cleared.wait(timeout=1))
+    state_thread.start()
+    self.assertTrue(state_started.wait(timeout=1))
+    try:
+      state_thread.join(timeout=0.1)
+      self.assertTrue(state_thread.is_alive())
+    finally:
+      finish_config.set()
+      config_thread.join(timeout=1)
+      state_thread.join(timeout=1)
+
+    self.assertFalse(config_thread.is_alive())
+    self.assertFalse(state_thread.is_alive())
+    self.assertTrue(plugin._init_process_finalized)
+    self.assertEqual(states, [False])
+    self.assertEqual(plugin.pause_events, ["pause", "resume"])
 
 
 if __name__ == "__main__":

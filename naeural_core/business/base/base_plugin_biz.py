@@ -9,7 +9,7 @@ from time import time, sleep, perf_counter
 from copy import deepcopy
 from collections import deque, OrderedDict
 from functools import partial
-from threading import Thread
+from threading import RLock, Thread
 
 # local dependencies
 from naeural_core import constants as ct
@@ -467,6 +467,7 @@ class BasePluginExecutor(
 
     self._was_stopped_last_iter = False  # for `FORCED_PAUSE`
     self._pause_transition_in_progress = False
+    self._plugin_lifecycle_lock = RLock()
 
     self._plugin_loop_in_exec = False
 
@@ -850,6 +851,7 @@ class BasePluginExecutor(
     Handle the transition into the temporary paused state.
 
     This may run before ``on_init`` when an instance starts disabled.
+    A failure leaves the plugin running so this callback can be retried.
     """
     return
 
@@ -864,6 +866,10 @@ class BasePluginExecutor(
   
   @property
   def is_plugin_temporary_stopped(self):
+    with self._plugin_lifecycle_lock:
+      return self.__is_plugin_temporary_stopped()
+
+  def __is_plugin_temporary_stopped(self):
     if self._pause_transition_in_progress:
       return self._was_stopped_last_iter
 
@@ -873,19 +879,20 @@ class BasePluginExecutor(
     forced_pause = self.cfg_forced_pause
     disabled = self.cfg_disabled
     operator_pause = forced_pause or disabled
+    was_stopped = self._was_stopped_last_iter
     stopped = operator_pause or (
       not self.should_resume()
-      if self._was_stopped_last_iter
+      if was_stopped
       else self.should_pause()
     )
     transition_callback = None
-    if self._was_stopped_last_iter and not stopped:
+    if was_stopped and not stopped:
       # just received "resume"
       msg = f"WARNING: Plugin will now RESUME. `FORCED_PAUSE`={forced_pause}, `DISABLED`={disabled}"
       status = "RESUMING"
       notif_code = ct.NOTIFICATION_CODES.PLUGIN_RESUME_OK
       transition_callback = self.on_resume
-    elif not self._was_stopped_last_iter and stopped:
+    elif not was_stopped and stopped:
       # just received "stop"
       msg = f"WARNING: Plugin will now STOP. `FORCED_PAUSE`={forced_pause}, `DISABLED`={disabled}"
       status = "PAUSING"
@@ -903,10 +910,13 @@ class BasePluginExecutor(
       self._pause_transition_in_progress = True
       try:
         transition_callback()
+      except Exception:
+        self._was_stopped_last_iter = was_stopped
+        raise
       finally:
         self._pause_transition_in_progress = False
-      self._was_stopped_last_iter = stopped
     # endif transition callback succeeded
+    self._was_stopped_last_iter = stopped
     if msg is not None:
       self.P(msg, color='r')
       self._create_notification(
@@ -925,7 +935,6 @@ class BasePluginExecutor(
         notif_code=notif_code,
       )
     # end if process just resumed or just stopped
-    self._was_stopped_last_iter = stopped
     return stopped
 
   @property
@@ -1532,6 +1541,7 @@ class BasePluginExecutor(
     # pause the plugin loop while updating the config
     self.loop_paused = True  # can also use self.pause_loop() but is safer like this as here we have getter and setter (harder to overwrite)
     last_config = deepcopy(self.config_data)
+    self._plugin_lifecycle_lock.acquire()
     try:
       self.__set_loop_stage(s='maybe_update_instance_config._update_instance_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
@@ -1540,11 +1550,9 @@ class BasePluginExecutor(
       self.__set_loop_stage(s='maybe_update_instance_config._on_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
       self.__on_config()
-      # resume loop
       self.__set_loop_stage(s='maybe_update_instance_config.reset_exec_counter_after_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
       self.reset_exec_counter_after_config()
-      self.loop_paused = False  # in the rare case that someone or something overwrote resume_loop()
 
     except Exception as exc:
       # rollback
@@ -1565,8 +1573,9 @@ class BasePluginExecutor(
         info=info,
         displayed=True,
       )
-      # resume loop even on exception
+    finally:
       self.loop_paused = False
+      self._plugin_lifecycle_lock.release()
     return
 
   def _create_notification(self, msg, info=None, notif=ct.PAYLOAD_CT.STATUS_TYPE.STATUS_NORMAL, use_local_comms_only=False, **kwargs):

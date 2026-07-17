@@ -1,4 +1,5 @@
 import sys
+import threading
 from types import ModuleType
 import unittest
 
@@ -21,7 +22,9 @@ class PluginPauseHookTests(unittest.TestCase):
         sys.modules["numpy"] = previous_numpy
     module.ct.NOTIFICATION_CODES.PLUGIN_PAUSE_OK = "PLUGIN_PAUSE_OK"
     module.ct.NOTIFICATION_CODES.PLUGIN_RESUME_OK = "PLUGIN_RESUME_OK"
+    module.ct.NON_ACTIONABLE_INSTANCE_CONFIG_KEYS = []
     plugin = _make_base_plugin(module)
+    plugin.ct = module.ct
     plugin.cfg_forced_pause = False
     plugin.cfg_disabled = False
     plugin.cfg_ignore_working_hours = False
@@ -99,13 +102,14 @@ class PluginPauseHookTests(unittest.TestCase):
     self.assertFalse(plugin.is_plugin_temporary_stopped)
     self.assertEqual(plugin.pause_events, ["pause", "resume"])
 
-  def test_callback_failure_does_not_replay_transition(self):
+  def test_pause_callback_failure_retries_transition(self):
     plugin = self._make_plugin()
     callback_calls = []
 
     def on_pause():
       callback_calls.append("pause")
-      raise RuntimeError("pause callback failed")
+      if len(callback_calls) == 1:
+        raise RuntimeError("pause callback failed")
 
     plugin.on_pause = on_pause
     plugin.should_pause = lambda: True
@@ -114,11 +118,62 @@ class PluginPauseHookTests(unittest.TestCase):
     with self.assertRaisesRegex(RuntimeError, "pause callback failed"):
       plugin.is_plugin_temporary_stopped
 
-    self.assertTrue(plugin.is_plugin_temporary_stopped)
+    self.assertFalse(plugin._was_stopped_last_iter)
     self.assertFalse(plugin._pause_transition_in_progress)
-    self.assertEqual(callback_calls, ["pause"])
     self.assertEqual(plugin.notifications, [])
     self.assertEqual(plugin.payloads, [])
+
+    self.assertTrue(plugin.is_plugin_temporary_stopped)
+    self.assertEqual(callback_calls, ["pause", "pause"])
+    self.assertEqual(len(plugin.notifications), 1)
+    self.assertEqual(len(plugin.payloads), 1)
+
+  def test_config_update_waits_for_pause_callback(self):
+    plugin = self._make_plugin()
+    plugin.cfg_instance_id = "instance"
+    plugin.loop_paused = False
+    plugin.time = lambda: 0
+    plugin._BasePluginExecutor__set_loop_stage = lambda **_kwargs: None
+    plugin._update_instance_config = lambda: None
+    plugin.reset_exec_counter_after_config = lambda: None
+    callback_entered = threading.Event()
+    callback_release = threading.Event()
+    config_entered = threading.Event()
+    errors = []
+
+    plugin.should_pause = lambda: True
+
+    def on_pause():
+      callback_entered.set()
+      callback_release.wait(timeout=2)
+
+    def update_config():
+      try:
+        plugin.maybe_update_instance_config({"VALUE": 1})
+      except Exception as exc:
+        errors.append(exc)
+
+    plugin.on_pause = on_pause
+    plugin._BasePluginExecutor__on_config = config_entered.set
+    pause_thread = threading.Thread(
+      target=lambda: plugin.is_plugin_temporary_stopped
+    )
+    config_thread = threading.Thread(target=update_config)
+
+    pause_thread.start()
+    self.assertTrue(callback_entered.wait(timeout=1))
+    config_thread.start()
+    try:
+      self.assertFalse(config_entered.wait(timeout=0.1))
+    finally:
+      callback_release.set()
+      pause_thread.join(timeout=1)
+      config_thread.join(timeout=1)
+
+    self.assertFalse(pause_thread.is_alive())
+    self.assertFalse(config_thread.is_alive())
+    self.assertEqual(errors, [])
+    self.assertTrue(config_entered.is_set())
 
   def test_working_hours_conflict_only_reported_for_forced_pause(self):
     plugin = self._make_plugin()

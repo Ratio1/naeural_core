@@ -28,9 +28,10 @@ class PluginPauseHookTests(unittest.TestCase):
     plugin._was_stopped_last_iter = False
     plugin._pause_transition_in_progress = False
     plugin.pause_events = []
+    plugin.messages = []
     plugin.notifications = []
     plugin.payloads = []
-    plugin.P = lambda *_args, **_kwargs: None
+    plugin.P = lambda msg, *_args, **_kwargs: plugin.messages.append(msg)
     plugin._create_notification = lambda **kwargs: plugin.notifications.append(kwargs)
     plugin.add_payload_by_fields = lambda **kwargs: plugin.payloads.append(kwargs)
     plugin.on_pause = lambda: plugin.pause_events.append("pause")
@@ -116,6 +117,23 @@ class PluginPauseHookTests(unittest.TestCase):
     self.assertTrue(plugin.is_plugin_temporary_stopped)
     self.assertFalse(plugin._pause_transition_in_progress)
     self.assertEqual(callback_calls, ["pause"])
+    self.assertEqual(plugin.notifications, [])
+    self.assertEqual(plugin.payloads, [])
+
+  def test_working_hours_conflict_only_reported_for_forced_pause(self):
+    plugin = self._make_plugin()
+    plugin.cfg_ignore_working_hours = True
+    plugin.should_pause = lambda: True
+
+    self.assertTrue(plugin.is_plugin_temporary_stopped)
+    self.assertFalse(any("IGNORE_WORKING_HOURS" in msg for msg in plugin.messages))
+
+    plugin = self._make_plugin()
+    plugin.cfg_ignore_working_hours = True
+    plugin.cfg_forced_pause = True
+
+    self.assertTrue(plugin.is_plugin_temporary_stopped)
+    self.assertTrue(any("IGNORE_WORKING_HOURS" in msg for msg in plugin.messages))
 
   def test_resume_callback_failure_keeps_plugin_paused_until_retry_succeeds(self):
     plugin = self._make_plugin()

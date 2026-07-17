@@ -823,6 +823,8 @@ class BasePluginExecutor(
     """
     Check whether the plugin should enter its temporary paused state.
 
+    Custom pause policies should override this together with ``should_resume``.
+
     Returns
     -------
     bool
@@ -833,6 +835,8 @@ class BasePluginExecutor(
   def should_resume(self):
     """
     Check whether the plugin should leave its temporary paused state.
+
+    Custom pause policies should override this together with ``should_pause``.
 
     Returns
     -------
@@ -887,21 +891,22 @@ class BasePluginExecutor(
       status = "PAUSING"
       notif_code = ct.NOTIFICATION_CODES.PLUGIN_PAUSE_OK
       transition_callback = self.on_pause
-      if self.cfg_ignore_working_hours:
+      if self.cfg_ignore_working_hours and forced_pause:
         msg_working_hours_conflict = "The following ERROR was detected: IGNORE_WORKING_HOURS is set to True and FORCED_PAUSE is set to True. Although FORCED_PAUSE is above WORKING_HOURS this might be a configuration error."
         msg += ". " + msg_working_hours_conflict
         self.P(msg_working_hours_conflict, color='r')
       # endif working hours conflict
     # endif resume or new stop
-    if transition_callback is not None and not stopped:
+    if transition_callback is not None:
+      if stopped:
+        self._was_stopped_last_iter = stopped
       self._pause_transition_in_progress = True
       try:
         transition_callback()
       finally:
         self._pause_transition_in_progress = False
-      transition_callback = None
       self._was_stopped_last_iter = stopped
-    # endif resume callback succeeded
+    # endif transition callback succeeded
     if msg is not None:
       self.P(msg, color='r')
       self._create_notification(
@@ -921,12 +926,6 @@ class BasePluginExecutor(
       )
     # end if process just resumed or just stopped
     self._was_stopped_last_iter = stopped
-    if transition_callback is not None:
-      self._pause_transition_in_progress = True
-      try:
-        transition_callback()
-      finally:
-        self._pause_transition_in_progress = False
     return stopped
 
   @property

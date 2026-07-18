@@ -467,6 +467,7 @@ class BasePluginExecutor(
 
     self._was_stopped_last_iter = False  # for `FORCED_PAUSE`
     self._pause_transition_in_progress = False
+    self._pause_transition_incomplete = False
     self._plugin_lifecycle_lock = RLock()
 
     self._plugin_loop_in_exec = False
@@ -851,7 +852,7 @@ class BasePluginExecutor(
     Handle the transition into the temporary paused state.
 
     This may run before ``on_init`` when an instance starts disabled.
-    A failure leaves the plugin running so this callback can be retried.
+    A failure keeps execution stopped and retries this callback.
     """
     return
 
@@ -880,7 +881,7 @@ class BasePluginExecutor(
     disabled = self.cfg_disabled
     operator_pause = forced_pause or disabled
     was_stopped = self._was_stopped_last_iter
-    stopped = operator_pause or (
+    stopped = self._pause_transition_incomplete or operator_pause or (
       not self.should_resume()
       if was_stopped
       else self.should_pause()
@@ -911,10 +912,14 @@ class BasePluginExecutor(
       try:
         transition_callback()
       except Exception:
+        if stopped:
+          self._pause_transition_incomplete = True
         self._was_stopped_last_iter = was_stopped
         raise
       finally:
         self._pause_transition_in_progress = False
+      if stopped:
+        self._pause_transition_incomplete = False
     # endif transition callback succeeded
     self._was_stopped_last_iter = stopped
     if msg is not None:
@@ -1509,16 +1514,6 @@ class BasePluginExecutor(
       return
     # endif is just a command
 
-    self._upstream_config = upstream_config
-
-    self.P("Config {} on request {}:{}".format(self, modified_by_id, modified_by_addr), color='b')
-    # DEBUG
-    # self.log.P("Current:\n{}".format(json.dumps(self._upstream_config, indent=4)), color='d')
-    # self.log.P("New:\n{}".format(json.dumps(upstream_config, indent=4)), color='d')
-    # END DEBUG
-    self.config_changed_since_last_process = True
-
-    
     # now while changing config we must stop loop exec
     self.__set_loop_stage(s='maybe_update_instance_config.wait', prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
     wait_start = self.time()
@@ -1540,9 +1535,20 @@ class BasePluginExecutor(
 
     # pause the plugin loop while updating the config
     self.loop_paused = True  # can also use self.pause_loop() but is safer like this as here we have getter and setter (harder to overwrite)
-    last_config = deepcopy(self.config_data)
-    self._plugin_lifecycle_lock.acquire()
+    # Leave upstream config unchanged so the next manager refresh retries this update.
+    if not self._plugin_lifecycle_lock.acquire(blocking=False):
+      self.loop_paused = False
+      return
+    last_config = self.config_data
     try:
+      last_config = deepcopy(self.config_data)
+      self._upstream_config = upstream_config
+      self.P("Config {} on request {}:{}".format(self, modified_by_id, modified_by_addr), color='b')
+      # DEBUG
+      # self.log.P("Current:\n{}".format(json.dumps(self._upstream_config, indent=4)), color='d')
+      # self.log.P("New:\n{}".format(json.dumps(upstream_config, indent=4)), color='d')
+      # END DEBUG
+      self.config_changed_since_last_process = True
       self.__set_loop_stage(s='maybe_update_instance_config._update_instance_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
       self._update_instance_config()

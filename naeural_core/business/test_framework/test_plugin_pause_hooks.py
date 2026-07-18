@@ -102,33 +102,53 @@ class PluginPauseHookTests(unittest.TestCase):
     self.assertFalse(plugin.is_plugin_temporary_stopped)
     self.assertEqual(plugin.pause_events, ["pause", "resume"])
 
-  def test_pause_callback_failure_retries_transition(self):
+  def test_pause_callback_failure_keeps_execution_stopped_until_retry_succeeds(self):
     plugin = self._make_plugin()
     callback_calls = []
+    should_pause = True
+    should_resume = False
+    resources = {"server": True, "tunnel": True}
 
     def on_pause():
+      nonlocal should_pause
       callback_calls.append("pause")
+      resources["server"] = False
+      should_pause = False
       if len(callback_calls) == 1:
         raise RuntimeError("pause callback failed")
+      resources["tunnel"] = False
+
+    def on_resume():
+      plugin.pause_events.append("resume")
+      resources.update(server=True, tunnel=True)
 
     plugin.on_pause = on_pause
-    plugin.should_pause = lambda: True
-    plugin.should_resume = lambda: False
+    plugin.on_resume = on_resume
+    plugin.should_pause = lambda: should_pause
+    plugin.should_resume = lambda: should_resume
 
     with self.assertRaisesRegex(RuntimeError, "pause callback failed"):
       plugin.is_plugin_temporary_stopped
 
-    self.assertFalse(plugin._was_stopped_last_iter)
     self.assertFalse(plugin._pause_transition_in_progress)
+    self.assertTrue(plugin._pause_transition_incomplete)
+    self.assertEqual(resources, {"server": False, "tunnel": True})
     self.assertEqual(plugin.notifications, [])
     self.assertEqual(plugin.payloads, [])
 
     self.assertTrue(plugin.is_plugin_temporary_stopped)
+    self.assertFalse(plugin._pause_transition_incomplete)
+    self.assertEqual(resources, {"server": False, "tunnel": False})
     self.assertEqual(callback_calls, ["pause", "pause"])
     self.assertEqual(len(plugin.notifications), 1)
     self.assertEqual(len(plugin.payloads), 1)
 
-  def test_config_update_waits_for_pause_callback(self):
+    should_resume = True
+    self.assertFalse(plugin.is_plugin_temporary_stopped)
+    self.assertEqual(plugin.pause_events, ["resume"])
+    self.assertEqual(resources, {"server": True, "tunnel": True})
+
+  def test_config_update_defers_without_waiting_for_pause_callback(self):
     plugin = self._make_plugin()
     plugin.cfg_instance_id = "instance"
     plugin.loop_paused = False
@@ -139,6 +159,7 @@ class PluginPauseHookTests(unittest.TestCase):
     callback_entered = threading.Event()
     callback_release = threading.Event()
     config_entered = threading.Event()
+    config_returned = threading.Event()
     errors = []
 
     plugin.should_pause = lambda: True
@@ -152,6 +173,8 @@ class PluginPauseHookTests(unittest.TestCase):
         plugin.maybe_update_instance_config({"VALUE": 1})
       except Exception as exc:
         errors.append(exc)
+      finally:
+        config_returned.set()
 
     plugin.on_pause = on_pause
     plugin._BasePluginExecutor__on_config = config_entered.set
@@ -164,7 +187,9 @@ class PluginPauseHookTests(unittest.TestCase):
     self.assertTrue(callback_entered.wait(timeout=1))
     config_thread.start()
     try:
-      self.assertFalse(config_entered.wait(timeout=0.1))
+      self.assertTrue(config_returned.wait(timeout=1))
+      self.assertFalse(config_entered.is_set())
+      self.assertEqual(plugin._upstream_config, {})
     finally:
       callback_release.set()
       pause_thread.join(timeout=1)
@@ -173,7 +198,10 @@ class PluginPauseHookTests(unittest.TestCase):
     self.assertFalse(pause_thread.is_alive())
     self.assertFalse(config_thread.is_alive())
     self.assertEqual(errors, [])
+    self.assertFalse(plugin.loop_paused)
+    plugin.maybe_update_instance_config({"VALUE": 1})
     self.assertTrue(config_entered.is_set())
+    self.assertEqual(plugin._upstream_config, {"VALUE": 1})
 
   def test_working_hours_conflict_only_reported_for_forced_pause(self):
     plugin = self._make_plugin()

@@ -9,7 +9,7 @@ from time import time, sleep, perf_counter
 from copy import deepcopy
 from collections import deque, OrderedDict
 from functools import partial
-from threading import Thread
+from threading import RLock, Thread
 
 # local dependencies
 from naeural_core import constants as ct
@@ -466,6 +466,9 @@ class BasePluginExecutor(
     self.done_loop = False
 
     self._was_stopped_last_iter = False  # for `FORCED_PAUSE`
+    self._pause_transition_in_progress = False
+    self._pause_transition_incomplete = False
+    self._plugin_lifecycle_lock = RLock()
 
     self._plugin_loop_in_exec = False
 
@@ -817,32 +820,108 @@ class BasePluginExecutor(
       return True
     # endif elapsed < delay thus wait more until elapsed >= delay
     return False
+
+  def should_pause(self):
+    """
+    Check whether the plugin should enter its temporary paused state.
+
+    Custom pause policies should override this together with ``should_resume``.
+
+    Returns
+    -------
+    bool
+      ``True`` when the plugin should pause.
+    """
+    return False
+
+  def should_resume(self):
+    """
+    Check whether the plugin should leave its temporary paused state.
+
+    Custom pause policies should override this together with ``should_pause``.
+
+    Returns
+    -------
+    bool
+      ``True`` when the plugin should resume.
+    """
+    return True
+
+  def on_pause(self):
+    """
+    Handle the transition into the temporary paused state.
+
+    This may run before ``on_init`` when an instance starts disabled.
+    A failure keeps execution stopped and retries this callback.
+    """
+    return
+
+  def on_resume(self):
+    """
+    Handle the transition out of the temporary paused state.
+
+    A failure leaves the plugin paused so this callback can be retried.
+    """
+    return
   
   
   @property
   def is_plugin_temporary_stopped(self):
+    with self._plugin_lifecycle_lock:
+      return self.__is_plugin_temporary_stopped()
+
+  def __is_plugin_temporary_stopped(self):
+    if self._pause_transition_in_progress:
+      return self._was_stopped_last_iter
+
     msg = None
     status = None
     notif_code = None
     forced_pause = self.cfg_forced_pause
     disabled = self.cfg_disabled
-    stopped = forced_pause or disabled
-    if self._was_stopped_last_iter and not stopped:
+    operator_pause = forced_pause or disabled
+    was_stopped = self._was_stopped_last_iter
+    stopped = self._pause_transition_incomplete or operator_pause or (
+      not self.should_resume()
+      if was_stopped
+      else self.should_pause()
+    )
+    transition_callback = None
+    if was_stopped and not stopped:
       # just received "resume"
       msg = f"WARNING: Plugin will now RESUME. `FORCED_PAUSE`={forced_pause}, `DISABLED`={disabled}"
       status = "RESUMING"
       notif_code = ct.NOTIFICATION_CODES.PLUGIN_RESUME_OK
-    elif not self._was_stopped_last_iter and stopped:
+      transition_callback = self.on_resume
+    elif not was_stopped and stopped:
       # just received "stop"
       msg = f"WARNING: Plugin will now STOP. `FORCED_PAUSE`={forced_pause}, `DISABLED`={disabled}"
       status = "PAUSING"
       notif_code = ct.NOTIFICATION_CODES.PLUGIN_PAUSE_OK
-      if self.cfg_ignore_working_hours:
+      transition_callback = self.on_pause
+      if self.cfg_ignore_working_hours and forced_pause:
         msg_working_hours_conflict = "The following ERROR was detected: IGNORE_WORKING_HOURS is set to True and FORCED_PAUSE is set to True. Although FORCED_PAUSE is above WORKING_HOURS this might be a configuration error."
         msg += ". " + msg_working_hours_conflict
         self.P(msg_working_hours_conflict, color='r')
       # endif working hours conflict
     # endif resume or new stop
+    if transition_callback is not None:
+      if stopped:
+        self._was_stopped_last_iter = stopped
+      self._pause_transition_in_progress = True
+      try:
+        transition_callback()
+      except Exception:
+        if stopped:
+          self._pause_transition_incomplete = True
+        self._was_stopped_last_iter = was_stopped
+        raise
+      finally:
+        self._pause_transition_in_progress = False
+      if stopped:
+        self._pause_transition_incomplete = False
+    # endif transition callback succeeded
+    self._was_stopped_last_iter = stopped
     if msg is not None:
       self.P(msg, color='r')
       self._create_notification(
@@ -861,7 +940,6 @@ class BasePluginExecutor(
         notif_code=notif_code,
       )
     # end if process just resumed or just stopped
-    self._was_stopped_last_iter = stopped
     return stopped
 
   @property
@@ -1436,16 +1514,6 @@ class BasePluginExecutor(
       return
     # endif is just a command
 
-    self._upstream_config = upstream_config
-
-    self.P("Config {} on request {}:{}".format(self, modified_by_id, modified_by_addr), color='b')
-    # DEBUG
-    # self.log.P("Current:\n{}".format(json.dumps(self._upstream_config, indent=4)), color='d')
-    # self.log.P("New:\n{}".format(json.dumps(upstream_config, indent=4)), color='d')
-    # END DEBUG
-    self.config_changed_since_last_process = True
-
-    
     # now while changing config we must stop loop exec
     self.__set_loop_stage(s='maybe_update_instance_config.wait', prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
     wait_start = self.time()
@@ -1467,8 +1535,20 @@ class BasePluginExecutor(
 
     # pause the plugin loop while updating the config
     self.loop_paused = True  # can also use self.pause_loop() but is safer like this as here we have getter and setter (harder to overwrite)
-    last_config = deepcopy(self.config_data)
+    # Leave upstream config unchanged so the next manager refresh retries this update.
+    if not self._plugin_lifecycle_lock.acquire(blocking=False):
+      self.loop_paused = False
+      return
+    last_config = self.config_data
     try:
+      last_config = deepcopy(self.config_data)
+      self._upstream_config = upstream_config
+      self.P("Config {} on request {}:{}".format(self, modified_by_id, modified_by_addr), color='b')
+      # DEBUG
+      # self.log.P("Current:\n{}".format(json.dumps(self._upstream_config, indent=4)), color='d')
+      # self.log.P("New:\n{}".format(json.dumps(upstream_config, indent=4)), color='d')
+      # END DEBUG
+      self.config_changed_since_last_process = True
       self.__set_loop_stage(s='maybe_update_instance_config._update_instance_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
       self._update_instance_config()
@@ -1476,11 +1556,9 @@ class BasePluginExecutor(
       self.__set_loop_stage(s='maybe_update_instance_config._on_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
       self.__on_config()
-      # resume loop
       self.__set_loop_stage(s='maybe_update_instance_config.reset_exec_counter_after_config',
                             prefix='2.bm.refresh.{}'.format(self.cfg_instance_id))
       self.reset_exec_counter_after_config()
-      self.loop_paused = False  # in the rare case that someone or something overwrote resume_loop()
 
     except Exception as exc:
       # rollback
@@ -1501,8 +1579,9 @@ class BasePluginExecutor(
         info=info,
         displayed=True,
       )
-      # resume loop even on exception
+    finally:
       self.loop_paused = False
+      self._plugin_lifecycle_lock.release()
     return
 
   def _create_notification(self, msg, info=None, notif=ct.PAYLOAD_CT.STATUS_TYPE.STATUS_NORMAL, use_local_comms_only=False, **kwargs):

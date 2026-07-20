@@ -1312,8 +1312,14 @@ class EpochsManager(Singleton):
     return
 
 
-  def maybe_close_epoch(self):
+  def maybe_close_epoch(self, recalculate_all_nodes=True):
     """Close the current epoch when the wall clock advances to the next one.
+
+    Parameters
+    ----------
+    recalculate_all_nodes : bool, optional
+      Recalculate every cached node at rollover. Set to False for local
+      self-heartbeats on nodes that do not receive peer heartbeats.
 
     Returns
     -------
@@ -1345,7 +1351,15 @@ class EpochsManager(Singleton):
         self.P("Closing epoch {} at start of epoch {}".format(self.__current_epoch, current_epoch))
         closed_epoch = True
         result = self.__current_epoch
-        self.__recalculate_current_epoch_for_all()
+        if recalculate_all_nodes:
+          self.__recalculate_current_epoch_for_all()
+        else:
+          self.start_timer("recalc_node_epoch")
+          self.__recalculate_current_epoch_for_node(
+            self.owner.node_addr,
+            extra_logs=True,
+          )
+          self.stop_timer("recalc_node_epoch")
         self.P("Starting epoch: {}".format(current_epoch))
         self.__current_epoch = current_epoch 
         self.__reset_all_timestamps()
@@ -1391,25 +1405,25 @@ class EpochsManager(Singleton):
     return
 
 
-  def register_data(self, node_addr, hb):
+  def __register_data(self, node_addr, hb, recalculate_all_nodes):
     """
-    Register a heartbeat for a node in the current epoch.
+    Register heartbeat data using the requested epoch rollover scope.
 
     Parameters
     ----------
     node_addr : str
       Node address.
-      
     hb : dict
       Heartbeat payload dictionary.
+    recalculate_all_nodes : bool
+      Whether an epoch transition may recalculate cached peer nodes.
 
     Returns
     -------
     None
-      
     """
     start_proc = time()
-    self.maybe_close_epoch()
+    self.maybe_close_epoch(recalculate_all_nodes=recalculate_all_nodes)
 
     local_epoch = self.get_time_epoch()   
     # maybe first epoch for node_addr
@@ -1446,6 +1460,52 @@ class EpochsManager(Singleton):
     #endif remote epoch is the same as the local epoch
     elapsed = time() - start_proc
     return
+
+
+  def register_data(self, node_addr, hb):
+    """
+    Register a received heartbeat for a node in the current epoch.
+
+    Parameters
+    ----------
+    node_addr : str
+      Node address.
+    hb : dict
+      Heartbeat payload dictionary.
+
+    Returns
+    -------
+    None
+    """
+    return self.__register_data(
+      node_addr=node_addr,
+      hb=hb,
+      recalculate_all_nodes=True,
+    )
+
+
+  def register_local_self_data(self, hb):
+    """
+    Register this node's locally generated heartbeat.
+
+    The owner address is derived internally so callers cannot use this path to
+    seed availability for another node. Epoch rollover recalculates only the
+    owner because regular nodes may not receive peer heartbeats.
+
+    Parameters
+    ----------
+    hb : dict
+      Canonical local heartbeat payload.
+
+    Returns
+    -------
+    None
+    """
+    return self.__register_data(
+      node_addr=self.owner.node_addr,
+      hb=hb,
+      recalculate_all_nodes=False,
+    )
   
   
   def get_node_list(self):

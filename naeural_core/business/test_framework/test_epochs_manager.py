@@ -7,7 +7,7 @@ from threading import Lock
 
 from naeural_core import constants as ct
 from naeural_core.core_logging import Logger
-from naeural_core.main.epochs_manager import EPCT, EpochsManager, SYNC_SIGNATURES
+from naeural_core.main.epochs_manager import EPCT, EpochsManager, SYNC_NODES, SYNC_SIGNATURES
 from naeural_core.main.net_mon import NetworkMonitor
 
 N_NODES = 100
@@ -33,6 +33,7 @@ class _DummyLock:
 class _StubLogger:
   def __init__(self):
     self._lock = Lock()
+    self.utc_offset = "UTC+0"
 
   def P(self, *args, **kwargs):  # pylint: disable=unused-argument
     if os.environ.get("EE_TEST_LOGS", DEFAULT_SHOW_TEST_LOGS) == "1":
@@ -165,13 +166,36 @@ class TestEpochsManager(unittest.TestCase):
         self._env_backup[key] = None
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = "48"
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = "3600"
+    self._build_manager()
+
+  def _build_manager(self, current_epoch=0, debug=False):
+    """
+    Build a fresh manager at the requested synthetic epoch.
+
+    Parameters
+    ----------
+    current_epoch : int, optional
+      Epoch in which the synthetic wall clock should start.
+    debug : bool, optional
+      Whether to enable verbose epoch recalculation results.
+    """
+    if hasattr(EpochsManager, "_instance"):
+      delattr(EpochsManager, "_instance")
     self.log = _StubLogger()
     self.owner = _StubOwner()
     genesis = datetime.strptime(ct.DEFAULT_GENESYS_EPOCH_DATE, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    debug_date = genesis + timedelta(seconds=1)
-    self.manager = EpochsManager(log=self.log, owner=self.owner, debug=False, debug_date=debug_date)
+    debug_date = genesis + timedelta(seconds=(current_epoch * self._configured_epoch_length) + 1)
+    self.manager = EpochsManager(log=self.log, owner=self.owner, debug=debug, debug_date=debug_date)
     self.manager._EpochsManager__initialize_new_node(self.owner.node_addr)
     self.manager.maybe_close_epoch()
+    return self.manager
+
+  @property
+  def _configured_epoch_length(self):
+    return (
+      int(os.environ[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY]) *
+      int(os.environ[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY])
+    )
 
   def tearDown(self):
     if hasattr(EpochsManager, "_instance"):
@@ -450,6 +474,65 @@ class TestEpochsManager(unittest.TestCase):
     self.assertEqual(closed_epoch, 0)
     self.assertTrue(len(saved_payloads) > 0)
     self.assertIsInstance(saved_payloads[-1], dict)
+
+  def test_local_self_rollover_updates_owner_without_recalculating_cached_peer(self):
+    os.environ[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = "1"
+    os.environ[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = "60"
+    self._build_manager(current_epoch=2)
+    remote_addr = "0xREMOTE"
+    self.manager._EpochsManager__initialize_new_node(remote_addr)
+    remote_state = self.manager._EpochsManager__data[remote_addr]
+    remote_state[EPCT.EPOCHS][2] = 123
+    remote_state[EPCT.LOCAL_EPOCHS][2] = 124
+    saved_payloads = []
+    self.log.save_pickle_to_data = lambda data, **kwargs: saved_payloads.append(data)
+    epoch_start = self.manager.genesis_date + timedelta(seconds=2 * self.manager.epoch_length)
+
+    for second in (1, 11, 21, 31, 41, 51):
+      self.manager.register_local_self_data(self._make_hb(epoch_start + timedelta(seconds=second)))
+
+    self.manager._set_dbg_date(epoch_start + timedelta(seconds=self.manager.epoch_length + 1))
+    self.manager.register_local_self_data(
+      self._make_hb(epoch_start + timedelta(seconds=self.manager.epoch_length + 1))
+    )
+
+    owner_state = self.manager._EpochsManager__data[self.owner.node_addr]
+    self.assertGreater(owner_state[EPCT.EPOCHS][2], 0)
+    self.assertEqual(owner_state[EPCT.EPOCHS][2], owner_state[EPCT.LOCAL_EPOCHS][2])
+    self.assertEqual(
+      self.manager.get_node_last_n_epochs(
+        self.owner.node_addr, n=1, autocomplete=False
+      ),
+      {2: owner_state[EPCT.EPOCHS][2]},
+    )
+    self.assertEqual(remote_state[EPCT.EPOCHS][2], 123)
+    self.assertEqual(remote_state[EPCT.LOCAL_EPOCHS][2], 124)
+    self.assertTrue(saved_payloads)
+    saved_remote = saved_payloads[-1][SYNC_NODES][remote_addr]
+    self.assertEqual(saved_remote[EPCT.EPOCHS][2], 123)
+    self.assertEqual(saved_remote[EPCT.LOCAL_EPOCHS][2], 124)
+
+  def test_regular_rollover_still_recalculates_cached_peer(self):
+    os.environ[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = "1"
+    os.environ[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = "60"
+    self._build_manager(current_epoch=2, debug=True)
+    remote_addr = "0xREMOTE"
+    epoch_start = self.manager.genesis_date + timedelta(seconds=2 * self.manager.epoch_length)
+
+    for second in (1, 11, 21, 31, 41, 51):
+      heartbeat = self._make_hb(epoch_start + timedelta(seconds=second))
+      self.manager.register_data(self.owner.node_addr, heartbeat)
+      self.manager.register_data(remote_addr, heartbeat)
+
+    self.manager._set_dbg_date(epoch_start + timedelta(seconds=self.manager.epoch_length + 1))
+    self.manager.register_data(
+      self.owner.node_addr,
+      self._make_hb(epoch_start + timedelta(seconds=self.manager.epoch_length + 1)),
+    )
+
+    remote_state = self.manager._EpochsManager__data[remote_addr]
+    self.assertGreater(remote_state[EPCT.EPOCHS][2], 0)
+    self.assertEqual(remote_state[EPCT.EPOCHS][2], remote_state[EPCT.LOCAL_EPOCHS][2])
 
   def test_stress_generator(self):
     genesis = self.manager.genesis_date

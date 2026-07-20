@@ -25,9 +25,13 @@ class _StubBlockEngine:
 class _CountingEpochManager:
   def __init__(self):
     self.calls = 0
+    self.local_calls = []
 
   def register_data(self, addr, data):
     self.calls += 1
+
+  def register_local_self_data(self, data):
+    self.local_calls.append(dict(data))
 
 
 def _make_netmon(
@@ -1060,21 +1064,105 @@ class TestNetmonSummaryStatus(unittest.TestCase):
     self.assertEqual(netmon.network_node_eeid("0xai_REMOTE"), "remote")
     self.assertEqual(netmon.epoch_manager.calls, 1)
 
-  def test_local_self_heartbeat_bypasses_epoch_but_fuels_self_api(self):
-    netmon, patcher = _make_netmon(summary_enabled=True)
+  def test_local_self_heartbeat_registers_owner_epoch_from_production_payload(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
     self.addCleanup(patcher.stop)
     heartbeat = {
       ct.EE_ID: "SELF",
       ct.HB.EE_ADDR: "0xai_SELF",
-      ct.PAYLOAD_DATA.EE_TIMESTAMP: "2026-05-28 10:00:00",
+      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
     }
 
-    netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+    netmon.register_local_heartbeat("SELF", heartbeat)
 
     self.assertIn("SELF", netmon.all_nodes)
     self.assertEqual(netmon.network_node_eeid("0xai_SELF"), "SELF")
     self.assertEqual(netmon.epoch_manager.calls, 0)
+    self.assertEqual(len(netmon.epoch_manager.local_calls), 1)
+    epoch_heartbeat = netmon.epoch_manager.local_calls[0]
+    self.assertEqual(
+      epoch_heartbeat[ct.PAYLOAD_DATA.EE_TIMESTAMP],
+      heartbeat[ct.HB.CURRENT_TIME],
+    )
+    self.assertEqual(epoch_heartbeat[ct.PAYLOAD_DATA.EE_TIMEZONE], netmon.log.utc_offset)
     self.assertIn(ct.HB.RECEIVED_TIME, netmon.network_node_last_heartbeat("0xai_SELF"))
+
+  def test_local_self_heartbeat_rejects_non_owner_addresses_before_mutation(self):
+    invalid_heartbeats = (
+      ("0xai_REMOTE", {ct.HB.EE_ADDR: "0xai_SELF"}),
+      ("0xai_SELF", {ct.HB.EE_ADDR: "0xai_REMOTE"}),
+      (None, {ct.HB.EE_ADDR: "0xai_SELF"}),
+    )
+    for addr, heartbeat_fields in invalid_heartbeats:
+      with self.subTest(addr=addr, embedded_addr=heartbeat_fields[ct.HB.EE_ADDR]):
+        netmon, patcher = _make_netmon(
+          summary_enabled=True,
+          extra_env={"EE_SUPERVISOR": "false"},
+          clear_env=True,
+        )
+        self.addCleanup(patcher.stop)
+        heartbeat = {
+          ct.EE_ID: "SELF",
+          ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
+          **heartbeat_fields,
+        }
+
+        netmon.register_local_heartbeat(addr, heartbeat)
+
+        self.assertEqual(netmon.all_nodes, [])
+        self.assertEqual(netmon.epoch_manager.calls, 0)
+        self.assertEqual(netmon.epoch_manager.local_calls, [])
+
+  def test_local_self_heartbeat_duplicate_only_updates_epoch_once(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    heartbeat = {
+      ct.EE_ID: "SELF",
+      ct.HB.EE_ADDR: "0xai_SELF",
+      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
+    }
+
+    netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+    netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+
+    self.assertEqual(len(netmon.get_box_heartbeats("0xai_SELF")), 1)
+    self.assertEqual(len(netmon.epoch_manager.local_calls), 1)
+
+  def test_supervisor_local_registration_is_noop_before_broker_echo(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=False,
+      extra_env={"EE_SUPERVISOR": "true"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    local_heartbeat = {
+      ct.EE_ID: "SELF",
+      ct.HB.EE_ADDR: "0xai_SELF",
+      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
+    }
+
+    netmon.register_local_heartbeat("0xai_SELF", local_heartbeat)
+
+    self.assertEqual(netmon.all_nodes, [])
+    self.assertEqual(netmon.epoch_manager.local_calls, [])
+
+    broker_heartbeat = {
+      **local_heartbeat,
+      ct.PAYLOAD_DATA.EE_TIMESTAMP: local_heartbeat[ct.HB.CURRENT_TIME],
+      ct.PAYLOAD_DATA.EE_TIMEZONE: "UTC+0",
+    }
+    netmon.register_heartbeat("0xai_SELF", broker_heartbeat)
+
+    self.assertEqual(len(netmon.get_box_heartbeats("0xai_SELF")), 1)
+    self.assertEqual(netmon.epoch_manager.calls, 1)
 
 
 if __name__ == "__main__":

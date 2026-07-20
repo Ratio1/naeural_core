@@ -496,7 +496,9 @@ class NetworkMonitor(DecentrAIObject):
     return
   
 
-  def __register_heartbeat(self, addr, data, update_received_time=True):
+  def __register_heartbeat(
+    self, addr, data, update_received_time=True, local_timezone=None,
+  ):
     """
     Register a heartbeat in the local network monitor cache.
 
@@ -510,6 +512,10 @@ class NetworkMonitor(DecentrAIObject):
       If True, stamp the heartbeat with the local receive time before storing
       it. Use False for internal replay paths that should preserve the
       existing receive-time semantics.
+    local_timezone : str, optional
+      When provided, canonicalize a locally generated heartbeat's timestamp
+      before duplicate detection and storage. Local loopback occurs before the
+      communication layer adds transport timestamp metadata.
 
     Returns
     -------
@@ -518,6 +524,9 @@ class NetworkMonitor(DecentrAIObject):
       None when it is dropped as a recent duplicate.
     """
     data, owned_keys = self.__decode_heartbeat_data(data)
+    if local_timezone is not None:
+      data.setdefault(ct.PAYLOAD_DATA.EE_TIMESTAMP, data.get(ct.HB.CURRENT_TIME))
+      data.setdefault(ct.PAYLOAD_DATA.EE_TIMEZONE, local_timezone)
 
     __eeid = data.get(ct.EE_ID, MISSING_ID)
     __addr_no_prefix = self.__remove_address_prefix(addr) 
@@ -1181,14 +1190,58 @@ class NetworkMonitor(DecentrAIObject):
 
     def register_local_heartbeat(self, addr, data):
       """
-      Register this node's own heartbeat for local NetMon reads only.
+      Register this node's own heartbeat for local status and epoch accounting.
 
-      Non-supervisors can disable CTRL heartbeat receive. In that mode they no
-      longer see their own broker echo, but self-address API calls still need a
-      fresh local heartbeat view. This path intentionally bypasses EpochsManager:
-      consensus availability must come from received heartbeats on supervisors.
+      Parameters
+      ----------
+      addr : str
+        Claimed address for the local heartbeat.
+      data : dict
+        Locally generated heartbeat payload before transport metadata is added.
+
+      Notes
+      -----
+      This path is limited to non-supervisors that skip CTRL heartbeat receive.
+      It validates the owner address before mutating state and delegates epoch
+      accounting to the owner-only EpochsManager path.
       """
-      self.__register_heartbeat(addr, data, update_received_time=True)
+      if self.__is_supervisor_node:
+        return
+      if not isinstance(addr, str) or not isinstance(data, dict):
+        self.P("Ignoring malformed local heartbeat registration.", color="r")
+        return
+
+      embedded_addr = data.get(ct.HB.EE_ADDR)
+      if embedded_addr is not None and not isinstance(embedded_addr, str):
+        self.P("Ignoring local heartbeat with malformed embedded address.", color="r")
+        return
+
+      owner_addr = self.__remove_address_prefix(self.node_addr)
+      heartbeat_addr = self.__remove_address_prefix(addr)
+      embedded_addr = (
+        self.__remove_address_prefix(embedded_addr)
+        if embedded_addr is not None else owner_addr
+      )
+      if heartbeat_addr != owner_addr or embedded_addr != owner_addr:
+        self.P(
+          "Ignoring non-owner local heartbeat registration for address {}.".format(addr),
+          color="r",
+        )
+        return
+
+      current_time = data.get(ct.PAYLOAD_DATA.EE_TIMESTAMP, data.get(ct.HB.CURRENT_TIME))
+      if not isinstance(current_time, str):
+        self.P("Ignoring local heartbeat without a valid timestamp.", color="r")
+        return
+
+      epoch_data = self.__register_heartbeat(
+        addr,
+        data,
+        update_received_time=True,
+        local_timezone=self.log.utc_offset,
+      )
+      if epoch_data is not None:
+        self.epoch_manager.register_local_self_data(epoch_data)
       return
 
     def register_network_status_snapshot(

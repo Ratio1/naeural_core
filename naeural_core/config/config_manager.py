@@ -18,6 +18,9 @@ from naeural_core import Logger
 from naeural_core.manager import Manager
 from naeural_core.config.mixins import _ConfigManagerCheckMixin
 from naeural_core.config.config_manager_commands import ConfigCommandHandlers
+from naeural_core.config.runtime_secret_resolution import (
+  overlay_canonical_secret_references,
+)
 
 EXTENSION = '.json'
 
@@ -205,6 +208,10 @@ class ConfigManager(
       instance_id=instance_id,
     )
     if instance_config is not None:
+      config = overlay_canonical_secret_references(
+        proposed=config,
+        canonical=instance_config,
+      )
       if verbose:
         self.log.P("Saving instance  <{}:{}:{}> config to local cache for following keys:\n{}".format(
           pipeline_name, signature, instance_id, json.dumps(config, indent=4)), color='b'
@@ -362,6 +369,10 @@ class ConfigManager(
       return None
     #endif
     
+    pipeline_config = overlay_canonical_secret_references(
+      proposed=pipeline_config,
+      canonical=self.dct_config_streams[pipeline_name],
+    )
     for k,v in pipeline_config.items():
       self.dct_config_streams[pipeline_name][k] = v
       
@@ -540,10 +551,6 @@ class ConfigManager(
       self.dct_config_streams[pipeline_name] = dct_current_admin # update the admin pipeline in the memory cache      
       self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(dct_current_admin, indent=2)))
       self._save_stream_config(dct_current_admin)
-      # now maybe replace the secrets
-      res = self.log.replace_secrets(dct_current_admin)
-      if res is not None and len(res) > 0:
-        self.P("Admin pipeline secrets replaced post save: {}".format(res), color='m')
     else:
       self.P("  Admin pipeline is already correctly configured - no need to save")
     #endif needs save
@@ -585,7 +592,6 @@ class ConfigManager(
     for fn in available_streams:
       crt_config_stream = self.log.load_json(
         fname=fn, folder=None, numeric_keys=False,
-        replace_environment_secrets='$EE_',
       )
       if crt_config_stream is not None:
         crt_config_stream = self.keep_good_stream(crt_config_stream)

@@ -5,7 +5,7 @@ import traceback
 import numpy as np
 
 from collections import deque
-from time import perf_counter, sleep, time
+from time import monotonic, perf_counter, sleep, time
 from threading import Lock, Thread
 from copy import deepcopy
 
@@ -22,6 +22,14 @@ from naeural_core.main.orchestrator_mixins import (
 )
 from naeural_core.data import CaptureManager
 from naeural_core.config import ConfigManager
+from naeural_core.config.runtime_secret_resolution import (
+  RuntimeSecretResolutionError,
+  build_capture_pipeline_config,
+  build_runtime_pipeline_config,
+  contains_dauth_secret_placeholder,
+  extract_dauth_plugins_secret_tree,
+  get_dauth_pipeline_identity,
+)
 from naeural_core.business import BusinessManager
 from naeural_core.comm import CommunicationManager
 from naeural_core.serving import ServingManager
@@ -60,6 +68,12 @@ CHECK_AND_COMPLETE_SLEEP_PERIOD = 30 # how many seconds to wait between iteratio
 CHECK_AND_COMPLETE_TIMEOUT = CHECK_AND_COMPLETE_ITERATIONS * CHECK_AND_COMPLETE_SLEEP_PERIOD
 CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle checks
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
+RUNTIME_SECRET_RESOLVER_POLL_SECONDS = 0.25
+RUNTIME_SECRET_RETRY_MAX_SECONDS = 30
+RUNTIME_SECRET_REQUEST_TIMEOUT = (5, 20)
+RUNTIME_SECRET_REQUEST_DEADLINE_SECONDS = 25
+RUNTIME_SECRET_SHUTDOWN_JOIN_SECONDS = 2
+RUNTIME_SECRET_REQUEST_JOIN_SECONDS = 26
 
 
 SHUTDOWN_RESET_FILE = "/shutdown_reset"
@@ -132,6 +146,10 @@ class Orchestrator(DecentrAIObject,
     self._last_main_loop_pass_time = perf_counter()
     self._heartbeat_counter = 0
     self._current_dct_config_streams = {}
+    self._runtime_dct_config_streams = {}
+    self._runtime_config_lock = Lock()
+    self._runtime_secret_cache = {}
+    self._runtime_secret_retry_state = {}
     self._should_send_initial_log = False
     self._initial_log_sent = False
     self._last_offline_log = 0
@@ -149,6 +167,7 @@ class Orchestrator(DecentrAIObject,
     self._return_code = None
     self._thread_async_comm = None
     self._thread_node_oracle_refresh = None
+    self._thread_runtime_secret_resolver = None
     self._thread_admin_pipeline_collect = None
     self._in_shutdown = False
     self._non_business_payloads = deque(maxlen=100)
@@ -394,6 +413,7 @@ class Orchestrator(DecentrAIObject,
 
 
     self._initialize_managers()
+    self._start_runtime_secret_resolver_thread()
 
     self.log.register_close_callback(self._maybe_gracefull_stop)
 
@@ -886,7 +906,311 @@ class Orchestrator(DecentrAIObject,
   
   
   def get_pipelines_view(self):
-    return list(self._current_dct_config_streams.values())
+    self._ensure_runtime_secret_resolution_state()
+    with self._runtime_config_lock:
+      return deepcopy(list(self._current_dct_config_streams.values()))
+
+  def _ensure_runtime_secret_resolution_state(self):
+    """Initialize runtime-secret state for normal and lightweight test objects."""
+    if not hasattr(self, "_runtime_dct_config_streams"):
+      self._runtime_dct_config_streams = {}
+    if not hasattr(self, "_runtime_config_lock"):
+      self._runtime_config_lock = Lock()
+    if not hasattr(self, "_runtime_secret_cache"):
+      self._runtime_secret_cache = {}
+    if not hasattr(self, "_runtime_secret_retry_state"):
+      self._runtime_secret_retry_state = {}
+    if not hasattr(self, "_thread_runtime_secret_resolver"):
+      self._thread_runtime_secret_resolver = None
+    if not hasattr(self, "_runtime_secret_request_worker"):
+      self._runtime_secret_request_worker = None
+    if not hasattr(self, "_runtime_secret_request_outcome"):
+      self._runtime_secret_request_outcome = None
+    if not hasattr(self, "_runtime_secret_request_job_id"):
+      self._runtime_secret_request_job_id = None
+    return
+
+  def _reconcile_runtime_streams(self, canonical_streams):
+    """Publish immediately resolvable streams and prune stale secret state.
+
+    Pipelines without dAuth placeholders are available immediately after local
+    environment expansion. Placeholder-bearing pipelines are published only
+    when their exact canonical version has a validated cached secret tree.
+    """
+    self._ensure_runtime_secret_resolution_state()
+    canonical_streams = deepcopy(canonical_streams)
+    with self._runtime_config_lock:
+      if canonical_streams != self._current_dct_config_streams:
+        return
+      valid_cache_keys = set()
+      runtime_streams = {}
+      for pipeline_name, pipeline_config in canonical_streams.items():
+        if not contains_dauth_secret_placeholder(pipeline_config):
+          runtime_streams[pipeline_name] = build_runtime_pipeline_config(
+            pipeline_config
+          )
+          continue
+
+        try:
+          cache_key = get_dauth_pipeline_identity(
+            pipeline_name=pipeline_name,
+            pipeline_config=pipeline_config,
+          )
+        except RuntimeSecretResolutionError:
+          continue
+        valid_cache_keys.add(cache_key)
+        if cache_key not in self._runtime_secret_cache:
+          continue
+        try:
+          runtime_streams[pipeline_name] = build_runtime_pipeline_config(
+            canonical_pipeline=pipeline_config,
+            secret_plugins=self._runtime_secret_cache[cache_key],
+          )
+        except RuntimeSecretResolutionError:
+          self._runtime_secret_cache.pop(cache_key, None)
+
+      self._runtime_secret_cache = {
+        key: value
+        for key, value in self._runtime_secret_cache.items()
+        if key in valid_cache_keys
+      }
+      self._runtime_secret_retry_state = {
+        key: value
+        for key, value in self._runtime_secret_retry_state.items()
+        if key in valid_cache_keys
+      }
+      self._runtime_dct_config_streams = runtime_streams
+    return
+
+  def _get_runtime_streams_snapshot(self):
+    """Return a detached snapshot for BusinessManager consumption."""
+    self._ensure_runtime_secret_resolution_state()
+    with self._runtime_config_lock:
+      return deepcopy(self._runtime_dct_config_streams)
+
+  def _get_capture_streams_snapshot(self):
+    """Return runtime-eligible streams without dAuth plugin plaintext."""
+    self._ensure_runtime_secret_resolution_state()
+    with self._runtime_config_lock:
+      eligible_names = set(self._runtime_dct_config_streams)
+      canonical_streams = deepcopy(self._current_dct_config_streams)
+    return {
+      name: build_capture_pipeline_config(config)
+      for name, config in canonical_streams.items()
+      if name in eligible_names
+    }
+
+  def _get_admin_pipeline_runtime_streams_snapshot(self):
+    """Return the runtime-only admin pipeline snapshot when available."""
+    runtime_streams = self._get_runtime_streams_snapshot()
+    if ct.CONST_ADMIN_PIPELINE_NAME not in runtime_streams:
+      return {}
+    return {
+      ct.CONST_ADMIN_PIPELINE_NAME:
+        runtime_streams[ct.CONST_ADMIN_PIPELINE_NAME]
+    }
+
+  def _resolve_runtime_streams_once(self, now=None):
+    """Attempt due dAuth resolutions once without blocking the main loop.
+
+    Parameters
+    ----------
+    now : float or None, optional
+      Time override used by focused retry tests.
+
+    Returns
+    -------
+    int
+      Number of pipeline versions resolved during this pass.
+    """
+    self._ensure_runtime_secret_resolution_state()
+    fixed_now = now is not None
+    now = time() if now is None else now
+    with self._runtime_config_lock:
+      canonical_streams = deepcopy(self._current_dct_config_streams)
+    self._reconcile_runtime_streams(canonical_streams)
+
+    resolved_count = 0
+    for pipeline_name, pipeline_config in canonical_streams.items():
+      if not contains_dauth_secret_placeholder(pipeline_config):
+        continue
+      try:
+        cache_key = get_dauth_pipeline_identity(
+          pipeline_name=pipeline_name,
+          pipeline_config=pipeline_config,
+        )
+      except RuntimeSecretResolutionError:
+        continue
+
+      with self._runtime_config_lock:
+        if cache_key in self._runtime_secret_cache:
+          continue
+        retry_state = self._runtime_secret_retry_state.get(cache_key, {})
+        if now < retry_state.get("next_retry", 0):
+          continue
+
+      job_id = cache_key[1]
+      try:
+        response = self._fetch_dauth_job_secret_bundle(job_id)
+        secret_plugins = extract_dauth_plugins_secret_tree(
+          response=response,
+          expected_job_id=job_id,
+        )
+        runtime_pipeline = build_runtime_pipeline_config(
+          canonical_pipeline=pipeline_config,
+          secret_plugins=secret_plugins,
+        )
+      except Exception as exc:
+        if vars(self).get("_Orchestrator__done", False):
+          return resolved_count
+        with self._runtime_config_lock:
+          current_pipeline = self._current_dct_config_streams.get(pipeline_name)
+          try:
+            current_key = get_dauth_pipeline_identity(
+              pipeline_name=pipeline_name,
+              pipeline_config=current_pipeline,
+            )
+          except Exception:
+            current_key = None
+          if current_key != cache_key:
+            continue
+          attempt = retry_state.get("attempt", 0) + 1
+          exponent = min(attempt - 1, 5)
+          delay = min(2 ** exponent, RUNTIME_SECRET_RETRY_MAX_SECONDS)
+          failure_time = now if fixed_now else time()
+          self._runtime_secret_retry_state[cache_key] = {
+            "attempt": attempt,
+            "next_retry": failure_time + delay,
+          }
+          self._runtime_dct_config_streams.pop(pipeline_name, None)
+        error_detail = (
+          str(exc)
+          if isinstance(exc, RuntimeSecretResolutionError)
+          else type(exc).__name__
+        )
+        self.P(
+          "Withholding pipeline '{}' while dAuth secrets are unresolved "
+          "(job {}, retry in {}s): {}".format(
+            pipeline_name,
+            job_id,
+            delay,
+            error_detail,
+          ),
+          color='y',
+        )
+        continue
+
+      with self._runtime_config_lock:
+        current_pipeline = self._current_dct_config_streams.get(pipeline_name)
+        try:
+          current_key = get_dauth_pipeline_identity(
+            pipeline_name=pipeline_name,
+            pipeline_config=current_pipeline,
+          )
+        except Exception:
+          current_key = None
+        if current_key != cache_key:
+          continue
+        self._runtime_secret_cache[cache_key] = secret_plugins
+        self._runtime_secret_retry_state.pop(cache_key, None)
+        self._runtime_dct_config_streams[pipeline_name] = runtime_pipeline
+      resolved_count += 1
+    return resolved_count
+
+  def _fetch_dauth_job_secret_bundle(self, job_id):
+    """Fetch one bundle behind a hard resolver deadline and shutdown check."""
+    self._ensure_runtime_secret_resolution_state()
+    existing_worker = self._runtime_secret_request_worker
+    if existing_worker is not None:
+      if existing_worker.is_alive():
+        raise TimeoutError("A dAuth secret request is still in progress.")
+      outcome = self._runtime_secret_request_outcome or {}
+      completed_job_id = self._runtime_secret_request_job_id
+      self._runtime_secret_request_worker = None
+      self._runtime_secret_request_outcome = None
+      self._runtime_secret_request_job_id = None
+      if completed_job_id == str(job_id):
+        if "error" in outcome:
+          raise outcome["error"]
+        if "response" in outcome:
+          return outcome["response"]
+
+    outcome = {}
+
+    def fetch():
+      try:
+        outcome["response"] = self.blockchain_manager.get_dauth_job_secret_bundle(
+          job_id=job_id,
+          request_timeout=RUNTIME_SECRET_REQUEST_TIMEOUT,
+        )
+      except Exception as exc:
+        outcome["error"] = exc
+
+    worker = Thread(
+      target=fetch,
+      name=ct.THREADS_PREFIX + 'runtime_secret_request',
+      daemon=True,
+    )
+    self._runtime_secret_request_worker = worker
+    self._runtime_secret_request_outcome = outcome
+    self._runtime_secret_request_job_id = str(job_id)
+    worker.start()
+    deadline = monotonic() + RUNTIME_SECRET_REQUEST_DEADLINE_SECONDS
+    while worker.is_alive():
+      if vars(self).get("_Orchestrator__done", False):
+        raise RuntimeError("Runtime secret resolver is shutting down.")
+      remaining = deadline - monotonic()
+      if remaining <= 0:
+        raise TimeoutError("dAuth secret request exceeded its runtime deadline.")
+      worker.join(timeout=min(RUNTIME_SECRET_RESOLVER_POLL_SECONDS, remaining))
+
+    if "error" in outcome:
+      self._runtime_secret_request_worker = None
+      self._runtime_secret_request_outcome = None
+      self._runtime_secret_request_job_id = None
+      raise outcome["error"]
+    if "response" not in outcome:
+      self._runtime_secret_request_worker = None
+      self._runtime_secret_request_outcome = None
+      self._runtime_secret_request_job_id = None
+      raise RuntimeError("dAuth secret request completed without a response.")
+    response = outcome["response"]
+    self._runtime_secret_request_worker = None
+    self._runtime_secret_request_outcome = None
+    self._runtime_secret_request_job_id = None
+    return response
+
+  def runtime_secret_resolution_loop(self):
+    """Resolve dAuth placeholders asynchronously until orchestrator shutdown."""
+    while not self.__done:
+      try:
+        self._resolve_runtime_streams_once()
+      except Exception:
+        self.P(
+          "Unexpected runtime secret resolver failure:\n{}".format(
+            traceback.format_exc()
+          ),
+          color='r',
+        )
+      sleep(RUNTIME_SECRET_RESOLVER_POLL_SECONDS)
+    return
+
+  def _start_runtime_secret_resolver_thread(self):
+    """Start the single runtime-secret resolver daemon when it is not alive."""
+    self._ensure_runtime_secret_resolution_state()
+    if (
+      self._thread_runtime_secret_resolver is not None
+      and self._thread_runtime_secret_resolver.is_alive()
+    ):
+      return
+    self._thread_runtime_secret_resolver = Thread(
+      target=self.runtime_secret_resolution_loop,
+      args=(),
+      name=ct.THREADS_PREFIX + 'runtime_secret_resolver',
+      daemon=True,
+    )
+    self._thread_runtime_secret_resolver.start()
+    return
   
   def get_node_running_time(self):
     return self.running_time
@@ -912,6 +1236,40 @@ class Orchestrator(DecentrAIObject,
         )
       else:
         self.P("Asynchronous communication thread joined.", color='y')
+    _thread_runtime_secret_resolver = vars(self).get('_thread_runtime_secret_resolver')
+    if (
+      _thread_runtime_secret_resolver is not None
+      and _thread_runtime_secret_resolver.is_alive()
+    ):
+      join_timeout = RUNTIME_SECRET_SHUTDOWN_JOIN_SECONDS
+      _thread_runtime_secret_resolver.join(timeout=join_timeout)
+      if _thread_runtime_secret_resolver.is_alive():
+        self.P(
+          "Runtime secret resolver thread did not stop after {:.1f}s; continuing shutdown.".format(
+            join_timeout
+          ),
+          color='r',
+        )
+      else:
+        self.P("Runtime secret resolver thread joined.", color='y')
+    _runtime_secret_request_worker = vars(self).get('_runtime_secret_request_worker')
+    if (
+      _runtime_secret_request_worker is not None
+      and _runtime_secret_request_worker.is_alive()
+    ):
+      _runtime_secret_request_worker.join(
+        timeout=RUNTIME_SECRET_REQUEST_JOIN_SECONDS
+      )
+      if _runtime_secret_request_worker.is_alive():
+        self.P(
+          "Runtime secret request worker did not stop after {:.1f}s; "
+          "it cannot publish runtime state and will remain a daemon.".format(
+            RUNTIME_SECRET_REQUEST_JOIN_SECONDS
+          ),
+          color='r',
+        )
+      else:
+        self.P("Runtime secret request worker joined.", color='y')
     _thread_admin_pipeline_collect = vars(self).get('_thread_admin_pipeline_collect')
     if _thread_admin_pipeline_collect is not None and _thread_admin_pipeline_collect.is_alive():
       join_timeout = min(5.0, max(1.0, 4 * self.cfg_admin_pipeline_dispatch_poll_seconds))
@@ -1406,7 +1764,9 @@ class Orchestrator(DecentrAIObject,
       Calls the BusinessManager to start new plugins and kill the unused ones
     """
     self.__loop_stage = '2.bm.refresh.call_bm.update_streams'
-    in_use_ai_engines = self._business_manager.update_streams(self._current_dct_config_streams)
+    in_use_ai_engines = self._business_manager.update_streams(
+      self._get_runtime_streams_snapshot()
+    )
     return in_use_ai_engines
 
   def choose_current_running_streams(self):
@@ -1422,7 +1782,11 @@ class Orchestrator(DecentrAIObject,
     try:
       running_streams = self._get_running_streams_snapshot()
       if self._current_dct_config_streams != running_streams:
-        self._current_dct_config_streams = running_streams
+        self._ensure_runtime_secret_resolution_state()
+        with self._runtime_config_lock:
+          self._current_dct_config_streams = running_streams
+          self._runtime_dct_config_streams = {}
+        self._reconcile_runtime_streams(running_streams)
     except:
       msg = "CRITICAL error in `choose_current_running_streams`"      
       self.P(msg, color='r')
@@ -1461,7 +1825,7 @@ class Orchestrator(DecentrAIObject,
     dict
         Single-entry admin-pipeline snapshot, or an empty dict when absent.
     """
-    running_streams = self._get_running_streams_snapshot()
+    running_streams = self._get_capture_streams_snapshot()
     if ct.CONST_ADMIN_PIPELINE_NAME not in running_streams:
       return {}
     return {
@@ -1476,7 +1840,7 @@ class Orchestrator(DecentrAIObject,
     with self.__capture_manager_lock:
       # update the streams to know which captures are done
       self.__loop_stage = '4.collect.update_streams'
-      self._capture_manager.update_streams(self._current_dct_config_streams)
+      self._capture_manager.update_streams(self._get_capture_streams_snapshot())
       
       self.__loop_stage = '4.collect.get_all_cap'
       excluded_stream_names = (
@@ -2057,6 +2421,13 @@ class Orchestrator(DecentrAIObject,
       return
 
     admin_stream_config = admin_running_streams[ct.CONST_ADMIN_PIPELINE_NAME]
+    admin_runtime_streams = self._get_admin_pipeline_runtime_streams_snapshot()
+    if len(admin_runtime_streams) == 0:
+      self.P(
+        "Admin bootstrap skipped: runtime configuration is not available.",
+        color='y',
+      )
+      return
     self.P(
       "Admin bootstrap: priming '{}' capture and admin instances before serving warmup.".format(
         ct.CONST_ADMIN_PIPELINE_NAME
@@ -2079,7 +2450,7 @@ class Orchestrator(DecentrAIObject,
       color='b',
     )
 
-    self._business_manager.bootstrap_admin_pipeline_instances(admin_running_streams)
+    self._business_manager.bootstrap_admin_pipeline_instances(admin_runtime_streams)
     self._collect_admin_pipeline_inputs_once(running_streams=admin_running_streams)
     self.P("Admin bootstrap completed before serving warmup.", color='b')
     return

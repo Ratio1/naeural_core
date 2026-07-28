@@ -294,7 +294,12 @@ class ConfigManager(
 
   def _apply_delta_to_config(self, original_config: dict, delta_config: dict, ignore_fields: list = None) -> dict:
     """
-    Will apply the delta configuration to the original configuration inplace.
+    Apply a delta to the original configuration in place.
+
+    The delta is prepared on a detached copy and canonical secret references are
+    restored before committing it. If protected-structure validation fails, the
+    original configuration remains unchanged.
+
     The delta configuration is a dictionary with the keys that need to be updated.
     The keys can be nested, separated by '.'. In this case, the original configuration
     will be traversed in depth.
@@ -314,6 +319,8 @@ class ConfigManager(
         The updated configuration
     """
 
+    canonical_config = deepcopy(original_config)
+    proposed_config = deepcopy(original_config)
     if ignore_fields is None:
       ignore_fields = []
 
@@ -322,11 +329,17 @@ class ConfigManager(
         continue
       
       if '.' not in k:
-        original_config[k] = v
+        proposed_config[k] = v
       else:
-        self.__apply_nested_key(original_config, k, v)
+        self.__apply_nested_key(proposed_config, k, v)
     # endfor
 
+    protected_config = overlay_canonical_secret_references(
+      proposed=proposed_config,
+      canonical=canonical_config,
+    )
+    original_config.clear()
+    original_config.update(protected_config)
     return original_config
   
   def save_instance_modifications(self, pipeline_name, signature, instance_id, config):

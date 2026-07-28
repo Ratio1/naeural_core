@@ -30,6 +30,7 @@ from naeural_core.config.runtime_secret_resolution import (
   overlay_canonical_secret_references,
   resolve_environment_references,
 )
+from naeural_core.local_libraries.config_handler_mixin import _ConfigHandlerMixin
 from naeural_core.main.orchestrator import Orchestrator
 
 
@@ -359,6 +360,77 @@ class OrchestratorRuntimeSecretTests(unittest.TestCase):
     self.assertEqual(orchestrator._get_runtime_streams_snapshot(), {})
     self.assertEqual(orchestrator._runtime_secret_cache, {})
 
+  def test_inflight_resolution_does_not_publish_stale_pipeline_snapshot(self):
+    orchestrator = self._make_orchestrator([
+      _bundle("stale"),
+      _bundle("fresh"),
+    ])
+    original = _pipeline()
+    original["USE_LOCAL_COMMS_ONLY"] = False
+    updated = deepcopy(original)
+    updated["USE_LOCAL_COMMS_ONLY"] = True
+    self._set_canonical(orchestrator, {"secret_pipeline": original})
+
+    original_fetch = orchestrator._fetch_dauth_job_secret_bundle
+
+    def fetch_and_update(job_id):
+      response = original_fetch(job_id)
+      with orchestrator._runtime_config_lock:
+        orchestrator._current_dct_config_streams = {
+          "secret_pipeline": deepcopy(updated),
+        }
+      return response
+
+    orchestrator._fetch_dauth_job_secret_bundle = fetch_and_update
+
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=1), 0)
+    self.assertEqual(orchestrator._get_runtime_streams_snapshot(), {})
+
+    orchestrator._fetch_dauth_job_secret_bundle = original_fetch
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=2), 1)
+    runtime = orchestrator._get_runtime_streams_snapshot()["secret_pipeline"]
+    self.assertTrue(runtime["USE_LOCAL_COMMS_ONLY"])
+    self.assertEqual(
+      runtime["PLUGINS"][0]["INSTANCES"][0]["ENV"]["TOKEN"],
+      "fresh",
+    )
+
+  def test_inflight_failure_does_not_record_retry_for_stale_pipeline_snapshot(self):
+    orchestrator = self._make_orchestrator([
+      RuntimeError("stale failure"),
+      _bundle("fresh"),
+    ])
+    original = _pipeline()
+    original["USE_LOCAL_COMMS_ONLY"] = False
+    updated = deepcopy(original)
+    updated["USE_LOCAL_COMMS_ONLY"] = True
+    self._set_canonical(orchestrator, {"secret_pipeline": original})
+
+    original_fetch = orchestrator._fetch_dauth_job_secret_bundle
+
+    def fetch_and_update(job_id):
+      try:
+        return original_fetch(job_id)
+      finally:
+        with orchestrator._runtime_config_lock:
+          orchestrator._current_dct_config_streams = {
+            "secret_pipeline": deepcopy(updated),
+          }
+
+    orchestrator._fetch_dauth_job_secret_bundle = fetch_and_update
+
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=1), 0)
+    self.assertEqual(orchestrator._runtime_secret_retry_state, {})
+
+    orchestrator._fetch_dauth_job_secret_bundle = original_fetch
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=2), 1)
+    runtime = orchestrator._get_runtime_streams_snapshot()["secret_pipeline"]
+    self.assertTrue(runtime["USE_LOCAL_COMMS_ONLY"])
+    self.assertEqual(
+      runtime["PLUGINS"][0]["INSTANCES"][0]["ENV"]["TOKEN"],
+      "fresh",
+    )
+
   def test_business_manager_receives_runtime_snapshot_only(self):
     orchestrator = self._make_orchestrator([_bundle()])
     self._set_canonical(orchestrator, {"secret_pipeline": _pipeline()})
@@ -475,6 +547,10 @@ class ConfigManagerSecretBarrierTests(unittest.TestCase):
     manager._get_plugin_instance = lambda **kwargs: instance
     manager._saved = []
     manager._save_stream_config = lambda config, **kwargs: manager._saved.append(deepcopy(config))
+    manager._check_duplicate_last = lambda **kwargs: False
+    manager.keep_good_stream = lambda config: config
+    manager._create_notification = lambda **kwargs: None
+    manager.admin_pipeline_name = ct.CONST_ADMIN_PIPELINE_NAME
     manager.log = type("LogHarness", (), {"P": lambda self, *args, **kwargs: None})()
     manager.P = lambda *args, **kwargs: None
     return manager
@@ -544,6 +620,115 @@ class ConfigManagerSecretBarrierTests(unittest.TestCase):
       saved_plugins[1]["INSTANCES"][0]["ENV"]["TOKEN"],
       DAUTH_SECRET_PLACEHOLDER,
     )
+
+  def test_instance_command_barrier_prevents_nested_plaintext_persistence(self):
+    manager = self._make_manager()
+
+    result = manager.update_pipeline_instance(
+      {
+        ct.PAYLOAD_DATA.NAME: "secret_pipeline",
+        ct.PLUGIN_INFO.SIGNATURE: "TEST_PLUGIN",
+        ct.PLUGIN_INFO.INSTANCE_ID: "test_instance",
+        ct.PAYLOAD_DATA.INSTANCE_CONFIG: {
+          "ENV.TOKEN": "dauth-plaintext",
+          "ENV.LOCAL": "env-plaintext",
+          "NEW_VALUE": "persist-me",
+        },
+      },
+      initiator_id=None,
+      session_id=None,
+    )
+
+    self.assertEqual(
+      result,
+      ("secret_pipeline", "TEST_PLUGIN", "test_instance"),
+    )
+    instance = manager.dct_config_streams["secret_pipeline"]["PLUGINS"][0]["INSTANCES"][0]
+    self.assertEqual(instance["ENV"]["TOKEN"], DAUTH_SECRET_PLACEHOLDER)
+    self.assertEqual(instance["ENV"]["LOCAL"], "$EE_LOCAL_SECRET")
+    self.assertEqual(instance["NEW_VALUE"], "persist-me")
+
+  def test_batch_instance_command_barrier_prevents_plaintext_persistence(self):
+    manager = self._make_manager()
+
+    manager.batch_update_pipeline_instance(
+      [{
+        ct.PAYLOAD_DATA.NAME: "secret_pipeline",
+        ct.PLUGIN_INFO.SIGNATURE: "TEST_PLUGIN",
+        ct.PLUGIN_INFO.INSTANCE_ID: "test_instance",
+        ct.PAYLOAD_DATA.INSTANCE_CONFIG: {
+          "ENV.TOKEN": "dauth-plaintext",
+          "NEW_VALUE": "persist-me",
+        },
+      }],
+      initiator_id=None,
+      session_id=None,
+    )
+
+    instance = manager.dct_config_streams["secret_pipeline"]["PLUGINS"][0]["INSTANCES"][0]
+    self.assertEqual(instance["ENV"]["TOKEN"], DAUTH_SECRET_PLACEHOLDER)
+    self.assertEqual(instance["NEW_VALUE"], "persist-me")
+
+  def test_pipeline_command_barrier_prevents_plaintext_persistence(self):
+    manager = self._make_manager()
+    runtime_pipeline = build_runtime_pipeline_config(
+      manager.dct_config_streams["secret_pipeline"],
+      secret_plugins=_secret_plugins(),
+      environment={"EE_LOCAL_SECRET": "local", "EE_LIST_SECRET": "list"},
+    )
+    runtime_pipeline["INITIATOR_ID"] = None
+    runtime_pipeline["NEW_VALUE"] = "persist-me"
+
+    manager.update_config_stream(
+      runtime_pipeline,
+      initiator_id=None,
+      session_id=None,
+    )
+
+    saved = manager.dct_config_streams["secret_pipeline"]
+    instance = saved["PLUGINS"][0]["INSTANCES"][0]
+    self.assertEqual(instance["ENV"]["TOKEN"], DAUTH_SECRET_PLACEHOLDER)
+    self.assertEqual(instance["ENV"]["LOCAL"], "$EE_LOCAL_SECRET")
+    self.assertEqual(instance["ARGS"][0], "$EE_LIST_SECRET")
+    self.assertEqual(saved["NEW_VALUE"], "persist-me")
+
+  def test_rejected_command_delta_leaves_canonical_config_unchanged(self):
+    manager = self._make_manager()
+    canonical = manager.dct_config_streams["secret_pipeline"]
+    before = deepcopy(canonical)
+    changed_plugins = deepcopy(canonical["PLUGINS"])
+    changed_plugins[0]["SIGNATURE"] = "RENAMED_PLUGIN"
+    changed_plugins[0]["INSTANCES"][0]["ENV"]["TOKEN"] = "plaintext"
+
+    with self.assertRaisesRegex(RuntimeSecretResolutionError, "changed SIGNATURE"):
+      manager._apply_delta_to_config(
+        canonical,
+        {"PLUGINS": changed_plugins},
+      )
+
+    self.assertEqual(canonical, before)
+
+
+class ConfigDebugLoggingTests(unittest.TestCase):
+  def test_debug_merge_logs_keys_without_configuration_values(self):
+    handler = _ConfigHandlerMixin.__new__(_ConfigHandlerMixin)
+    handler.log = object()
+    handler._messages = []
+    handler.P = lambda message, **kwargs: handler._messages.append(message)
+
+    result = handler._merge_prepare_config(
+      default_config={"TOKEN": "old-secret", "UNCHANGED": "same"},
+      delta_config={"TOKEN": "must-never-appear", "UNCHANGED": "same"},
+      debug=True,
+      verbose=2,
+    )
+
+    logged = "\n".join(handler._messages)
+    self.assertEqual(result["TOKEN"], "must-never-appear")
+    self.assertIn("TOKEN", logged)
+    self.assertIn("configuration values omitted", logged)
+    self.assertNotIn("must-never-appear", logged)
+    self.assertNotIn("old-secret", logged)
 
 
 class CmdAPIBuilderTests(unittest.TestCase):

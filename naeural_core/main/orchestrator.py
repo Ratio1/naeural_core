@@ -1065,14 +1065,7 @@ class Orchestrator(DecentrAIObject,
           return resolved_count
         with self._runtime_config_lock:
           current_pipeline = self._current_dct_config_streams.get(pipeline_name)
-          try:
-            current_key = get_dauth_pipeline_identity(
-              pipeline_name=pipeline_name,
-              pipeline_config=current_pipeline,
-            )
-          except Exception:
-            current_key = None
-          if current_key != cache_key:
+          if current_pipeline != pipeline_config:
             continue
           attempt = retry_state.get("attempt", 0) + 1
           exponent = min(attempt - 1, 5)
@@ -1102,14 +1095,7 @@ class Orchestrator(DecentrAIObject,
 
       with self._runtime_config_lock:
         current_pipeline = self._current_dct_config_streams.get(pipeline_name)
-        try:
-          current_key = get_dauth_pipeline_identity(
-            pipeline_name=pipeline_name,
-            pipeline_config=current_pipeline,
-          )
-        except Exception:
-          current_key = None
-        if current_key != cache_key:
+        if current_pipeline != pipeline_config:
           continue
         self._runtime_secret_cache[cache_key] = secret_plugins
         self._runtime_secret_retry_state.pop(cache_key, None)

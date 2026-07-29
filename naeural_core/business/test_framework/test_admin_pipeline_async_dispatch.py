@@ -551,6 +551,7 @@ class TestAdminPipelineCollectionLane(unittest.TestCase):
     orchestrator._Orchestrator__capture_manager_lock = Lock()
     setattr(orchestrator, "_Orchestrator__done", False)
     orchestrator._current_dct_config_streams = {}
+    orchestrator._runtime_dct_config_streams = {}
     orchestrator._main_loop_counts = defaultdict(int)
     orchestrator._reset_timers = False
     orchestrator._thread_admin_pipeline_collect = None
@@ -570,6 +571,9 @@ class TestAdminPipelineCollectionLane(unittest.TestCase):
     orchestrator._current_dct_config_streams = deepcopy(
       orchestrator._config_manager.dct_config_streams
     )
+    orchestrator._runtime_dct_config_streams = deepcopy(
+      orchestrator._current_dct_config_streams
+    )
 
     dct_captures = orchestrator.collect_data()
 
@@ -586,6 +590,9 @@ class TestAdminPipelineCollectionLane(unittest.TestCase):
     orchestrator._current_dct_config_streams = deepcopy(
       orchestrator._config_manager.dct_config_streams
     )
+    orchestrator._runtime_dct_config_streams = deepcopy(
+      orchestrator._current_dct_config_streams
+    )
 
     dct_captures = orchestrator.collect_data()
 
@@ -594,6 +601,12 @@ class TestAdminPipelineCollectionLane(unittest.TestCase):
 
   def test_collect_once_builds_and_dispatches_admin_inputs(self):
     orchestrator = self._make_orchestrator()
+    orchestrator._current_dct_config_streams = deepcopy(
+      orchestrator._config_manager.dct_config_streams
+    )
+    orchestrator._runtime_dct_config_streams = deepcopy(
+      orchestrator._current_dct_config_streams
+    )
 
     dispatched = orchestrator._collect_admin_pipeline_inputs_once()
 
@@ -655,6 +668,12 @@ class TestAdminPipelineCollectionLane(unittest.TestCase):
 
   def test_bootstrap_admin_pipeline_startup_runs_before_serving_warmup(self):
     orchestrator = self._make_orchestrator()
+    orchestrator._current_dct_config_streams = deepcopy(
+      orchestrator._config_manager.dct_config_streams
+    )
+    orchestrator._runtime_dct_config_streams = deepcopy(
+      orchestrator._config_manager.dct_config_streams
+    )
     call_order = []
     orchestrator.choose_current_running_streams = lambda: call_order.append("choose")
     orchestrator._capture_manager.ensure_stream_capture = lambda config_stream: call_order.append(("capture_ensure", deepcopy(config_stream))) or True

@@ -134,9 +134,18 @@ class _ConfigHandlerMixin(object):
       )
     )
     if debug and hasattr(self, 'log'):
-      str_init = '\n{}'.format(self.log.dict_pretty_format(default_config))
-      str_delta = '\n{}'.format(self.log.dict_pretty_format(delta_config))
-      self.P("Update info:\n************ Initial:\n{}\n************ Modifications:\n{}".format(str_init, str_delta))
+      initial_keys = [] if not isinstance(default_config, dict) else sorted(
+        str(key) for key in default_config
+      )
+      modification_keys = sorted(str(key) for key in delta_config)
+      self.P(
+        "Update info (configuration values omitted):\n"
+        "************ Initial keys:\n{}\n"
+        "************ Modification keys:\n{}".format(
+          initial_keys,
+          modification_keys,
+        )
+      )
       
     if default_config is None:
       self.P("WARNING: no default config was provided at {} startup!".format(
@@ -149,19 +158,17 @@ class _ConfigHandlerMixin(object):
     for k in all_keys:
       if final_config.get(k) == delta_config.get(k) or k not in delta_config:
         if debug:
-          lst_msg.append("  {}={}".format(k, final_config.get(k)))
+          lst_msg.append("  {} [UNCHANGED]".format(k))
       else:
         if k not in final_config:
           if verbose > 1:
-            lst_msg.append("  {}={} [NEW]".format(k, delta_config[k]))
+            lst_msg.append("  {} [NEW]".format(k))
           else:
             lst_msg[-1] += k + '; '
           #endif verbose
         elif final_config[k] != delta_config[k]:
           if verbose > 1:
-            lst_msg.append("  {}={} -> {}={}".format(
-              k, final_config[k], k, delta_config[k])
-            )
+            lst_msg.append("  {} [UPDATED]".format(k))
           else:
             lst_msg[-1] += k + '; '
           #endif verbose

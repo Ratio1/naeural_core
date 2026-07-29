@@ -1,5 +1,43 @@
 from naeural_core.constants import COMMANDS, CONFIG_STREAM, PAYLOAD_DATA
 
+
+def build_cmdapi_stream_config(
+  name,
+  stream_type,
+  url=None,
+  reconnectable=None,
+  live_feed=False,
+  plugins=None,
+  stream_config_metadata=None,
+  cap_resolution=None,
+  **kwargs
+):
+  """Build a pipeline command configuration without side effects.
+
+  Parameters mirror ``_cmdapi_start_stream_by_params`` except for destination
+  and dispatch controls, which are intentionally excluded from the pure data
+  builder.
+  """
+  config_stream = {
+    CONFIG_STREAM.K_NAME: name,
+    CONFIG_STREAM.K_TYPE: stream_type,
+  }
+  if reconnectable is not None:
+    config_stream[CONFIG_STREAM.K_RECONNECTABLE] = reconnectable
+  if live_feed is not None:
+    config_stream[CONFIG_STREAM.K_LIVE_FEED] = live_feed
+  if url is not None:
+    config_stream[CONFIG_STREAM.K_URL] = url
+  if plugins is not None:
+    config_stream[CONFIG_STREAM.K_PLUGINS] = plugins
+  if stream_config_metadata is not None:
+    config_stream[CONFIG_STREAM.STREAM_CONFIG_METADATA] = stream_config_metadata
+  if cap_resolution is not None:
+    config_stream[CONFIG_STREAM.CAP_RESOLUTION] = cap_resolution
+  config_stream.update({key.upper(): value for key, value in kwargs.items()})
+  return config_stream
+
+
 class _CmdAPIMixin(object):
 
   def __init__(self):
@@ -17,6 +55,11 @@ class _CmdAPIMixin(object):
     c = self._commands
     self._cmdapi_refresh()
     return c  
+
+
+  def cmdapi_build_pipeline_config(self, **kwargs):
+    """Build pipeline command metadata without registering a command."""
+    return build_cmdapi_stream_config(**kwargs)
   
   
   def _cmdapi_send_commands(self):
@@ -611,33 +654,17 @@ class _CmdAPIMixin(object):
       **kwargs
     ):
 
-      config_stream = {
-        CONFIG_STREAM.K_NAME          : name,
-        CONFIG_STREAM.K_TYPE          : stream_type,
-      }
-
-      if reconnectable is not None:
-        config_stream[CONFIG_STREAM.K_RECONNECTABLE] = reconnectable
-
-      if live_feed is not None:
-        config_stream[CONFIG_STREAM.K_LIVE_FEED] = live_feed
-
-      if url is not None:
-        config_stream[CONFIG_STREAM.K_URL] = url
-
-      if plugins is not None:
-        config_stream[CONFIG_STREAM.K_PLUGINS] = plugins
-
-      if stream_config_metadata is not None:
-        config_stream[CONFIG_STREAM.STREAM_CONFIG_METADATA] = stream_config_metadata
-
-      if cap_resolution is not None:
-        config_stream[CONFIG_STREAM.CAP_RESOLUTION] = cap_resolution
-      
-      config_stream = {
-        **config_stream, 
-        **{k.upper():v for k,v in kwargs.items()},
-      }
+      config_stream = build_cmdapi_stream_config(
+        name=name,
+        stream_type=stream_type,
+        url=url,
+        reconnectable=reconnectable,
+        live_feed=live_feed,
+        plugins=plugins,
+        stream_config_metadata=stream_config_metadata,
+        cap_resolution=cap_resolution,
+        **kwargs
+      )
       self._cmdapi_start_stream_by_config(
         config_stream=config_stream, node_address=node_address,
         send_immediately=send_immediately,
@@ -768,4 +795,3 @@ class _CmdAPIMixin(object):
       self._cmdapi_finish_stream_acquisition(node_address=node_address, stream_name=stream_name)
       return
   #endif
-

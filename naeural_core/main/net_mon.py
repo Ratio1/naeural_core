@@ -471,16 +471,9 @@ class NetworkMonitor(DecentrAIObject):
     if not isinstance(current_time, str):
       self.P("Ignoring local heartbeat without a valid timestamp.", color="r")
       return False
-    for timestamp_format in (
-      ct.HB.TIMESTAMP_FORMAT,
-      ct.HB.TIMESTAMP_FORMAT_SHORT,
-    ):
-      try:
-        dt.strptime(current_time, timestamp_format)
-        break
-      except ValueError:
-        continue
-    else:
+    try:
+      dt.strptime(current_time, ct.HB.TIMESTAMP_FORMAT)
+    except ValueError:
       self.P("Ignoring local heartbeat with malformed timestamp.", color="r")
       return False
 

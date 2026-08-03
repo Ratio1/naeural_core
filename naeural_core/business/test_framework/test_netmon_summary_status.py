@@ -1092,7 +1092,7 @@ class TestNetmonSummaryStatus(unittest.TestCase):
     heartbeat = {
       ct.EE_ID: "SELF",
       ct.HB.EE_ADDR: "0xai_SELF",
-      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
+      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00.000000",
     }
 
     netmon.register_local_heartbeat("SELF", heartbeat)
@@ -1116,7 +1116,7 @@ class TestNetmonSummaryStatus(unittest.TestCase):
       clear_env=True,
     )
     self.addCleanup(patcher.stop)
-    timestamp = "2026-05-28 10:00:00"
+    timestamp = "2026-05-28 10:00:00.000000"
     heartbeat = {
       ct.EE_ID: "SELF",
       ct.HB.EE_ADDR: "0xai_SELF",

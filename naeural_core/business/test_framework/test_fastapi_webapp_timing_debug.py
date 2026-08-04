@@ -129,6 +129,13 @@ class TestFastApiWebAppTimingDebug(unittest.TestCase):
     self.assertIn("DEBUG_TIMINGS = {{ debug_timings }}", template)
     self.assertIn("DEBUG_TIMINGS_STEPS = {{ debug_timings_steps }}", template)
 
+  def test_uvicorn_post_model_does_not_shadow_request_field(self):
+    template = UVICORN_TEMPLATE_PATH.read_text()
+    self.assertIn("request_model: {{ item['name'] }}Model", template)
+    self.assertIn("{{ param }} = request_model.{{ param }}", template)
+    self.assertIn("kwargs_dict = request_model.extras or {}", template)
+    self.assertNotIn("{{ param }} = request.{{ param }}", template)
+
   def test_timing_logs_wait_for_full_batch(self):
     harness = self._new_harness()
 

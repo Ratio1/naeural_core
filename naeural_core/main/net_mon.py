@@ -436,6 +436,54 @@ class NetworkMonitor(DecentrAIObject):
     return hb_data, owned_keys
 
 
+  def __prepare_local_heartbeat(
+    self, addr, data, local_timezone, require_current_time=False,
+  ):
+    """
+    Validate and canonicalize one decoded local self-heartbeat.
+
+    Local loopback runs before the communication layer adds transport metadata,
+    so the decoded ``CURRENT_TIME`` is the authoritative timestamp.
+    """
+    embedded_addr = data.get(ct.HB.EE_ADDR)
+    if embedded_addr is not None and not isinstance(embedded_addr, str):
+      self.P("Ignoring local heartbeat with malformed embedded address.", color="r")
+      return False
+
+    owner_addr = self.__remove_address_prefix(self.node_addr)
+    heartbeat_addr = self.__remove_address_prefix(addr)
+    embedded_addr = (
+      self.__remove_address_prefix(embedded_addr)
+      if embedded_addr is not None else owner_addr
+    )
+    if heartbeat_addr != owner_addr or embedded_addr != owner_addr:
+      self.P(
+        "Ignoring non-owner local heartbeat registration for address {}.".format(addr),
+        color="r",
+      )
+      return False
+
+    current_time = data.get(ct.HB.CURRENT_TIME)
+    if current_time is None and not require_current_time:
+      # Preserve the legacy uncompressed local-call contract. Compressed
+      # heartbeats must use CURRENT_TIME from their decoded canonical payload.
+      current_time = data.get(ct.PAYLOAD_DATA.EE_TIMESTAMP)
+    if not isinstance(current_time, str):
+      self.P("Ignoring local heartbeat without a valid timestamp.", color="r")
+      return False
+    try:
+      dt.strptime(current_time, ct.HB.TIMESTAMP_FORMAT)
+    except ValueError:
+      self.P("Ignoring local heartbeat with malformed timestamp.", color="r")
+      return False
+
+    # Compressed heartbeats always reach here with decoded CURRENT_TIME;
+    # uncompressed legacy callers may provide the equivalent EE_TIMESTAMP.
+    data[ct.PAYLOAD_DATA.EE_TIMESTAMP] = current_time
+    data[ct.PAYLOAD_DATA.EE_TIMEZONE] = local_timezone
+    return True
+
+
   def __build_hb_storage_snapshot(self, hb, owned_keys=None):
     """
     Detach a heartbeat before storing it in history.
@@ -497,7 +545,12 @@ class NetworkMonitor(DecentrAIObject):
   
 
   def __register_heartbeat(
-    self, addr, data, update_received_time=True, local_timezone=None,
+    self,
+    addr,
+    data,
+    update_received_time=True,
+    local_timezone=None,
+    local_owner_only=False,
   ):
     """
     Register a heartbeat in the local network monitor cache.
@@ -516,15 +569,33 @@ class NetworkMonitor(DecentrAIObject):
       When provided, canonicalize a locally generated heartbeat's timestamp
       before duplicate detection and storage. Local loopback occurs before the
       communication layer adds transport timestamp metadata.
+    local_owner_only : bool, optional
+      Validate the decoded heartbeat as owner-only local data before mutating
+      NetMon history. Malformed compressed local payloads are rejected safely.
 
     Returns
     -------
     dict or None
       The decoded heartbeat view when the heartbeat is accepted and stored.
-      None when it is dropped as a recent duplicate.
+      None when it is rejected or dropped as a recent duplicate.
     """
-    data, owned_keys = self.__decode_heartbeat_data(data)
-    if local_timezone is not None:
+    has_encoded_data = ct.HB.ENCODED_DATA in data
+    if local_owner_only:
+      try:
+        data, owned_keys = self.__decode_heartbeat_data(data)
+      except Exception:
+        self.P("Ignoring malformed compressed local heartbeat.", color="r")
+        return None
+      if not self.__prepare_local_heartbeat(
+        addr,
+        data,
+        local_timezone,
+        require_current_time=has_encoded_data,
+      ):
+        return None
+    else:
+      data, owned_keys = self.__decode_heartbeat_data(data)
+    if local_timezone is not None and not local_owner_only:
       data.setdefault(ct.PAYLOAD_DATA.EE_TIMESTAMP, data.get(ct.HB.CURRENT_TIME))
       data.setdefault(ct.PAYLOAD_DATA.EE_TIMEZONE, local_timezone)
 
@@ -1211,34 +1282,12 @@ class NetworkMonitor(DecentrAIObject):
         self.P("Ignoring malformed local heartbeat registration.", color="r")
         return
 
-      embedded_addr = data.get(ct.HB.EE_ADDR)
-      if embedded_addr is not None and not isinstance(embedded_addr, str):
-        self.P("Ignoring local heartbeat with malformed embedded address.", color="r")
-        return
-
-      owner_addr = self.__remove_address_prefix(self.node_addr)
-      heartbeat_addr = self.__remove_address_prefix(addr)
-      embedded_addr = (
-        self.__remove_address_prefix(embedded_addr)
-        if embedded_addr is not None else owner_addr
-      )
-      if heartbeat_addr != owner_addr or embedded_addr != owner_addr:
-        self.P(
-          "Ignoring non-owner local heartbeat registration for address {}.".format(addr),
-          color="r",
-        )
-        return
-
-      current_time = data.get(ct.PAYLOAD_DATA.EE_TIMESTAMP, data.get(ct.HB.CURRENT_TIME))
-      if not isinstance(current_time, str):
-        self.P("Ignoring local heartbeat without a valid timestamp.", color="r")
-        return
-
       epoch_data = self.__register_heartbeat(
         addr,
         data,
         update_received_time=True,
         local_timezone=self.log.utc_offset,
+        local_owner_only=True,
       )
       if epoch_data is not None:
         self.epoch_manager.register_local_self_data(epoch_data)

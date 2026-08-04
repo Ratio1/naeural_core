@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from datetime import datetime, timedelta
@@ -103,6 +104,23 @@ def _summary_node(addr="0xai_REMOTE", eeid="remote", working=ct.DEVICE_STATUS_ON
     "SCORE": 88,
     "trusted": True,
     "trust": 0.9,
+  }
+
+
+def _compressed_heartbeat(netmon, body, **envelope_fields):
+  return {
+    ct.HB.ENCODED_DATA: netmon.log.compress_text(json.dumps(body)),
+    ct.HB.HEARTBEAT_VERSION: ct.HB.V2,
+    **envelope_fields,
+  }
+
+
+def _local_heartbeat_envelope(**fields):
+  return {
+    ct.EE_ADDR: "0xai_SELF",
+    ct.EE_ID: "SELF",
+    ct.PAYLOAD_DATA.EE_EVENT_TYPE: ct.HEARTBEAT,
+    **fields,
   }
 
 
@@ -1074,7 +1092,7 @@ class TestNetmonSummaryStatus(unittest.TestCase):
     heartbeat = {
       ct.EE_ID: "SELF",
       ct.HB.EE_ADDR: "0xai_SELF",
-      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
+      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00.000000",
     }
 
     netmon.register_local_heartbeat("SELF", heartbeat)
@@ -1090,6 +1108,230 @@ class TestNetmonSummaryStatus(unittest.TestCase):
     )
     self.assertEqual(epoch_heartbeat[ct.PAYLOAD_DATA.EE_TIMEZONE], netmon.log.utc_offset)
     self.assertIn(ct.HB.RECEIVED_TIME, netmon.network_node_last_heartbeat("0xai_SELF"))
+
+  def test_uncompressed_local_self_heartbeat_preserves_timestamp_only_compatibility(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    timestamp = "2026-05-28 10:00:00.000000"
+    heartbeat = {
+      ct.EE_ID: "SELF",
+      ct.HB.EE_ADDR: "0xai_SELF",
+      ct.PAYLOAD_DATA.EE_TIMESTAMP: timestamp,
+    }
+
+    netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+
+    stored_heartbeat = netmon.network_node_last_heartbeat("0xai_SELF")
+    self.assertEqual(stored_heartbeat[ct.PAYLOAD_DATA.EE_TIMESTAMP], timestamp)
+    self.assertEqual(stored_heartbeat[ct.PAYLOAD_DATA.EE_TIMEZONE], netmon.log.utc_offset)
+    self.assertEqual(len(netmon.epoch_manager.local_calls), 1)
+
+  def test_local_self_heartbeat_decodes_compressed_production_payload(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    current_time = "2026-05-28 10:00:00.000000"
+    heartbeat = _compressed_heartbeat(
+      netmon,
+      {
+        ct.EE_ID: "SELF",
+        ct.HB.EE_ADDR: "0xai_SELF",
+        ct.HB.CURRENT_TIME: current_time,
+        ct.HB.NR_INFERENCES: 3,
+      },
+      **{
+        **_local_heartbeat_envelope(),
+        ct.HB.NR_INFERENCES: 3,
+        ct.HB.NR_PAYLOADS: 5,
+        ct.HB.NR_STREAMS_DATA: 7,
+      },
+    )
+    encoded_data = heartbeat[ct.HB.ENCODED_DATA]
+    decode_heartbeat = netmon._NetworkMonitor__decode_heartbeat_data
+
+    with mock.patch.object(
+      netmon,
+      "_NetworkMonitor__decode_heartbeat_data",
+      wraps=decode_heartbeat,
+    ) as decode_mock:
+      netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+
+    self.assertEqual(decode_mock.call_count, 1)
+    self.assertEqual(heartbeat[ct.HB.ENCODED_DATA], encoded_data)
+    self.assertNotIn(ct.PAYLOAD_DATA.EE_TIMESTAMP, heartbeat)
+    self.assertEqual(len(netmon.get_box_heartbeats("0xai_SELF")), 1)
+    stored_heartbeat = netmon.network_node_last_heartbeat("0xai_SELF")
+    self.assertEqual(stored_heartbeat[ct.HB.CURRENT_TIME], current_time)
+    self.assertEqual(stored_heartbeat[ct.PAYLOAD_DATA.EE_TIMESTAMP], current_time)
+    self.assertEqual(stored_heartbeat[ct.PAYLOAD_DATA.EE_TIMEZONE], netmon.log.utc_offset)
+    self.assertNotIn(ct.HB.ENCODED_DATA, stored_heartbeat)
+    self.assertEqual(len(netmon.epoch_manager.local_calls), 1)
+    self.assertEqual(
+      netmon.epoch_manager.local_calls[0][ct.PAYLOAD_DATA.EE_TIMESTAMP],
+      current_time,
+    )
+
+  def test_local_self_heartbeat_uses_decoded_time_over_outer_transport_metadata(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    current_time = "2026-05-28 10:00:00.000000"
+    heartbeat = _compressed_heartbeat(
+      netmon,
+      {
+        ct.EE_ID: "SELF",
+        ct.HB.EE_ADDR: "0xai_SELF",
+        ct.HB.CURRENT_TIME: current_time,
+      },
+      **_local_heartbeat_envelope(
+        **{
+          ct.PAYLOAD_DATA.EE_TIMESTAMP: "2020-01-01 00:00:00.000000",
+          ct.PAYLOAD_DATA.EE_TIMEZONE: "UTC+9",
+        },
+      ),
+    )
+
+    netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+
+    stored_heartbeat = netmon.network_node_last_heartbeat("0xai_SELF")
+    self.assertEqual(stored_heartbeat[ct.PAYLOAD_DATA.EE_TIMESTAMP], current_time)
+    self.assertEqual(stored_heartbeat[ct.PAYLOAD_DATA.EE_TIMEZONE], netmon.log.utc_offset)
+    self.assertEqual(len(netmon.epoch_manager.local_calls), 1)
+
+  def test_local_self_heartbeat_compressed_duplicate_updates_epoch_once(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    heartbeat = _compressed_heartbeat(
+      netmon,
+      {
+        ct.EE_ID: "SELF",
+        ct.HB.EE_ADDR: "0xai_SELF",
+        ct.HB.CURRENT_TIME: "2026-05-28 10:00:00.000000",
+      },
+      **_local_heartbeat_envelope(),
+    )
+
+    netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+    netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+
+    self.assertEqual(len(netmon.get_box_heartbeats("0xai_SELF")), 1)
+    self.assertEqual(len(netmon.epoch_manager.local_calls), 1)
+
+  def test_local_self_heartbeat_rejects_invalid_compressed_payloads_without_mutation(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    invalid_heartbeats = (
+      {
+        **_local_heartbeat_envelope(
+          **{ct.PAYLOAD_DATA.EE_TIMESTAMP: "2026-05-28 10:00:00.000000"},
+        ),
+        ct.HB.ENCODED_DATA: "not-compressed-data",
+      },
+      {
+        **_local_heartbeat_envelope(
+          **{ct.PAYLOAD_DATA.EE_TIMESTAMP: "2026-05-28 10:00:00.000000"},
+        ),
+        ct.HB.ENCODED_DATA: None,
+        ct.HB.HEARTBEAT_VERSION: ct.HB.V2,
+      },
+      {
+        **_local_heartbeat_envelope(
+          **{ct.PAYLOAD_DATA.EE_TIMESTAMP: "2026-05-28 10:00:00.000000"},
+        ),
+        ct.HB.ENCODED_DATA: netmon.log.compress_text(json.dumps([])),
+        ct.HB.HEARTBEAT_VERSION: ct.HB.V2,
+      },
+    )
+
+    for heartbeat in invalid_heartbeats:
+      with self.subTest(heartbeat=heartbeat):
+        netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+
+    self.assertEqual(netmon.all_nodes, [])
+    self.assertEqual(netmon.epoch_manager.local_calls, [])
+
+  def test_local_self_heartbeat_rejects_decoded_missing_timestamp_without_mutation(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    invalid_bodies = (
+      {
+        ct.EE_ID: "SELF",
+        ct.HB.EE_ADDR: "0xai_SELF",
+      },
+      {
+        ct.EE_ID: "SELF",
+        ct.HB.EE_ADDR: "0xai_SELF",
+        ct.HB.CURRENT_TIME: 123,
+      },
+      {
+        ct.EE_ID: "SELF",
+        ct.HB.EE_ADDR: "0xai_SELF",
+        ct.HB.CURRENT_TIME: "not-a-timestamp",
+      },
+    )
+
+    for body in invalid_bodies:
+      with self.subTest(body=body):
+        netmon.register_local_heartbeat(
+          "0xai_SELF",
+          _compressed_heartbeat(
+            netmon,
+            body,
+            **_local_heartbeat_envelope(
+              **{ct.PAYLOAD_DATA.EE_TIMESTAMP: "2026-05-28 10:00:00.000000"},
+            ),
+          ),
+        )
+
+    self.assertEqual(netmon.all_nodes, [])
+    self.assertEqual(netmon.epoch_manager.local_calls, [])
+
+  def test_local_self_heartbeat_rejects_decoded_non_owner_without_mutation(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=True,
+      extra_env={"EE_SUPERVISOR": "false"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+    for embedded_addr in ("0xai_REMOTE", 123):
+      with self.subTest(embedded_addr=embedded_addr):
+        heartbeat = _compressed_heartbeat(
+          netmon,
+          {
+            ct.EE_ID: "SELF",
+            ct.HB.EE_ADDR: embedded_addr,
+            ct.HB.CURRENT_TIME: "2026-05-28 10:00:00.000000",
+          },
+          **_local_heartbeat_envelope(
+            **{ct.PAYLOAD_DATA.EE_TIMESTAMP: "2026-05-28 10:00:00.000000"},
+          ),
+        )
+        netmon.register_local_heartbeat("0xai_SELF", heartbeat)
+
+    self.assertEqual(netmon.all_nodes, [])
+    self.assertEqual(netmon.epoch_manager.local_calls, [])
 
   def test_local_self_heartbeat_rejects_non_owner_addresses_before_mutation(self):
     invalid_heartbeats = (
@@ -1107,7 +1349,7 @@ class TestNetmonSummaryStatus(unittest.TestCase):
         self.addCleanup(patcher.stop)
         heartbeat = {
           ct.EE_ID: "SELF",
-          ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
+          ct.HB.CURRENT_TIME: "2026-05-28 10:00:00.000000",
           **heartbeat_fields,
         }
 
@@ -1127,7 +1369,7 @@ class TestNetmonSummaryStatus(unittest.TestCase):
     heartbeat = {
       ct.EE_ID: "SELF",
       ct.HB.EE_ADDR: "0xai_SELF",
-      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
+      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00.000000",
     }
 
     netmon.register_local_heartbeat("0xai_SELF", heartbeat)
@@ -1146,7 +1388,7 @@ class TestNetmonSummaryStatus(unittest.TestCase):
     local_heartbeat = {
       ct.EE_ID: "SELF",
       ct.HB.EE_ADDR: "0xai_SELF",
-      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00",
+      ct.HB.CURRENT_TIME: "2026-05-28 10:00:00.000000",
     }
 
     netmon.register_local_heartbeat("0xai_SELF", local_heartbeat)
@@ -1163,6 +1405,28 @@ class TestNetmonSummaryStatus(unittest.TestCase):
 
     self.assertEqual(len(netmon.get_box_heartbeats("0xai_SELF")), 1)
     self.assertEqual(netmon.epoch_manager.calls, 1)
+
+  def test_supervisor_local_registration_does_not_decode_malformed_envelope(self):
+    netmon, patcher = _make_netmon(
+      summary_enabled=False,
+      extra_env={"EE_SUPERVISOR": "true"},
+      clear_env=True,
+    )
+    self.addCleanup(patcher.stop)
+
+    with mock.patch.object(
+      netmon,
+      "_NetworkMonitor__decode_heartbeat_data",
+      wraps=netmon._NetworkMonitor__decode_heartbeat_data,
+    ) as decode_mock:
+      netmon.register_local_heartbeat(
+        "0xai_SELF",
+        {ct.HB.ENCODED_DATA: "not-compressed-data"},
+      )
+
+    self.assertEqual(decode_mock.call_count, 0)
+    self.assertEqual(netmon.all_nodes, [])
+    self.assertEqual(netmon.epoch_manager.local_calls, [])
 
 
 if __name__ == "__main__":

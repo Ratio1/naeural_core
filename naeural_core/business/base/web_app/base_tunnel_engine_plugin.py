@@ -51,6 +51,10 @@ class BaseTunnelEnginePlugin(
   """
   CONFIG = _CONFIG
 
+  def _redact_tunnel_command_for_log(self, command):
+    """Return a tunnel command with its Cloudflare token masked for logging."""
+    return _redact_cloudflared_token(command)
+
   def use_cloudflare(self):
     """
     Check if the plugin is configured to use Cloudflare as the tunnel engine.
@@ -128,7 +132,7 @@ class BaseTunnelEnginePlugin(
       return None
     
     try:
-      self.P(f"Running tunnel command: {_redact_cloudflared_token(command)}")
+      self.P(f"Running tunnel command: {self._redact_tunnel_command_for_log(command)}")
       popen_kwargs = dict(
         args=command,
         shell=True,
@@ -155,7 +159,10 @@ class BaseTunnelEnginePlugin(
       
       return process
     except Exception as e:
-      self.P(f"Error running tunnel command: {_redact_cloudflared_token(str(e))}")
+      self.P(
+        f"Error running tunnel command: "
+        f"{self._redact_tunnel_command_for_log(str(e))}"
+      )
       return None
 
   def _remember_process_group(self, process):

@@ -4,6 +4,7 @@ import subprocess
 import sys
 import types
 import unittest
+from collections import deque
 from types import SimpleNamespace
 from unittest import mock
 
@@ -155,6 +156,59 @@ ct = _CAPTURE_MANAGER_MODULE.ct
 CaptureManager = _CAPTURE_MANAGER_MODULE.CaptureManager
 _TUNNEL_MODULE = _load_base_tunnel_module()
 BaseTunnelEnginePlugin = _TUNNEL_MODULE.BaseTunnelEnginePlugin
+
+
+def _load_base_web_app_module():
+  """Load BaseWebAppPlugin with lightweight dependencies for log tests."""
+  path = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "business" / "base" / "web_app" / "base_web_app_plugin.py"
+  )
+  module_name = "base_web_app_plugin_under_test"
+  module = importlib.util.module_from_spec(
+    importlib.util.spec_from_file_location(module_name, path)
+  )
+
+  class _BasePluginExecutor:
+    CONFIG = {"VALIDATION_RULES": {}}
+
+  core_mod = types.ModuleType("naeural_core")
+  business_mod = types.ModuleType("naeural_core.business")
+  base_mod = types.ModuleType("naeural_core.business.base")
+  base_mod.BasePluginExecutor = _BasePluginExecutor
+  web_app_mod = types.ModuleType("naeural_core.business.base.web_app")
+  tunnel_mod = types.ModuleType(
+    "naeural_core.business.base.web_app.base_tunnel_engine_plugin"
+  )
+  tunnel_mod.BaseTunnelEnginePlugin = BaseTunnelEnginePlugin
+  jinja_mod = types.ModuleType("jinja2")
+  jinja_mod.Environment = mock.Mock()
+  jinja_mod.FileSystemLoader = mock.Mock()
+  psutil_mod = types.ModuleType("psutil")
+  stubs = {
+    "jinja2": jinja_mod,
+    "psutil": psutil_mod,
+    "naeural_core": core_mod,
+    "naeural_core.business": business_mod,
+    "naeural_core.business.base": base_mod,
+    "naeural_core.business.base.web_app": web_app_mod,
+    "naeural_core.business.base.web_app.base_tunnel_engine_plugin": tunnel_mod,
+  }
+  old_modules = {name: sys.modules.get(name) for name in stubs}
+  try:
+    sys.modules.update(stubs)
+    module.__spec__.loader.exec_module(module)
+  finally:
+    for name, old_module in old_modules.items():
+      if old_module is None:
+        sys.modules.pop(name, None)
+      else:
+        sys.modules[name] = old_module
+  return module
+
+
+_BASE_WEB_APP_MODULE = _load_base_web_app_module()
+BaseWebAppPlugin = _BASE_WEB_APP_MODULE.BaseWebAppPlugin
 
 
 class _Owner:
@@ -383,6 +437,40 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     self.assertEqual(popen.call_args.kwargs["args"], command)
     self.assertNotIn(token, "\n".join(plugin.messages))
     self.assertIn("--token [REDACTED]", "\n".join(plugin.messages))
+    return
+
+  def test_web_app_tunnel_start_logs_are_redacted_but_execution_is_unchanged(self):
+    token = "cloudflare-web-app-secret"
+    command = (
+      "cloudflared tunnel --no-autoupdate run "
+      f"--token {token} --url http://127.0.0.1:8080"
+    )
+    plugin = BaseWebAppPlugin.__new__(BaseWebAppPlugin)
+    plugin.messages = []
+    plugin.P = lambda msg, *args, **kwargs: plugin.messages.append(str(msg))
+    plugin.str_unique_identification = "test-web-app"
+    plugin.plugins_shmem = {"USED_PORTS": {"test-web-app": 8080}}
+    plugin.deque = deque
+    plugin.failed = False
+    plugin.get_setup_commands = lambda: []
+    plugin.get_start_commands = lambda: [command]
+    plugin.prepared_env = {}
+    plugin.add_payload_by_fields = lambda **kwargs: None
+    plugin.time = mock.Mock(side_effect=[0, 10])
+    process = mock.Mock()
+    executed = []
+    plugin._BaseWebAppPlugin__run_command = (
+      lambda cmd, env: (executed.append(cmd) or process, None, None)
+    )
+    plugin._BaseWebAppPlugin__wait_for_command = lambda process, timeout: (False, False)
+
+    plugin._BaseWebAppPlugin__setup_commands()
+    plugin._BaseWebAppPlugin__maybe_run_nth_start_command(0, timeout=5)
+
+    serialized_logs = "\n".join(plugin.messages)
+    self.assertEqual(executed, [command])
+    self.assertNotIn(token, serialized_logs)
+    self.assertEqual(serialized_logs.count("[REDACTED]"), 3)
     return
 
   def test_windows_fallback_kills_process_without_sigkill(self):

@@ -420,9 +420,6 @@ async def {{ item['name'] }}(
 ):
     """{{ item['endpoint_doc'] }}"""
     profile = _start_profile("{{ item['name'] }}")
-    {% for param in item['params'] %}
-    {{ param }} = request_model.{{ param }}
-    {% endfor %}
 
     {% if item['has_kwargs'] %}
     kwargs_dict = request_model.extras or {}
@@ -432,7 +429,7 @@ async def {{ item['name'] }}(
     call_plugin_args: List = []
     {% if item['require_token'] %}call_plugin_args.append(token){% endif %}
     {% for param in item['params'] %}
-    call_plugin_args.append({{ param }})
+    call_plugin_args.append(request_model.{{ param }})
     {% endfor %}
 
 {#    call_plugin_kwargs: Dict[str, Any] = {}#}

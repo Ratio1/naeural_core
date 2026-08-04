@@ -3,6 +3,8 @@ import pathlib
 import textwrap
 import unittest
 
+from jinja2 import Template
+
 
 FASTAPI_WEBAPP_PATH = pathlib.Path(__file__).resolve().parents[1] / "default" / "web_app" / "fast_api_web_app.py"
 UVICORN_TEMPLATE_PATH = pathlib.Path(__file__).resolve().parents[1] / "base" / "uvicorn_templates" / "basic_server.j2"
@@ -64,6 +66,20 @@ class TestFastApiWebAppTimingDebug(unittest.TestCase):
       if isinstance(item, ast.FunctionDef) and item.name == method_name:
         return item
     self.fail(f"FastApiWebAppPlugin.{method_name} not found")
+
+  def _render_regular_post_route(self, params, require_token=True, has_kwargs=True):
+    template = UVICORN_TEMPLATE_PATH.read_text()
+    start = template.index("class {{ item['name'] }}Model")
+    end = template.index("{% else %}\n{% if item['method'] is not none %}", start)
+    route_template = Template(template[start:end])
+    return route_template.render(item={
+      "name": "collision_case",
+      "args": [f"{param}: str" for param in params],
+      "params": params,
+      "endpoint_doc": "Collision regression endpoint.",
+      "require_token": require_token,
+      "has_kwargs": has_kwargs,
+    })
 
   def _build_harness(self, entrypoint):
     method_nodes = {
@@ -129,12 +145,51 @@ class TestFastApiWebAppTimingDebug(unittest.TestCase):
     self.assertIn("DEBUG_TIMINGS = {{ debug_timings }}", template)
     self.assertIn("DEBUG_TIMINGS_STEPS = {{ debug_timings_steps }}", template)
 
-  def test_uvicorn_post_model_does_not_shadow_request_field(self):
+  def test_uvicorn_post_model_does_not_assign_endpoint_fields(self):
     template = UVICORN_TEMPLATE_PATH.read_text()
     self.assertIn("request_model: {{ item['name'] }}Model", template)
-    self.assertIn("{{ param }} = request_model.{{ param }}", template)
+    self.assertIn("call_plugin_args.append(request_model.{{ param }})", template)
     self.assertIn("kwargs_dict = request_model.extras or {}", template)
+    self.assertNotIn("{{ param }} = request_model.{{ param }}", template)
     self.assertNotIn("{{ param }} = request.{{ param }}", template)
+
+  def test_rendered_post_route_does_not_assign_over_body_model(self):
+    params = ["request", "request_model", "value"]
+    rendered = self._render_regular_post_route(params=params)
+    compile(rendered, "<rendered-post-route>", "exec")
+    module = ast.parse(rendered)
+    handler = next(node for node in module.body if isinstance(node, ast.AsyncFunctionDef))
+
+    assigned_names = {
+      target.id
+      for statement in handler.body
+      if isinstance(statement, ast.Assign)
+      for target in statement.targets
+      if isinstance(target, ast.Name)
+    }
+    self.assertTrue(set(params).isdisjoint(assigned_names))
+
+    append_args = []
+    for statement in handler.body:
+      if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        continue
+      call = statement.value
+      if not isinstance(call.func, ast.Attribute) or call.func.attr != "append":
+        continue
+      if not isinstance(call.func.value, ast.Name) or call.func.value.id != "call_plugin_args":
+        continue
+      append_args.append(ast.unparse(call.args[0]))
+
+    self.assertEqual(
+      append_args,
+      [
+        "token",
+        "request_model.request",
+        "request_model.request_model",
+        "request_model.value",
+        "kwargs_dict",
+      ],
+    )
 
   def test_timing_logs_wait_for_full_batch(self):
     harness = self._new_harness()

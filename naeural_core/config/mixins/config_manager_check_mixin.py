@@ -1,5 +1,4 @@
 from naeural_core import constants as ct
-from naeural_core.utils.logging_utils import redact_cloudflare_tokens
 import json
 
 class _ConfigManagerCheckMixin(object):
@@ -9,7 +8,7 @@ class _ConfigManagerCheckMixin(object):
 
   def __append_exception_message(self, messages, str_message, extra=None):
     if extra is not None:
-      str_message += '\n{}'.format(json.dumps(redact_cloudflare_tokens(extra)))
+      str_message += '\n{}'.format(json.dumps(extra))
 
     messages.append({'notif' : ct.STATUS_TYPE.STATUS_EXCEPTION, 'msg' : str_message})
     self.P(str_message, color='r')
@@ -413,7 +412,7 @@ class _ConfigManagerCheckMixin(object):
           new_instances = [x[ct.PLUGIN_INFO.INSTANCE_ID] for x in new_config_plugin[ct.CONFIG_STREAM.INSTANCES]]
           crt_msg = "WARNING! plugin `{}`:{} already exists for stream `{}` with instances: {}. Keeping just the first one:\n{}".format(
             plugin_signature, new_instances, stream_name, instances,
-            redact_cloudflare_tokens(lst_config_plugins),
+            lst_config_plugins,
           )
           self.__append_exception_message(messages, crt_msg)
         else:

@@ -125,9 +125,6 @@ def _load_base_tunnel_module():
   ngrok_mod._NgrokMixinPlugin = _NgrokMixinPlugin
   cloudflare_mod = types.ModuleType("naeural_core.business.mixins_libs.cloudflare_mixin")
   cloudflare_mod._CloudflareMixinPlugin = _CloudflareMixinPlugin
-  utils_mod = types.ModuleType("naeural_core.utils")
-  logging_utils_mod = types.ModuleType("naeural_core.utils.logging_utils")
-  logging_utils_mod.redact_cloudflare_tokens = lambda value: value
 
   stubs = {
     "naeural_core": core_mod,
@@ -136,8 +133,6 @@ def _load_base_tunnel_module():
     "naeural_core.business.mixins_libs": mixins_mod,
     "naeural_core.business.mixins_libs.ngrok_mixin": ngrok_mod,
     "naeural_core.business.mixins_libs.cloudflare_mixin": cloudflare_mod,
-    "naeural_core.utils": utils_mod,
-    "naeural_core.utils.logging_utils": logging_utils_mod,
   }
   old_modules = {
     name: sys.modules.get(name)
@@ -367,6 +362,28 @@ def _fake_proc_stat_open(proc_entries):
 
 
 class TestTunnelShutdownHardening(unittest.TestCase):
+
+  def test_cloudflare_tunnel_start_redacts_token_but_executes_original_command(self):
+    token = "cloudflare-tunnel-secret"
+    command = (
+      "cloudflared tunnel --no-autoupdate run "
+      f"--token {token} --url http://127.0.0.1:8080"
+    )
+    plugin = BaseTunnelEnginePlugin.__new__(BaseTunnelEnginePlugin)
+    plugin.messages = []
+    plugin.P = lambda msg, *args, **kwargs: plugin.messages.append(str(msg))
+    plugin.LogReader = mock.Mock(side_effect=lambda *args, **kwargs: mock.Mock())
+    plugin._remember_process_group = mock.Mock()
+    process = mock.Mock(stdout=mock.Mock(), stderr=mock.Mock())
+
+    with mock.patch.object(_TUNNEL_MODULE.subprocess, "Popen", return_value=process) as popen:
+      result = plugin.run_tunnel_command(command)
+
+    self.assertIs(result, process)
+    self.assertEqual(popen.call_args.kwargs["args"], command)
+    self.assertNotIn(token, "\n".join(plugin.messages))
+    self.assertIn("--token [REDACTED]", "\n".join(plugin.messages))
+    return
 
   def test_windows_fallback_kills_process_without_sigkill(self):
     plugin = BaseTunnelEnginePlugin.__new__(BaseTunnelEnginePlugin)

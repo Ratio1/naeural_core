@@ -19,6 +19,7 @@ from naeural_core.main.orchestrator import Orchestrator
 from naeural_core import Logger
 
 from naeural_core.main.ver import __VER__
+from naeural_core.utils.logging_utils import redact_cloudflare_tokens
 
 # TODO: change to `from ratio1 import`
 from ratio1.utils import load_dotenv
@@ -122,17 +123,17 @@ def get_config(config_fn):
     #endif config string is a file
     elif len(config_string) > 3:
       # assume input is json config and we will overwrite the local cache even if it exists
-      print("Attempting to process JSON '{}'...".format(config_string), flush=True)      
+      print("Attempting to process inline JSON from EE_CONFIG...", flush=True)
       config_data = json.loads(config_string)
       if isinstance(config_data, dict):
         with open(fn, 'w') as fh:
           json.dump(config_data, fh)
         print("Saved config JSON to {}".format(fn), flush=True)
       else:
-        print("ERROR: EE_CONFIG '{}' is neither config file nor valid json data".format(config_string), flush=True)
+        print("ERROR: EE_CONFIG is neither a config file nor valid JSON data", flush=True)
         sys.exit(ct.CODE_CONFIG_ERROR)
     else:
-      print("ERROR: EE_CONFIG '{}' cannot be used for startup configuration".format(config_string), flush=True)
+      print("ERROR: EE_CONFIG cannot be used for startup configuration", flush=True)
       sys.exit(ct.CODE_CONFIG_ERROR)
       #endif cache or copy
     #endif JSON or file
@@ -468,7 +469,8 @@ def main(additional_packages: list = None):
     l.P("ERROR: config_startup.txt is not a valid json file", color='r', boxed=True)
     sys.exit(ct.CODE_CONFIG_ERROR)
   else:
-    l.P("Running with config:\n{}".format(json.dumps(l.config_data, indent=4)), color='n')
+    safe_config_data = redact_cloudflare_tokens(l.config_data)
+    l.P("Running with config:\n{}".format(json.dumps(safe_config_data, indent=4)), color='n')
 
   packs = l.get_packages(as_text=True, indent=4, mandatory=MANDATORY_PACKAGES)
   l.P("Current build installed packages:\n{}".format(packs))
@@ -477,7 +479,8 @@ def main(additional_packages: list = None):
   l.P("Environment:")
   for k in os.environ:
     if k.startswith('EE_') or k.startswith('AIXP'):
-      l.P("  {}={}".format(k, os.environ[k]))
+      safe_value = redact_cloudflare_tokens({k: os.environ[k]})[k]
+      l.P("  {}={}".format(k, safe_value))
   # DEBUG end log environment
 
   if is_docker:

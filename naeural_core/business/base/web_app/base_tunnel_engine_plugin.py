@@ -6,6 +6,7 @@ import time
 from naeural_core.business.base import BasePluginExecutor
 from naeural_core.business.mixins_libs.ngrok_mixin import _NgrokMixinPlugin
 from naeural_core.business.mixins_libs.cloudflare_mixin import _CloudflareMixinPlugin
+from naeural_core.utils.logging_utils import redact_cloudflare_tokens
 
 
 _CONFIG = {
@@ -110,7 +111,7 @@ class BaseTunnelEnginePlugin(
       return None
     
     try:
-      self.P(f"Running tunnel command: {command}")
+      self.P(f"Running tunnel command: {redact_cloudflare_tokens(command)}")
       popen_kwargs = dict(
         args=command,
         shell=True,
@@ -137,7 +138,7 @@ class BaseTunnelEnginePlugin(
       
       return process
     except Exception as e:
-      self.P(f"Error running tunnel command: {e}")
+      self.P(f"Error running tunnel command: {redact_cloudflare_tokens(str(e))}")
       return None
 
   def _remember_process_group(self, process):

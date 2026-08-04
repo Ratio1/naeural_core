@@ -30,6 +30,7 @@ from naeural_core.config.runtime_secret_resolution import (
   extract_dauth_plugins_secret_tree,
   get_dauth_pipeline_identity,
 )
+from naeural_core.utils.logging_utils import redact_cloudflare_tokens
 from naeural_core.business import BusinessManager
 from naeural_core.comm import CommunicationManager
 from naeural_core.serving import ServingManager
@@ -2140,8 +2141,9 @@ class Orchestrator(DecentrAIObject,
           self.P("'{}' cmd from <{}:{}>".format(        
             command_type, initiator_id, sender_addr), color='y', boxed=True,
           )
+          safe_command_content = redact_cloudflare_tokens(command_content)
           if True:
-            self.P("  Command content: {}".format(str(command_content)[:250]), color='y')
+            self.P("  Command content: {}".format(str(safe_command_content)[:250]), color='y')
           res = self.run_cmd(
             # command string
             cmd=command_type, 
@@ -2151,11 +2153,18 @@ class Orchestrator(DecentrAIObject,
             session_id=session_id,
           )
           if res is not None:
-            self.P("  Command '{}' returned: {}".format(command_type, res), color='y')
+            self.P(
+              "  Command '{}' returned: {}".format(
+                command_type, redact_cloudflare_tokens(res)
+              ),
+              color='y',
+            )
             return_code, status = res
         except:
           msg = "CRITICAL error in `communicate_recv_and_handle` for command: '{}' originating from {}:{}\nContent: {}".format(
-            command_type, initiator_id, session_id, command_content)
+            command_type, initiator_id, session_id,
+            redact_cloudflare_tokens(command_content),
+          )
           self.P(msg, color='r')
           self._create_notification(
             notif=ct.STATUS_TYPE.STATUS_EXCEPTION, msg=msg, autocomplete_info=True,

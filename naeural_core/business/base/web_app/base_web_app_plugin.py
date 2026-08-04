@@ -8,6 +8,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from naeural_core.business.base import BasePluginExecutor
 from naeural_core.business.base.web_app.base_tunnel_engine_plugin import BaseTunnelEnginePlugin
+from naeural_core.utils.logging_utils import redact_cloudflare_tokens
 
 __VER__ = '0.0.0.0'
 
@@ -517,8 +518,9 @@ class BaseWebAppPlugin(
       return
 
     if not self.setup_commands_started[idx]:
-      self.P(f"Running setup command nr {idx}: {self.get_setup_commands()[idx]}")
-      proc, logs_reader, err_logs_reader = self.__run_command(self.get_setup_commands()[idx], self.base_env)
+      command = self.get_setup_commands()[idx]
+      self.P(f"Running setup command nr {idx}: {redact_cloudflare_tokens(command)}")
+      proc, logs_reader, err_logs_reader = self.__run_command(command, self.base_env)
       self.setup_commands_processes[idx] = proc
       self.dct_logs_reader[f"setup_{idx}"] = logs_reader
       self.dct_err_logs_reader[f"setup_{idx}"] = err_logs_reader
@@ -540,7 +542,7 @@ class BaseWebAppPlugin(
         self.add_payload_by_fields(
           command_type="setup",
           command_idx=idx,
-          command_str=self.get_setup_commands()[idx],
+          command_str=redact_cloudflare_tokens(self.get_setup_commands()[idx]),
           command_status="success"
         )
         self.P(f"Setup command nr {idx} finished successfully")
@@ -549,7 +551,7 @@ class BaseWebAppPlugin(
         self.add_payload_by_fields(
           command_type="setup",
           command_idx=idx,
-          command_str=self.get_setup_commands()[idx],
+          command_str=redact_cloudflare_tokens(self.get_setup_commands()[idx]),
           command_status="failed"
         )
         self.P(f"ERROR: Setup command nr {idx} finished with exit code {self.setup_commands_processes[idx].returncode}")
@@ -562,7 +564,7 @@ class BaseWebAppPlugin(
           self.add_payload_by_fields(
             command_type="setup",
             command_idx=idx,
-            command_str=self.get_setup_commands()[idx],
+            command_str=redact_cloudflare_tokens(self.get_setup_commands()[idx]),
             command_status="timeout"
           )
           self.failed = True
@@ -632,7 +634,7 @@ class BaseWebAppPlugin(
 
     if not self.start_commands_started[idx]:
       cmd = self.get_start_commands()[idx]
-      self.P(f"Running start command nr {idx}: {cmd}")
+      self.P(f"Running start command nr {idx}: {redact_cloudflare_tokens(cmd)}")
       proc, logs_reader, err_logs_reader = self.__run_command(cmd, self.prepared_env)
       self.start_commands_processes[idx] = proc
       self.dct_logs_reader[f"start_{idx}"] = logs_reader
@@ -655,7 +657,7 @@ class BaseWebAppPlugin(
         self.add_payload_by_fields(
           command_type="start",
           command_idx=idx,
-          command_str=self.get_start_commands()[idx],
+          command_str=redact_cloudflare_tokens(self.get_start_commands()[idx]),
           command_status="failed"
         )
         self.P(f"Start command nr {idx} finished unexpectedly. Please check the logs.")
@@ -667,10 +669,12 @@ class BaseWebAppPlugin(
         self.add_payload_by_fields(
           command_type="start",
           command_idx=idx,
-          command_str=cmd,
+          command_str=redact_cloudflare_tokens(cmd),
           command_status="success"
         )
-        self.P(f"Start cmd {idx} '{cmd}' is running after {timeout}s.")
+        self.P(
+          f"Start cmd {idx} '{redact_cloudflare_tokens(cmd)}' is running after {timeout}s."
+        )
     # endif setup command finished
     return
 
@@ -1150,8 +1154,8 @@ class BaseWebAppPlugin(
     self.dct_err_logs_reader = {}
 
     self.P(f"Port: {self.port}")
-    self.P(f"Setup commands: {setup_commands}")
-    self.P(f"Start commands: {start_commands}")
+    self.P(f"Setup commands: {redact_cloudflare_tokens(setup_commands)}")
+    self.P(f"Start commands: {redact_cloudflare_tokens(start_commands)}")
     return
 
 

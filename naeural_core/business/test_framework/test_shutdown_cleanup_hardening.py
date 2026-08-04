@@ -125,6 +125,9 @@ def _load_base_tunnel_module():
   ngrok_mod._NgrokMixinPlugin = _NgrokMixinPlugin
   cloudflare_mod = types.ModuleType("naeural_core.business.mixins_libs.cloudflare_mixin")
   cloudflare_mod._CloudflareMixinPlugin = _CloudflareMixinPlugin
+  utils_mod = types.ModuleType("naeural_core.utils")
+  logging_utils_mod = types.ModuleType("naeural_core.utils.logging_utils")
+  logging_utils_mod.redact_cloudflare_tokens = lambda value: value
 
   stubs = {
     "naeural_core": core_mod,
@@ -133,6 +136,8 @@ def _load_base_tunnel_module():
     "naeural_core.business.mixins_libs": mixins_mod,
     "naeural_core.business.mixins_libs.ngrok_mixin": ngrok_mod,
     "naeural_core.business.mixins_libs.cloudflare_mixin": cloudflare_mod,
+    "naeural_core.utils": utils_mod,
+    "naeural_core.utils.logging_utils": logging_utils_mod,
   }
   old_modules = {
     name: sys.modules.get(name)

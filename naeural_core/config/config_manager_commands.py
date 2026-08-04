@@ -1,6 +1,7 @@
 import os
 
 from naeural_core import constants as ct
+from naeural_core.utils.logging_utils import redact_cloudflare_tokens
 
 class ConfigCommandHandlers:
   
@@ -172,7 +173,9 @@ class ConfigCommandHandlers:
       )
       notif = ct.STATUS_TYPE.STATUS_EXCEPTION
       notif_code=ct.NOTIFICATION_CODES.PIPELINE_FAILED
-      info = "Command should contain NAME, SIGNATURE, INSTANCE_ID as well as INSTANCE_CONFIG 'delta' object and MUST address a existing pipeline. Full received command: {}".format(dct_config_data)
+      info = "Command should contain NAME, SIGNATURE, INSTANCE_ID as well as INSTANCE_CONFIG 'delta' object and MUST address a existing pipeline. Full received command: {}".format(
+        redact_cloudflare_tokens(dct_config_data)
+      )
     else:
       
       if session_id is None:
@@ -205,7 +208,7 @@ class ConfigCommandHandlers:
         info = ""
       else:
         msg = "Cannot find instance '{}' in pipeline/plugin <{}:{}>".format(instance_id, pipeline_name, signature)
-        info = "Full command: {}".format(dct_config_data)
+        info = "Full command: {}".format(redact_cloudflare_tokens(dct_config_data))
         notif = ct.STATUS_TYPE.STATUS_EXCEPTION
         notif_code=ct.NOTIFICATION_CODES.PIPELINE_FAILED
       #endif success or not
@@ -280,7 +283,7 @@ class ConfigCommandHandlers:
         ct.PAYLOAD_CT.COMMANDS.BATCH_UPDATE_PIPELINE_INSTANCE,
       )
       notif = ct.STATUS_TYPE.STATUS_EXCEPTION
-      info = "Full received payload: {}".format(lst_configs)
+      info = "Full received payload: {}".format(redact_cloudflare_tokens(lst_configs))
     else:
       instances = [
         "  - {}:{}:{}".format(x.get(ct.PAYLOAD_DATA.NAME), x.get(ct.PLUGIN_INFO.SIGNATURE), x.get(ct.PLUGIN_INFO.INSTANCE_ID)) 
@@ -324,7 +327,7 @@ class ConfigCommandHandlers:
     info = ""
     if pipeline_name not in self.dct_config_streams:
       msg = "Received invalid data '{}...' for commanding pipeline '{}'. Pipeline does not exist".format(
-        str(dct_config_data)[:10], pipeline_name
+        str(redact_cloudflare_tokens(dct_config_data))[:10], pipeline_name
       )
       notif = ct.STATUS_TYPE.STATUS_EXCEPTION
     else:      

@@ -21,6 +21,7 @@ from naeural_core.config.config_manager_commands import ConfigCommandHandlers
 from naeural_core.config.runtime_secret_resolution import (
   overlay_canonical_secret_references,
 )
+from naeural_core.utils.logging_utils import redact_cloudflare_tokens
 
 EXTENSION = '.json'
 
@@ -562,7 +563,8 @@ class ConfigManager(
         **default_admin_pipeline_setup, # we add the default type, etc
       }
       self.dct_config_streams[pipeline_name] = dct_current_admin # update the admin pipeline in the memory cache      
-      self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(dct_current_admin, indent=2)))
+      safe_admin_config = redact_cloudflare_tokens(dct_current_admin)
+      self.P("  Saving admin pipeline post modification:\n{}".format(json.dumps(safe_admin_config, indent=2)))
       self._save_stream_config(dct_current_admin)
     else:
       self.P("  Admin pipeline is already correctly configured - no need to save")

@@ -47,7 +47,6 @@ from naeural_core.data_structures import GeneralPayload
 from naeural_core.utils.config_utils import get_now_value_from_time_dict
 from naeural_core.utils.per_node_config import (
   CANONICAL_PER_NODE_CONFIG_KEY,
-  PER_NODE_CONFIG_KEYS,
   PER_NODE_TARGET_NODES_KEY,
   deep_merge_config,
   lookup_keys,
@@ -2091,15 +2090,19 @@ class BasePluginExecutor(
         A deep-copied config patched with the selected local overlay.
       """
       materialized = deepcopy(instance_config)
-      present_keys = [key for key in PER_NODE_CONFIG_KEYS if key in materialized]
-      if len(present_keys) > 1:
+      unsupported_keys = [
+        key for key in ("perNodeConfig", "PERNODECONFIG")
+        if key in materialized
+      ]
+      if unsupported_keys:
         raise ValueError(
-          f"Duplicate per-node config aliases are not supported: {present_keys}."
+          "Business plugin configuration only accepts 'PER_NODE_CONFIG'; "
+          f"unsupported spelling(s): {unsupported_keys}."
         )
-      if not present_keys:
+      if CANONICAL_PER_NODE_CONFIG_KEY not in materialized:
         return materialized
 
-      raw_config = materialized.pop(present_keys[0])
+      raw_config = materialized.pop(CANONICAL_PER_NODE_CONFIG_KEY)
       target_nodes = materialized.get(PER_NODE_TARGET_NODES_KEY)
       if not isinstance(target_nodes, list) or not target_nodes:
         target_nodes = materialized.get('CHAINSTORE_PEERS', [])

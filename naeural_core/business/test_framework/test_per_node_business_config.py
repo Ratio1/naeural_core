@@ -129,7 +129,7 @@ class PerNodeBusinessConfigTests(unittest.TestCase):
     )
     self.assertNotIn("PER_NODE_CONFIG", prepared)
 
-  def test_base_plugin_accepts_camel_case_per_node_config_after_key_normalization(self):
+  def test_base_plugin_rejects_camel_case_per_node_config_before_validation(self):
     plugin = object.__new__(_PluginHarness)
     plugin.log = SimpleNamespace(config_data={"PLUGINS_DEBUG_LOAD_TIMINGS": False})
     plugin._instance_config = None
@@ -148,17 +148,17 @@ class PerNodeBusinessConfigTests(unittest.TestCase):
     plugin._BasePluginExecutor__debug_config_changes = False
     plugin._BasePluginExecutor__set_loop_stage = lambda *_args, **_kwargs: None
 
+    validation_calls = []
+
     def capture_pre_validation_config(config, verbose=0):  # pylint: disable=unused-argument
-      plugin.pre_validation_config = deepcopy(config)
-      raise _StopAfterConfigPrepared()
+      validation_calls.append(deepcopy(config))
 
     plugin.setup_config_and_validate = capture_pre_validation_config
 
-    with self.assertRaises(_StopAfterConfigPrepared):
+    with self.assertRaisesRegex(ValueError, "only accepts 'PER_NODE_CONFIG'"):
       plugin._update_instance_config()
 
-    self.assertEqual(plugin.pre_validation_config["AI_ENGINE"], "llama_cpp_medium")
-    self.assertNotIn("PERNODECONFIG", plugin.pre_validation_config)
+    self.assertEqual(validation_calls, [])
 
   def test_replacing_overlay_does_not_reuse_previous_materialized_ai_config(self):
     plugin = object.__new__(_PluginHarness)

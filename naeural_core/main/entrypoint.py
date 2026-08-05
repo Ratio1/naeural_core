@@ -174,7 +174,7 @@ def install_package_with_constraints_to_target(
       # 1) Snapshot current environment into constraints file
       with open(constraints_path, "w", encoding="utf-8") as f:
         subprocess.run(
-          [sys.executable, "-m", "pip", "freeze"],
+          [sys.executable, "-m", "pip", "freeze", "--exclude-editable"],
           stdout=f,
           stderr=subprocess.PIPE,
           check=True,  # raises CalledProcessError on non-zero exit

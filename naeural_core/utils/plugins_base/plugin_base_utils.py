@@ -41,12 +41,6 @@ from functools import partial
 
 from naeural_core import constants as ct
 
-from naeural_core.serving.ai_engines.utils import (
-  get_serving_process_given_ai_engine,
-  get_ai_engine_given_serving_process,
-  get_params_given_ai_engine
-)
-
 from naeural_core.utils.plugins_base.persistence_serialization_mixin import _PersistenceSerializationMixin
 from naeural_core.utils.system_shared_memory import NumpySharedMemory
 
@@ -412,6 +406,8 @@ class _UtilsBaseMixin(
     return sys.version.split()[0]
   
   def get_serving_process_given_ai_engine(self, ai_engine):
+    from naeural_core.serving.ai_engines.utils import get_serving_process_given_ai_engine
+
     return get_serving_process_given_ai_engine(ai_engine)
   
     

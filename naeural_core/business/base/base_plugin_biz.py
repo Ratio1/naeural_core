@@ -45,6 +45,14 @@ from naeural_core.utils.mixins.code_executor import _CodeExecutorMixin
 
 from naeural_core.data_structures import GeneralPayload
 from naeural_core.utils.config_utils import get_now_value_from_time_dict
+from naeural_core.utils.per_node_config import (
+  CANONICAL_PER_NODE_CONFIG_KEY,
+  PER_NODE_CONFIG_KEYS,
+  PER_NODE_TARGET_NODES_KEY,
+  deep_merge_config,
+  lookup_keys,
+  overlay_for_node,
+)
 from naeural_core.business.test_framework.testing_manager import TestingManager
 from naeural_core.business.test_framework.scoring_manager import ScoringManager
 
@@ -69,6 +77,7 @@ _CONFIG = {
   
   'CHAINSTORE_PEERS' : [], # list of peers to be used for chainstore and will enable distribution even to non-whitelisted peers
   'CHAINSTORE_RESPONSE_KEY': None,  # key for plugin lifecycle confirmations to chainstore
+  'PER_NODE_TARGET_NODES': [],  # ordered target list used by PER_NODE_CONFIG.byIndex
 
   # set this to 1 for real time processing (data will be lost and only latest data be avail)
   # when PROCESS_DELAY is used this should be either bigger than 1 if we want to have previous data
@@ -428,6 +437,7 @@ class BasePluginExecutor(
     self._init_process_finalized = False
 
     self._instance_config = None
+    self._instance_config_unmaterialized = None
     
     self.__pipeline_use_local_comms_only = pipeline_use_local_comms_only
 
@@ -1540,8 +1550,12 @@ class BasePluginExecutor(
       self.loop_paused = False
       return
     last_config = self.config_data
+    last_unmaterialized_config = self._instance_config_unmaterialized
+    last_upstream_config = self._upstream_config
     try:
       last_config = deepcopy(self.config_data)
+      last_unmaterialized_config = deepcopy(self._instance_config_unmaterialized)
+      last_upstream_config = deepcopy(self._upstream_config)
       self._upstream_config = upstream_config
       self.P("Config {} on request {}:{}".format(self, modified_by_id, modified_by_addr), color='b')
       # DEBUG
@@ -1563,6 +1577,8 @@ class BasePluginExecutor(
     except Exception as exc:
       # rollback
       self._instance_config = last_config
+      self._instance_config_unmaterialized = last_unmaterialized_config
+      self._upstream_config = last_upstream_config
       self.config_data = last_config
       msg = "Exception occured while updating the instance config: '{}' Rollback to the last good config.".format(exc)
       info = traceback.format_exc()
@@ -2044,14 +2060,74 @@ class BasePluginExecutor(
     def _check_delta_config(self, delta_config):
       # see what keys differ from current config - particularly useful for INSTANCE_COMMAND
       updates = []
+      current_config = self._instance_config_unmaterialized
+      if current_config is None:
+        current_config = self._instance_config
       for k, v in delta_config.items():
         if (
-          (self._instance_config is None) or
-          (k not in self._instance_config) or
-          (v != self._instance_config[k])
+          (current_config is None) or
+          (k not in current_config) or
+          (v != current_config[k])
         ):
           updates.append(k)
       return updates
+
+    def _materialize_per_node_config(self, instance_config):
+      """Return the effective config for the current node.
+
+      The raw selector map is consumed from the effective plugin config so it
+      cannot leak into config handlers, serving startup parameters, payloads,
+      or plugin-visible configuration. The upstream copy remains intact for
+      future reconfiguration and selector validation by the deployer.
+
+      Parameters
+      ----------
+      instance_config : dict
+        Merged defaults, environment values, and upstream instance config.
+
+      Returns
+      -------
+      dict
+        A deep-copied config patched with the selected local overlay.
+      """
+      materialized = deepcopy(instance_config)
+      present_keys = [key for key in PER_NODE_CONFIG_KEYS if key in materialized]
+      if len(present_keys) > 1:
+        raise ValueError(
+          f"Duplicate per-node config aliases are not supported: {present_keys}."
+        )
+      if not present_keys:
+        return materialized
+
+      raw_config = materialized.pop(present_keys[0])
+      target_nodes = materialized.get(PER_NODE_TARGET_NODES_KEY)
+      if not isinstance(target_nodes, list) or not target_nodes:
+        target_nodes = materialized.get('CHAINSTORE_PEERS', [])
+      if not isinstance(target_nodes, list):
+        target_nodes = []
+
+      node_index = None
+      for lookup_key in lookup_keys(self.ee_addr):
+        if lookup_key in target_nodes:
+          node_index = target_nodes.index(lookup_key)
+          break
+
+      overlay = overlay_for_node(
+        raw_config=raw_config,
+        node_addr=self.ee_addr,
+        node_index=node_index,
+        label=CANONICAL_PER_NODE_CONFIG_KEY,
+      )
+      if overlay:
+        materialized = deep_merge_config(materialized, overlay)
+        self.P(
+          "Applied PER_NODE_CONFIG overlay for node={} index={}".format(
+            self.ee_addr,
+            node_index,
+          ),
+          color='b',
+        )
+      return materialized
 
     def _update_instance_config(self):
       debug_load_timings = self.log.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True)
@@ -2071,6 +2147,7 @@ class BasePluginExecutor(
         self.P("* * * * * Initial config of plugin `{}` * * *".format(self.__class__.__name__), color='m')
         reconfig = False
 
+      unmaterialized_config = self._instance_config_unmaterialized
       if self._environment_variables is not None and len(self._environment_variables) > 0:
         if self.__debug_config_changes:
           self.P("Updating instance config with node environment config....", color='m')
@@ -2079,8 +2156,8 @@ class BasePluginExecutor(
         self.__set_loop_stage('_update_instance_config._environment_variables')
         if debug_load_timings:
           env_start = perf_counter()
-        self._instance_config = self._merge_prepare_config(
-          default_config=self._instance_config,
+        unmaterialized_config = self._merge_prepare_config(
+          default_config=unmaterialized_config,
           delta_config=self._environment_variables,
           debug=self.__debug_config_changes,
         )
@@ -2094,10 +2171,12 @@ class BasePluginExecutor(
 
       if debug_load_timings:
         default_merge_start = perf_counter()
-      self._instance_config = self._merge_prepare_config(
-        default_config=self._instance_config,
+      unmaterialized_config = self._merge_prepare_config(
+        default_config=unmaterialized_config,
         debug=self.__debug_config_changes,
       )
+      self._instance_config_unmaterialized = deepcopy(unmaterialized_config)
+      self._instance_config = self._materialize_per_node_config(unmaterialized_config)
       if debug_load_timings:
         default_merge_s = perf_counter() - default_merge_start
 

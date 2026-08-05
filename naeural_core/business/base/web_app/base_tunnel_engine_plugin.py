@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 import subprocess
 import time
@@ -6,6 +7,23 @@ import time
 from naeural_core.business.base import BasePluginExecutor
 from naeural_core.business.mixins_libs.ngrok_mixin import _NgrokMixinPlugin
 from naeural_core.business.mixins_libs.cloudflare_mixin import _CloudflareMixinPlugin
+
+
+_CLOUDFLARED_TOKEN_RE = re.compile(
+  r"(--token(?:\s+|=))(?:\"[^\"]*\"|'[^']*'|[^\s;&|]+)",
+  flags=re.IGNORECASE,
+)
+_CLOUDFLARED_TOKEN_REDACTION = "[REDACTED]"
+
+
+def _redact_cloudflared_token(command):
+  """Return a log-safe Cloudflare tunnel command."""
+  if not isinstance(command, str) or "cloudflared" not in command.lower():
+    return command
+  return _CLOUDFLARED_TOKEN_RE.sub(
+    lambda match: match.group(1) + _CLOUDFLARED_TOKEN_REDACTION,
+    command,
+  )
 
 
 _CONFIG = {
@@ -32,6 +50,10 @@ class BaseTunnelEnginePlugin(
   expose methods as endpoints and tunnel traffic through ngrok or cloudflare.
   """
   CONFIG = _CONFIG
+
+  def _redact_tunnel_command_for_log(self, command):
+    """Return a tunnel command with its Cloudflare token masked for logging."""
+    return _redact_cloudflared_token(command)
 
   def use_cloudflare(self):
     """
@@ -110,7 +132,7 @@ class BaseTunnelEnginePlugin(
       return None
     
     try:
-      self.P(f"Running tunnel command: {command}")
+      self.P(f"Running tunnel command: {self._redact_tunnel_command_for_log(command)}")
       popen_kwargs = dict(
         args=command,
         shell=True,
@@ -137,7 +159,10 @@ class BaseTunnelEnginePlugin(
       
       return process
     except Exception as e:
-      self.P(f"Error running tunnel command: {e}")
+      self.P(
+        f"Error running tunnel command: "
+        f"{self._redact_tunnel_command_for_log(str(e))}"
+      )
       return None
 
   def _remember_process_group(self, process):

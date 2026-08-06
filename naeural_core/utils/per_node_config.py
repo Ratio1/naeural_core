@@ -63,7 +63,12 @@ def deep_merge_config(base, overlay, copy_fn=_deepcopy):
   return copy_fn(overlay)
 
 
-def get_structured_section(raw_config, section_name, aliases, label="perNodeConfig"):
+def get_structured_section(
+    raw_config,
+    section_name,
+    aliases,
+    label=CANONICAL_PER_NODE_CONFIG_KEY,
+):
   """Read one structured section while rejecting duplicate aliases."""
   present_aliases = [key for key in aliases if key in raw_config]
   if len(present_aliases) > 1:
@@ -82,7 +87,7 @@ def get_structured_section(raw_config, section_name, aliases, label="perNodeConf
 
 def normalize_config(
     raw_config,
-    label="perNodeConfig",
+    label=CANONICAL_PER_NODE_CONFIG_KEY,
     config_keys=PER_NODE_CONFIG_KEYS,
     system_keys=PER_NODE_CONFIG_SYSTEM_KEYS,
 ):
@@ -172,7 +177,7 @@ def normalize_config(
 
 def iter_overlays(
     raw_config,
-    label="perNodeConfig",
+    label=CANONICAL_PER_NODE_CONFIG_KEY,
     config_keys=PER_NODE_CONFIG_KEYS,
     system_keys=PER_NODE_CONFIG_SYSTEM_KEYS,
 ):
@@ -201,7 +206,7 @@ def overlay_for_node(
     raw_config,
     node_addr,
     node_index,
-    label="perNodeConfig",
+    label=CANONICAL_PER_NODE_CONFIG_KEY,
     copy_fn=_deepcopy,
     config_keys=PER_NODE_CONFIG_KEYS,
     system_keys=PER_NODE_CONFIG_SYSTEM_KEYS,
@@ -233,7 +238,7 @@ def overlay_for_node(
 def validate_selectors(
     raw_configs,
     nodes,
-    label="perNodeConfig",
+    label=CANONICAL_PER_NODE_CONFIG_KEY,
     config_keys=PER_NODE_CONFIG_KEYS,
     system_keys=PER_NODE_CONFIG_SYSTEM_KEYS,
 ):

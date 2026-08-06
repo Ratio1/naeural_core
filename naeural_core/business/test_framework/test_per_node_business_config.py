@@ -6,8 +6,11 @@ from types import SimpleNamespace
 from naeural_core.business.base.base_plugin_biz import BasePluginExecutor
 from naeural_core.utils.per_node_config import (
   deep_merge_config,
+  get_structured_section,
+  iter_overlays,
   normalize_config,
   overlay_for_node,
+  validate_selectors,
 )
 
 
@@ -35,6 +38,23 @@ class _PluginHarness(BasePluginExecutor):
 
 
 class PerNodeBusinessConfigTests(unittest.TestCase):
+  def test_core_helpers_use_canonical_error_label_by_default(self):
+    invalid_calls = (
+      lambda: get_structured_section(
+        {"default": []}, "default", ("default", "DEFAULT")
+      ),
+      lambda: normalize_config([]),
+      lambda: list(iter_overlays([])),
+      lambda: overlay_for_node([], "0xai_node_a", 0),
+      lambda: validate_selectors([[]], ["0xai_node_a"]),
+    )
+
+    for invalid_call in invalid_calls:
+      with self.subTest(call=invalid_call), self.assertRaisesRegex(
+        ValueError, "^PER_NODE_CONFIG"
+      ):
+        invalid_call()
+
   def test_overlay_precedence_deep_merges_default_index_and_node(self):
     raw_config = {
       "default": {

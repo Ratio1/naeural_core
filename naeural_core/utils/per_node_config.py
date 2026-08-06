@@ -1,10 +1,16 @@
-"""Shared helpers for selecting and materializing per-node plugin config."""
+"""Shared helpers for selecting and materializing per-node plugin config.
+
+Core business instances accept only the canonical ``PER_NODE_CONFIG`` field.
+The camel-case spelling remains recognized here solely so it cannot be nested
+inside an overlay and bypass the no-recursion validation.
+"""
 
 from copy import deepcopy as _deepcopy
 
 
 CANONICAL_PER_NODE_CONFIG_KEY = "PER_NODE_CONFIG"
 PER_NODE_TARGET_NODES_KEY = "PER_NODE_TARGET_NODES"
+# Recognized nested field spellings, not accepted BasePlugin top-level aliases.
 PER_NODE_CONFIG_KEYS = (
   "perNodeConfig",
   CANONICAL_PER_NODE_CONFIG_KEY,

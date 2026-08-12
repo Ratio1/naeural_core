@@ -102,6 +102,46 @@ class PerNodeBusinessConfigTests(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "system-managed"):
       normalize_config({"byNode": {"node-a": {"CHAINSTORE_PEERS": ["node-b"]}}})
 
+  def test_overlay_keys_are_canonicalized_and_case_collisions_rejected(self):
+    overlay = overlay_for_node(
+      {"byIndex": {"0": {"ai_engine": "llama_cpp_medium"}}},
+      "0xai_node_a",
+      0,
+    )
+
+    self.assertEqual(overlay, {"AI_ENGINE": "llama_cpp_medium"})
+    with self.assertRaisesRegex(ValueError, "duplicate normalized key 'AI_ENGINE'"):
+      normalize_config({
+        "byIndex": {
+          "0": {
+            "AI_ENGINE": "llama_cpp_small",
+            "ai_engine": "llama_cpp_medium",
+          },
+        },
+      })
+
+  def test_one_shot_commands_cannot_enter_retained_overlay_or_replay(self):
+    plugin = object.__new__(_PluginHarness)
+    for command_key in ("INSTANCE_COMMAND", "INSTANCE_COMMAND_LAST"):
+      raw_config = {
+        "AI_ENGINE": "llama_cpp_small",
+        "PER_NODE_TARGET_NODES": ["0xai_node_b"],
+        "PER_NODE_CONFIG": {
+          "byNode": {
+            "0xai_node_b": {
+              command_key.lower(): {"COMMAND": "RESTART"},
+            },
+          },
+        },
+      }
+      unrelated_update = deep_merge_config(raw_config, {"LOG_INFO": 1})
+
+      for candidate in (raw_config, unrelated_update):
+        with self.subTest(command_key=command_key, candidate=candidate), self.assertRaisesRegex(
+          ValueError, "system-managed"
+        ):
+          plugin._materialize_per_node_config(candidate)  # pylint: disable=protected-access
+
   def test_base_plugin_materializes_ai_config_before_validation(self):
     plugin = object.__new__(_PluginHarness)
     plugin.log = SimpleNamespace(config_data={"PLUGINS_DEBUG_LOAD_TIMINGS": False})

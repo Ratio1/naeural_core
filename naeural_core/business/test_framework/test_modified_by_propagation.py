@@ -206,6 +206,14 @@ def _make_common_stubs():
       "naeural_core.utils.config_utils",
       get_now_value_from_time_dict=lambda *_args, **_kwargs: None,
     ),
+    "naeural_core.utils.per_node_config": _module(
+      "naeural_core.utils.per_node_config",
+      CANONICAL_PER_NODE_CONFIG_KEY="PER_NODE_CONFIG",
+      PER_NODE_TARGET_NODES_KEY="PER_NODE_TARGET_NODES",
+      deep_merge_config=lambda base, overlay: {**base, **overlay},
+      lookup_keys=lambda node_addr: [node_addr],
+      overlay_for_node=lambda *_args, **_kwargs: {},
+    ),
     "naeural_core.business.test_framework": _module("naeural_core.business.test_framework"),
     "naeural_core.business.test_framework.testing_manager": _module(
       "naeural_core.business.test_framework.testing_manager",

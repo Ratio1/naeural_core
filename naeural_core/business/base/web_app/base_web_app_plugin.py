@@ -632,7 +632,8 @@ class BaseWebAppPlugin(
 
     if not self.start_commands_started[idx]:
       cmd = self.get_start_commands()[idx]
-      self.P(f"Running start command nr {idx}: {cmd}")
+      safe_cmd = self._redact_tunnel_command_for_log(cmd)
+      self.P(f"Running start command nr {idx}: {safe_cmd}")
       proc, logs_reader, err_logs_reader = self.__run_command(cmd, self.prepared_env)
       self.start_commands_processes[idx] = proc
       self.dct_logs_reader[f"start_{idx}"] = logs_reader
@@ -670,7 +671,8 @@ class BaseWebAppPlugin(
           command_str=cmd,
           command_status="success"
         )
-        self.P(f"Start cmd {idx} '{cmd}' is running after {timeout}s.")
+        safe_cmd = self._redact_tunnel_command_for_log(cmd)
+        self.P(f"Start cmd {idx} '{safe_cmd}' is running after {timeout}s.")
     # endif setup command finished
     return
 
@@ -1151,7 +1153,11 @@ class BaseWebAppPlugin(
 
     self.P(f"Port: {self.port}")
     self.P(f"Setup commands: {setup_commands}")
-    self.P(f"Start commands: {start_commands}")
+    safe_start_commands = [
+      self._redact_tunnel_command_for_log(command)
+      for command in start_commands
+    ]
+    self.P(f"Start commands: {safe_start_commands}")
     return
 
 

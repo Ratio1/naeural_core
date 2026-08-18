@@ -22,6 +22,7 @@ class _HeartbeatsCommMixin(object):
     already delivered heartbeat targets.
     """
     self._init()
+    self._start_heartbeat_ingress_worker()
     bytes_delivered = 1 # force to 1 to trigger the first send
     last_delivered = 0
     send_times = deque(maxlen=10_000)
@@ -76,6 +77,10 @@ class _HeartbeatsCommMixin(object):
           self._last_read = now
         # endif
 
+        # Disabling the worker is a configuration-only rollback. The CTRL owner
+        # must still consume heartbeats on this loop under regrouped roles.
+        self._process_next_heartbeat_synchronously()
+
         end_it = time()
         loop_time = end_it - start_it
         loop_resolution = self.loop_resolution
@@ -94,6 +99,7 @@ class _HeartbeatsCommMixin(object):
       # end try-except
     # endwhile
 
+    self._stop_heartbeat_ingress_worker(drain=True, timeout=10.0)
     self._release()
     self.P('`run_thread` finished')
     self._thread_stopped = True

@@ -6,13 +6,14 @@ import traceback
 import numpy as np
 import uuid
 
+from copy import deepcopy
 from time import perf_counter, time
 
 
 from collections import deque
 from naeural_core import DecentrAIObject
 from naeural_core import Logger
-from threading import Thread
+from threading import Lock, Thread
 
 from naeural_core.bc import DefaultBlockEngine
 from naeural_core.main.net_mon import NetworkMonitor
@@ -30,6 +31,8 @@ from naeural_core.comm.mixins import (
 
 from naeural_core.local_libraries import _ConfigHandlerMixin
 from .comm_loop_timing_debug import _CommLoopTimingDebugMixin
+from ..heartbeat_ingress import HeartbeatIngressProcessor, HeartbeatIngressWorker
+from ..message_buffer import ObservableMessageBuffer
 
 
 RUN_ON_THREAD = True
@@ -57,8 +60,35 @@ _CONFIG = {
 
   'DISABLE_ADDRESSED_PAYLOAD_SENDS': False,
 
-  'VALIDATION_RULES': {
+  # Heartbeat CTRL ingress uses bounded parallel raw-envelope authentication
+  # followed by one ordered state owner. ``shadow`` verifies and measures
+  # legacy traffic without rejecting it; operators can move to ``enforce``
+  # after rollout evidence.
+  'HEARTBEAT_INGRESS_WORKER_ENABLED': True,
+  'HEARTBEAT_INGRESS_QUEUE_SIZE': 10_000,
+  'HEARTBEAT_AUTH_WORKERS': 4,
+  'HEARTBEAT_AUTH_MAX_IN_FLIGHT': 32,
+  'HEARTBEAT_AUTH_MODE': 'shadow',
+  'HEARTBEAT_TARGETED_MIRROR_ENABLED': False,
 
+  'VALIDATION_RULES': {
+    'HEARTBEAT_INGRESS_QUEUE_SIZE': {
+      'TYPE': 'int',
+      'MIN_VAL': 1,
+    },
+    'HEARTBEAT_AUTH_WORKERS': {
+      'TYPE': 'int',
+      'MIN_VAL': 1,
+      'MAX_VAL': 32,
+    },
+    'HEARTBEAT_AUTH_MAX_IN_FLIGHT': {
+      'TYPE': 'int',
+      'MIN_VAL': 1,
+    },
+    'HEARTBEAT_AUTH_MODE': {
+      'TYPE': 'str',
+      'ACCEPTED_VALUES': ['off', 'shadow', 'enforce'],
+    },
   }
 }
 
@@ -117,10 +147,35 @@ class BaseCommThread(
     self.has_recv_conn = False  # public flag for RECV connection
     self._send_to = None
     self._last_send_retry_targets = None
-    self._send_buff = deque(maxlen=ct.COMM_SEND_BUFFER)
+    if comm_type in [
+      ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+      "L_" + ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+    ]:
+      self._send_buff = ObservableMessageBuffer(capacity=ct.COMM_SEND_BUFFER)
+    else:
+      self._send_buff = deque(maxlen=ct.COMM_SEND_BUFFER)
+    self._send_buffer_lock = Lock()
+    self._send_buffer_admitted = 0
+    self._send_buffer_rejected_full = 0
+    self._send_buffer_dequeued = 0
+    self._send_buffer_discarded = 0
+    self._send_buffer_high_water_mark = 0
+    self._send_buffer_degraded = False
+    self._outbound_state_lock = Lock()
+    self._outbound_current = None
+    self._outbound_transport_handoffs = 0
+    self._outbound_terminal_discards = 0
+    self._last_send_outcome = None
     self._send_channel_name = send_channel_name
-    self._recv_buff = deque(maxlen=ct.COMM_RECV_BUFFER + extra_receive_buffer)
+    recv_capacity = ct.COMM_RECV_BUFFER + extra_receive_buffer
+    if recv_channel_name == ct.COMMS.COMMUNICATION_CONFIG_CHANNEL:
+      self._recv_buff = ObservableMessageBuffer(capacity=recv_capacity)
+    else:
+      self._recv_buff = deque(maxlen=recv_capacity)
     self._recv_channel_name = recv_channel_name
+    self._heartbeat_ingress_processor = None
+    self._heartbeat_ingress_worker = None
+    self._heartbeat_ingress_stop_timed_out = False
     
     self.__deque_received_hashes = deque(maxlen=1000)
     
@@ -173,6 +228,11 @@ class BaseCommThread(
 
     self.setup_config_and_validate(self._config)
 
+    if self.receives_heartbeat_channel:
+      self._recv_buff = ObservableMessageBuffer(
+        capacity=self.cfg_heartbeat_ingress_queue_size,
+      )
+
     self._heavy_ops_manager = self.shmem['heavy_ops_manager']
     self._network_monitor: NetworkMonitor = self.shmem['network_monitor']
     self._io_formatter_manager = self.shmem['io_formatter_manager']
@@ -195,6 +255,63 @@ class BaseCommThread(
   @property
   def last_activity_time(self):
     return self._last_activity
+
+  @property
+  def recv_channel_name(self):
+    """Configured receive channel used to derive the traffic role."""
+    return self._recv_channel_name
+
+  @property
+  def receives_heartbeat_channel(self):
+    recv_channel = self._recv_channel_name
+    if isinstance(recv_channel, str):
+      recv_channel = recv_channel.upper()
+    return recv_channel == ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+
+  @property
+  def heartbeat_ingress_worker_enabled(self):
+    value = self.cfg_heartbeat_ingress_worker_enabled
+    if isinstance(value, str):
+      value = value.strip().lower() in ['1', 'true', 'yes', 'y', 'on']
+    return bool(value) and self.receives_heartbeat_channel
+
+  def _heartbeat_config_value(self, key, default=None):
+    env_key = 'EE_' + key
+    environment_variables = getattr(self, '_environment_variables', {}) or {}
+    if env_key in environment_variables:
+      return environment_variables[env_key]
+    if env_key in os.environ:
+      return os.environ[env_key]
+    return self._config.get(key, default)
+
+  @property
+  def cfg_heartbeat_ingress_worker_enabled(self):
+    return self._heartbeat_config_value(
+      'HEARTBEAT_INGRESS_WORKER_ENABLED', True,
+    )
+
+  @property
+  def cfg_heartbeat_ingress_queue_size(self):
+    return int(self._heartbeat_config_value(
+      'HEARTBEAT_INGRESS_QUEUE_SIZE', 10_000,
+    ))
+
+  @property
+  def cfg_heartbeat_auth_workers(self):
+    return int(self._heartbeat_config_value(
+      'HEARTBEAT_AUTH_WORKERS', 4,
+    ))
+
+  @property
+  def cfg_heartbeat_auth_max_in_flight(self):
+    return int(self._heartbeat_config_value(
+      'HEARTBEAT_AUTH_MAX_IN_FLIGHT', 32,
+    ))
+
+  @property
+  def cfg_heartbeat_auth_mode(self):
+    value = self._heartbeat_config_value('HEARTBEAT_AUTH_MODE', 'shadow')
+    return str(value).strip().lower()
 
   @property
   def server_address(self):
@@ -338,6 +455,15 @@ class BaseCommThread(
       return value.strip().upper() in ['1', 'TRUE', 'YES']
     return bool(value)
 
+  def __heartbeat_targeted_mirror_enabled(self):
+    """Return whether this node mirrors its heartbeat to its exact topic."""
+    value = self._heartbeat_config_value(
+      'HEARTBEAT_TARGETED_MIRROR_ENABLED', False,
+    )
+    if isinstance(value, str):
+      return value.strip().upper() in ['1', 'TRUE', 'YES']
+    return bool(value)
+
   def _resolve_publish_targets(self, data, send_to=None):
     """
     Resolve the effective publish targets for an outgoing message.
@@ -371,6 +497,33 @@ class BaseCommThread(
       return self._normalize_publish_targets(send_to)
 
     event_type = data.get(ct.PAYLOAD_DATA.EE_EVENT_TYPE, data.get('EE_EVENT_TYPE'))
+    if event_type == ct.HEARTBEAT and self.__heartbeat_targeted_mirror_enabled():
+      channel_cfg = (
+        self._config.get(self._send_channel_name, {})
+        if isinstance(self._send_channel_name, str)
+        else {}
+      )
+      targeted_topic = channel_cfg.get('TARGETED_TOPIC')
+      if not isinstance(targeted_topic, str) or '{}' not in targeted_topic:
+        if not getattr(
+          self,
+          '_heartbeat_targeted_topic_warning_emitted',
+          False,
+        ):
+          self.P(
+            "Heartbeat targeted mirror is enabled but channel '{}' has no "
+            "TARGETED_TOPIC. Publishing globally only.".format(
+              self._send_channel_name,
+            ),
+            color='y',
+          )
+          self._heartbeat_targeted_topic_warning_emitted = True
+        return [None]
+      own_address = getattr(self.bc_engine, 'address', None)
+      if own_address is None:
+        return [None]
+      return [None, self.bc_engine.maybe_add_prefix(own_address)]
+
     if event_type != 'PAYLOAD':
       return [None]
 
@@ -458,6 +611,174 @@ class BaseCommThread(
 
   def _get_errors(self):
     return [], []
+
+  def _decode_heartbeat_message(self, message):
+    """Decode a verified outer envelope with its declared formatter."""
+    formatter = self._io_formatter_manager.get_required_formatter_from_payload(message)
+    if formatter is None:
+      return None
+    return formatter.decode_output(message)
+
+  def _normalize_heartbeat_address(self, address):
+    """Normalize both current and legacy Ratio1 address prefixes."""
+    if not isinstance(address, str):
+      return None
+    lowered = address.lower()
+    for prefix in ('0xai_', 'aixp_'):
+      if lowered.startswith(prefix):
+        return address[len(prefix):]
+    if self.bc_engine is not None:
+      return self.bc_engine.maybe_remove_prefix(address)
+    return address
+
+  def _verify_heartbeat_message(self, message):
+    return self.bc_engine.verify(
+      message,
+      return_full_info=True,
+      verify_allowed=False,
+      log_hash_sign_fails=False,
+      persist_canon_stats=False,
+    )
+
+  def _authenticate_raw_heartbeat_message(self, raw_message):
+    incoming_len = len(raw_message) if hasattr(raw_message, '__len__') else 0
+    self.add_incoming(incoming_len)
+    return self._heartbeat_ingress_processor.authenticate(raw_message)
+
+  def _commit_authenticated_heartbeat(self, authenticated):
+    outcome = self._heartbeat_ingress_processor.commit_authenticated(
+      authenticated,
+    )
+    if outcome != 'invalid_json':
+      self._last_activity = time()
+    return outcome
+
+  def _process_raw_heartbeat_message(self, raw_message):
+    authenticated = self._authenticate_raw_heartbeat_message(raw_message)
+    return self._commit_authenticated_heartbeat(authenticated)
+
+  def _ensure_heartbeat_ingress_processor(self):
+    if getattr(self, '_heartbeat_ingress_processor', None) is None:
+      self._heartbeat_ingress_processor = HeartbeatIngressProcessor(
+        verify_message=self._verify_heartbeat_message,
+        decode_message=self._decode_heartbeat_message,
+        register_heartbeat=self._network_monitor.register_heartbeat,
+        decompress_text=self.log.decompress_text,
+        normalize_address=self._normalize_heartbeat_address,
+        auth_mode=self.cfg_heartbeat_auth_mode,
+      )
+    return self._heartbeat_ingress_processor
+
+  def _process_next_heartbeat_synchronously(self):
+    """Preserve heartbeat processing when the worker rollout flag is off."""
+    if (
+      not self.receives_heartbeat_channel
+      or self.heartbeat_ingress_worker_enabled
+      or len(self._recv_buff) == 0
+    ):
+      return None
+    self._ensure_heartbeat_ingress_processor()
+    raw_message = self._recv_buff.popleft()
+    return self._process_raw_heartbeat_message(raw_message)
+
+  def _start_heartbeat_ingress_worker(self):
+    """Start the dedicated CTRL consumer after transport initialization."""
+    if not self.receives_heartbeat_channel:
+      return
+    self._ensure_heartbeat_ingress_processor()
+    if not self.heartbeat_ingress_worker_enabled:
+      self.P(
+        "Heartbeat ingress worker is disabled; CTRL heartbeats will be "
+        "processed synchronously on the communication loop.",
+        color='y',
+      )
+      return
+    if self._heartbeat_ingress_worker is not None and self._heartbeat_ingress_worker.is_alive():
+      return
+
+    self._heartbeat_ingress_stop_timed_out = False
+    self._heartbeat_ingress_worker = HeartbeatIngressWorker(
+      message_buffer=self._recv_buff,
+      prepare_message=self._authenticate_raw_heartbeat_message,
+      commit_message=self._commit_authenticated_heartbeat,
+      prepare_workers=self.cfg_heartbeat_auth_workers,
+      max_in_flight=self.cfg_heartbeat_auth_max_in_flight,
+      poll_timeout=0.1,
+    )
+    self._heartbeat_ingress_worker.start()
+    self.P(
+      "Heartbeat ingress worker started (capacity={}, auth_mode={}, "
+      "auth_workers={}, max_in_flight={}).".format(
+        self.cfg_heartbeat_ingress_queue_size,
+        self.cfg_heartbeat_auth_mode,
+        self.cfg_heartbeat_auth_workers,
+        self.cfg_heartbeat_auth_max_in_flight,
+      ),
+      color='g',
+    )
+    return
+
+  def _stop_heartbeat_ingress_worker(self, drain=True, timeout=10.0):
+    worker = self._heartbeat_ingress_worker
+    if worker is not None:
+      close_recv_buffer = getattr(self._recv_buff, 'close', None)
+      if callable(close_recv_buffer):
+        close_recv_buffer(discard=not drain)
+      worker.stop(drain=drain, timeout=timeout)
+      if worker.is_alive():
+        self._heartbeat_ingress_stop_timed_out = True
+        printer = getattr(self, 'P', None)
+        if callable(printer):
+          printer(
+            "Heartbeat ingress did not stop within {:.1f}s; verifier stats "
+            "were not flushed and shutdown drain is incomplete.".format(
+              float(timeout),
+            ),
+            color='r',
+          )
+        return False
+      self._heartbeat_ingress_stop_timed_out = False
+    if (
+      worker is not None
+      or getattr(self, '_heartbeat_ingress_processor', None) is not None
+    ):
+      flush_verify_stats = getattr(
+        self.bc_engine,
+        'flush_verify_canon_stats',
+        None,
+      )
+      if callable(flush_verify_stats):
+        flush_verify_stats(wait=True, timeout=timeout)
+    return True
+
+  def get_heartbeat_ingress_status(self):
+    """Return low-overhead queue and processor conservation snapshots."""
+    buffer_snapshot = None
+    snapshot = getattr(self._recv_buff, 'snapshot', None)
+    if callable(snapshot):
+      buffer_snapshot = vars(snapshot())
+    processor_snapshot = None
+    if self._heartbeat_ingress_processor is not None:
+      processor_snapshot = vars(self._heartbeat_ingress_processor.snapshot())
+    worker_status = None
+    if self._heartbeat_ingress_worker is not None:
+      worker_status = {
+        'alive': self._heartbeat_ingress_worker.is_alive(),
+        'stop_timed_out': getattr(
+          self,
+          '_heartbeat_ingress_stop_timed_out',
+          False,
+        ),
+        'auth_workers': self._heartbeat_ingress_worker.prepare_workers,
+        'in_flight': self._heartbeat_ingress_worker.in_flight,
+        'max_in_flight': self._heartbeat_ingress_worker.max_in_flight,
+      }
+    return {
+      'enabled': self.heartbeat_ingress_worker_enabled,
+      'queue': buffer_snapshot,
+      'processor': processor_snapshot,
+      'worker': worker_status,
+    }
 
   def get_error_report(self):
     errors, times = self._get_errors()
@@ -572,6 +893,7 @@ class BaseCommThread(
     """
     is_ok = 0
     self._last_send_retry_targets = None
+    self._last_send_outcome = 'preparing'
     try:
       # next step will add the signature, hash, addr and also cleanup the payload
       self.maybe_debug_save_message_stage(
@@ -617,6 +939,7 @@ class BaseCommThread(
           self.add_outgoing(published_bytes)
           self._last_activity = time()
         if len(publish_result['failed_targets']) > 0:
+          self._last_send_outcome = 'retry_pending'
           self._last_send_retry_targets = list(publish_result['failed_targets'])
           attempted_targets = [x if x is not None else '<broadcast>' for x in publish_result['attempted_targets']]
           failed_targets = [x if x is not None else '<broadcast>' for x in publish_result['failed_targets']]
@@ -640,14 +963,17 @@ class BaseCommThread(
           )
           is_ok = 0
         else:
+          self._last_send_outcome = 'paho_handoff'
           is_ok = published_bytes
       else:
         self.P("Message size {:,.1f} KB was dropped for pipeline {}".format(
           len(message) / 1024, signed_data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>")
           ), color='r'
         )
+        self._last_send_outcome = 'terminal_dropped_oversize'
         is_ok = 1 # we return 1 to signal that the message was dropped and should not be preserved
     except Exception as exc:
+      self._last_send_outcome = 'retry_pending'
       self.has_send_conn = False
       msg = "`send_wrapper` error on payload {} -> {}\n{}".format(
         data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>"), exc,
@@ -711,7 +1037,12 @@ class BaseCommThread(
 
   def stop(self):
     self._stop = True
+    close_recv_buffer = getattr(self._recv_buff, 'close', None)
+    if callable(close_recv_buffer):
+      close_recv_buffer(discard=False)
+    self._stop_heartbeat_ingress_worker(drain=True, timeout=10.0)
     self._thread.join()
+    self._finish_outbound_current(terminal_discard=True)
     self._send_buff.clear()
     self._recv_buff.clear()
     self.P('Received `stop` command. Cleaned everything.')
@@ -771,6 +1102,123 @@ class BaseCommThread(
   def get_message_count(self):
     return self._msg_id
 
+  def _mark_outbound_dequeued(self, msg_id, age_at_dequeue_seconds=0.0):
+    """Record one command that left the local admission queue."""
+    with self._outbound_state_lock:
+      self._outbound_current = {
+        'message_id': msg_id,
+        'state': 'dequeued',
+        'dequeued_at': perf_counter(),
+        'age_at_dequeue_seconds': max(float(age_at_dequeue_seconds or 0.0), 0.0),
+        'retry_attempts': 0,
+        'retry_targets_count': 0,
+      }
+
+  def _set_outbound_current_state(
+      self,
+      state,
+      retry_targets=None,
+      increment_retry=False,
+    ):
+    """Update the payload-free state of the command currently being sent."""
+    with self._outbound_state_lock:
+      if self._outbound_current is None:
+        return
+      self._outbound_current['state'] = state
+      if retry_targets is not None:
+        if isinstance(retry_targets, (list, tuple, set)):
+          self._outbound_current['retry_targets_count'] = len(retry_targets)
+        else:
+          self._outbound_current['retry_targets_count'] = 1
+      if increment_retry:
+        self._outbound_current['retry_attempts'] += 1
+
+  def _finish_outbound_current(
+      self,
+      transport_handoff=False,
+      terminal_discard=False,
+    ):
+    """Account for the terminal local outcome of the current command."""
+    with self._outbound_state_lock:
+      if self._outbound_current is None:
+        return
+      if transport_handoff:
+        self._outbound_transport_handoffs += 1
+      if terminal_discard:
+        self._outbound_terminal_discards += 1
+      self._outbound_current = None
+
+  def get_inbound_queue_status(self):
+    """Return receive admission state when the active buffer is observable."""
+    snapshot = getattr(self._recv_buff, 'snapshot', None)
+    if callable(snapshot):
+      result = vars(snapshot())
+      result['discarded'] = result['discarded_on_close']
+      result['observable'] = True
+      return result
+    return {
+      'capacity': getattr(self._recv_buff, 'maxlen', None),
+      'depth': len(self._recv_buff),
+      'observable': False,
+    }
+
+  def get_transport_delivery_status(self):
+    """Return transport lifecycle state when the wrapper exposes it."""
+    controller = getattr(self, '_controller', None)
+    getter = getattr(controller, 'get_delivery_lifecycle_status', None)
+    return getter() if callable(getter) else None
+
+  def get_outbound_queue_status(self):
+    """Return exact process-local command admission and queue state."""
+    snapshot = getattr(self._send_buff, 'snapshot', None)
+    if callable(snapshot):
+      result = vars(snapshot())
+      result['discarded'] = result['discarded_on_close']
+    else:
+      with self._send_buffer_lock:
+        depth = len(self._send_buff)
+        capacity = getattr(self._send_buff, 'maxlen', None)
+        result = {
+          'capacity': capacity,
+          'depth': depth,
+          'admitted': self._send_buffer_admitted,
+          'rejected_full': self._send_buffer_rejected_full,
+          'dequeued': self._send_buffer_dequeued,
+          'discarded': self._send_buffer_discarded,
+          'high_water_mark': self._send_buffer_high_water_mark,
+          'oldest_age_seconds': None,
+          'closed': False,
+          'degraded': self._send_buffer_degraded,
+          'conserved': self._send_buffer_admitted == (
+            self._send_buffer_dequeued + self._send_buffer_discarded + depth
+          ),
+        }
+
+    with self._outbound_state_lock:
+      current = None if self._outbound_current is None else dict(self._outbound_current)
+      transport_handoffs = self._outbound_transport_handoffs
+      terminal_discards = self._outbound_terminal_discards
+    current_age = None
+    if current is not None:
+      current_age = current.pop('age_at_dequeue_seconds') + max(
+        perf_counter() - current.pop('dequeued_at'),
+        0.0,
+      )
+      current['age_seconds'] = current_age
+    queue_age = result.get('oldest_age_seconds')
+    unfinished_ages = [age for age in [queue_age, current_age] if age is not None]
+    result.update({
+      'current': current,
+      'oldest_unfinished_age_seconds': max(unfinished_ages) if unfinished_ages else None,
+      'transport_handoff_completed': transport_handoffs,
+      'terminal_discarded_after_dequeue': terminal_discards,
+      'completion_conserved': result['dequeued'] == (
+        transport_handoffs + terminal_discards + (1 if current is not None else 0)
+      ),
+      'application_execution_known': False,
+    })
+    return result
+
   def send(self, data):
     """Queue one outbound message for the comm loop.
 
@@ -786,12 +1234,45 @@ class BaseCommThread(
     slot starts as ``None`` so the first attempt uses the message's natural
     routing, and later retries can narrow the publish target list without
     mutating the original payload.
+
+    Returns
+    -------
+    bool or None
+      Command communicators return ``True`` when the bounded queue admits the
+      command and ``False`` when it rejects the newest command. Other
+      communicators preserve the legacy deque contract and return ``None``.
     """
+    is_command_communicator = self._comm_type in [
+      ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+      "L_" + ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+    ]
+    queued_data = deepcopy(data) if is_command_communicator else data
+
     self._msg_id += 1
     msg_id = self._msg_id
     now = self.log.now_str(nice_print=True, short=False)
-    self._send_buff.append((msg_id, data, now, None))
-    return
+    entry = (msg_id, queued_data, now, None)
+    if not is_command_communicator:
+      self._send_buff.append(entry)
+      return
+
+    try_append = getattr(self._send_buff, 'try_append', None)
+    if callable(try_append):
+      return try_append(entry)
+
+    with self._send_buffer_lock:
+      capacity = getattr(self._send_buff, 'maxlen', None)
+      if capacity is not None and len(self._send_buff) >= capacity:
+        self._send_buffer_rejected_full += 1
+        self._send_buffer_degraded = True
+        return False
+      self._send_buff.append(entry)
+      self._send_buffer_admitted += 1
+      self._send_buffer_high_water_mark = max(
+        self._send_buffer_high_water_mark,
+        len(self._send_buff),
+      )
+      return True
 
   def _save_raw_payload(self, msg, prefix='', pickle=False):
     try:
@@ -982,6 +1463,7 @@ class BaseCommThread(
 
   def _prepare_command(self, command, receiver_address=None):
     try:
+      command = deepcopy(command)
       critical_data = {
         ct.COMMS.COMM_SEND_MESSAGE.K_ACTION: command.pop(ct.COMMS.COMM_SEND_MESSAGE.K_ACTION),
         ct.COMMS.COMM_SEND_MESSAGE.K_PAYLOAD: command.pop(ct.COMMS.COMM_SEND_MESSAGE.K_PAYLOAD),

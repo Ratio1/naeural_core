@@ -350,6 +350,33 @@ class TestHeartbeatIngressWorker(unittest.TestCase):
     self.assertEqual(worker.max_in_flight, 8)
     self.assertFalse(worker.is_alive())
 
+  def test_wait_until_idle_waits_for_reserved_inflight_work(self):
+    messages = queue.Queue(maxsize=1)
+    messages.put(1)
+    prepared = threading.Event()
+
+    def prepare(message):
+      prepared.set()
+      time.sleep(0.2)
+      return message
+
+    worker = HeartbeatIngressWorker(
+      message_buffer=messages,
+      prepare_message=prepare,
+      commit_message=lambda message: None,
+      prepare_workers=1,
+      max_in_flight=1,
+      poll_timeout=0.001,
+    )
+
+    worker.start()
+    self.assertTrue(prepared.wait(timeout=5.0))
+    self.assertFalse(worker.wait_until_idle(timeout=0.1))
+    worker.stop(drain=True, timeout=2.0)
+
+    self.assertEqual(worker.in_flight, 0)
+    self.assertFalse(worker.is_alive())
+
   def test_parallel_worker_drains_admitted_messages_during_stop(self):
     item_count = 100
     messages = queue.Queue(maxsize=item_count)

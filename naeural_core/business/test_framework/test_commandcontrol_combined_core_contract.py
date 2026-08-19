@@ -19,6 +19,10 @@ class TestCombinedCoreContract(unittest.TestCase):
     self.assertGreaterEqual(_CONFIG["HEARTBEAT_INGRESS_QUEUE_SIZE"], 1)
     self.assertGreaterEqual(_CONFIG["HEARTBEAT_AUTH_WORKERS"], 1)
     self.assertGreaterEqual(_CONFIG["HEARTBEAT_AUTH_MAX_IN_FLIGHT"], 1)
+    self.assertGreaterEqual(
+      _CONFIG["HEARTBEAT_AUTH_MAX_IN_FLIGHT"],
+      _CONFIG["HEARTBEAT_AUTH_WORKERS"],
+    )
     self.assertEqual(_CONFIG["HEARTBEAT_AUTH_MODE"], "shadow")
     self.assertFalse(_CONFIG["HEARTBEAT_TARGETED_MIRROR_ENABLED"])
 

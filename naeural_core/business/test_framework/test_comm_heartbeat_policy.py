@@ -411,6 +411,40 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
       comm.P.call_args.args[0],
     )
 
+  def test_heartbeat_ingress_worker_adjusts_max_in_flight_when_too_low(self):
+    worker_arguments = []
+
+    def _worker_ctor(**kwargs):
+      worker_arguments.append(kwargs)
+      worker = mock.Mock()
+      worker.is_alive.return_value = False
+      return worker
+
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_AUTH_WORKERS": "4",
+      "EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT": "1",
+    }
+    comm._config = {"HEARTBEAT_AUTH_MODE": "shadow"}
+    comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+    comm._heartbeat_ingress_worker = None
+    comm._heartbeat_ingress_processor = object()
+    comm._recv_buff = mock.Mock()
+    comm.P = mock.Mock()
+
+    with mock.patch(
+      "naeural_core.comm.base.base_comm_thread.HeartbeatIngressWorker",
+      side_effect=_worker_ctor,
+    ):
+      comm._start_heartbeat_ingress_worker()
+
+    self.assertEqual(len(worker_arguments), 1)
+    self.assertEqual(worker_arguments[0]["prepare_workers"], 4)
+    self.assertEqual(worker_arguments[0]["max_in_flight"], 4)
+    self.assertTrue(
+      any("using 4" in call.args[0] for call in comm.P.call_args_list),
+    )
+
   def test_regrouped_heartbeat_loop_runs_worker_off_fallback(self):
     class _Harness(_HeartbeatsCommMixin):
       def __init__(self):

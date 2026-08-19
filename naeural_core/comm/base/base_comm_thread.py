@@ -697,12 +697,23 @@ class BaseCommThread(
       return
 
     self._heartbeat_ingress_stop_timed_out = False
+    auth_workers = self.cfg_heartbeat_auth_workers
+    max_in_flight = self.cfg_heartbeat_auth_max_in_flight
+    if max_in_flight < auth_workers:
+      self.P(
+        "HEARTBEAT_AUTH_MAX_IN_FLIGHT={} is smaller than"
+        " HEARTBEAT_AUTH_WORKERS={}; using {} to keep worker"
+        " concurrency valid.".format(max_in_flight, auth_workers, auth_workers),
+        color='y',
+      )
+      max_in_flight = auth_workers
+
     self._heartbeat_ingress_worker = HeartbeatIngressWorker(
       message_buffer=self._recv_buff,
       prepare_message=self._authenticate_raw_heartbeat_message,
       commit_message=self._commit_authenticated_heartbeat,
-      prepare_workers=self.cfg_heartbeat_auth_workers,
-      max_in_flight=self.cfg_heartbeat_auth_max_in_flight,
+      prepare_workers=auth_workers,
+      max_in_flight=max_in_flight,
       poll_timeout=0.1,
     )
     self._heartbeat_ingress_worker.start()

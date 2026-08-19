@@ -339,13 +339,36 @@ class HeartbeatIngressWorker:
       return empty()
     return len(self._message_buffer) == 0
 
-  def _next_message(self, timeout=None):
+  def _next_message(self, timeout=None, reserve=False):
     if timeout is None:
       timeout = self._poll_timeout
-    try:
-      return self._message_buffer.get(timeout=timeout)
-    except Empty:
-      return None
+    deadline = monotonic() + max(float(timeout), 0.0)
+    while True:
+      with self._state_condition:
+        try:
+          get_nowait = getattr(self._message_buffer, "get_nowait", None)
+          if callable(get_nowait):
+            message = get_nowait()
+          else:
+            get = getattr(self._message_buffer, "get", None)
+            if callable(get):
+              message = get(timeout=0)
+            elif self._buffer_is_empty():
+              message = None
+            else:
+              message = self._message_buffer.popleft()
+        except (Empty, IndexError):
+          message = None
+        if message is not None:
+          if reserve:
+            self._in_flight += 1
+            self._state_condition.notify_all()
+          return message
+
+      remaining = deadline - monotonic()
+      if remaining <= 0:
+        return None
+      self._stop_event.wait(min(remaining, self._poll_timeout))
 
   def _mark_in_flight(self, delta):
     with self._state_condition:
@@ -365,11 +388,9 @@ class HeartbeatIngressWorker:
         if not self._drain_on_stop or self._buffer_is_empty():
           break
 
-      message = self._next_message()
+      message = self._next_message(reserve=True)
       if message is None:
         continue
-
-      self._mark_in_flight(1)
       try:
         self._process_message(message)
       except Exception as exc:
@@ -388,10 +409,9 @@ class HeartbeatIngressWorker:
           if self._stop_event.is_set() and not self._drain_on_stop:
             break
           timeout = self._poll_timeout if len(pending) == 0 else 0
-          message = self._next_message(timeout=timeout)
+          message = self._next_message(timeout=timeout, reserve=True)
           if message is None:
             break
-          self._mark_in_flight(1)
           try:
             future = executor.submit(self._prepare_message, message)
           except Exception as exc:

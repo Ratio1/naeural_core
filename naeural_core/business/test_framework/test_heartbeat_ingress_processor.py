@@ -351,16 +351,30 @@ class TestHeartbeatIngressWorker(unittest.TestCase):
     self.assertFalse(worker.is_alive())
 
   def test_wait_until_idle_waits_for_reserved_inflight_work(self):
-    messages = queue.Queue(maxsize=1)
+    dequeued = threading.Event()
+    allow_dequeue_return = threading.Event()
+
+    class _GatedQueue(queue.Queue):
+      def get(self, block=True, timeout=None):
+        message = super().get(block=block, timeout=timeout)
+        dequeued.set()
+        allow_dequeue_return.wait(timeout=5.0)
+        return message
+
+    messages = _GatedQueue(maxsize=1)
     messages.put(1)
-    prepared = threading.Event()
+    processing_started = threading.Event()
+    continue_processing = threading.Event()
+    in_flight_seen = []
+    worker_ref = []
 
     def prepare(message):
-      prepared.set()
-      time.sleep(0.2)
+      processing_started.set()
+      in_flight_seen.append(worker_ref[0].in_flight if worker_ref else None)
+      continue_processing.wait(timeout=5.0)
       return message
 
-    worker = HeartbeatIngressWorker(
+    message_worker = HeartbeatIngressWorker(
       message_buffer=messages,
       prepare_message=prepare,
       commit_message=lambda message: None,
@@ -368,14 +382,34 @@ class TestHeartbeatIngressWorker(unittest.TestCase):
       max_in_flight=1,
       poll_timeout=0.001,
     )
+    worker_ref.append(message_worker)
 
-    worker.start()
-    self.assertTrue(prepared.wait(timeout=5.0))
-    self.assertFalse(worker.wait_until_idle(timeout=0.1))
-    worker.stop(drain=True, timeout=2.0)
+    message_worker.start()
+    self.addCleanup(message_worker.stop, drain=False, timeout=2.0)
+    self.addCleanup(continue_processing.set)
+    self.addCleanup(allow_dequeue_return.set)
+    self.assertTrue(dequeued.wait(timeout=5.0))
+    handoff_lock_acquired = message_worker._state_condition.acquire(
+      blocking=False,
+    )
+    if handoff_lock_acquired:
+      message_worker._state_condition.release()
+    allow_dequeue_return.set()
 
-    self.assertEqual(worker.in_flight, 0)
-    self.assertFalse(worker.is_alive())
+    self.assertFalse(
+      handoff_lock_acquired,
+      "dequeue and in-flight reservation must share the idle-state lock",
+    )
+    self.assertTrue(processing_started.wait(timeout=5.0))
+    self.assertEqual(message_worker.in_flight, 1)
+    self.assertFalse(message_worker.wait_until_idle(timeout=0.2))
+    continue_processing.set()
+    self.assertTrue(message_worker.wait_until_idle(timeout=5.0))
+    message_worker.stop(drain=True, timeout=2.0)
+
+    self.assertEqual(message_worker.in_flight, 0)
+    self.assertEqual(in_flight_seen, [1])
+    self.assertFalse(message_worker.is_alive())
 
   def test_parallel_worker_drains_admitted_messages_during_stop(self):
     item_count = 100

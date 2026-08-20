@@ -723,7 +723,7 @@ class BaseCommThread(
         self.cfg_heartbeat_ingress_queue_size,
         self.cfg_heartbeat_auth_mode,
         self.cfg_heartbeat_auth_workers,
-        self.cfg_heartbeat_auth_max_in_flight,
+        max_in_flight,
       ),
       color='g',
     )

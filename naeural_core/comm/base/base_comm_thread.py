@@ -176,6 +176,8 @@ class BaseCommThread(
     self._heartbeat_ingress_processor = None
     self._heartbeat_ingress_worker = None
     self._heartbeat_ingress_stop_timed_out = False
+    self._invalid_heartbeat_config_warnings = set()
+    self._heartbeat_config_warning_lock = Lock()
     
     self.__deque_received_hashes = deque(maxlen=1000)
     
@@ -284,6 +286,57 @@ class BaseCommThread(
       return os.environ[env_key]
     return self._config.get(key, default)
 
+  def _positive_heartbeat_config_value(
+      self,
+      key,
+      default,
+      max_value=None,
+  ):
+    """Resolve one bounded positive integer heartbeat setting."""
+    raw_value = self._heartbeat_config_value(key, default)
+    if isinstance(raw_value, bool):
+      value = None
+    elif isinstance(raw_value, int):
+      value = raw_value
+    elif isinstance(raw_value, str):
+      try:
+        value = int(raw_value)
+      except ValueError:
+        value = None
+    else:
+      value = None
+
+    if value is not None and value >= 1 and (
+        max_value is None or value <= max_value
+    ):
+      return value
+
+    constraint = "a positive integer"
+    if max_value is not None:
+      constraint += " no greater than {}".format(max_value)
+    printer = getattr(self, 'P', None)
+    warning_lock = getattr(self, '_heartbeat_config_warning_lock', None)
+    if warning_lock is None:
+      warning_lock = Lock()
+      self._heartbeat_config_warning_lock = warning_lock
+    with warning_lock:
+      warned_keys = getattr(self, '_invalid_heartbeat_config_warnings', set())
+      should_warn = key not in warned_keys
+      if should_warn:
+        warned_keys.add(key)
+        self._invalid_heartbeat_config_warnings = warned_keys
+    if callable(printer) and should_warn:
+      printer(
+        "Invalid {}={!r}; expected {}, using default {}.".format(
+          key,
+          raw_value,
+          constraint,
+          default,
+        ),
+        color='y',
+      )
+    return default
+
   @property
   def cfg_heartbeat_ingress_worker_enabled(self):
     return self._heartbeat_config_value(
@@ -292,21 +345,21 @@ class BaseCommThread(
 
   @property
   def cfg_heartbeat_ingress_queue_size(self):
-    return int(self._heartbeat_config_value(
+    return self._positive_heartbeat_config_value(
       'HEARTBEAT_INGRESS_QUEUE_SIZE', 10_000,
-    ))
+    )
 
   @property
   def cfg_heartbeat_auth_workers(self):
-    return int(self._heartbeat_config_value(
-      'HEARTBEAT_AUTH_WORKERS', 4,
-    ))
+    return self._positive_heartbeat_config_value(
+      'HEARTBEAT_AUTH_WORKERS', 4, max_value=32,
+    )
 
   @property
   def cfg_heartbeat_auth_max_in_flight(self):
-    return int(self._heartbeat_config_value(
+    return self._positive_heartbeat_config_value(
       'HEARTBEAT_AUTH_MAX_IN_FLIGHT', 32,
-    ))
+    )
 
   @property
   def cfg_heartbeat_auth_mode(self):
@@ -722,7 +775,7 @@ class BaseCommThread(
       "auth_workers={}, max_in_flight={}).".format(
         self.cfg_heartbeat_ingress_queue_size,
         self.cfg_heartbeat_auth_mode,
-        self.cfg_heartbeat_auth_workers,
+        auth_workers,
         max_in_flight,
       ),
       color='g',

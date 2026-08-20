@@ -4,8 +4,11 @@ import pathlib
 import sys
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from unittest import mock
 
+from naeural_core import Logger
 from naeural_core import constants as ct
 from naeural_core.comm.base.base_comm_thread import BaseCommThread
 from naeural_core.comm.communication_manager import CommunicationManager
@@ -366,6 +369,39 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertEqual(comm.cfg_heartbeat_auth_mode, "enforce")
     self.assertFalse(comm.heartbeat_ingress_worker_enabled)
 
+  def test_invalid_heartbeat_ingress_sizing_uses_safe_defaults(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_INGRESS_QUEUE_SIZE": "not-an-integer",
+      "EE_HEARTBEAT_AUTH_WORKERS": "33",
+      "EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT": "-1",
+    }
+    comm._config = {}
+    comm.P = mock.Mock()
+
+    self.assertEqual(comm.cfg_heartbeat_ingress_queue_size, 10_000)
+    self.assertEqual(comm.cfg_heartbeat_auth_workers, 4)
+    self.assertEqual(comm.cfg_heartbeat_auth_max_in_flight, 32)
+    self.assertEqual(comm.cfg_heartbeat_auth_workers, 4)
+    self.assertEqual(comm.P.call_count, 3)
+
+  def test_invalid_heartbeat_sizing_warns_once_under_concurrent_reads(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {"EE_HEARTBEAT_AUTH_WORKERS": "0"}
+    comm._config = {}
+    comm._invalid_heartbeat_config_warnings = set()
+    comm._heartbeat_config_warning_lock = Lock()
+    comm.P = mock.Mock()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+      values = list(executor.map(
+        lambda _: comm.cfg_heartbeat_auth_workers,
+        range(32),
+      ))
+
+    self.assertEqual(values, [4] * 32)
+    comm.P.assert_called_once()
+
   def test_worker_disabled_ctrl_owner_processes_one_raw_heartbeat_synchronously(self):
     comm = BaseCommThread.__new__(BaseCommThread)
     comm._environment_variables = {
@@ -444,6 +480,113 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertTrue(
       any("using 4" in call.args[0] for call in comm.P.call_args_list),
     )
+
+  def test_heartbeat_ingress_worker_starts_with_invalid_runtime_sizing(self):
+    cases = [
+      ({"EE_HEARTBEAT_AUTH_WORKERS": "0"}, 4, 32),
+      ({"EE_HEARTBEAT_AUTH_WORKERS": "not-an-integer"}, 4, 32),
+      ({"EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT": "0"}, 4, 32),
+      ({"EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT": "not-an-integer"}, 4, 32),
+    ]
+
+    for environment_variables, expected_workers, expected_max_in_flight in cases:
+      with self.subTest(environment_variables=environment_variables):
+        comm = BaseCommThread.__new__(BaseCommThread)
+        comm._environment_variables = environment_variables
+        comm._config = {"HEARTBEAT_AUTH_MODE": "shadow"}
+        comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+        comm._heartbeat_ingress_worker = None
+        comm._heartbeat_ingress_processor = object()
+        comm._recv_buff = ObservableMessageBuffer(capacity=2)
+        comm._authenticate_raw_heartbeat_message = lambda raw_message: raw_message
+        comm._commit_authenticated_heartbeat = lambda prepared: None
+        comm.P = mock.Mock()
+
+        comm._start_heartbeat_ingress_worker()
+        worker = comm._heartbeat_ingress_worker
+        try:
+          self.assertTrue(worker.is_alive())
+          self.assertEqual(worker.prepare_workers, expected_workers)
+          self.assertEqual(worker.max_in_flight, expected_max_in_flight)
+          self.assertTrue(
+            any("using default" in call.args[0] for call in comm.P.call_args_list),
+          )
+        finally:
+          comm._recv_buff.close(discard=True)
+          worker.stop(drain=False, timeout=2.0)
+        self.assertFalse(worker.is_alive())
+
+  def test_ctrl_communicator_lifecycle_survives_invalid_worker_overrides(self):
+    class _StartupComm(BaseCommThread):
+      def _init(self):
+        self._stop = True
+
+      def _maybe_reconnect_send(self):
+        return
+
+      def _maybe_reconnect_recv(self):
+        return
+
+      def _send(self, data, send_to=None):
+        return
+
+      def _maybe_fill_recv_buffer(self):
+        return
+
+      def _release(self):
+        return
+
+    logger = Logger(
+      lib_name="TEST_COMM_STARTUP",
+      base_folder=".",
+      app_folder="_local_cache",
+      no_folders_no_save=True,
+      DEBUG=False,
+    )
+    logger.config_data = {}
+    formatter_manager = mock.Mock()
+    formatter_manager.get_formatter.return_value = (None, None)
+    block_engine = mock.Mock()
+    shmem = {
+      "heavy_ops_manager": mock.Mock(),
+      "network_monitor": mock.Mock(),
+      "io_formatter_manager": formatter_manager,
+      ct.BLOCKCHAIN_MANAGER: block_engine,
+    }
+
+    cases = [
+      ("EE_HEARTBEAT_AUTH_WORKERS", "0"),
+      ("EE_HEARTBEAT_AUTH_WORKERS", "not-an-integer"),
+      ("EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT", "0"),
+      ("EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT", "not-an-integer"),
+    ]
+    for key, override in cases:
+      with self.subTest(key=key, override=override):
+        comm = _StartupComm(
+          log=logger,
+          shmem=shmem,
+          signature="TEST_MQTT",
+          comm_type=ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+          default_config=BaseCommThread.CONFIG,
+          upstream_config={},
+          environment_variables={key: override},
+          recv_channel_name=ct.COMMS.COMMUNICATION_CTRL_CHANNEL,
+        )
+
+        self.assertIsInstance(comm._recv_buff, ObservableMessageBuffer)
+        comm.start()
+        comm._thread.join(timeout=3.0)
+        try:
+          self.assertFalse(comm._thread.is_alive())
+          self.assertTrue(comm._thread_stopped)
+          self.assertEqual(comm._heartbeat_ingress_worker.prepare_workers, 4)
+          self.assertEqual(comm._heartbeat_ingress_worker.max_in_flight, 32)
+          self.assertFalse(comm._heartbeat_ingress_worker.is_alive())
+        finally:
+          if comm._thread.is_alive():
+            comm._stop = True
+            comm._recv_buff.close(discard=True)
+            comm._thread.join(timeout=3.0)
 
   def test_regrouped_heartbeat_loop_runs_worker_off_fallback(self):
     class _Harness(_HeartbeatsCommMixin):

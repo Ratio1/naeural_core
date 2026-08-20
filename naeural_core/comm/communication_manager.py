@@ -86,20 +86,48 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
 
   def __runtime_bool(self, *keys, default=False):
     value = self.__runtime_value(*keys, default=default)
-    if hasattr(self.log, "str_to_bool"):
-      return self.log.str_to_bool(value)
+    if isinstance(value, bool):
+      return value
     if isinstance(value, str):
-      return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
+      normalized = value.strip().lower()
+      if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+      if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    elif isinstance(value, int) and value in [0, 1]:
+      return bool(value)
+
+    warned_keys = getattr(self, "_invalid_runtime_bool_warnings", set())
+    warning_key = keys[0]
+    if warning_key not in warned_keys:
+      warned_keys.add(warning_key)
+      self._invalid_runtime_bool_warnings = warned_keys
+      self.P(
+        "Invalid {}={!r}; expected a boolean, using default {}.".format(
+          warning_key,
+          value,
+          default,
+        ),
+        color="y",
+      )
+    return default
 
   def __runtime_qos(self, *keys):
     value = self.__runtime_value(*keys, default=None)
     if value is None or value == "":
       return None
-    value = int(value)
-    if value not in [0, 1, 2]:
-      raise ValueError("Invalid MQTT QoS {}. Expected one of 0, 1, 2.".format(value))
-    return value
+    invalid_message = (
+      "Invalid MQTT QoS {!r}. Expected one of 0, 1, 2.".format(value)
+    )
+    if isinstance(value, bool):
+      raise ValueError(invalid_message)
+    try:
+      normalized = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+      raise ValueError(invalid_message) from exc
+    if str(value).strip() != str(normalized) or normalized not in [0, 1, 2]:
+      raise ValueError(invalid_message)
+    return normalized
 
   @property
   def is_supervisor_node(self):

@@ -438,6 +438,78 @@ class TestHeartbeatIngressWorker(unittest.TestCase):
     self.assertEqual(worker.in_flight, 0)
     self.assertFalse(worker.is_alive())
 
+  def test_forced_stop_prevents_unadmitted_commit_after_drain_timeout(self):
+    messages = queue.Queue(maxsize=1)
+    messages.put("heartbeat")
+    preparation_started = threading.Event()
+    allow_preparation = threading.Event()
+    committed = []
+
+    def prepare(message):
+      preparation_started.set()
+      allow_preparation.wait(timeout=5.0)
+      return message
+
+    worker = HeartbeatIngressWorker(
+      message_buffer=messages,
+      prepare_message=prepare,
+      commit_message=committed.append,
+      prepare_workers=1,
+      max_in_flight=1,
+      poll_timeout=0.001,
+    )
+    worker.start()
+    self.assertTrue(preparation_started.wait(timeout=2.0))
+
+    worker.stop(drain=True, timeout=0.01)
+    self.assertTrue(worker.is_alive())
+    worker.stop(drain=False, timeout=0)
+    self.assertFalse(worker.commit_in_progress)
+    allow_preparation.set()
+    worker.stop(drain=False, timeout=2.0)
+
+    self.assertFalse(worker.is_alive())
+    self.assertEqual(committed, [])
+
+  def test_forced_stop_does_not_block_on_commit_in_progress(self):
+    messages = queue.Queue(maxsize=1)
+    messages.put("heartbeat")
+    commit_started = threading.Event()
+    allow_commit = threading.Event()
+    committed = []
+
+    def commit(message):
+      commit_started.set()
+      allow_commit.wait(timeout=5.0)
+      committed.append(message)
+
+    worker = HeartbeatIngressWorker(
+      message_buffer=messages,
+      prepare_message=lambda message: message,
+      commit_message=commit,
+      prepare_workers=1,
+      max_in_flight=1,
+      poll_timeout=0.001,
+    )
+    worker.start()
+    self.assertTrue(commit_started.wait(timeout=2.0))
+    self.assertTrue(worker.commit_in_progress)
+
+    worker.stop(drain=True, timeout=0.01)
+    self.assertTrue(worker.is_alive())
+    started = time.monotonic()
+    worker.stop(drain=False, timeout=0)
+    self.assertLess(time.monotonic() - started, 0.1)
+    self.assertTrue(worker.is_alive())
+    self.assertTrue(worker.commit_in_progress)
+
+    allow_commit.set()
+    worker.stop(drain=False, timeout=2.0)
+
+    self.assertFalse(worker.is_alive())
+    self.assertFalse(worker.commit_in_progress)
+    self.assertEqual(committed, ["heartbeat"])
+
 
 if __name__ == "__main__":
   unittest.main()

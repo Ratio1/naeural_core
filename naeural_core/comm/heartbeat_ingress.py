@@ -328,8 +328,11 @@ class HeartbeatIngressWorker:
     self._poll_timeout = max(float(poll_timeout), 0.001)
     self._stop_event = Event()
     self._state_condition = Condition()
+    self._commit_gate_lock = Lock()
     self._thread = None
     self._drain_on_stop = True
+    self._commit_enabled = True
+    self._commit_in_progress = False
     self._in_flight = 0
     self._last_error = None
 
@@ -425,7 +428,17 @@ class HeartbeatIngressWorker:
           # completes first. Only this coordinator calls the stateful commit.
           future = pending.popleft()
           try:
-            self._commit_message(future.result())
+            prepared = future.result()
+            with self._commit_gate_lock:
+              commit_admitted = self._commit_enabled
+              if commit_admitted:
+                self._commit_in_progress = True
+            if commit_admitted:
+              try:
+                self._commit_message(prepared)
+              finally:
+                with self._commit_gate_lock:
+                  self._commit_in_progress = False
           except Exception as exc:
             self._last_error = exc
           finally:
@@ -449,6 +462,8 @@ class HeartbeatIngressWorker:
     if self._thread is not None and self._thread.is_alive():
       return
     self._stop_event.clear()
+    with self._commit_gate_lock:
+      self._commit_enabled = True
     self._thread = Thread(
       target=self._run,
       name="heartbeat-ingress",
@@ -468,6 +483,9 @@ class HeartbeatIngressWorker:
 
   def stop(self, drain=True, timeout=None):
     self._drain_on_stop = bool(drain)
+    if not drain:
+      with self._commit_gate_lock:
+        self._commit_enabled = False
     self._stop_event.set()
     if self._thread is not None:
       self._thread.join(timeout=timeout)
@@ -491,3 +509,9 @@ class HeartbeatIngressWorker:
   def in_flight(self):
     with self._state_condition:
       return self._in_flight
+
+  @property
+  def commit_in_progress(self):
+    """Return whether one state commit crossed the shutdown admission gate."""
+    with self._commit_gate_lock:
+      return self._commit_in_progress

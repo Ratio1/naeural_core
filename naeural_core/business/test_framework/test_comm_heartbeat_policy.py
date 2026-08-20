@@ -73,6 +73,34 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertEqual(prepared[ct.COMMS.COMMUNICATION_CONFIG_CHANNEL][ct.COMMS.TOPIC], "root/{}/config")
     self.assertEqual(prepared[ct.COMMS.COMMUNICATION_CONFIG_CHANNEL][ct.COMMS.QOS], 2)
 
+  def test_channel_qos_overrides_reject_non_integral_runtime_values(self):
+    config = {
+      ct.COMMS.COMMUNICATION_CTRL_CHANNEL: {
+        ct.COMMS.TOPIC: "root/ctrl",
+      },
+      ct.COMMS.COMMUNICATION_CONFIG_CHANNEL: {
+        ct.COMMS.TOPIC: "root/{}/config",
+      },
+    }
+    for invalid_qos in (
+      True, False, 1.5, float("nan"), float("inf"), float("-inf"), "1.0",
+    ):
+      with self.subTest(invalid_qos=invalid_qos):
+        harness = _PolicyHarness({
+          "EE_MQTT_HEARTBEAT_QOS": invalid_qos,
+        })
+        with self.assertRaisesRegex(ValueError, "Invalid MQTT QoS"):
+          harness.manager._prepare_comm_config_instance(copy.deepcopy(config))
+
+  def test_invalid_runtime_boolean_uses_safe_default_and_warns(self):
+    harness = _PolicyHarness({
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "not-a-boolean",
+    })
+
+    self.assertFalse(harness.manager.oracle_only_heartbeat_mode_enabled)
+    self.assertEqual(len(harness.manager.messages), 1)
+    self.assertIn("not-a-boolean", harness.manager.messages[0][0])
+
   def test_channel_qos_overrides_fail_fast_with_old_sdk_wrapper(self):
     harness = _PolicyHarness({
       "EE_MQTT_HEARTBEAT_QOS": "1",
@@ -369,6 +397,38 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertEqual(comm.cfg_heartbeat_auth_mode, "enforce")
     self.assertFalse(comm.heartbeat_ingress_worker_enabled)
 
+  def test_invalid_heartbeat_policy_overrides_use_safe_defaults(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_AUTH_MODE": "not-a-mode",
+      "EE_HEARTBEAT_INGRESS_WORKER_ENABLED": "not-a-boolean",
+      "EE_HEARTBEAT_TARGETED_MIRROR_ENABLED": "not-a-boolean",
+    }
+    comm._config = {}
+    comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+    comm.P = mock.Mock()
+
+    self.assertEqual(comm.cfg_heartbeat_auth_mode, "shadow")
+    self.assertTrue(comm.heartbeat_ingress_worker_enabled)
+    self.assertFalse(
+      comm._BaseCommThread__heartbeat_targeted_mirror_enabled(),
+    )
+    self.assertEqual(comm.P.call_count, 3)
+
+  def test_process_environment_sizing_override_is_validated(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {}
+    comm._config = {"HEARTBEAT_AUTH_WORKERS": 7}
+    comm.P = mock.Mock()
+
+    with mock.patch.dict(
+      "os.environ",
+      {"EE_HEARTBEAT_AUTH_WORKERS": "not-an-integer"},
+    ):
+      self.assertEqual(comm.cfg_heartbeat_auth_workers, 4)
+
+    comm.P.assert_called_once()
+
   def test_invalid_heartbeat_ingress_sizing_uses_safe_defaults(self):
     comm = BaseCommThread.__new__(BaseCommThread)
     comm._environment_variables = {
@@ -557,8 +617,15 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     cases = [
       ("EE_HEARTBEAT_AUTH_WORKERS", "0"),
       ("EE_HEARTBEAT_AUTH_WORKERS", "not-an-integer"),
+      ("EE_HEARTBEAT_AUTH_WORKERS", True),
+      ("EE_HEARTBEAT_AUTH_WORKERS", 4.0),
       ("EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT", "0"),
       ("EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT", "not-an-integer"),
+      ("EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT", float("inf")),
+      ("EE_HEARTBEAT_INGRESS_QUEUE_SIZE", "0"),
+      ("EE_HEARTBEAT_INGRESS_QUEUE_SIZE", "not-an-integer"),
+      ("EE_HEARTBEAT_AUTH_MODE", "not-a-mode"),
+      ("EE_HEARTBEAT_INGRESS_WORKER_ENABLED", "not-a-boolean"),
     ]
     for key, override in cases:
       with self.subTest(key=key, override=override):
@@ -735,6 +802,7 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertEqual(events, [
       ("close", False),
       ("stop", True, 3.0),
+      ("stop", False, 0),
       ("warning", "Heartbeat ingress did not stop within 3.0s; verifier stats were not flushed and shutdown drain is incomplete."),
     ])
 

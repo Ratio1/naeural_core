@@ -131,6 +131,25 @@ class TestCommandQueueAdmission(unittest.TestCase):
     self.assertEqual(queued["ACTION"], "UPDATE_CONFIG")
     self.assertEqual(queued["PAYLOAD"]["VALUES"], [1, 2, 3])
 
+  def test_closed_command_buffer_rejects_post_stop_admission(self):
+    harness = _CommandHarness(capacity=2, observable=True)
+    harness._recv_buff = ObservableMessageBuffer(capacity=1)
+    harness._stop = False
+    harness._stop_heartbeat_ingress_worker = lambda **kwargs: None
+
+    class _ThreadProbe:
+      def join(self):
+        return
+
+    harness._thread = _ThreadProbe()
+
+    BaseCommThread.stop(harness)
+
+    self.assertFalse(harness.send(_command("late-command")))
+    snapshot = harness._send_buff.snapshot()
+    self.assertEqual(snapshot.depth, 0)
+    self.assertEqual(snapshot.rejected_closed, 1)
+
   def test_dequeued_retry_is_visible_without_exposing_command_payload(self):
     harness = _CommandHarness(capacity=2, observable=True)
     self.assertTrue(harness.send(_command("cmd-held")))

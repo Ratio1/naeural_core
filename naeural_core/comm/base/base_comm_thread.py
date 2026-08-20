@@ -272,10 +272,10 @@ class BaseCommThread(
 
   @property
   def heartbeat_ingress_worker_enabled(self):
-    value = self.cfg_heartbeat_ingress_worker_enabled
-    if isinstance(value, str):
-      value = value.strip().lower() in ['1', 'true', 'yes', 'y', 'on']
-    return bool(value) and self.receives_heartbeat_channel
+    return (
+      self.cfg_heartbeat_ingress_worker_enabled
+      and self.receives_heartbeat_channel
+    )
 
   def _heartbeat_config_value(self, key, default=None):
     env_key = 'EE_' + key
@@ -314,6 +314,17 @@ class BaseCommThread(
     constraint = "a positive integer"
     if max_value is not None:
       constraint += " no greater than {}".format(max_value)
+    self._warn_invalid_heartbeat_config(key, raw_value, constraint, default)
+    return default
+
+  def _warn_invalid_heartbeat_config(
+      self,
+      key,
+      raw_value,
+      constraint,
+      default,
+  ):
+    """Log one warning per invalid effective heartbeat setting."""
     printer = getattr(self, 'P', None)
     warning_lock = getattr(self, '_heartbeat_config_warning_lock', None)
     if warning_lock is None:
@@ -335,11 +346,47 @@ class BaseCommThread(
         ),
         color='y',
       )
+    return
+
+  def _heartbeat_bool_config_value(self, key, default):
+    """Resolve one heartbeat boolean without truthiness coercion."""
+    raw_value = self._heartbeat_config_value(key, default)
+    if isinstance(raw_value, bool):
+      return raw_value
+    if isinstance(raw_value, str):
+      normalized = raw_value.strip().lower()
+      if normalized in ['1', 'true', 'yes', 'y', 'on']:
+        return True
+      if normalized in ['0', 'false', 'no', 'n', 'off']:
+        return False
+    elif isinstance(raw_value, int) and raw_value in [0, 1]:
+      return bool(raw_value)
+    self._warn_invalid_heartbeat_config(
+      key,
+      raw_value,
+      "a boolean",
+      default,
+    )
+    return default
+
+  def _heartbeat_choice_config_value(self, key, default, accepted_values):
+    """Resolve one normalized heartbeat string choice."""
+    raw_value = self._heartbeat_config_value(key, default)
+    if isinstance(raw_value, str):
+      normalized = raw_value.strip().lower()
+      if normalized in accepted_values:
+        return normalized
+    self._warn_invalid_heartbeat_config(
+      key,
+      raw_value,
+      "one of {}".format(tuple(accepted_values)),
+      default,
+    )
     return default
 
   @property
   def cfg_heartbeat_ingress_worker_enabled(self):
-    return self._heartbeat_config_value(
+    return self._heartbeat_bool_config_value(
       'HEARTBEAT_INGRESS_WORKER_ENABLED', True,
     )
 
@@ -363,8 +410,11 @@ class BaseCommThread(
 
   @property
   def cfg_heartbeat_auth_mode(self):
-    value = self._heartbeat_config_value('HEARTBEAT_AUTH_MODE', 'shadow')
-    return str(value).strip().lower()
+    return self._heartbeat_choice_config_value(
+      'HEARTBEAT_AUTH_MODE',
+      'shadow',
+      ('off', 'shadow', 'enforce'),
+    )
 
   @property
   def server_address(self):
@@ -510,12 +560,9 @@ class BaseCommThread(
 
   def __heartbeat_targeted_mirror_enabled(self):
     """Return whether this node mirrors its heartbeat to its exact topic."""
-    value = self._heartbeat_config_value(
+    return self._heartbeat_bool_config_value(
       'HEARTBEAT_TARGETED_MIRROR_ENABLED', False,
     )
-    if isinstance(value, str):
-      return value.strip().upper() in ['1', 'TRUE', 'YES']
-    return bool(value)
 
   def _resolve_publish_targets(self, data, send_to=None):
     """
@@ -790,6 +837,7 @@ class BaseCommThread(
         close_recv_buffer(discard=not drain)
       worker.stop(drain=drain, timeout=timeout)
       if worker.is_alive():
+        worker.stop(drain=False, timeout=0)
         self._heartbeat_ingress_stop_timed_out = True
         printer = getattr(self, 'P', None)
         if callable(printer):
@@ -1101,6 +1149,9 @@ class BaseCommThread(
 
   def stop(self):
     self._stop = True
+    close_send_buffer = getattr(self._send_buff, 'close', None)
+    if callable(close_send_buffer):
+      close_send_buffer(discard=False)
     close_recv_buffer = getattr(self._recv_buff, 'close', None)
     if callable(close_recv_buffer):
       close_recv_buffer(discard=False)

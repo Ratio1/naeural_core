@@ -22,7 +22,9 @@ class _CommandControlCommMixin(object):
     narrow the transport targets when a multi-target publish partially fails.
     """
     bytes_delivered = 1 # force to 1 to trigger the first send
+    data = None
     self._init()
+    self._start_heartbeat_ingress_worker()
     while True:
       try:
         start_it = perf_counter()
@@ -41,7 +43,16 @@ class _CommandControlCommMixin(object):
           t_section = perf_counter() if debug_timings else None
           data = None
           if len(self._send_buff) > 0:
+            snapshot = getattr(self._send_buff, 'snapshot', None)
+            age_at_dequeue = (
+              snapshot().oldest_age_seconds if callable(snapshot) else 0.0
+            )
             data = self._send_buff.popleft()
+            if data is not None:
+              self._mark_outbound_dequeued(
+                msg_id=data[0],
+                age_at_dequeue_seconds=age_at_dequeue,
+              )
             bytes_delivered = 0 if data is not None else 1 # if data is None then set bytes_delivered to 1
             if debug_timings:
               self._comm_loop_timing_count("send_buffer_dequeued")
@@ -60,6 +71,7 @@ class _CommandControlCommMixin(object):
         if data is not None:
           msg_id, (receiver_id, receiver_addr, command), ts_added_in_buff, retry_send_to = data
           raw_command = command
+          self._set_outbound_current_state('preparing')
           t_section = perf_counter() if debug_timings else None
           command = self._prepare_command(command, receiver_addr)
           if debug_timings:
@@ -77,6 +89,7 @@ class _CommandControlCommMixin(object):
             # `received_addr` is being used, since any node will always listen to the address subtopic,
             # even if it also listens to the alias subtopic.
             send_target = retry_send_to if retry_send_to is not None else receiver_addr
+            self._set_outbound_current_state('paho_handoff_pending')
             t_section = perf_counter() if debug_timings else None
             bytes_delivered = self.send_wrapper(command, send_to=send_target)
             if debug_timings:
@@ -86,6 +99,18 @@ class _CommandControlCommMixin(object):
                 self._comm_loop_timing_count("send_success")
             if bytes_delivered <= 0 and self._last_send_retry_targets is not None:
               data = (msg_id, (receiver_id, receiver_addr, raw_command), ts_added_in_buff, self._last_send_retry_targets)
+            if bytes_delivered <= 0:
+              self._set_outbound_current_state(
+                'retry_pending',
+                retry_targets=self._last_send_retry_targets,
+                increment_retry=True,
+              )
+            elif self._last_send_outcome == 'terminal_dropped_oversize':
+              self._finish_outbound_current(terminal_discard=True)
+            else:
+              self._finish_outbound_current(transport_handoff=True)
+          else:
+            self._set_outbound_current_state('waiting_for_connection')
         # endif
 
         if self.has_recv_conn:
@@ -94,49 +119,19 @@ class _CommandControlCommMixin(object):
           if debug_timings:
             self._comm_loop_timing_add("fill_recv_buffer", perf_counter() - t_section)
 
+        # In legacy topology this instance owns CTRL; in regrouped topology it
+        # owns CONFIG and this helper is a no-op. The synchronous path is the
+        # worker-off rollback and retains the same auth/identity boundary.
         t_section = perf_counter() if debug_timings else None
-        json_msg = self.get_message()
+        heartbeat_outcome = self._process_next_heartbeat_synchronously()
         if debug_timings:
-          self._comm_loop_timing_add("get_message", perf_counter() - t_section)
-        if json_msg is not None:
-          if debug_timings:
+          self._comm_loop_timing_add(
+            "synchronous_heartbeat", perf_counter() - t_section,
+          )
+          if heartbeat_outcome is not None:
             self._comm_loop_timing_count("messages_received")
-          # below code is incorrect: DO NOT assume messages come with local formatter
-          # so the format should be decided based on inputs
-          # if self._formatter is not None:
-          #   json_msg = self._formatter.decode_output(json_msg)
-
-          t_section = perf_counter() if debug_timings else None
-          formatter = self._io_formatter_manager.get_required_formatter_from_payload(json_msg)
-          if debug_timings:
-            self._comm_loop_timing_add("formatter_lookup", perf_counter() - t_section)
-          if formatter is not None:
-            t_section = perf_counter() if debug_timings else None
-            json_msg = formatter.decode_output(json_msg)
-            if debug_timings:
-              self._comm_loop_timing_add("formatter_decode", perf_counter() - t_section)
-
-            # TODO: @Stefan - explain why this was moved in if in comment
-            # also why register heartbeat dependant on formatter
-            device_addr = json_msg.get(ct.EE_ADDR, json_msg.get(ct.PAYLOAD_DATA.EE_SENDER))
-            event_type = json_msg.get(ct.PAYLOAD_DATA.EE_EVENT_TYPE, None)
-            
-              
-            if device_addr is None or event_type is None:
-              self._deque_invalid_messages.append(json_msg)
-
-            is_heartbeat = (event_type == ct.HEARTBEAT)
-            if is_heartbeat:
-              if debug_timings:
-                self._comm_loop_timing_count("heartbeats_received")
-              t_section = perf_counter() if debug_timings else None
-              self._network_monitor.register_heartbeat(addr=device_addr, data=json_msg)
-              if debug_timings:
-                self._comm_loop_timing_add("register_heartbeat", perf_counter() - t_section)
-            # endif
-          elif debug_timings:
-            self._comm_loop_timing_count("messages_without_formatter")
-        # endif
+          if heartbeat_outcome == 'committed':
+            self._comm_loop_timing_count("heartbeats_received")
 
         now = time()
         nr_minutes = 5
@@ -180,6 +175,8 @@ class _CommandControlCommMixin(object):
       # end try-except
     # endwhile
 
+    self._finish_outbound_current(terminal_discard=True)
+    self._stop_heartbeat_ingress_worker(drain=True, timeout=10.0)
     self._release()
     self.P('`run_thread` finished')
     self._thread_stopped = True

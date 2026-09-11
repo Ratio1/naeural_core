@@ -4,10 +4,16 @@ import pathlib
 import sys
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from unittest import mock
 
+from naeural_core import Logger
 from naeural_core import constants as ct
+from naeural_core.comm.base.base_comm_thread import BaseCommThread
 from naeural_core.comm.communication_manager import CommunicationManager
+from naeural_core.comm.message_buffer import ObservableMessageBuffer
+from naeural_core.comm.mixins.heartbeats_comm_mixin import _HeartbeatsCommMixin
 
 
 def _load_mqtt_comm_thread_class():
@@ -66,6 +72,34 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertEqual(prepared[ct.COMMS.COMMUNICATION_CTRL_CHANNEL][ct.COMMS.QOS], 1)
     self.assertEqual(prepared[ct.COMMS.COMMUNICATION_CONFIG_CHANNEL][ct.COMMS.TOPIC], "root/{}/config")
     self.assertEqual(prepared[ct.COMMS.COMMUNICATION_CONFIG_CHANNEL][ct.COMMS.QOS], 2)
+
+  def test_channel_qos_overrides_reject_non_integral_runtime_values(self):
+    config = {
+      ct.COMMS.COMMUNICATION_CTRL_CHANNEL: {
+        ct.COMMS.TOPIC: "root/ctrl",
+      },
+      ct.COMMS.COMMUNICATION_CONFIG_CHANNEL: {
+        ct.COMMS.TOPIC: "root/{}/config",
+      },
+    }
+    for invalid_qos in (
+      True, False, 1.5, float("nan"), float("inf"), float("-inf"), "1.0",
+    ):
+      with self.subTest(invalid_qos=invalid_qos):
+        harness = _PolicyHarness({
+          "EE_MQTT_HEARTBEAT_QOS": invalid_qos,
+        })
+        with self.assertRaisesRegex(ValueError, "Invalid MQTT QoS"):
+          harness.manager._prepare_comm_config_instance(copy.deepcopy(config))
+
+  def test_invalid_runtime_boolean_uses_safe_default_and_warns(self):
+    harness = _PolicyHarness({
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "not-a-boolean",
+    })
+
+    self.assertFalse(harness.manager.oracle_only_heartbeat_mode_enabled)
+    self.assertEqual(len(harness.manager.messages), 1)
+    self.assertIn("not-a-boolean", harness.manager.messages[0][0])
 
   def test_channel_qos_overrides_fail_fast_with_old_sdk_wrapper(self):
     harness = _PolicyHarness({
@@ -307,6 +341,470 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertTrue(comm.has_recv_conn)
     self.assertEqual(len(notifications), 1)
     self.assertIn("disabled", notifications[0]["msg"])
+
+  def test_command_consumer_is_selected_by_config_channel_after_regrouping(self):
+    class _Communicator:
+      def __init__(self, recv_channel_name, messages):
+        self.recv_channel_name = recv_channel_name
+        self.messages = list(messages)
+
+      def get_messages(self):
+        messages = list(self.messages)
+        self.messages.clear()
+        return messages
+
+    manager = CommunicationManager.__new__(CommunicationManager)
+    manager._dct_comm_plugins = {
+      ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL: _Communicator(
+        ct.COMMS.COMMUNICATION_CONFIG_CHANNEL,
+        [{"ACTION": "NEW_TOPOLOGY"}],
+      ),
+      ct.COMMS.COMMUNICATION_HEARTBEATS: _Communicator(
+        ct.COMMS.COMMUNICATION_CTRL_CHANNEL,
+        [{"EE_EVENT_TYPE": "HEARTBEAT"}],
+      ),
+    }
+    processed = []
+    manager.process_command_message = processed.append
+    manager.process_commands_from_self = lambda: None
+    manager.get_received_commands = lambda: processed
+
+    result = manager.maybe_process_incoming()
+
+    self.assertEqual(result, [{"ACTION": "NEW_TOPOLOGY"}])
+    self.assertEqual(
+      manager._dct_comm_plugins[
+        ct.COMMS.COMMUNICATION_HEARTBEATS
+      ].messages,
+      [{"EE_EVENT_TYPE": "HEARTBEAT"}],
+    )
+
+  def test_heartbeat_ingress_runtime_env_overrides_are_normalized(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_INGRESS_QUEUE_SIZE": "7500",
+      "EE_HEARTBEAT_AUTH_MODE": "ENFORCE",
+      "EE_HEARTBEAT_INGRESS_WORKER_ENABLED": "false",
+    }
+    comm._config = {
+      "HEARTBEAT_INGRESS_QUEUE_SIZE": 10000,
+      "HEARTBEAT_AUTH_MODE": "shadow",
+      "HEARTBEAT_INGRESS_WORKER_ENABLED": True,
+    }
+    comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+
+    self.assertEqual(comm.cfg_heartbeat_ingress_queue_size, 7500)
+    self.assertEqual(comm.cfg_heartbeat_auth_mode, "enforce")
+    self.assertFalse(comm.heartbeat_ingress_worker_enabled)
+
+  def test_invalid_heartbeat_policy_overrides_use_safe_defaults(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_AUTH_MODE": "not-a-mode",
+      "EE_HEARTBEAT_INGRESS_WORKER_ENABLED": "not-a-boolean",
+      "EE_HEARTBEAT_TARGETED_MIRROR_ENABLED": "not-a-boolean",
+    }
+    comm._config = {}
+    comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+    comm.P = mock.Mock()
+
+    self.assertEqual(comm.cfg_heartbeat_auth_mode, "shadow")
+    self.assertTrue(comm.heartbeat_ingress_worker_enabled)
+    self.assertFalse(
+      comm._BaseCommThread__heartbeat_targeted_mirror_enabled(),
+    )
+    self.assertEqual(comm.P.call_count, 3)
+
+  def test_process_environment_sizing_override_is_validated(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {}
+    comm._config = {"HEARTBEAT_AUTH_WORKERS": 7}
+    comm.P = mock.Mock()
+
+    with mock.patch.dict(
+      "os.environ",
+      {"EE_HEARTBEAT_AUTH_WORKERS": "not-an-integer"},
+    ):
+      self.assertEqual(comm.cfg_heartbeat_auth_workers, 4)
+
+    comm.P.assert_called_once()
+
+  def test_invalid_heartbeat_ingress_sizing_uses_safe_defaults(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_INGRESS_QUEUE_SIZE": "not-an-integer",
+      "EE_HEARTBEAT_AUTH_WORKERS": "33",
+      "EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT": "-1",
+    }
+    comm._config = {}
+    comm.P = mock.Mock()
+
+    self.assertEqual(comm.cfg_heartbeat_ingress_queue_size, 10_000)
+    self.assertEqual(comm.cfg_heartbeat_auth_workers, 4)
+    self.assertEqual(comm.cfg_heartbeat_auth_max_in_flight, 32)
+    self.assertEqual(comm.cfg_heartbeat_auth_workers, 4)
+    self.assertEqual(comm.P.call_count, 3)
+
+  def test_invalid_heartbeat_sizing_warns_once_under_concurrent_reads(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {"EE_HEARTBEAT_AUTH_WORKERS": "0"}
+    comm._config = {}
+    comm._invalid_heartbeat_config_warnings = set()
+    comm._heartbeat_config_warning_lock = Lock()
+    comm.P = mock.Mock()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+      values = list(executor.map(
+        lambda _: comm.cfg_heartbeat_auth_workers,
+        range(32),
+      ))
+
+    self.assertEqual(values, [4] * 32)
+    comm.P.assert_called_once()
+
+  def test_worker_disabled_ctrl_owner_processes_one_raw_heartbeat_synchronously(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_INGRESS_WORKER_ENABLED": "false",
+    }
+    comm._config = {}
+    comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+    comm._recv_buff = ObservableMessageBuffer(capacity=2)
+    comm._heartbeat_ingress_processor = object()
+    comm._process_raw_heartbeat_message = mock.Mock(return_value="committed")
+    raw_heartbeat = '{"EE_EVENT_TYPE":"HEARTBEAT"}'
+    comm._recv_buff.append(raw_heartbeat)
+
+    outcome = comm._process_next_heartbeat_synchronously()
+
+    self.assertEqual(outcome, "committed")
+    comm._process_raw_heartbeat_message.assert_called_once_with(raw_heartbeat)
+    self.assertEqual(comm._recv_buff.snapshot().depth, 0)
+
+  def test_worker_disabled_start_initializes_processor_without_starting_worker(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_INGRESS_WORKER_ENABLED": "false",
+    }
+    comm._config = {"HEARTBEAT_AUTH_MODE": "shadow"}
+    comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+    comm._heartbeat_ingress_processor = None
+    comm._heartbeat_ingress_worker = None
+    comm._network_monitor = mock.Mock()
+    comm._io_formatter_manager = mock.Mock()
+    comm.log = mock.Mock()
+    comm.P = mock.Mock()
+
+    with mock.patch(
+      "naeural_core.comm.base.base_comm_thread.HeartbeatIngressProcessor",
+    ) as processor_cls:
+      comm._start_heartbeat_ingress_worker()
+
+    processor_cls.assert_called_once()
+    self.assertIsNone(comm._heartbeat_ingress_worker)
+    self.assertIn(
+      "processed synchronously",
+      comm.P.call_args.args[0],
+    )
+
+  def test_heartbeat_ingress_worker_adjusts_max_in_flight_when_too_low(self):
+    worker_arguments = []
+
+    def _worker_ctor(**kwargs):
+      worker_arguments.append(kwargs)
+      worker = mock.Mock()
+      worker.is_alive.return_value = False
+      return worker
+
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._environment_variables = {
+      "EE_HEARTBEAT_AUTH_WORKERS": "4",
+      "EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT": "1",
+    }
+    comm._config = {"HEARTBEAT_AUTH_MODE": "shadow"}
+    comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+    comm._heartbeat_ingress_worker = None
+    comm._heartbeat_ingress_processor = object()
+    comm._recv_buff = mock.Mock()
+    comm.P = mock.Mock()
+
+    with mock.patch(
+      "naeural_core.comm.base.base_comm_thread.HeartbeatIngressWorker",
+      side_effect=_worker_ctor,
+    ):
+      comm._start_heartbeat_ingress_worker()
+
+    self.assertEqual(len(worker_arguments), 1)
+    self.assertEqual(worker_arguments[0]["prepare_workers"], 4)
+    self.assertEqual(worker_arguments[0]["max_in_flight"], 4)
+    self.assertTrue(
+      any("using 4" in call.args[0] for call in comm.P.call_args_list),
+    )
+
+  def test_heartbeat_ingress_worker_starts_with_invalid_runtime_sizing(self):
+    cases = [
+      ({"EE_HEARTBEAT_AUTH_WORKERS": "0"}, 4, 32),
+      ({"EE_HEARTBEAT_AUTH_WORKERS": "not-an-integer"}, 4, 32),
+      ({"EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT": "0"}, 4, 32),
+      ({"EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT": "not-an-integer"}, 4, 32),
+    ]
+
+    for environment_variables, expected_workers, expected_max_in_flight in cases:
+      with self.subTest(environment_variables=environment_variables):
+        comm = BaseCommThread.__new__(BaseCommThread)
+        comm._environment_variables = environment_variables
+        comm._config = {"HEARTBEAT_AUTH_MODE": "shadow"}
+        comm._recv_channel_name = ct.COMMS.COMMUNICATION_CTRL_CHANNEL
+        comm._heartbeat_ingress_worker = None
+        comm._heartbeat_ingress_processor = object()
+        comm._recv_buff = ObservableMessageBuffer(capacity=2)
+        comm._authenticate_raw_heartbeat_message = lambda raw_message: raw_message
+        comm._commit_authenticated_heartbeat = lambda prepared: None
+        comm.P = mock.Mock()
+
+        comm._start_heartbeat_ingress_worker()
+        worker = comm._heartbeat_ingress_worker
+        try:
+          self.assertTrue(worker.is_alive())
+          self.assertEqual(worker.prepare_workers, expected_workers)
+          self.assertEqual(worker.max_in_flight, expected_max_in_flight)
+          self.assertTrue(
+            any("using default" in call.args[0] for call in comm.P.call_args_list),
+          )
+        finally:
+          comm._recv_buff.close(discard=True)
+          worker.stop(drain=False, timeout=2.0)
+        self.assertFalse(worker.is_alive())
+
+  def test_ctrl_communicator_lifecycle_survives_invalid_worker_overrides(self):
+    class _StartupComm(BaseCommThread):
+      def _init(self):
+        self._stop = True
+
+      def _maybe_reconnect_send(self):
+        return
+
+      def _maybe_reconnect_recv(self):
+        return
+
+      def _send(self, data, send_to=None):
+        return
+
+      def _maybe_fill_recv_buffer(self):
+        return
+
+      def _release(self):
+        return
+
+    logger = Logger(
+      lib_name="TEST_COMM_STARTUP",
+      base_folder=".",
+      app_folder="_local_cache",
+      no_folders_no_save=True,
+      DEBUG=False,
+    )
+    logger.config_data = {}
+    formatter_manager = mock.Mock()
+    formatter_manager.get_formatter.return_value = (None, None)
+    block_engine = mock.Mock()
+    shmem = {
+      "heavy_ops_manager": mock.Mock(),
+      "network_monitor": mock.Mock(),
+      "io_formatter_manager": formatter_manager,
+      ct.BLOCKCHAIN_MANAGER: block_engine,
+    }
+
+    cases = [
+      ("EE_HEARTBEAT_AUTH_WORKERS", "0"),
+      ("EE_HEARTBEAT_AUTH_WORKERS", "not-an-integer"),
+      ("EE_HEARTBEAT_AUTH_WORKERS", True),
+      ("EE_HEARTBEAT_AUTH_WORKERS", 4.0),
+      ("EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT", "0"),
+      ("EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT", "not-an-integer"),
+      ("EE_HEARTBEAT_AUTH_MAX_IN_FLIGHT", float("inf")),
+      ("EE_HEARTBEAT_INGRESS_QUEUE_SIZE", "0"),
+      ("EE_HEARTBEAT_INGRESS_QUEUE_SIZE", "not-an-integer"),
+      ("EE_HEARTBEAT_AUTH_MODE", "not-a-mode"),
+      ("EE_HEARTBEAT_INGRESS_WORKER_ENABLED", "not-a-boolean"),
+    ]
+    for key, override in cases:
+      with self.subTest(key=key, override=override):
+        comm = _StartupComm(
+          log=logger,
+          shmem=shmem,
+          signature="TEST_MQTT",
+          comm_type=ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL,
+          default_config=BaseCommThread.CONFIG,
+          upstream_config={},
+          environment_variables={key: override},
+          recv_channel_name=ct.COMMS.COMMUNICATION_CTRL_CHANNEL,
+        )
+
+        self.assertIsInstance(comm._recv_buff, ObservableMessageBuffer)
+        comm.start()
+        comm._thread.join(timeout=3.0)
+        try:
+          self.assertFalse(comm._thread.is_alive())
+          self.assertTrue(comm._thread_stopped)
+          self.assertEqual(comm._heartbeat_ingress_worker.prepare_workers, 4)
+          self.assertEqual(comm._heartbeat_ingress_worker.max_in_flight, 32)
+          self.assertFalse(comm._heartbeat_ingress_worker.is_alive())
+        finally:
+          if comm._thread.is_alive():
+            comm._stop = True
+            comm._recv_buff.close(discard=True)
+            comm._thread.join(timeout=3.0)
+
+  def test_regrouped_heartbeat_loop_runs_worker_off_fallback(self):
+    class _Harness(_HeartbeatsCommMixin):
+      def __init__(self):
+        self._stop = False
+        self._send_buff = []
+        self._last_read = 0
+        self.has_recv_conn = True
+        self.has_send_conn = False
+        self.loop_resolution = 10
+        self.fallback_calls = 0
+
+      def _init(self):
+        return
+
+      def _start_heartbeat_ingress_worker(self):
+        return
+
+      def _maybe_reconnect_send(self):
+        return
+
+      def _maybe_reconnect_recv(self):
+        return
+
+      def maybe_fill_recv_buffer_wrapper(self):
+        return
+
+      def _process_next_heartbeat_synchronously(self):
+        self.fallback_calls += 1
+        self._stop = True
+
+      def _stop_heartbeat_ingress_worker(self, **kwargs):
+        return True
+
+      def _release(self):
+        return
+
+      def P(self, *args, **kwargs):
+        return
+
+    comm = _Harness()
+
+    with mock.patch(
+      "naeural_core.comm.mixins.heartbeats_comm_mixin.sleep",
+      return_value=None,
+    ):
+      comm._run_thread_heartbeats()
+
+    self.assertEqual(comm.fallback_calls, 1)
+    self.assertTrue(comm._thread_stopped)
+
+  def test_worker_disabled_shutdown_flushes_direct_verification_stats(self):
+    events = []
+
+    class _BlockEngine:
+      def flush_verify_canon_stats(self, wait=False, timeout=None):
+        events.append(("flush", wait, timeout))
+
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._heartbeat_ingress_worker = None
+    comm._heartbeat_ingress_processor = object()
+    comm.shmem = {ct.BLOCKCHAIN_MANAGER: _BlockEngine()}
+
+    stopped = comm._stop_heartbeat_ingress_worker(timeout=2.0)
+
+    self.assertTrue(stopped)
+    self.assertEqual(events, [("flush", True, 2.0)])
+
+  def test_heartbeat_verification_defers_canon_stats_persistence(self):
+    comm = BaseCommThread.__new__(BaseCommThread)
+    block_engine = mock.Mock()
+    comm.shmem = {ct.BLOCKCHAIN_MANAGER: block_engine}
+    message = {"EE_EVENT_TYPE": "HEARTBEAT"}
+
+    comm._verify_heartbeat_message(message)
+
+    block_engine.verify.assert_called_once_with(
+      message,
+      return_full_info=True,
+      verify_allowed=False,
+      log_hash_sign_fails=False,
+      persist_canon_stats=False,
+    )
+
+  def test_heartbeat_shutdown_flushes_canon_stats_after_worker_drain(self):
+    events = []
+
+    class _Buffer:
+      def close(self, discard=False):
+        events.append(("close", discard))
+
+    class _Worker:
+      def stop(self, drain=True, timeout=None):
+        events.append(("stop", drain, timeout))
+
+      def is_alive(self):
+        return False
+
+    class _BlockEngine:
+      def flush_verify_canon_stats(self, wait=False, timeout=None):
+        events.append(("flush", wait, timeout))
+        return True
+
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._recv_buff = _Buffer()
+    comm._heartbeat_ingress_worker = _Worker()
+    comm.shmem = {ct.BLOCKCHAIN_MANAGER: _BlockEngine()}
+
+    stopped = comm._stop_heartbeat_ingress_worker(drain=True, timeout=3.0)
+
+    self.assertTrue(stopped)
+    self.assertEqual(events, [
+      ("close", False),
+      ("stop", True, 3.0),
+      ("flush", True, 3.0),
+    ])
+
+  def test_heartbeat_shutdown_does_not_flush_while_worker_is_active(self):
+    events = []
+
+    class _Buffer:
+      def close(self, discard=False):
+        events.append(("close", discard))
+
+    class _Worker:
+      def stop(self, drain=True, timeout=None):
+        events.append(("stop", drain, timeout))
+
+      def is_alive(self):
+        return True
+
+    class _BlockEngine:
+      def flush_verify_canon_stats(self, wait=False, timeout=None):
+        events.append(("flush", wait, timeout))
+
+    comm = BaseCommThread.__new__(BaseCommThread)
+    comm._recv_buff = _Buffer()
+    comm._heartbeat_ingress_worker = _Worker()
+    comm.shmem = {ct.BLOCKCHAIN_MANAGER: _BlockEngine()}
+    comm.P = lambda *args, **kwargs: events.append(("warning", args[0]))
+
+    stopped = comm._stop_heartbeat_ingress_worker(drain=True, timeout=3.0)
+
+    self.assertFalse(stopped)
+    self.assertTrue(comm._heartbeat_ingress_stop_timed_out)
+    self.assertEqual(events, [
+      ("close", False),
+      ("stop", True, 3.0),
+      ("stop", False, 0),
+      ("warning", "Heartbeat ingress did not stop within 3.0s; verifier stats were not flushed and shutdown drain is incomplete."),
+    ])
 
 
 if __name__ == "__main__":

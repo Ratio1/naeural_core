@@ -257,6 +257,41 @@ class _FullPathHarness:
 
 class TestHeartbeatIngressFullPath(unittest.TestCase):
 
+  def test_signed_aixp1_compressed_identity_checked_before_netmon_epoch(self):
+    harness = _FullPathHarness(3, sender_count=1, auth_workers=1)
+    self.addCleanup(harness.close)
+    for idx, case in enumerate(('flat_mismatch', 'nested_mismatch', 'nested_valid')):
+      with self.subTest(case=case):
+        raw, timestamp, sender = harness.build_message(idx)
+        message = json.loads(raw)
+        body = json.loads(harness.log.decompress_text(message['ENCODED_DATA']))
+        body['EE_ADDR'] = sender if case == 'nested_valid' else '0xai_OTHER'
+        message['ENCODED_DATA'] = harness.log.compress_text(json.dumps(body))
+        if case.startswith('nested'):
+          message['DATA'] = {'ENCODED_DATA': message.pop('ENCODED_DATA')}
+          message['EE_FORMATTER'] = 'aixp1'
+          message['EE_PAYLOAD_PATH'] = ['identity-regression', None, None, None]
+        message.pop('EE_SIGN', None)
+        message.pop('EE_HASH', None)
+        harness.block_engines[0].sign(message, add_data=True, use_digest=True)
+        self.assertTrue(harness._verify(message).valid)
+        harness.admitted_at[timestamp] = time.perf_counter()
+        previous_epoch_calls = harness.netmon_harness.epoch_manager.calls
+
+        outcome = harness.processor.process(json.dumps(message))
+
+        accepted = case == 'nested_valid'
+        self.assertEqual(outcome, 'committed' if accepted else 'identity_rejected')
+        self.assertEqual(
+          harness.netmon_harness.epoch_manager.calls - previous_epoch_calls,
+          int(accepted),
+        )
+        stored = harness.netmon_harness.netmon.network_node_last_heartbeat(sender)
+        if accepted:
+          self.assertEqual(stored['EE_ADDR'], sender)
+        else:
+          self.assertFalse(stored)
+
   def test_signed_compressed_callback_worker_netmon_epoch_profile(self):
     message_count = _env_int(PROFILE_MESSAGES_ENV, DEFAULT_PROFILE_MESSAGES)
     sender_count = _env_int(PROFILE_SENDERS_ENV, 1)

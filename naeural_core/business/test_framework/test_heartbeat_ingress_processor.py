@@ -204,6 +204,37 @@ class TestHeartbeatIngressProcessor(unittest.TestCase):
     self.assertEqual(outcome, "committed")
     self.assertEqual(decompressed, [message["ENCODED_DATA"]])
 
+  def test_formatter_exposed_compressed_claim_is_validated_once(self):
+    for mode in ('enforce', 'shadow'):
+      for claim in ('0xai_NODE', 'aixp_NODE', '0xai_OTHER'):
+        for original_encoded in (None, json.dumps({'EE_ADDR': '0xai_NODE'})):
+          with self.subTest(mode=mode, claim=claim, original=original_encoded):
+            decompressed = []
+
+            def decode(value):
+              value.update(value.pop('DATA'))
+              return value
+
+            def decompress(value):
+              decompressed.append(value)
+              return value
+
+            harness = _Harness(auth_mode=mode, decoder=decode, decompress_text=decompress)
+            inner = json.dumps({'EE_ADDR': claim})
+            message = _heartbeat(DATA={'ENCODED_DATA': inner})
+            if original_encoded is not None:
+              message['ENCODED_DATA'] = original_encoded
+            outcome = harness.processor.process(json.dumps(message))
+            mismatch = claim == '0xai_OTHER'
+            expected = 'identity_rejected' if mismatch and mode == 'enforce' else 'committed'
+            self.assertEqual(outcome, expected)
+            self.assertEqual(harness.processor.snapshot().identity_mismatch, int(mismatch))
+            expected_expansions = [original_encoded] if original_encoded is not None else []
+            if inner != original_encoded:
+              expected_expansions.append(inner)
+            self.assertEqual(decompressed, expected_expansions)
+            self.assertEqual(len(harness.registered), int(expected == 'committed'))
+
   def test_processing_failure_does_not_poison_dedup_retry(self):
     harness = _Harness(auth_mode="enforce")
     attempts = []

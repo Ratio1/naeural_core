@@ -216,6 +216,7 @@ class HeartbeatIngressProcessor:
       try:
         # Formatters are allowed to mutate their input. Preserve every identity
         # claim from the verified wire envelope before handing it to the decoder.
+        raw_encoded_data = message.get("ENCODED_DATA")
         identity_claims = self._collect_identity_claims(message, {})
       except Exception:
         return self._finish_message("processing_failed")
@@ -234,13 +235,12 @@ class HeartbeatIngressProcessor:
         return self._finish_message("ignored_non_heartbeat")
 
       try:
-        # The signed compressed claim was captured before formatter mutation.
-        # Do not expand the same ENCODED_DATA a second time when a formatter
-        # returns the original envelope (the normal heartbeat path).
+        # Aixp1 can expose DATA.ENCODED_DATA or replace the outer body. Validate
+        # that canonical claim too, but do not re-expand an unchanged body.
         identity_claims.extend(self._collect_identity_claims(
           {},
           decoded_message,
-          include_compressed=False,
+          include_compressed=decoded_message.get("ENCODED_DATA") != raw_encoded_data,
         ))
       except Exception:
         return self._finish_message("processing_failed")

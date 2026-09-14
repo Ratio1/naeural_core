@@ -16,7 +16,10 @@ def _normalize_channel(channel):
 
 
 def resolve_receive_roles(instances, require_heartbeat_receiver=True):
-  """Resolve the unique heartbeat and command receive owners.
+  """Resolve receive consumers without changing configured subscribers.
+
+  The crossed legacy layout keeps DEFAULT's passive CONFIG copy, but only
+  HEARTBEATS consumes commands. Other duplicate owners remain invalid.
 
   Parameters
   ----------
@@ -46,6 +49,16 @@ def resolve_receive_roles(instances, require_heartbeat_receiver=True):
     recv_channel = _normalize_channel(paths.get("RECV_FROM"))
     if recv_channel in owners:
       owners[recv_channel].append(instance_name)
+
+  if (
+    [_normalize_channel(name) for name in owners[CTRL_CHANNEL]] == ["COMMANDCONTROL"]
+    and len(owners[CONFIG_CHANNEL]) == 2
+    and {_normalize_channel(name) for name in owners[CONFIG_CHANNEL]} == {"DEFAULT", "HEARTBEATS"}
+  ):
+    owners[CONFIG_CHANNEL] = [
+      name for name in owners[CONFIG_CHANNEL]
+      if _normalize_channel(name) == "HEARTBEATS"
+    ]
 
   for channel, channel_owners in owners.items():
     required = channel != CTRL_CHANNEL or require_heartbeat_receiver

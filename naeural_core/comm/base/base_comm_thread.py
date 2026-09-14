@@ -168,9 +168,13 @@ class BaseCommThread(
     self._last_send_outcome = None
     self._send_channel_name = send_channel_name
     recv_capacity = ct.COMM_RECV_BUFFER + extra_receive_buffer
-    if recv_channel_name == ct.COMMS.COMMUNICATION_CONFIG_CHANNEL:
+    if (
+      recv_channel_name == ct.COMMS.COMMUNICATION_CONFIG_CHANNEL
+      and comm_type not in [ct.COMMS.COMMUNICATION_DEFAULT, "L_" + ct.COMMS.COMMUNICATION_DEFAULT]
+    ):
       self._recv_buff = ObservableMessageBuffer(capacity=recv_capacity)
     else:
+      # DEFAULT's legacy CONFIG copy is passive: retain newest for its callback.
       self._recv_buff = deque(maxlen=recv_capacity)
     self._recv_channel_name = recv_channel_name
     self._heartbeat_ingress_processor = None

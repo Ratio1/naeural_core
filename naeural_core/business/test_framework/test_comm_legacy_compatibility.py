@@ -9,6 +9,7 @@ from unittest import mock
 
 from naeural_core import Logger, constants as ct
 from naeural_core.comm.base.base_comm_thread import BaseCommThread
+from naeural_core.comm.default import mqtt as mqtt_comm
 from naeural_core.comm.communication_manager import CommunicationManager
 from naeural_core.comm.communication_roles import resolve_receive_roles
 from naeural_core.comm.message_buffer import ObservableMessageBuffer
@@ -194,7 +195,7 @@ class TestPassiveReceiveBuffer(unittest.TestCase):
           log=logger,
           shmem={"heavy_ops_manager": mock.Mock(), "network_monitor": mock.Mock(), "io_formatter_manager": formatter},
           signature="TEST_MQTT", comm_type=name,
-          default_config=BaseCommThread.CONFIG, upstream_config={},
+          default_config=BaseCommThread.CONFIG, upstream_config={ct.EE_ID: "compat_node"},
           recv_channel_name="CONFIG_CHANNEL", extra_receive_buffer=2 - ct.COMM_RECV_BUFFER,
         )
         wrapper = MQTTWrapper.__new__(MQTTWrapper)
@@ -202,14 +203,22 @@ class TestPassiveReceiveBuffer(unittest.TestCase):
         wrapper._custom_on_message = None
         wrapper._recv_buff = comm._recv_buff
         wrapper._MQTTWrapper__nr_dropped_messages = 0
-        wrapper._post_default_on_message = comm._post_on_message if name in ("DEFAULT", "L_DEFAULT") else None
         comm.P = mock.Mock()
+        comm._maybe_reconnect_to_server = mock.Mock()
+        with mock.patch.object(mqtt_comm, "MQTTWrapper", return_value=wrapper) as factory:
+          mqtt_comm.MQTTCommThread._init(comm)
+        wrapper._post_default_on_message = factory.call_args.kwargs["post_default_on_message"]
+        self.assertEqual(wrapper._post_default_on_message is not None, name == "DEFAULT")
+        comm.P.reset_mock()
         for item in (b"first", b"second", b"third"):
           wrapper._callback_on_message(wrapper._mqttc, None, SimpleNamespace(payload=item))
         if name in ("DEFAULT", "L_DEFAULT"):
           self.assertIsInstance(comm._recv_buff, deque)
           self.assertEqual(list(comm._recv_buff), ["second", "third"])
-          self.assertIn("third", comm.P.call_args.args[0])
+          if name == "DEFAULT":
+            self.assertIn("third", comm.P.call_args.args[0])
+          else:
+            comm.P.assert_not_called()
           self.assertEqual(wrapper._MQTTWrapper__nr_dropped_messages, 0)
         else:
           self.assertIsInstance(comm._recv_buff, ObservableMessageBuffer)

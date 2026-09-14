@@ -89,13 +89,35 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     -------
     bool
       Effective policy value, retaining legacy aliases and whitespace behavior.
+
+    Notes
+    -----
+    Unrecognized nonempty strings warn once per policy key without replacing
+    the historical conversion result with a different default.
     """
     value = self.__runtime_value(*keys, default=default)
     if hasattr(self.log, "str_to_bool"):
-      return self.log.str_to_bool(value)
-    if isinstance(value, str):
-      return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
+      result = self.log.str_to_bool(value)
+    elif isinstance(value, str):
+      result = value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    else:
+      result = bool(value)
+    if (
+      isinstance(value, str) and value and not result
+      and value.lower() not in {"0", "false", "no", "n", "off"}
+    ):
+      warned_keys = getattr(self, "_invalid_runtime_bool_warnings", set())
+      warning_key = keys[0]
+      if warning_key not in warned_keys:
+        warned_keys.add(warning_key)
+        self._invalid_runtime_bool_warnings = warned_keys
+        self.P(
+          "Invalid {}={!r}; using legacy boolean conversion result {}.".format(
+            warning_key, value, result,
+          ),
+          color="y",
+        )
+    return result
 
   def __runtime_qos(self, *keys):
     """Resolve QoS with legacy integer coercion followed by range validation.

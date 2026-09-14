@@ -89,12 +89,56 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid MQTT QoS"):
           harness.manager._prepare_comm_config_instance(copy.deepcopy(config))
 
-  def test_unknown_legacy_boolean_retains_logger_false_result(self):
-    harness = _PolicyHarness({
-      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "not-a-boolean",
-    })
+  def test_unknown_legacy_boolean_retains_logger_result_and_warns_once(self):
+    for value in ("not-a-boolean", "ture", "enabled", "disabled", "2", "1.0", " true "):
+      with self.subTest(value=value):
+        harness = _PolicyHarness({
+          "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": value,
+        })
 
-    self.assertFalse(harness.manager.oracle_only_heartbeat_mode_enabled)
+        for _ in range(3):
+          self.assertEqual(harness.manager.oracle_only_heartbeat_mode_enabled, Logger.str_to_bool(value))
+        self.assertEqual(len(harness.manager.messages), 1)
+        self.assertIn("EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE", harness.manager.messages[0][0])
+        self.assertIn("False", harness.manager.messages[0][0])
+
+  def test_recognized_legacy_booleans_and_empty_values_do_not_warn(self):
+    values = (True, False, 0, 1, "true", "T", "YES", "y", "1", "ON", "false", "NO", "n", "0", "OFF", "")
+    for value in values:
+      with self.subTest(value=value):
+        harness = _PolicyHarness({"EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": value})
+        self.assertEqual(harness.manager.oracle_only_heartbeat_mode_enabled, Logger.str_to_bool(value))
+        self.assertEqual(harness.manager.messages, [])
+
+  def test_runtime_boolean_warnings_are_bounded_per_policy_key(self):
+    settings = {
+      "EE_SUPERVISOR": "is_supervisor_node",
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "oracle_only_heartbeat_mode_enabled",
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_RECEIVE": "oracle_only_heartbeat_receive_enabled",
+      "EE_NETMON_USE_SUMMARY_STATUS": "netmon_summary_status_enabled",
+    }
+    harness = _PolicyHarness()
+    with mock.patch.dict("os.environ", {key: "ture" for key in settings}, clear=True):
+      for _ in range(10):
+        for prop in settings.values():
+          self.assertFalse(getattr(harness.manager, prop))
+    self.assertEqual(len(harness.manager.messages), len(settings))
+    self.assertEqual(len(harness.manager._invalid_runtime_bool_warnings), len(settings))
+
+  def test_runtime_boolean_warning_does_not_replace_logger_conversion_with_default(self):
+    harness = _PolicyHarness({"EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "ture"})
+    result = harness.manager._CommunicationManager__runtime_bool(
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE", default=True,
+    )
+    self.assertFalse(result)
+    self.assertEqual(len(harness.manager.messages), 1)
+
+  def test_valid_preferred_runtime_boolean_does_not_warn_for_unused_alias(self):
+    harness = _PolicyHarness({
+      "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "t",
+      "NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "ture",
+    })
+    self.assertTrue(harness.manager.oracle_only_heartbeat_mode_enabled)
     self.assertEqual(harness.manager.messages, [])
 
   def test_channel_qos_overrides_fail_fast_with_old_sdk_wrapper(self):

@@ -14,8 +14,8 @@ This document is planning-only. It covers transport observability, logging, and 
 - Per-communicator bandwidth comes from `BaseCommThread._incoming_lens/_outgoing_lens`.
 - Outgoing bytes are counted after `send_wrapper()` succeeds.
 - Incoming bytes are counted in `get_message()` when `_recv_buff` is drained, so current `IN_KB` is delivery rate, not raw broker ingress.
-- `_send_buff` and `_recv_buff` are bounded deques and overwrite silently once full unless code adds explicit counters.
-- Command receive handling is currently drained from the `HEARTBEATS` communicator in `CommunicationManager.maybe_process_incoming()`, so heartbeat and command ingress attribution are mixed.
+- Active command queues and heartbeat ingress use bounded observable buffers; passive DEFAULT receive retains the legacy deque that evicts oldest and keeps newest. Other deque paths remain outside those admission counters.
+- Command consumers are resolved from the configured receive layout before oracle-only policy. Legacy crossed layouts drain `HEARTBEATS`/`L_HEARTBEATS`, retaining DEFAULT's passive CONFIG setting; regrouped layouts drain `COMMANDCONTROL`/`L_COMMANDCONTROL`. No configured path is rewritten and no new DEFAULT subscription is added. Other duplicate owners remain invalid.
 - Local and central communicators can both carry the same logical message, but periodic stats do not quantify that duplication today.
 
 ## Observability Objectives

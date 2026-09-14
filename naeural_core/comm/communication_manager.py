@@ -15,10 +15,7 @@ from naeural_core import constants as ct
 from naeural_core.bc import DefaultBlockEngine, VerifyMessage
 from naeural_core.local_libraries import _ConfigHandlerMixin
 from naeural_core.manager import Manager
-from naeural_core.comm.communication_roles import (
-  resolve_receive_roles,
-  select_receive_communicators,
-)
+from naeural_core.comm.communication_roles import resolve_receive_roles
 
 
 class CommunicationManager(Manager, _ConfigHandlerMixin):
@@ -37,6 +34,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
 
     self._environment_variables = environment_variables
     self._dct_comm_plugins = None
+    self._receive_roles = None
     self._last_print_info = time()
     self._command_queues = None
     self.__lst_commands_from_self = []
@@ -85,47 +83,39 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     return default
 
   def __runtime_bool(self, *keys, default=False):
-    value = self.__runtime_value(*keys, default=default)
-    if isinstance(value, bool):
-      return value
-    if isinstance(value, str):
-      normalized = value.strip().lower()
-      if normalized in {"1", "true", "yes", "y", "on"}:
-        return True
-      if normalized in {"0", "false", "no", "n", "off"}:
-        return False
-    elif isinstance(value, int) and value in [0, 1]:
-      return bool(value)
+    """Convert existing policy flags using the historical Logger grammar.
 
-    warned_keys = getattr(self, "_invalid_runtime_bool_warnings", set())
-    warning_key = keys[0]
-    if warning_key not in warned_keys:
-      warned_keys.add(warning_key)
-      self._invalid_runtime_bool_warnings = warned_keys
-      self.P(
-        "Invalid {}={!r}; expected a boolean, using default {}.".format(
-          warning_key,
-          value,
-          default,
-        ),
-        color="y",
-      )
-    return default
+    Returns
+    -------
+    bool
+      Effective policy value, retaining legacy aliases and whitespace behavior.
+    """
+    value = self.__runtime_value(*keys, default=default)
+    if hasattr(self.log, "str_to_bool"):
+      return self.log.str_to_bool(value)
+    if isinstance(value, str):
+      return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
   def __runtime_qos(self, *keys):
+    """Resolve QoS with legacy integer coercion followed by range validation.
+
+    Returns
+    -------
+    int or None
+      MQTT QoS in 0..2, or None when no override was supplied.
+    """
     value = self.__runtime_value(*keys, default=None)
     if value is None or value == "":
       return None
     invalid_message = (
       "Invalid MQTT QoS {!r}. Expected one of 0, 1, 2.".format(value)
     )
-    if isinstance(value, bool):
-      raise ValueError(invalid_message)
     try:
       normalized = int(value)
     except (TypeError, ValueError, OverflowError) as exc:
       raise ValueError(invalid_message) from exc
-    if str(value).strip() != str(normalized) or normalized not in [0, 1, 2]:
+    if normalized not in [0, 1, 2]:
       raise ValueError(invalid_message)
     return normalized
 
@@ -366,6 +356,17 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     return _class_def, _class_config
 
   def __start_communication(self, config_instance, is_local=False):
+    """Start configured instances, keeping receive consumers separate from paths.
+
+    Parameters
+    ----------
+    config_instance : dict
+      Broker parameters for the central or local connection.
+    is_local : bool, optional
+      Prefix runtime instance names with ``L_`` for the local connection.
+    """
+    # Resolve before oracle-only policy removes a runtime CTRL subscription.
+    self._receive_roles = resolve_receive_roles(self.config["INSTANCES"])
     plugin_name = self.config["TYPE"]
     config_instance = self._prepare_comm_config_instance(config_instance)
     config_instance[ct.EE_ID] = self._device_id
@@ -620,13 +621,20 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     return
 
   def maybe_process_incoming(self):
+    """Drain the configured command consumer and its optional local counterpart.
+
+    Returns
+    -------
+    list
+      Validated commands ready for orchestrator dispatch. Passive subscribers
+      are left untouched, matching the legacy HEARTBEATS-only consumer policy.
+    """
     incoming_commands = []
-    command_communicators = select_receive_communicators(
-      self._dct_comm_plugins,
-      ct.COMMS.COMMUNICATION_CONFIG_CHANNEL,
-    )
-    for communicator in command_communicators:
-      incoming_commands.extend(communicator.get_messages())
+    command_owner = self._receive_roles["command"].upper()
+    for name in (command_owner, "L_" + command_owner):
+      communicator = self._dct_comm_plugins.get(name)
+      if communicator is not None:
+        incoming_commands.extend(communicator.get_messages())
 
     for json_msg in incoming_commands:
       self.process_command_message(json_msg)
@@ -998,7 +1006,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         self.add_error("Make sure that all communication instances {} are configured as 'INSTANCES' for 'COMMUNICATION' in `config_app.txt`".format(
           ct.COMMS.COMMUNICATION_VALID_TYPES))
       try:
-        resolve_receive_roles(dct_instances)
+        self._receive_roles = resolve_receive_roles(dct_instances)
       except ValueError as exc:
         self.add_error(
           "Invalid heartbeat/command receive topology in `config_app.txt`: {}".format(exc)

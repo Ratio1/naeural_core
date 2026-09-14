@@ -35,10 +35,7 @@ def _load_mqtt_comm_thread_class():
 
 
 class _FakeLog:
-  def str_to_bool(self, value):
-    if isinstance(value, str):
-      return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
+  str_to_bool = staticmethod(Logger.str_to_bool)
 
 
 class _PolicyHarness:
@@ -73,7 +70,7 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
     self.assertEqual(prepared[ct.COMMS.COMMUNICATION_CONFIG_CHANNEL][ct.COMMS.TOPIC], "root/{}/config")
     self.assertEqual(prepared[ct.COMMS.COMMUNICATION_CONFIG_CHANNEL][ct.COMMS.QOS], 2)
 
-  def test_channel_qos_overrides_reject_non_integral_runtime_values(self):
+  def test_channel_qos_overrides_reject_invalid_runtime_values(self):
     config = {
       ct.COMMS.COMMUNICATION_CTRL_CHANNEL: {
         ct.COMMS.TOPIC: "root/ctrl",
@@ -83,7 +80,7 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
       },
     }
     for invalid_qos in (
-      True, False, 1.5, float("nan"), float("inf"), float("-inf"), "1.0",
+      -1, 3, float("nan"), float("inf"), float("-inf"), "1.0", "true", "bad",
     ):
       with self.subTest(invalid_qos=invalid_qos):
         harness = _PolicyHarness({
@@ -92,14 +89,13 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid MQTT QoS"):
           harness.manager._prepare_comm_config_instance(copy.deepcopy(config))
 
-  def test_invalid_runtime_boolean_uses_safe_default_and_warns(self):
+  def test_unknown_legacy_boolean_retains_logger_false_result(self):
     harness = _PolicyHarness({
       "EE_NETMON_ORACLE_ONLY_HEARTBEAT_MODE": "not-a-boolean",
     })
 
     self.assertFalse(harness.manager.oracle_only_heartbeat_mode_enabled)
-    self.assertEqual(len(harness.manager.messages), 1)
-    self.assertIn("not-a-boolean", harness.manager.messages[0][0])
+    self.assertEqual(harness.manager.messages, [])
 
   def test_channel_qos_overrides_fail_fast_with_old_sdk_wrapper(self):
     harness = _PolicyHarness({
@@ -354,6 +350,7 @@ class TestCommunicationHeartbeatPolicy(unittest.TestCase):
         return messages
 
     manager = CommunicationManager.__new__(CommunicationManager)
+    manager._receive_roles = {"command": "COMMANDCONTROL", "heartbeat": "HEARTBEATS"}
     manager._dct_comm_plugins = {
       ct.COMMS.COMMUNICATION_COMMAND_AND_CONTROL: _Communicator(
         ct.COMMS.COMMUNICATION_CONFIG_CHANNEL,

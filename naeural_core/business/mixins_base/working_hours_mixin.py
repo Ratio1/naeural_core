@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone, tzinfo
+from dateutil import tz
 
 class _WorkingHoursMixin(object):
 
@@ -49,7 +51,7 @@ class _WorkingHoursMixin(object):
 
   def validate_working_hours(self):
     """
-    Method for validating the working hours configuration.
+    Validate interval shapes and the timezone used for current-time evaluation.
     Returns
     -------
     res - bool - True if the configuration is valid, False otherwise
@@ -82,7 +84,42 @@ class _WorkingHoursMixin(object):
     # endif working_hours type
     if not is_valid:
       self.add_error(err_message)
+    # Unrestricted and ignored schedules never consult a timezone at runtime.
+    # Keep default/admin plugins usable even when host zone discovery fails.
+    if working_hours != [] and not self.cfg_ignore_working_hours:
+      try:
+        self._working_hours_timezone()
+      except ValueError as exc:
+        self.add_error(str(exc))
+        is_valid = False
     return is_valid
+
+  def _working_hours_timezone(self):
+    """Resolve the timezone forms already accepted by the runtime logger.
+
+    Returns
+    -------
+    datetime.tzinfo
+      Schedule timezone, falling back to the logger's zone only when the
+      configuration is None, as in ``get_timezone``.
+
+    Raises
+    ------
+    ValueError
+      The configured or fallback zone cannot identify a real civil clock.
+    """
+    zone = self.get_timezone()
+    if isinstance(zone, tzinfo):
+      return zone
+    if isinstance(zone, int):
+      return timezone(timedelta(hours=zone))
+    if isinstance(zone, str) and zone:
+      # Use the same parser as Logger.utc_to_local, retaining IANA, fixed-offset
+      # and POSIX timezone strings without changing global logger behavior.
+      resolved = tz.gettz(zone)
+      if resolved is not None:
+        return resolved
+    raise ValueError(f"Unsupported WORKING_HOURS_TIMEZONE: {zone}")
 
   def get_timezone(self):
     tz = self.cfg_working_hours_timezone
@@ -186,7 +223,18 @@ class _WorkingHoursMixin(object):
     return res_working_hours
 
   @property
-  def working_hours(self):
+  def _working_hours_schedule(self):
+    """Return normalized hours in the configured schedule timezone.
+
+    Returns
+    -------
+    dict or list or None
+      Source-zone intervals and uppercase weekdays. Keep source times for both
+      evaluation and shift-hook metadata: converting a weekly map through an
+      arbitrary historical date loses seasonal offsets and repeated DST hours.
+      The public legacy conversion view remains available to explicit callers,
+      but is no longer part of runtime schedule evaluation.
+    """
     schedule = self.cfg_working_hours
 
     # adapted also in case of having just one interval and mistakenly the operator did not configured list of lists.
@@ -199,15 +247,20 @@ class _WorkingHoursMixin(object):
         for key, value in schedule.items()
       }
     # endif dict
-    try:
-      res_working_hours = self.working_hours_to_local(schedule, timezone=self.get_timezone())
-    except Exception as e:
-      self.P("Exception {} occurent in working_hours_to_local:\ncfg_working_hours:\n{}\n\nschedule:\n{}".format(
-        e, self.json_dumps(self.cfg_working_hours), self.json_dumps(schedule),
-      ))
-      raise
-    #endtry
-    return res_working_hours
+    return schedule
+
+  @property
+  def working_hours(self):
+    """Preserve the legacy edge-local schedule view for existing consumers.
+
+    Returns
+    -------
+    dict or list
+      Converted wall-time intervals. This compatibility view cannot encode
+      changing seasonal offsets or DST folds. Runtime decisions and shift
+      metadata use ``_working_hours_schedule`` in the source zone instead.
+    """
+    return self.working_hours_to_local(self._working_hours_schedule, timezone=self.get_timezone())
   
   
   def on_shift_start(self, interval_idx=None, weekday_name=None, **kwargs):
@@ -225,8 +278,18 @@ class _WorkingHoursMixin(object):
     return
 
   def __on_shift_start(self, interval_idx, weekday_name=None):
+    """Emit one shift start using the active source interval's metadata.
+
+    Parameters
+    ----------
+    interval_idx : int or None
+      Index within the original source day's intervals, or None for Always on.
+    weekday_name : str or None
+      Starting weekday, including the previous day for an overnight carry.
+    """
     # TODO: in future implement dict params for instance config in a specific time interval
-    hour_schedule = self.working_hours[weekday_name] if weekday_name is not None else self.working_hours
+    schedule = self._working_hours_schedule
+    hour_schedule = schedule[weekday_name] if weekday_name is not None else schedule
     hrs = 'NON-STOP' if interval_idx is None else hour_schedule[interval_idx]
     shift_str = f'{hrs}' if weekday_name is None else f'{weekday_name}: {hrs}[{self.get_timezone()}]'
     msg = f"Starting new working hours shift {shift_str}"
@@ -251,8 +314,10 @@ class _WorkingHoursMixin(object):
     return
 
   def __on_shift_end(self):
-    msg = f"Ended current working hours shift for {self}. The full schedule is: {self.working_hours}[{self.get_timezone()}]"
-    info = f"Plugin {self} ended its shift shift. The full schedule is: {self.working_hours}[{self.get_timezone()}]"
+    """Emit the existing end notification, payload and hook in the source zone."""
+    schedule = self._working_hours_schedule
+    msg = f"Ended current working hours shift for {self}. The full schedule is: {schedule}[{self.get_timezone()}]"
+    info = f"Plugin {self} ended its shift shift. The full schedule is: {schedule}[{self.get_timezone()}]"
     self.P(msg, color='r')
     self._create_notification(
       msg=msg,
@@ -276,42 +341,55 @@ class _WorkingHoursMixin(object):
     return
 
   def __get_outside_working_hours(self):
-    interval_idx = None
-    result = True
-    weekday_name = None
+    """Evaluate the current instant in the schedule's own civil timezone.
 
- # if the plugin is configured to ignore working hours it will always be considered as inside working hours
-    if self.cfg_ignore_working_hours:      
-      return False, interval_idx, weekday_name
-    
-    # if the provided working_hours is None the plugin will always be outside working hours
-    if self.working_hours is None:
-      return True, interval_idx, weekday_name
+    Returns
+    -------
+    tuple[bool, int or None, str or None]
+      Outside status, active source interval index and its starting weekday.
+      Source metadata lets existing shift callbacks address the original map,
+      including the previous day's interval after an overnight boundary.
+    """
+    if self.cfg_ignore_working_hours:
+      return False, None, None
+    schedule = self._working_hours_schedule
+    if schedule is None:
+      return True, None, None
+    if isinstance(schedule, list) and not schedule:
+      return False, None, None  # Only a global [] means unrestricted.
 
-    ts_now = self.datetime.now()
-    # extracting both the weekday and the hour intervals if it's the case
-    lst_hour_schedule, weekday_name = self.log.extract_weekday_schedule(
-      ts=ts_now,
-      schedule=self.working_hours,
-      return_day_name=True
-    )
-    
-    # in case we have schedule based on week days and the current day was not specified
-    # it means we are outside the working hours
-    
-    if lst_hour_schedule is not None:
-      # if hour_schedule is an empty list we have 2 cases:
-      # 1. The plugin will work non-stop on the current day (if schedule is using week days)
-      # 2. The plugin will work non-stop regardless of the week day
-      if len(lst_hour_schedule) == 0:
-        result = False
+    # An aware instant preserves both fall-back occurrences and uses today's
+    # seasonal offset, regardless of the edge host's local timezone.
+    now = datetime.fromtimestamp(self.time(), timezone.utc).astimezone(self._working_hours_timezone())
+    current_minute = now.hour * 60 + now.minute
+    weekly = isinstance(schedule, dict)
+    weekday_name = self.ct.WEEKDAYS_SHORT[now.weekday()] if weekly else None
+    days = [(weekday_name, False)]
+    if weekly:
+      # Prefer a carried interval on a cold start after midnight so hooks report
+      # the shift's starting day even if today's first interval overlaps it.
+      days.insert(0, (self.ct.WEEKDAYS_SHORT[(now.weekday() - 1) % 7], True))
 
-      interval_idx = self.log.extract_hour_interval_idx(
-        ts=ts_now,
-        lst_schedule=lst_hour_schedule
-      )
-    # endif hour_schedule is not None
-    return result, interval_idx, weekday_name
+    for day, previous_day in days:
+      intervals = schedule.get(day, []) if weekly else schedule
+      for idx, (start, end) in enumerate(intervals):
+        start_hour, start_minute = start.split(':')[:2]
+        end_hour, end_minute = end.split(':')[:2]
+        start_minute = int(start_hour) * 60 + int(start_minute)
+        end_minute = int(end_hour) * 60 + int(end_minute)
+        # Both endpoint minutes are active, including all their seconds.
+        # Runtime-only overnight schedules remain supported even though some
+        # API consumers require same-day intervals. A weekly interval belongs
+        # to its start day; only its after-midnight portion carries forward.
+        if previous_day:
+          active = end_minute < start_minute and current_minute <= end_minute
+        elif end_minute < start_minute:
+          active = current_minute >= start_minute or (not weekly and current_minute <= end_minute)
+        else:
+          active = start_minute <= current_minute <= end_minute
+        if active:
+          return False, idx, day
+    return True, None, weekday_name
   
 
   @property
@@ -406,4 +484,3 @@ if __name__ == '__main__':
     log.P(f'`p.working_hours_is_new_shift`={p.working_hours_is_new_shift}')
     # print(p.outside_working_hours)
     # print(p.working_hours_is_new_shift)
-

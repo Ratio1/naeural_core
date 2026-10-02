@@ -3,6 +3,108 @@ import os
 from naeural_core import constants as ct
 
 class ConfigCommandHandlers:
+
+  _DEEPLOY_LIFECYCLE_GENERATION = "lifecycle_generation"
+  _DEEPLOY_DATE_UPDATED = "date_updated"
+
+  def _coerce_deeploy_lifecycle_number(self, value):
+    if isinstance(value, bool) or value is None:
+      return None
+    try:
+      return float(value)
+    except (TypeError, ValueError):
+      return None
+
+  def _get_deeploy_lifecycle_marker(self, payload):
+    if not isinstance(payload, dict):
+      return None
+    specs = payload.get(ct.CONFIG_STREAM.DEEPLOY_SPECS)
+    if not isinstance(specs, dict):
+      return None
+
+    generation = self._coerce_deeploy_lifecycle_number(
+      specs.get(self._DEEPLOY_LIFECYCLE_GENERATION)
+    )
+    date_updated = self._coerce_deeploy_lifecycle_number(
+      specs.get(self._DEEPLOY_DATE_UPDATED)
+    )
+    if generation is None and date_updated is None:
+      return None
+    return {
+      self._DEEPLOY_LIFECYCLE_GENERATION: generation,
+      self._DEEPLOY_DATE_UPDATED: date_updated,
+    }
+
+  def _get_deeploy_lifecycle_tombstones(self):
+    if not hasattr(self, "_deeploy_lifecycle_tombstones"):
+      self._deeploy_lifecycle_tombstones = {}
+    return self._deeploy_lifecycle_tombstones
+
+  def _remember_deeploy_lifecycle_tombstone(self, stream_name, payload):
+    marker = self._get_deeploy_lifecycle_marker(payload)
+    if marker is not None:
+      self._get_deeploy_lifecycle_tombstones()[stream_name] = marker
+    return
+
+  def _clear_deeploy_lifecycle_tombstone(self, stream_name):
+    self._get_deeploy_lifecycle_tombstones().pop(stream_name, None)
+    return
+
+  def _is_stale_deeploy_lifecycle_marker(self, incoming_marker, current_marker):
+    if incoming_marker is None or current_marker is None:
+      return False
+
+    incoming_generation = incoming_marker.get(self._DEEPLOY_LIFECYCLE_GENERATION)
+    current_generation = current_marker.get(self._DEEPLOY_LIFECYCLE_GENERATION)
+    if incoming_generation is not None and current_generation is not None:
+      if incoming_generation < current_generation:
+        return True
+      if incoming_generation > current_generation:
+        return False
+
+    incoming_date = incoming_marker.get(self._DEEPLOY_DATE_UPDATED)
+    current_date = current_marker.get(self._DEEPLOY_DATE_UPDATED)
+    if incoming_date is not None and current_date is not None:
+      return incoming_date < current_date
+    return False
+
+  def _should_skip_stale_deeploy_lifecycle_command(
+    self,
+    command_name,
+    stream_name,
+    incoming_payload,
+    current_payload,
+    initiator_id,
+    session_id,
+  ):
+    incoming_marker = self._get_deeploy_lifecycle_marker(incoming_payload)
+    current_marker = self._get_deeploy_lifecycle_marker(current_payload)
+    if self._is_stale_deeploy_lifecycle_marker(incoming_marker, current_marker):
+      msg = (
+        "Skipping stale Deeploy {} for pipeline '{}': incoming lifecycle {} "
+        "is older than current lifecycle {}."
+      ).format(command_name, stream_name, incoming_marker, current_marker)
+      self.P(msg, color='y')
+      self._create_notification(
+        notif=ct.STATUS_TYPE.STATUS_NORMAL,
+        msg=msg,
+        stream_name=stream_name,
+        session_id=session_id,
+        initiator_id=initiator_id,
+        displayed=True,
+      )
+      return True
+    return False
+
+  def _normalize_delete_config_payload(self, stream_name):
+    if not isinstance(stream_name, dict):
+      return stream_name, None
+    delete_payload = stream_name
+    normalized_name = (
+      delete_payload.get(ct.CONFIG_STREAM.NAME)
+      or delete_payload.get(ct.CONFIG_STREAM.K_NAME)
+    )
+    return normalized_name, delete_payload
   
   def update_config_stream(self, delta_config_stream, initiator_id, session_id, verbose=1):
     stream_name = delta_config_stream[ct.CONFIG_STREAM.NAME]
@@ -41,6 +143,19 @@ class ConfigCommandHandlers:
       return     
     #endif admin pipeline modification is not allowed 
       
+    config_stream = self.dct_config_streams.get(stream_name, {})
+    lifecycle_current_payload = config_stream
+    if len(config_stream) == 0:
+      lifecycle_current_payload = self._get_deeploy_lifecycle_tombstones().get(stream_name, {})
+    if self._should_skip_stale_deeploy_lifecycle_command(
+      command_name=ct.PAYLOAD_CT.COMMANDS.UPDATE_CONFIG,
+      stream_name=stream_name,
+      incoming_payload=delta_config_stream,
+      current_payload=lifecycle_current_payload,
+      initiator_id=initiator_id,
+      session_id=session_id,
+    ):
+      return
 
     is_duplicate = self._check_duplicate_last(
       payload=delta_config_stream,
@@ -65,7 +180,6 @@ class ConfigCommandHandlers:
       # return
     #endif
 
-    config_stream = self.dct_config_streams.get(stream_name, {})
     is_new = False
     if len(config_stream) > 0:
       msg = "Received {} command to update for existing pipeline '{}' ({}) from {}:{}".format(
@@ -117,6 +231,7 @@ class ConfigCommandHandlers:
       stream_name = config_stream[ct.CONFIG_STREAM.NAME]
       self._save_stream_config(config_stream)
       self.dct_config_streams[stream_name] = config_stream
+      self._clear_deeploy_lifecycle_tombstone(stream_name)
       
       str_new = "new" if is_new else "existing"
       msg = "Successfully updated {} configuration for pipeline '{}' initiated by '{}'".format(str_new, stream_name, initiator_id)
@@ -362,6 +477,18 @@ class ConfigCommandHandlers:
   
   
   def delete_config_stream(self, stream_name, initiator_id, session_id, verbose=1):
+    stream_name, delete_payload = self._normalize_delete_config_payload(stream_name)
+    if not isinstance(stream_name, str) or len(stream_name) == 0:
+      msg = "Attempt to delete a pipeline with no/wrong pipeline name/information: {}.".format(stream_name)
+      self.P(msg, color='r')
+      self._create_notification(
+        notif=ct.STATUS_TYPE.STATUS_ABNORMAL_FUNCTIONING,
+        msg=msg,
+        stream_name=stream_name,
+        displayed=True,
+      )
+      return
+
     if stream_name not in self.dct_config_streams:
       msg = "Attempted to delete pipeline '{}' that does not exist. Current pipelines: {}".format(
         stream_name, list(self.dct_config_streams.keys())
@@ -389,6 +516,21 @@ class ConfigCommandHandlers:
     if initiator_id is None:
       initiator_id = self.dct_config_streams[stream_name].get(ct.PAYLOAD_DATA.INITIATOR_ID)
 
+    current_config_stream = self.dct_config_streams[stream_name]
+    if self._should_skip_stale_deeploy_lifecycle_command(
+      command_name=ct.PAYLOAD_CT.COMMANDS.DELETE_CONFIG,
+      stream_name=stream_name,
+      incoming_payload=delete_payload,
+      current_payload=current_config_stream,
+      initiator_id=initiator_id,
+      session_id=session_id,
+    ):
+      return
+
+    self._remember_deeploy_lifecycle_tombstone(
+      stream_name=stream_name,
+      payload=delete_payload or current_config_stream,
+    )
     self._delete_stream_config(stream_name)
     self.dct_config_streams.pop(stream_name)
     

@@ -1,0 +1,27 @@
+{
+  "stream_name": "sentinelapi-0_d60b35d",
+  "current_update": {
+    "NAME": "sentinelapi-0_d60b35d",
+    "TYPE": "Void",
+    "INITIATOR_ID": "manager-new",
+    "SESSION_ID": "session-new",
+    "DEEPLOY_SPECS": {
+      "job_id": 66,
+      "project_id": 12,
+      "lifecycle_generation": 2,
+      "lifecycle_operation": "update",
+      "date_updated": 200.0
+    }
+  },
+  "stale_delete": {
+    "NAME": "sentinelapi-0_d60b35d",
+    "OWNER": "0xowner",
+    "DEEPLOY_SPECS": {
+      "job_id": 66,
+      "project_id": 12,
+      "lifecycle_generation": 1,
+      "lifecycle_operation": "delete",
+      "date_updated": 100.0
+    }
+  }
+}

@@ -1262,20 +1262,48 @@ class BasePluginExecutor(
     return self.__dct_last_payload
 
   def get_plugin_used_memory(self, return_tree=False):
+    """Estimate plugin state without traversing shared runtime infrastructure.
+
+    Parameters
+    ----------
+    return_tree : bool, optional
+      Return the scanner's object tree and top consumers alongside the size.
+
+    Returns
+    -------
+    int or tuple
+      Estimated size in bytes, or ``(size, tree, top_consumers)`` when
+      ``return_tree`` is true. The input queue is measured separately by
+      ``get_plugin_queue_memory()``.
+
+    Notes
+    -----
+    Exclusions match stored ``__dict__`` keys, including Python-mangled private
+    names. Shared managers, engines and inter-plugin state are not owned by this
+    instance. This is an object-graph estimate, not process RSS accounting.
+    """
     self.start_timer('get_plugin_memory')
-    size_o = self.log.get_obj_size(
-      obj=self,
-      return_tree=return_tree,
-      excluded_obj_props=[
-        '_painter', 'thread', 'log', 'owner', 'global_shmem',
-        # why excluding - to clarify
-      ],
-      exclude_obj_props_like=[
-        'upstream_inputs_deque'
-      ]
-    )
-    self.end_timer('get_plugin_memory')
-    return size_o
+    try:
+      return self.log.get_obj_size(
+        obj=self,
+        return_tree=return_tree,
+        excluded_obj_props=[
+          '_painter', 'thread', 'log', 'owner', 'global_shmem',
+          # Use the defining class's stored names, also for inherited plugins.
+          '_BasePluginExecutor__global_shmem',
+          '_BasePluginExecutor__plugins_shmem',
+          '_BasePluginExecutor__blockchain_manager',
+          '_BasePluginExecutor__bc',
+          '_BasePluginExecutor__r1fs',
+          '_file_system_manager',
+          'plugins_shared_mem',
+        ],
+        exclude_obj_props_like=[
+          'upstream_inputs_deque'
+        ]
+      )
+    finally:
+      self.end_timer('get_plugin_memory')
 
   def get_plugin_queue_memory(self):
     self.start_timer('get_plugin_queue_memory')

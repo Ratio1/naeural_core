@@ -36,6 +36,9 @@ transport observations. No IDs are added to production envelopes. Consumer
 records use the existing instance hash and explicitly report `correlated=false`,
 because CMD_ID has already been removed before business dispatch. Timeouts and
 receive exceptions without an envelope also remain uncorrelated.
+For instance-specific detectors, consumer targeting and inference lookup retain
+`MODEL_INSTANCE_ID` from `STARTUP_AI_ENGINE_PARAMS`, using the same flat/keyed
+single-engine and per-engine list conventions as BusinessManager.
 
 Every recursively visited ndarray occurrence counts, including metadata and
 duplicate references. `admitted` is a sender count; `read_ok` is a receiver count.
@@ -54,10 +57,11 @@ receipt; receipt does not prove every image was usable. Parallel transport probe
 do not execute in in-process mode; absence of their records is not loss evidence.
 
 Each target/event has a one-second detail ceiling and ten-second repeat cadence.
-The next eligible observation records error/recovery transitions and suppressed
-observation counts. Suppression counters cover observations since the last
-record, not exact per-category incident totals. Expiry can leave a final partial
-interval unreported. Missing sampled records cannot prove a missing request.
+An eligible observation records its current error/recovery state and suppressed
+observation count. A short-lived anomaly during suppression may be represented
+only in that generic count: transitions are not buffered. These are not exact
+per-category incident totals. Expiry can leave a final partial interval unreported.
+Missing sampled records cannot prove a missing request or absence of failures.
 
 State is bounded to eight target/event entries per interpreter. New serialized
 record bytes are capped at one MiB per interpreter/window, ending with a cap
@@ -81,3 +85,11 @@ tests. Production-load budgets (at most 1% throughput loss and 5% p95 prediction
 increase) remain a deployment gate. Existing timers supply performance context;
 these records do not attribute elapsed time to GIL contention or prove the
 October 9 allocation trigger. Moxa and backend diagnostics are separate work.
+
+The companion polling-wait commit adds at least 20 ms after normal plugin work,
+including an iteration already over its time budget. A 50 ms execution therefore
+takes at least 70 ms per iteration, about 14.3 Hz; a 100 ms execution takes at
+least 120 ms, about 8.3 Hz. This is the agreed sleep floor, not a period floor.
+It deliberately trades per-plugin throughput/latency for fewer GIL reacquisitions.
+Measure the wait-only build against baseline separately from diagnostics off/on;
+check busy-plugin queues, dropped inputs and command latency before deployment.

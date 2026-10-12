@@ -787,8 +787,12 @@ class ServingManager(Manager):
       shm_diag.observe(self.log, server_name, "result", correlated=False,
                        exception_type=type(exc).__name__)
       raise
-    if shm_diag.enabled(server_name) and isinstance(payload, dict) and payload.get(SMConst.TYPE) == SMConst.RESULT:
+    if shm_diag.enabled(server_name):
       try:
+        # Even the observation predicate can invoke user-defined equality;
+        # isolate it so diagnostics cannot change the original result path.
+        if not isinstance(payload, dict) or payload.get(SMConst.TYPE) != SMConst.RESULT:
+          return payload
         msg_data = payload.get(SMConst.DATA)
         rows = msg_data.get(ct.INFERENCES) if isinstance(msg_data, dict) else None
         shm_diag.observe(

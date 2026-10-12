@@ -951,14 +951,24 @@ class CVPluginExecutor(BasePluginExecutor,
         # CMD_ID is already stripped here: never claim request correlation.
         try:
           raw_inferences = self.dataapi_inferences()
+          startup_params = self.cfg_startup_ai_engine_params
           for model in self._get_detector_ai_engines():
-            target = get_serving_process_given_ai_engine(model)
+            # Match BusinessManager's single-engine flat/keyed and multi-engine
+            # keyed startup config, retaining the actual worker instance.
+            engine = model.lower()
+            params = startup_params.get(engine, {})
+            if not isinstance(self.cfg_ai_engine, list) and engine not in startup_params:
+              params = startup_params
+            instance_id = params.get('MODEL_INSTANCE_ID')
+            handle = (engine, instance_id) if instance_id is not None else engine
+            target = get_serving_process_given_ai_engine(handle)
             target = '_'.join(target) if isinstance(target, (list, tuple)) else target
             if shm_diag.enabled(target):
-              rows = raw_inferences.get(model) if isinstance(raw_inferences, dict) else None
+              # Dispatch preserves the same (engine, instance) inference key.
+              rows = raw_inferences.get(handle) if isinstance(raw_inferences, dict) else None
               count = len(rows) if isinstance(rows, list) else None
               wrong_type = not isinstance(rows, list) or any(not isinstance(row, list) for row in rows)
-              reason = "absent_model" if isinstance(raw_inferences, dict) and model not in raw_inferences \
+              reason = "absent_model" if isinstance(raw_inferences, dict) and handle not in raw_inferences \
                 else "wrong_type" if wrong_type \
                 else "cardinality" if count != len(dct_images) else None
               shm_diag.observe(

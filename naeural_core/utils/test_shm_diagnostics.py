@@ -70,6 +70,17 @@ _CV = _methods("business/base/cv_plugin_executor.py", "CVPluginExecutor",
                ["_pre_process"], dict(_ENV))
 _DataAPI = _methods("business/mixins_base/dataapi.py", "_DataAPIMixin",
                     ["dataapi_specific_image_inferences"], {})
+_BusinessManager = _methods("business/business_manager.py", "BusinessManager",
+                            ["fetch_ai_engines"], {"json": json})
+with mock.patch.dict(sys.modules, {
+  "extensions.serving.ai_engines.stable": types.SimpleNamespace(AI_ENGINES={}),
+}):
+  _stable_engines = _load_file("stable_engines_subject", _ROOT / "serving/ai_engines/stable.py")
+with mock.patch.dict(sys.modules, {"naeural_core.serving.ai_engines": _stable_engines}):
+  _engine_utils = _load_file("engine_utils_subject", _ROOT / "serving/ai_engines/utils.py")
+_DataHandler = _methods("main/main_loop_data_handler.py", "MainLoopDataHandler",
+                        ["append_inferences"], {"json": json,
+                          "get_ai_engine_given_serving_process": _engine_utils.get_ai_engine_given_serving_process})
 
 
 class _Log:
@@ -172,6 +183,30 @@ class ShmDiagnosticsTests(unittest.TestCase):
     worker.server_name, worker.npy_shm, worker.comm_eng = "DETECTOR", shm, comm
     worker.time, worker.P = time.time, worker.log.P
     return worker
+
+  def consumer(self, engines, startup_params, raw, calls):
+    """Isolate downstream CV work while observing its real preprocessing hook."""
+    cv = _CV()
+    cv.log, cv.instance_hash, cv._coords_type = _Log(), "bounded-instance", "set"
+    cv.cfg_ai_engine, cv.cfg_startup_ai_engine_params = engines, startup_params
+    cv.dataapi_images = lambda: {0: np.zeros((1, 1, 3))}
+    cv.dataapi_inferences = lambda: raw
+    cv.dataapi_images_inferences = lambda: raw
+    cv._get_detector_ai_engines = lambda: engines if isinstance(engines, list) else [engines]
+    cv._get_detector_ai_engine = lambda: cv._get_detector_ai_engines()[0]
+    cv.cfg_meta_type_mapping, cv.cfg_meta_nms_iou_thr = {}, 0.5
+    def filtering(data):
+      calls.append(("filter", len(cv.log.records())))
+      return data
+    cv._filter_confidence_threshold = filtering
+    cv._filter_object_types = lambda data: data
+    cv._maybe_process_meta_types = lambda data, **kwargs: data
+    cv._track_objects = lambda data: data
+    cv._get_generic_positional_objects = lambda data: (data, data)
+    cv._keep_only_intersected_objects = lambda data: data
+    cv._track_in_zone_objects = lambda **kwargs: kwargs["dct_inference"]
+    cv._CVPluginExecutor__maybe_complete_color_tag = lambda *args: None
+    return cv
 
   def test_capacity_and_receiver_loss_preserve_data_flags_and_wire_shape(self):
     cases = [(49, 0, False, False, 0), (50, 0, False, False, 0),
@@ -292,26 +327,9 @@ class ShmDiagnosticsTests(unittest.TestCase):
       for enabled in (False, True):
         _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
         _DIAG._STATE.clear()
-        cv, calls = _CV(), []
-        cv.log, cv.instance_hash, cv._coords_type = _Log(), "bounded-instance", "set"
+        calls = []
         raw = {} if rows == "absent" else {"detector": rows}
-        cv.dataapi_images = lambda: {0: np.zeros((1, 1, 3))}
-        cv.dataapi_inferences = lambda: raw
-        cv.dataapi_images_inferences = lambda: raw
-        cv._get_detector_ai_engines = lambda: ["detector"]
-        cv._get_detector_ai_engine = lambda: "detector"
-        cv.cfg_meta_type_mapping, cv.cfg_meta_nms_iou_thr = {}, 0.5
-        def filtering(data):
-          calls.append(("filter", len(cv.log.records())))
-          return data
-        cv._filter_confidence_threshold = filtering
-        cv._filter_object_types = lambda data: data
-        cv._maybe_process_meta_types = lambda data, **kwargs: data
-        cv._track_objects = lambda data: data
-        cv._get_generic_positional_objects = lambda data: (data, data)
-        cv._keep_only_intersected_objects = lambda data: data
-        cv._track_in_zone_objects = lambda **kwargs: kwargs["dct_inference"]
-        cv._CVPluginExecutor__maybe_complete_color_tag = lambda *args: None
+        cv = self.consumer("detector", {}, raw, calls)
         outcomes.append(cv._pre_process())
         if rows == [] or rows == [[]]:
           api = _DataAPI()
@@ -330,6 +348,64 @@ class ShmDiagnosticsTests(unittest.TestCase):
           self.assertFalse(record["correlated"])
           self.assertIsNone(record["cmd_id"])
       self.assertEqual(outcomes[0], outcomes[1])
+
+  def test_consumer_target_matches_business_manager_model_instances(self):
+    """Select the real workers produced by flat/keyed per-engine startup config."""
+    custom, general, nano = "custom_second_stage_detector", "general_detector", "nano_general_detector"
+    cases = [
+      (custom, {"MODEL_INSTANCE_ID": "helmet"}),
+      (custom, {custom: {"MODEL_INSTANCE_ID": "helmet"}}),
+      ([custom, general], {custom: {"MODEL_INSTANCE_ID": "helmet"},
+                            general: {"MODEL_INSTANCE_ID": "road"}}),
+      (general, {}),
+      (custom, {"MODEL_INSTANCE_ID": "ignored", custom: {"MODEL_INSTANCE_ID": "keyed"}}),
+      ([general, nano], {"MODEL_INSTANCE_ID": "ignored"}),
+    ]
+    resolve = _engine_utils.get_serving_process_given_ai_engine
+    with mock.patch.dict(_CV._pre_process.__globals__, {"get_serving_process_given_ai_engine": resolve}):
+      for engines, startup_params in cases:
+        business = _BusinessManager()
+        business._dct_current_instances = {"test": types.SimpleNamespace(cfg_ai_engine=engines)}
+        business.dct_instances_details = {"test": ("stream", "plugin", {
+          "STARTUP_AI_ENGINE_PARAMS": startup_params,
+        })}
+        targets, outputs = set(), {}
+        handler = _DataHandler()
+        handler._dct_models_stream_idx = {}
+        handler.dct_business_inputs = {"test": {}}
+        for handle in business.fetch_ai_engines():
+          target = resolve(handle)
+          targets.add(("_".join(target) if isinstance(target, tuple) else target).upper())
+          handler._dct_models_stream_idx[target] = [("stream", "{}", {})]
+          outputs[target] = {"INFERENCES": [[[]]], "INFERENCES_META": {}}
+        handler._dct_serving_processes_details = business.dct_serving_processes_details
+        handler.append_inferences(outputs)
+        raw = handler.dct_business_inputs["test"]["INFERENCES"]
+        before = json.dumps(startup_params, sort_keys=True)
+        outcomes = []
+        for enabled in (False, True):
+          with self.subTest(engines=engines, params=startup_params, enabled=enabled):
+            _DIAG._TARGETS = tuple(targets) if enabled else ()
+            _DIAG._STATE.clear()
+            calls = []
+            cv = self.consumer(engines, startup_params, raw, calls)
+            outcomes.append(cv._pre_process())
+            records = cv.log.records()
+            self.assertEqual({r["target"] for r in records}, targets if enabled else set())
+            self.assertTrue(all(r["reason"] is None and not r["correlated"] for r in records))
+            self.assertEqual(calls, [("filter", len(targets) if enabled else 0)])
+            self.assertEqual(json.dumps(startup_params, sort_keys=True), before)
+        self.assertEqual(outcomes[0], outcomes[1])
+
+        # A bare-key result from another identity must not hide a missing
+        # configured instance, even when its cardinality looks healthy.
+        if custom in (engines if isinstance(engines, list) else [engines]):
+          raw = {custom: [[]]}
+          _DIAG._STATE.clear()
+          cv = self.consumer(engines, startup_params, raw, [])
+          cv._pre_process()
+          record = next(r for r in cv.log.records() if r["target"].startswith("TH_YOLO_SECOND_STAGE_"))
+          self.assertEqual(record["reason"], "absent_model")
 
   def test_result_timeout_and_result_envelope_are_preserved(self):
     for payload in (None, {"TYPE": "RESULT", "DATA": {"INFERENCES": [[], [[]]]}, "CMD_ID": 71}):
@@ -368,6 +444,45 @@ class ShmDiagnosticsTests(unittest.TestCase):
         if not expected:
           with mock.patch.object(module.time, "monotonic", side_effect=AssertionError("off clock")):
             self.assertFalse(module.enabled())
+
+  def test_result_type_inspection_preserves_envelope_and_result_consumer(self):
+    """A failing diagnostic predicate must leave the original consumer in charge."""
+    class ResultType(str):
+      def __eq__(self, other):
+        raise RuntimeError("secret_canary")
+
+      def __ne__(self, other):
+        raise RuntimeError("secret_canary")
+
+    for kind in (np.array(["RESULT", "RESULT"]), ResultType("RESULT")):
+      for enabled in (False, True):
+        with self.subTest(kind=type(kind).__name__, enabled=enabled):
+          _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
+          _DIAG._STATE.clear()
+          payload = {"TYPE": kind, "DATA": {"INFERENCES": [[]]}, "CMD_ID": 72}
+          comm = _Comm(payload)
+          manager = self.manager(None, comm)
+          self.assertIs(manager._wait_for_comm_message("DETECTOR", max_wait_time=1), payload)
+          self.assertEqual(comm.calls, ["poll", "recv"])
+          if enabled:
+            record = manager.log.records()[0]
+            self.assertTrue(record["observation_error"])
+            self.assertNotIn("secret_canary", json.dumps(record))
+          else:
+            self.assertEqual(manager.log.records(), [])
+
+          # The real result consumer tolerates this string subtype through
+          # .upper(); keep that success and the ndarray's original exception.
+          _DIAG._STATE.clear()
+          comm.calls.clear()
+          if isinstance(kind, str):
+            result = manager._wait_for_result("DETECTOR", max_wait_time=1)
+            self.assertEqual(result[0], "RESULT")
+            self.assertIs(result[1], payload["DATA"])
+          else:
+            with self.assertRaises(AttributeError):
+              manager._wait_for_result("DETECTOR", max_wait_time=1)
+          self.assertEqual(comm.calls, ["poll", "recv"])
 
   def test_fork_reset_preserves_expiry_and_does_not_inherit_a_locked_gate(self):
     deadline, until = _DIAG._DEADLINE, _DIAG._UNTIL

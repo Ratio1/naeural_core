@@ -10,6 +10,7 @@ import sys
 import traceback
 
 from naeural_core import DecentrAIObject
+from naeural_core.utils.shm_diagnostics import array_observation
 
 __VER__ = '0.2.1.3'
 MAXLEN = 50
@@ -473,7 +474,7 @@ class NumpySharedMemoryPlaceholder:
     return self.__shm_idx
 
 
-def ndarray_to_shm(data: np.ndarray, shm: NumpySharedMemory, debug: bool = False) -> NumpySharedMemoryPlaceholder:
+def ndarray_to_shm(data: np.ndarray, shm: NumpySharedMemory, debug: bool = False, trace=None) -> NumpySharedMemoryPlaceholder:
   """
   Helper function to replace a numpy ndarray with a shared memory object.
   Parameters
@@ -481,6 +482,8 @@ def ndarray_to_shm(data: np.ndarray, shm: NumpySharedMemory, debug: bool = False
   data - np.ndarray - the numpy array to be replaced
   shm - NumpySharedMemory - the shared memory object to be used
   debug - bool - if True, the function will print debug information
+  trace : dict or None
+      Optional request-local scalar counters; no data or slot mutation.
 
   Returns
   -------
@@ -489,12 +492,29 @@ def ndarray_to_shm(data: np.ndarray, shm: NumpySharedMemory, debug: bool = False
   if debug:
     shm.log.P(f"Writing data of shape {data.shape if isinstance(data, np.ndarray) else None} to shared memory.")
   idx = shm.add_data_to_buffer(data)
+  if trace is not None:
+    try:
+      reason = None
+      if idx is None:
+        if data.size > shm._max_element_size:
+          reason = "array_too_large"
+        elif data.ndim > shm.shape_offset:
+          reason = "rank_too_large"
+        elif not shm.initialized:
+          reason = "uninitialized"
+        elif not shm.is_buffer:
+          reason = "not_buffer"
+        else:
+          reason = "no_free_slot"
+      array_observation(trace, data, idx, reason)
+    except Exception:
+      trace["observation_error"] = True
   if debug:
     shm.log.P(f"Data written to shared memory index {idx}")
   return NumpySharedMemoryPlaceholder(idx)
 
 
-def replace_ndarray_with_shm(data: any, shm: NumpySharedMemory, debug: bool = False) -> any:
+def replace_ndarray_with_shm(data: any, shm: NumpySharedMemory, debug: bool = False, trace=None) -> any:
   """
   Replaces all numpy ndarrays from data with shared memory placeholders.
   Parameters
@@ -502,6 +522,8 @@ def replace_ndarray_with_shm(data: any, shm: NumpySharedMemory, debug: bool = Fa
   data - any - the data to be processed
   shm - NumpySharedMemory or None - the shared memory object to be used or None if no replacement is needed
   debug - bool - if True, the function will print debug information
+  trace : dict or None
+      Optional request-local scalar counters; no data or slot mutation.
 
   Returns
   -------
@@ -513,26 +535,26 @@ def replace_ndarray_with_shm(data: any, shm: NumpySharedMemory, debug: bool = Fa
     res = [None] * len(data)
     for i in range(len(data)):
       if isinstance(data[i], np.ndarray):
-        res[i] = ndarray_to_shm(data[i], shm, debug)
+        res[i] = ndarray_to_shm(data[i], shm, debug, trace=trace)
       else:
-        res[i] = replace_ndarray_with_shm(data[i], shm, debug)
+        res[i] = replace_ndarray_with_shm(data[i], shm, debug, trace=trace)
     # endfor data
   elif isinstance(data, dict):
     res = {}
     for k in data:
       if isinstance(data[k], np.ndarray):
-        res[k] = ndarray_to_shm(data[k], shm, debug)
+        res[k] = ndarray_to_shm(data[k], shm, debug, trace=trace)
       else:
-        res[k] = replace_ndarray_with_shm(data[k], shm, debug)
+        res[k] = replace_ndarray_with_shm(data[k], shm, debug, trace=trace)
     # endfor data
   elif isinstance(data, np.ndarray):
-    res = ndarray_to_shm(data, shm, debug)
+    res = ndarray_to_shm(data, shm, debug, trace=trace)
   else:
     res = data
   return res
 
 
-def shm_to_ndarray(data: NumpySharedMemoryPlaceholder, shm: NumpySharedMemory, debug: bool = False) -> np.ndarray:
+def shm_to_ndarray(data: NumpySharedMemoryPlaceholder, shm: NumpySharedMemory, debug: bool = False, trace=None) -> np.ndarray:
   """
   Helper function to replace a shared memory object with a numpy ndarray.
   Parameters
@@ -540,6 +562,8 @@ def shm_to_ndarray(data: NumpySharedMemoryPlaceholder, shm: NumpySharedMemory, d
   data - NumpySharedMemoryPlaceholder - the placeholder object to be replaced
   shm - NumpySharedMemory - the shared memory object to be used
   debug - bool - if True, the function will print debug information
+  trace : dict or None
+      Optional request-local scalar counters; no data or slot mutation.
 
   Returns
   -------
@@ -549,12 +573,30 @@ def shm_to_ndarray(data: NumpySharedMemoryPlaceholder, shm: NumpySharedMemory, d
   if debug:
     shm.log.P(f"Reading data from shared memory index {shm_idx}")
   res = shm.read_buffer_data(shm_idx) if shm_idx is not None else None
+  if trace is not None:
+    try:
+      # read_buffer_data already coerces built-in strings/floats. Classify that
+      # same index, without invoking a custom object's __int__ a second time.
+      observed_idx = int(shm_idx) if type(shm_idx) in (str, float) else shm_idx
+      reason = None
+      if res is None:
+        if shm_idx is None:
+          reason = "unadmitted_placeholder"
+        elif not shm.initialized:
+          reason = "uninitialized"
+        elif isinstance(observed_idx, (int, np.integer)) and not 0 <= observed_idx < shm.maxlen:
+          reason = "invalid_slot"
+        else:
+          reason = "slot_unavailable"
+      array_observation(trace, res, observed_idx, reason, reading=True)
+    except Exception:
+      trace["observation_error"] = True
   if debug:
     shm.log.P(f"Read data of shape {res.shape if isinstance(res, np.ndarray) else None} from shared memory index {shm_idx}.")
   return res
 
 
-def replace_shm_with_ndarray(data: any, shm: NumpySharedMemory, debug: bool = False) -> any:
+def replace_shm_with_ndarray(data: any, shm: NumpySharedMemory, debug: bool = False, trace=None) -> any:
   """
   Replaces all shared memory placeholders from data with numpy ndarrays.
   Parameters
@@ -562,6 +604,8 @@ def replace_shm_with_ndarray(data: any, shm: NumpySharedMemory, debug: bool = Fa
   data - any - the data to be processed
   shm - NumpySharedMemory or None - the shared memory object to be used or None if no replacement is needed
   debug - bool - if True, the function will print debug information
+  trace : dict or None
+      Optional request-local scalar counters; no data or slot mutation.
 
   Returns
   -------
@@ -573,20 +617,20 @@ def replace_shm_with_ndarray(data: any, shm: NumpySharedMemory, debug: bool = Fa
     res = [None] * len(data)
     for i in range(len(data)):
       if isinstance(data[i], NumpySharedMemoryPlaceholder):
-        res[i] = shm_to_ndarray(data[i], shm, debug)
+        res[i] = shm_to_ndarray(data[i], shm, debug, trace=trace)
       else:
-        res[i] = replace_shm_with_ndarray(data[i], shm, debug)
+        res[i] = replace_shm_with_ndarray(data[i], shm, debug, trace=trace)
     # endfor data
   elif isinstance(data, dict):
     res = {}
     for k in data:
       if isinstance(data[k], NumpySharedMemoryPlaceholder):
-        res[k] = shm_to_ndarray(data[k], shm, debug)
+        res[k] = shm_to_ndarray(data[k], shm, debug, trace=trace)
       else:
-        res[k] = replace_shm_with_ndarray(data[k], shm, debug)
+        res[k] = replace_shm_with_ndarray(data[k], shm, debug, trace=trace)
     # endfor data
   elif isinstance(data, NumpySharedMemoryPlaceholder):
-    res = shm_to_ndarray(data, shm, debug)
+    res = shm_to_ndarray(data, shm, debug, trace=trace)
   else:
     res = data
   return res

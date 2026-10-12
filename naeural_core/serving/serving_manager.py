@@ -28,6 +28,7 @@ from collections import OrderedDict, defaultdict
 
 from naeural_core import constants as ct
 from naeural_core.utils.system_shared_memory import NumpySharedMemory, replace_ndarray_with_shm, replace_shm_with_ndarray
+from naeural_core.utils import shm_diagnostics as shm_diag
 
 from naeural_core.manager import Manager
 from naeural_core.serving.base.serving_utils import comm_generator
@@ -683,11 +684,36 @@ class ServingManager(Manager):
     return started
 
   def _send_message(self, server_name, command, inputs):
+    """Submit the existing request, optionally observing SHM admission.
+
+    Parameters
+    ----------
+    server_name : str or tuple
+      Existing serving handle.
+    command : str
+      Existing IPC command type.
+    inputs : object
+      Request data; diagnostic counters are local and never enter the envelope.
+
+    Raises
+    ------
+    ValueError
+      Existing send failure; conversion errors retain their original type.
+    """
     server_name = self.get_server_name(server_name)
     self.__cmd_count += 1
+    shm = self._servers[server_name].get(SMConst.SHM)
+    trace = shm_diag.request_observation(inputs, shm) if shm_diag.enabled(server_name) else None
     if self._servers[server_name].get(SMConst.SHM) is not None:
       self.log.start_timer('replace_ndarray_with_shm')
-      processed_inputs = replace_ndarray_with_shm(inputs, self._servers[server_name][SMConst.SHM], debug=self.full_debug)
+      try:
+        processed_inputs = replace_ndarray_with_shm(inputs, shm, debug=self.full_debug, trace=trace)
+      except BaseException as exc:
+        if trace is not None:
+          shm_diag.observe(self.log, server_name, "send", self.__cmd_count,
+                           **trace, attempted=False, completed=False,
+                           exception_type=type(exc).__name__)
+        raise
       self.log.stop_timer('replace_ndarray_with_shm')
     else:
       processed_inputs = inputs
@@ -703,12 +729,21 @@ class ServingManager(Manager):
       if self.full_debug or command != SMConst.PREDICT:
         self.P('Sending {}:{} to {} on {}'.format(command, self.__cmd_count, server_name, comm_eng), color='y')
       self.log.start_timer('pipe_send_message')
+      if trace is not None:
+        trace['occupied_after'] = shm_diag.occupancy_observation(shm)
       comm_eng.send(dct_cmd)
       self.log.stop_timer('pipe_send_message')
+      if trace is not None:
+        shm_diag.observe(self.log, server_name, "send", self.__cmd_count,
+                         **trace, attempted=True, completed=True)
       if self.full_debug or command != SMConst.PREDICT:
         self.P('  Command {}:{} sent to {}'.format(command, self.__cmd_count, server_name), color='y')
         
-    except:
+    except BaseException as exc:
+      if trace is not None:
+        shm_diag.observe(self.log, server_name, "send", self.__cmd_count,
+                         **trace, attempted=True, completed=False,
+                         exception_type=type(exc).__name__)
       self.log.stop_timer('pipe_send_message') # double stop due to re-raise
       self.P("Error while sending command {} to server {}:{}".format(
          command, server_name, traceback.format_exc()), color='r')
@@ -718,19 +753,54 @@ class ServingManager(Manager):
   
   
   def _wait_for_comm_message(self, server_name, comm_eng=None, max_wait_time=None):
+    """Poll/receive once and observe returned result cardinality.
+
+    Parameters
+    ----------
+    server_name : str or tuple
+      Existing serving handle.
+    comm_eng : object or None
+      Existing transport, or resolve it from the server registry.
+    max_wait_time : float
+      Required existing poll timeout; an empty poll is not diagnosed here.
+
+    Returns
+    -------
+    object or None
+      Original IPC envelope, unchanged. Transport exceptions are re-raised.
+    """
     assert max_wait_time is not None, "ERROR: max_wait_time != None is required"
     server_name = self.get_server_name(server_name)
     if comm_eng is None:
       comm_eng = self._servers[server_name][SMConst.COMM]
-    if max_wait_time is None:
-      # we wait until we receive the answer
-      payload = comm_eng.recv()
-    else:
-      # now we wait only `max_wait_time` seconds for the result
-      has_payload = comm_eng.poll(max_wait_time)
-      payload = None
-      if has_payload:
+    try:
+      if max_wait_time is None:
+        # we wait until we receive the answer
         payload = comm_eng.recv()
+      else:
+        # now we wait only `max_wait_time` seconds for the result
+        has_payload = comm_eng.poll(max_wait_time)
+        payload = None
+        if has_payload:
+          payload = comm_eng.recv()
+    except BaseException as exc:
+      shm_diag.observe(self.log, server_name, "result", correlated=False,
+                       exception_type=type(exc).__name__)
+      raise
+    if shm_diag.enabled(server_name) and isinstance(payload, dict) and payload.get(SMConst.TYPE) == SMConst.RESULT:
+      try:
+        msg_data = payload.get(SMConst.DATA)
+        rows = msg_data.get(ct.INFERENCES) if isinstance(msg_data, dict) else None
+        shm_diag.observe(
+          self.log, server_name, "result", payload.get(SMConst.CMD_ID),
+          correlated=type(payload.get(SMConst.CMD_ID)) is int,
+          entries=len(rows) if isinstance(rows, list) else None,
+          missing=sum(isinstance(row, list) and len(row) == 0 for row in rows)
+          if isinstance(rows, list) else 0,
+          wrong_type=not isinstance(rows, list),
+        )
+      except Exception:
+        shm_diag.observe(self.log, server_name, "result", observation_error=True, correlated=False)
     return payload
   
       
@@ -786,6 +856,17 @@ class ServingManager(Manager):
     return self._servers[server_name][SMConst.SERVER] if server_name in self._servers else None
 
   def _close_server_on_null(self, server_name, max_wait_time=None):
+    """Keep existing response-timeout cleanup and add an uncorrelated record.
+
+    Parameters
+    ----------
+    server_name : str or tuple
+      Timed-out serving handle.
+    max_wait_time : float or None
+      Existing response deadline; None resolves the configured value.
+    """
+    shm_diag.observe(self.log, self.get_server_name(server_name), "result",
+                     correlated=False, reason="response_timeout")
     if max_wait_time is None:
       max_wait_time = self._server_wait_time(server_name)
     msg = "Server '{}' error: no message returned from server (maybe timeout) in over {}s.".format(

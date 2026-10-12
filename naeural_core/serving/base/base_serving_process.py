@@ -19,6 +19,7 @@ from naeural_core.serving.mixins_base import (
   _InferenceUtilsMixin,
 )
 from naeural_core.utils.system_shared_memory import NumpySharedMemory, replace_shm_with_ndarray, replace_ndarray_with_shm
+from naeural_core.utils import shm_diagnostics as shm_diag
 
 # from naeural_core.serving.base.serving_utils import CommEngine
 
@@ -340,24 +341,55 @@ class ModelServingProcess(
     return self.config_model
   
   def _get_message(self, wait=False):
+    """Receive and restore a request without changing idle/IPC semantics.
+
+    Parameters
+    ----------
+    wait : bool
+      Existing blocking receive selection.
+
+    Returns
+    -------
+    tuple
+      Existing command, restored data, server name, command ID and timestamp.
+      Optional scalar observations distinguish receipt from successful reads.
+    """
     payload, msg_type, msg_data, msg_server_name, msg_id, msg_ts = None, None, None, None, None, None
     if not wait:
       sleep(0.0001)
     if self._full_debug:
       # sleep(1)
       self.P("Running poll...")
-    res = self.comm_eng.poll(0.5)
-    if wait or res:
-      if self._full_debug and res:
-        self.P("{} has data and will `recv`".format(self.__class__.__name__), color='y')
-      payload = self.comm_eng.recv()
+    try:
+      res = self.comm_eng.poll(0.5)
+      if wait or res:
+        if self._full_debug and res:
+          self.P("{} has data and will `recv`".format(self.__class__.__name__), color='y')
+        payload = self.comm_eng.recv()
+    except BaseException as exc:
+      shm_diag.observe(self.log, self.server_name, "receive", correlated=False,
+                       exception_type=type(exc).__name__)
+      raise
         
     if payload is not None:
       if self._full_debug:
         self.P(f'Received payload with keys: {payload.keys()}')
         self.P(f'payload[`SERVER_NAME`]={payload.get("SERVER_NAME")}')
       msg_type = payload['TYPE']
-      msg_data = replace_shm_with_ndarray(payload['DATA'], self.npy_shm, debug=self._full_debug)
+      trace = shm_diag.request_observation(payload['DATA'], self.npy_shm) \
+        if shm_diag.enabled(self.server_name) else None
+      try:
+        msg_data = replace_shm_with_ndarray(payload['DATA'], self.npy_shm,
+                                          debug=self._full_debug, trace=trace)
+      except BaseException as exc:
+        if trace is not None:
+          shm_diag.observe(self.log, self.server_name, "receive", payload.get('CMD_ID'),
+                           **trace, completed=False, exception_type=type(exc).__name__)
+        raise
+      if trace is not None:
+        shm_diag.observe(self.log, self.server_name, "receive", payload.get('CMD_ID'),
+                         **trace, completed=True,
+                         images_read=shm_diag.request_observation(msg_data)['images'])
       msg_server_name = payload['SERVER_NAME']
       msg_id = payload['CMD_ID']
       msg_ts = payload['TIMESTAMP']
@@ -375,6 +407,19 @@ class ModelServingProcess(
   
   
   def _send_message(self, command, inputs, send_timers=False, cmd_id=None):
+    """Send the original response and observe completion or exception class.
+
+    Parameters
+    ----------
+    command : str
+      Existing response command.
+    inputs : object
+      Original response data, never copied into diagnostic records.
+    send_timers : bool
+      Existing optional timer-envelope selection.
+    cmd_id : int or None
+      Existing request correlation ID, unchanged on the wire.
+    """
     timers_val = self.log.export_timers_section() if send_timers else None
     if timers_val is not None:
       self.P("Sending timers (len {})".format(len(timers_val[0])))
@@ -387,7 +432,14 @@ class ModelServingProcess(
     }
     if self._full_debug:
       self.P("Sending '{}' for cmd_id:{} to manager".format(command, cmd_id))
-    self.comm_eng.send(dct_msg)
+    try:
+      self.comm_eng.send(dct_msg)
+    except BaseException as exc:
+      shm_diag.observe(self.log, self.server_name, "send", cmd_id,
+                       attempted=True, completed=False, exception_type=type(exc).__name__)
+      raise
+    shm_diag.observe(self.log, self.server_name, "send", cmd_id,
+                     attempted=True, completed=True)
     if self._full_debug:
       self.P("  '{}' for cmd_id:{} sent to manager".format(command, cmd_id))
     return

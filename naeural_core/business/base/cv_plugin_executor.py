@@ -14,6 +14,8 @@ from .base_plugin_biz import BasePluginExecutor
 from naeural_core.serving.ai_engines import AI_ENGINES
 from naeural_core.business import utils
 from naeural_core.utils import nms
+from naeural_core.utils import shm_diagnostics as shm_diag
+from naeural_core.serving.ai_engines.utils import get_serving_process_given_ai_engine
 from decentra_vision.draw_utils import DrawUtils
 
 from naeural_core.business.mixins_base import _LimitedDataMixin
@@ -943,6 +945,31 @@ class CVPluginExecutor(BasePluginExecutor,
         2. Filter within location with threshold
       """ 
       dct_images = self.dataapi_images()
+      if shm_diag.enabled():
+        # Observe raw results before metadata filtering or tracking. Configured
+        # detectors establish expectation even when the model key is absent.
+        # CMD_ID is already stripped here: never claim request correlation.
+        try:
+          raw_inferences = self.dataapi_inferences()
+          for model in self._get_detector_ai_engines():
+            target = get_serving_process_given_ai_engine(model)
+            target = '_'.join(target) if isinstance(target, (list, tuple)) else target
+            if shm_diag.enabled(target):
+              rows = raw_inferences.get(model) if isinstance(raw_inferences, dict) else None
+              count = len(rows) if isinstance(rows, list) else None
+              wrong_type = not isinstance(rows, list) or any(not isinstance(row, list) for row in rows)
+              reason = "absent_model" if isinstance(raw_inferences, dict) and model not in raw_inferences \
+                else "wrong_type" if wrong_type \
+                else "cardinality" if count != len(dct_images) else None
+              shm_diag.observe(
+                self.log, target, "consumer", correlated=False,
+                stream=self.instance_hash, images=len(dct_images), result_entries=count,
+                wrong_type=wrong_type, reason=reason,
+              )
+        except Exception:
+          # Observation alone is best effort; the original path below still
+          # owns all validation, filtering, tracking and exceptions.
+          pass
       if self._coords_type == ct.COORDS_NONE and len(dct_images) >= 1:
         img = self.dataapi_image()
         self._top, self._left, self._bottom, self._right = 0, 0, img.shape[-3], img.shape[-2]

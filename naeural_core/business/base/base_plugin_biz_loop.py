@@ -416,14 +416,24 @@ class _BasePluginLoopMixin(object):
 
   def plugin_loop(self):
     """
-    This is BusinessPlugin main execution loop (plugin loop)
+    Run the business plugin with bounded polling and lifecycle cleanup.
 
-      - plugin.outside_working_hours and plugin.is_process_postponed need to be handled also
-      - main thread execution actually is wrapped in the "execute"
-      
-      stop precedence:
-      PROCESS_DELAY > FORCE_PAUSE > WORKING_HOURS
-      
+    Returns
+    -------
+    None
+        Return after initialization failure or loop shutdown and cleanup.
+
+    Notes
+    -----
+    Normal execution and configuration-pause polling sleep at least 20 ms,
+    limiting the loop to at most 50 Hz even with zero ``PROCESS_DELAY`` or a
+    shorter ``FORCED_LOOP_SLEEP``. Longer configured waits and error backoff
+    remain intact. Postponed processing waits for the remaining delay clamped
+    to 20--250 ms; temporary pause and out-of-hours polling wait 250 ms.
+    These are polling intervals, not hard response-time guarantees.
+
+    Instance commands remain ahead of the process-delay, force-pause and
+    working-hours gates, in that order, but do not run during config updates.
     """
     try: 
       plugin_loop_initialized = False
@@ -439,7 +449,8 @@ class _BasePluginLoopMixin(object):
         try:
           # START postpone area
           if self.__loop_paused: # triggered when updating config
-            sleep(0.001)          
+            # Keep config handoffs responsive without millisecond polling.
+            sleep(0.020)
             continue
           # INSTANCE_COMMAND: if no imposed parallel updating
           # then we can check for instance commands and trigger callback
@@ -448,21 +459,23 @@ class _BasePluginLoopMixin(object):
           
           # PROCESS_DELAY mechanism
           if self.is_process_postponed:  
-            # skip if postpone is required
-            sleep(0.001)
+            # Bound each polling sleep to 250 ms for command responsiveness;
+            # near the deadline, round only to the shared 20 ms minimum.
+            remaining_delay = self.cfg_process_delay - self.time_from_last_process
+            sleep(max(0.020, min(0.250, remaining_delay)))
             continue
           # END PROCESS_DELAY mechanism
           
           # FORCE_PAUSE mechanism
           if self.is_plugin_temporary_stopped: 
-            sleep(0.001)
+            sleep(0.250)
             continue
           # END FORCE_PAUSE mechanism
 
           self.is_outside_working_hours = self.outside_working_hours
           if self.is_outside_working_hours: # WORKING_HOURS mechanism
             # always skip if outside hours
-            sleep(0.001)
+            sleep(0.250)
             continue
           # END postpone area
           # no postponing, now outside of scheduling and no pausing so we proceed
@@ -505,6 +518,9 @@ class _BasePluginLoopMixin(object):
           # now check for previous errors
           sleep_time = self.__maybe_handle_exec_errors(sleep_time=sleep_time)
           # end error checking
+          # Apply the same floor to computed/forced waits without shortening
+          # configured slower loops or exception backoff.
+          sleep_time = max(0.020, sleep_time)
           self.start_timer('loop_sleep')
           if sleep_time > 0:
             sleep(sleep_time)

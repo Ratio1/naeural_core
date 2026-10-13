@@ -35,6 +35,12 @@ New lines begin with `[SHM_DIAG]` and contain bounded scalar JSON:
 | `configuration` | Once per selected worker/segment lifecycle: actual worker PID, requested alias, transport kind, SHM segment, capacity, maximum elements/rank and dtype |
 | `timeout` | Pre-cleanup worker liveness, pending-request and SHM occupancy snapshot; independent of result sampling |
 
+Configuration describes the physical worker's segment, even when a covered
+alias omits SHM in its registry entry and therefore sends arrays through the
+pipe. Per-request `send.shm`, admission counters and `requested_server` retain
+the actual handle's transport behavior; alternating direct and covered handles
+must not repeatedly emit worker configuration.
+
 `pid`, the shared `window_until`, target and existing `cmd_id` identify sampled
 transport observations. No IDs are added to production envelopes. Consumer
 records use the existing instance hash and explicitly report `correlated=false`,

@@ -726,8 +726,11 @@ class ServingManager(Manager):
     if trace is not None:
       trace["requested_server"] = server_name
       entry = self._servers[server_name]
+      configuration_entry = self._servers.get(target, entry)
       shm_diag.configuration_observation(self.log, target, server_name,
-                                         entry.get(SMConst.SERVER), shm, entry.get(SMConst.COMM))
+                                         configuration_entry.get(SMConst.SERVER),
+                                         configuration_entry.get(SMConst.SHM),
+                                         configuration_entry.get(SMConst.COMM))
     if self._servers[server_name].get(SMConst.SHM) is not None:
       self.log.start_timer('replace_ndarray_with_shm')
       try:

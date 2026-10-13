@@ -250,6 +250,26 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     self.assertEqual(cv.log.records()[0]["target"], "TH_YFS_MSPN")
     self.assertEqual(cv.log.records()[0]["requested_server"], "TH_YF8S")
 
+  def test_configuration_uses_physical_worker_segment_across_pipe_alias(self):
+    """Real covered aliases omit SHM; alternating handles must not relog it."""
+    shm, comm = _FIXTURE._buffer(), _FIXTURE._Comm()
+    manager = self.manager(shm, comm)
+    worker = types.SimpleNamespace(server_name="DETECTOR", pid=88, comm_method="shm")
+    manager._servers["DETECTOR"].update(SERVER=worker, PID=88)
+    manager._servers["ALIAS"] = {"SERVER": worker, "COMM": comm, "PID": 88,
+                                 "COVERED_BY": "DETECTOR"}
+    for instant, requested in ((10, "DETECTOR"), (11.1, "ALIAS"),
+        (12.2, "DETECTOR"), (13.3, "ALIAS")):
+      with mock.patch.object(_DIAG.time, "monotonic", return_value=instant):
+        manager._send_message(requested, "GET_CONFIG", None)
+    records = manager.log.records(include_configuration=True)
+    configurations = [row for row in records if row["event"] == "configuration"]
+    self.assertEqual(len(configurations), 1)
+    self.assertEqual(configurations[0]["capacity"], 50)
+    self.assertTrue(configurations[0]["shm"])
+    self.assertNotIn("SHM", manager._servers["ALIAS"])
+    self.assertEqual(comm.payload["SERVER_NAME"], "ALIAS")
+
 
 if __name__ == "__main__":
   unittest.main()

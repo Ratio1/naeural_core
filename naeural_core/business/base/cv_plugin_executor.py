@@ -14,6 +14,8 @@ from .base_plugin_biz import BasePluginExecutor
 from naeural_core.serving.ai_engines import AI_ENGINES
 from naeural_core.business import utils
 from naeural_core.utils import nms
+from naeural_core.utils import shm_diagnostics as shm_diag
+from naeural_core.serving.ai_engines.utils import get_serving_process_given_ai_engine
 from decentra_vision.draw_utils import DrawUtils
 
 from naeural_core.business.mixins_base import _LimitedDataMixin
@@ -943,6 +945,45 @@ class CVPluginExecutor(BasePluginExecutor,
         2. Filter within location with threshold
       """ 
       dct_images = self.dataapi_images()
+      if shm_diag.enabled():
+        # Observe raw results before metadata filtering or tracking. Configured
+        # detectors establish expectation even when the model key is absent.
+        # CMD_ID is already stripped here: never claim request correlation.
+        try:
+          raw_inferences = self.dataapi_inferences()
+          startup_params = self.cfg_startup_ai_engine_params
+          for model in self._get_detector_ai_engines():
+            # Match BusinessManager's single-engine flat/keyed and multi-engine
+            # keyed startup config, retaining the actual worker instance.
+            engine = model.lower()
+            params = startup_params.get(engine, {})
+            if not isinstance(self.cfg_ai_engine, list) and engine not in startup_params:
+              params = startup_params
+            instance_id = params.get('MODEL_INSTANCE_ID')
+            handle = (engine, instance_id) if instance_id is not None else engine
+            target = get_serving_process_given_ai_engine(handle)
+            target = '_'.join(target) if isinstance(target, (list, tuple)) else target
+            requested = target.upper()
+            manager = getattr(self, "global_shmem", {}).get("serving_manager")
+            target = manager.get_diagnostic_server_name(requested) if manager is not None else requested
+            if shm_diag.enabled(target):
+              # Dispatch preserves the same (engine, instance) inference key.
+              rows = raw_inferences.get(handle) if isinstance(raw_inferences, dict) else None
+              count = len(rows) if isinstance(rows, list) else None
+              wrong_type = not isinstance(rows, list) or any(not isinstance(row, list) for row in rows)
+              reason = "absent_model" if isinstance(raw_inferences, dict) and handle not in raw_inferences \
+                else "wrong_type" if wrong_type \
+                else "cardinality" if count != len(dct_images) else None
+              shm_diag.observe(
+                self.log, target, "consumer", correlated=False,
+                requested_server=requested,
+                stream=self.instance_hash, images=len(dct_images), result_entries=count,
+                wrong_type=wrong_type, reason=reason,
+              )
+        except Exception:
+          # Observation alone is best effort; the original path below still
+          # owns all validation, filtering, tracking and exceptions.
+          pass
       if self._coords_type == ct.COORDS_NONE and len(dct_images) >= 1:
         img = self.dataapi_image()
         self._top, self._left, self._bottom, self._right = 0, 0, img.shape[-3], img.shape[-2]

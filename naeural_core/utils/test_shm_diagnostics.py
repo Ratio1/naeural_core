@@ -57,13 +57,15 @@ _CT = types.SimpleNamespace(INFERENCES="INFERENCES", COORDS_NONE="none",
 _SM = types.SimpleNamespace(SHM="SHM", COMM="COMM", TYPE="TYPE", DATA="DATA",
                            SERVER_NAME="SERVER_NAME", CMD_ID="CMD_ID", TIMESTAMP="TIMESTAMP",
                            PREDICT="PREDICT", RESULT="RESULT", TIMERS="TIMERS", ABNORMAL_EXIT="ABNORMAL_EXIT")
+_SM.SERVER, _SM.PID, _SM.COVERED_BY = "SERVER", "PID", "COVERED_BY"
 _ENV = {"shm_diag": _DIAG, "ct": _CT, "SMConst": _SM, "time": time.time,
         "sleep": lambda _: None, "traceback": __import__("traceback"),
         "replace_ndarray_with_shm": _SHM.replace_ndarray_with_shm,
         "replace_shm_with_ndarray": _SHM.replace_shm_with_ndarray,
         "get_serving_process_given_ai_engine": lambda _: "DETECTOR"}
 _Manager = _methods("serving/serving_manager.py", "ServingManager",
-                    ["_send_message", "_wait_for_comm_message", "_wait_for_result", "_close_server_on_null"], dict(_ENV))
+                    ["_send_message", "_wait_for_comm_message", "_wait_for_result", "_close_server_on_null",
+                     "get_diagnostic_server_name"], dict(_ENV))
 _Worker = _methods("serving/base/base_serving_process.py", "ModelServingProcess",
                    ["_get_message", "_send_message"], dict(_ENV))
 _CV = _methods("business/base/cv_plugin_executor.py", "CVPluginExecutor",
@@ -99,9 +101,10 @@ class _Log:
   def stop_timer(self, name):
     self.timers.append(("stop", name))
 
-  def records(self):
-    return [json.loads(line[len("[SHM_DIAG] "):]) for line in self.lines
-            if line.startswith("[SHM_DIAG] ")]
+  def records(self, include_configuration=False):
+    records = [json.loads(line[len("[SHM_DIAG] "):]) for line in self.lines
+               if line.startswith("[SHM_DIAG] ")]
+    return records if include_configuration else [r for r in records if r["event"] != "configuration"]
 
 
 class _Comm:
@@ -163,7 +166,8 @@ class ShmDiagnosticsTests(unittest.TestCase):
     self.patch = mock.patch.multiple(_DIAG, _TARGETS=("DETECTOR",),
                                     _UNTIL=time.time() + 600,
                                     _DEADLINE=time.monotonic() + 600,
-                                    _STATE={}, _BYTES=0, _LIMIT=1024 * 1024)
+                                    _STATE={}, _BYTES=0, _LIMIT=1024 * 1024,
+                                    _PENDING={}, _EVICTIONS={}, _CONFIGURED={})
     self.patch.start()
     self.addCleanup(self.patch.stop)
 

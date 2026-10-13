@@ -963,6 +963,9 @@ class CVPluginExecutor(BasePluginExecutor,
             handle = (engine, instance_id) if instance_id is not None else engine
             target = get_serving_process_given_ai_engine(handle)
             target = '_'.join(target) if isinstance(target, (list, tuple)) else target
+            requested = target.upper()
+            manager = getattr(self, "global_shmem", {}).get("serving_manager")
+            target = manager.get_diagnostic_server_name(requested) if manager is not None else requested
             if shm_diag.enabled(target):
               # Dispatch preserves the same (engine, instance) inference key.
               rows = raw_inferences.get(handle) if isinstance(raw_inferences, dict) else None
@@ -973,6 +976,7 @@ class CVPluginExecutor(BasePluginExecutor,
                 else "cardinality" if count != len(dct_images) else None
               shm_diag.observe(
                 self.log, target, "consumer", correlated=False,
+                requested_server=requested,
                 stream=self.instance_hash, images=len(dct_images), result_entries=count,
                 wrong_type=wrong_type, reason=reason,
               )

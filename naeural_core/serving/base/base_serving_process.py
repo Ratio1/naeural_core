@@ -378,6 +378,8 @@ class ModelServingProcess(
       msg_type = payload['TYPE']
       trace = shm_diag.request_observation(payload['DATA'], self.npy_shm) \
         if shm_diag.enabled(self.server_name) else None
+      if trace is not None:
+        trace["requested_server"] = payload.get("SERVER_NAME")
       try:
         msg_data = replace_shm_with_ndarray(payload['DATA'], self.npy_shm,
                                           debug=self._full_debug, trace=trace)

@@ -61,3 +61,14 @@ model artifacts or MinIO test bed. Python 3.10-3.11 qualification remains separa
   28+2 test reruns, 18-test additional scratch suite, original timeout/cap repros,
   actual cleanup/logger failures/out-of-order IDs and whitespace review passed.
   No blocking findings. Full model/load and Python 3.10-3.11 remain unqualified.
+- Integrated `main` at `cdef608` with no history rewrite. The only conflict was
+  append-only AGENTS notes; all main and diagnostic notes were retained.
+- PASS after integration: 28 evidence tests, 2 spawn/Pipe/OS-SHM tests,
+  7 polling tests, 11 real-SDK memory-scan tests and compilation/whitespace checks.
+- FAIL, unchanged integrated baseline: both the patch and original-PR-plus-main
+  baseline run 357 business tests with the same 4 failures, 11 errors and 1 skip.
+  Comparison baseline is local commit `1ba7ccee006e5da293cc02263f68e5b6e0119088`.
+- PASS: second adversarial integration review confirms the incoming main delta
+  and exact preservation of diagnostic code/tests from `f12c9f8`.
+- Implementation and review are complete; publication is gated by one final
+  remote-head/base freshness and ancestry check. No deployment is authorized.

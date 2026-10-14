@@ -25,6 +25,8 @@ TODO:
 """
 
 
+from threading import RLock
+
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
 
 _CONFIG = {
@@ -96,6 +98,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__chainstore_identity = "CS_MSG_{}".format(self.uuid(7))
     
     self.__ops = self.deque()
+    self.__persistence_lock = RLock()
     
     try:
       self.__chain_storage = self.cacheapi_load_pickle(default={}, verbose=True)
@@ -284,10 +287,132 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   
   def __save_chain_storage(self):
-    self.cacheapi_save_pickle(self.__chain_storage, verbose=True)
+    with self.__persistence_lock:
+      self.cacheapi_save_pickle(self.deepcopy(self.__chain_storage), verbose=True, strict=True)
     self.__last_chain_storage_save = self.time()
     return
 
+
+  def __namespace_for_key(self, key, namespaces):
+    """Recognize reserved hash namespaces without exposing composed fields."""
+    if not isinstance(key, str):
+      return None
+    return next((name for name in namespaces if key.startswith(self.__hset_index(name))), None)
+
+  def __registry_member(self, address, dauth_only=False):
+    """Authorize a transport identity against registry ETH addresses; fail closed."""
+    try:
+      eth_address = self.bc.node_address_to_eth_address(address).lower()
+      allowed = list(self.bc.get_eth_dauth_oracles() or [])
+      if not dauth_only:
+        allowed.extend(self.bc.get_eth_oracles() or [])
+      return eth_address in {item.lower() for item in allowed}
+    except Exception:
+      return False
+
+  def __secret_namespace(self, key):
+    """Identify the protected mutable and revision-specific dAuth namespaces."""
+    return self.__namespace_for_key(key, ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"))
+
+  def __revoked_secret(self, key, snapshot=None):
+    """Preserve revocation markers and reject payload resurrection after revoke."""
+    if self.__secret_namespace(key) != "DAUTH_JOB_SECRET_REVISIONS":
+      return False
+    prefix = self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")
+    field = self.base64_to_str(key[len(prefix):], url_safe=True)
+    marker = key if field.endswith("|revoked") else prefix + self.str_to_base64(field + "|revoked", url_safe=True).rstrip("=")
+    return bool(self.__chain_storage.get(marker, {}).get(self.CS_VALUE)) or bool((snapshot or {}).get(marker, {}).get(self.CS_VALUE))
+
+  def __erased_secret(self, key, value, snapshot=None):
+    """Accept only the exact redacted tombstone bound to its revocation marker."""
+    if not isinstance(value, dict) or set(value) != {"job_id", "revision", "revoked"} or value.get("revoked") is not True:
+      return False
+    prefix = self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")
+    field = self.base64_to_str(key[len(prefix):], url_safe=True)
+    marker_key = prefix + self.str_to_base64(field + "|revoked", url_safe=True).rstrip("=")
+    marker = self.__chain_storage.get(marker_key, {}).get(self.CS_VALUE) or (snapshot or {}).get(marker_key, {}).get(self.CS_VALUE)
+    return isinstance(marker, dict) and marker.get("job_id") == value["job_id"] and marker.get("revision") == value["revision"]
+
+  def __versioned_job_record(self, key, value, namespace):
+    """Protect canonical pointers and current bundles with signed generations.
+
+    The generation increases across deployment, restore and delete commits; it
+    is independent of the runtime configuration revision restored after failure.
+    A higher generation permits explicit reuse after deletion. Once a versioned
+    record exists, unversioned writes and stale snapshot repair cannot replace it.
+    """
+    version_key = "revision" if namespace == "DEEPLOY_DEPLOYED_JOBS" else "deployment_revision"
+    local = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
+    local_version = local.get(version_key) if isinstance(local, dict) else None
+    version = value.get(version_key) if isinstance(value, dict) else None
+    if version is None:
+      return local_version is None
+    if type(version) is not int or version < 1:
+      return False
+    try:
+      field = self.base64_to_str(key[len(self.__hset_index(namespace)):], url_safe=True)
+      principal = value.get("coordinator")
+      if (value.get("job_id") != field or not isinstance(value.get("operation_id"), str)
+          or not value["operation_id"] or value.get("EE_SENDER") != principal
+          or not self.__registry_member(principal) or not self.bc.verify(value, return_full_info=True).valid):
+        return False
+      if namespace == "DEEPLOY_DEPLOYED_JOBS":
+        if type(value.get("deleted")) is not bool:
+          return False
+        if value["deleted"]:
+          if value.get("pipeline_cid") is not None:
+            return False
+        elif not isinstance(value.get("pipeline_cid"), str) or not value["pipeline_cid"]:
+          return False
+      if type(local_version) is int:
+        if version < local_version:
+          return False
+        if version == local_version:
+          signature_keys = {"EE_SIGN", "EE_SENDER", "EE_HASH", "EE_SIGN_CANON_V"}
+          return ({key: item for key, item in value.items() if key not in signature_keys}
+                  == {key: item for key, item in local.items() if key not in signature_keys})
+    except Exception:
+      return False
+    return True
+
+  def __versioned_record(self, key, value):
+    """Validate signed operation/node records before accepting sequence order."""
+    job_namespace = self.__namespace_for_key(key, ("DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS"))
+    if job_namespace:
+      return self.__versioned_job_record(key, value, job_namespace)
+    namespace = self.__namespace_for_key(key, ("DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS"))
+    if namespace is None:
+      return True
+    if not isinstance(value, dict) or not isinstance(value.get("sequence"), int) or isinstance(value["sequence"], bool):
+      return False
+    principal = value.get("coordinator") if namespace == "DEEPLOY_OPERATIONS" else value.get("node_addr")
+    operation_id = value.get("operation_id")
+    if not isinstance(operation_id, str) or not operation_id or not isinstance(principal, str):
+      return False
+    try:
+      field = self.base64_to_str(key[len(self.__hset_index(namespace)):], url_safe=True)
+    except Exception:
+      return False
+    expected = operation_id
+    if namespace == "DEEPLOY_NODE_OPERATIONS":
+      if value.get("attempt") not in ("deploy", "restore", "retire"):
+        return False
+      expected += "|" + value["attempt"] + "|" + principal
+    if field not in (expected, expected + "|" + str(value["sequence"] % 8)):
+      return False
+    if value.get("EE_SENDER") != principal:
+      return False
+    try:
+      if not self.bc.verify(value, return_full_info=True).valid:
+        return False
+      if namespace == "DEEPLOY_OPERATIONS" and not self.__registry_member(principal):
+        return False
+      local = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
+      if isinstance(local, dict) and local.get("sequence", -1) > value["sequence"]:
+        return False
+    except Exception:
+      return False
+    return True
 
   def __hset_index(self, hkey):
     """
@@ -327,6 +452,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     filtering. That keeps snapshot generation stable even if another local
     write mutates the dictionary while the snapshot is being assembled.
     """
+    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS") and not self.__registry_member(self.ee_addr, dauth_only=True):
+      return {}
     index = self.__hset_index(hkey)
     snapshot = {}
     # Freeze the current dictionary view before filtering so live writes do not
@@ -336,7 +463,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         continue
       if not isinstance(record, dict):
         continue
+      # HSync carries no token capability. Never disclose token values or
+      # protected records merely because the caller knows a namespace name.
+      if record.get(self.CS_TOKEN) is not None:
+        continue
       snapshot[key] = self.deepcopy(record)
+      snapshot[key].pop(self.CS_TOKEN, None)
     return snapshot
 
 
@@ -365,50 +497,78 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     if not isinstance(snapshot, dict):
       return 0
+    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS") and not self.__registry_member(self.ee_addr, dauth_only=True):
+      return 0
 
     index = self.__hset_index(hkey)
     merged_fields = 0
     changed = False
-    for key, record in snapshot.items():
-      if not isinstance(key, str) or not key.startswith(index):
-        continue
-      if not isinstance(record, dict):
-        continue
-      if self.CS_OWNER not in record or self.CS_VALUE not in record:
-        continue
-
-      value = self.deepcopy(record.get(self.CS_VALUE))
-      if value is None:
-        continue
-
-      readonly = record.get(self.CS_READONLY, False)
-      token = record.get(self.CS_TOKEN, None)
-      local_record = self.__chain_storage.get(key)
-      if isinstance(local_record, dict):
-        same_owner = local_record.get(self.CS_OWNER) == record.get(self.CS_OWNER)
-        same_value = local_record.get(self.CS_VALUE) == value
-        same_readonly = local_record.get(self.CS_READONLY, False) == readonly
-        same_token = local_record.get(self.CS_TOKEN, None) == token
-        if same_owner and same_value and same_readonly and same_token:
+    with self.__persistence_lock:
+      for key, record in snapshot.items():
+        if not isinstance(key, str) or not key.startswith(index):
+          continue
+        if not isinstance(record, dict):
+          continue
+        if self.CS_OWNER not in record or self.CS_VALUE not in record:
           continue
 
-      # Apply the peer record only to the local replica. HSync intentionally
-      # does not enqueue a broadcast because this node is catching up to peer
-      # state rather than originating a new write.
-      self.__chain_storage[key] = {
-        self.CS_KEY: key,
-        self.CS_VALUE: value,
-        self.CS_OWNER: record.get(self.CS_OWNER),
-        self.CS_READONLY: readonly,
-        self.CS_TOKEN: token,
-        self.CS_CONFIRMATIONS: -1,
-        self.CS_MIN_CONFIRMATIONS: 0,
-      }
-      merged_fields += 1
-      changed = True
+        value = self.deepcopy(record.get(self.CS_VALUE))
+        if value is None or not self.__versioned_record(key, value):
+          continue
+        if self.__secret_namespace(key) == "DAUTH_JOB_SECRET_REVISIONS":
+          prefix = self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")
+          if self.base64_to_str(key[len(prefix):], url_safe=True).endswith("|revoked") and not value:
+            continue
+        if self.__revoked_secret(key, snapshot):
+          prefix = self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")
+          field = self.base64_to_str(key[len(prefix):], url_safe=True)
+          if not field.endswith("|revoked") and not self.__erased_secret(key, value, snapshot):
+            self.__chain_storage.pop(key, None)
+            changed = True
+            continue
+          existing_marker = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
+          if field.endswith("|revoked") and existing_marker:
+            continue
 
-    if changed:
-      self.__save_chain_storage()
+        readonly = record.get(self.CS_READONLY, False)
+        token = record.get(self.CS_TOKEN, None)
+        versioned_namespace = self.__namespace_for_key(key, ("DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS"))
+        if versioned_namespace:
+          record = dict(record)
+          record[self.CS_OWNER] = value.get("coordinator") if versioned_namespace == "DEEPLOY_OPERATIONS" else value.get("node_addr")
+          readonly = True
+        job_namespace = self.__namespace_for_key(key, ("DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS"))
+        if job_namespace and isinstance(value, dict) and "coordinator" in value:
+          record = dict(record)
+          record[self.CS_OWNER] = value["coordinator"]
+          readonly = False
+          token = None
+        local_record = self.__chain_storage.get(key)
+        if isinstance(local_record, dict):
+          same_owner = local_record.get(self.CS_OWNER) == record.get(self.CS_OWNER)
+          same_value = local_record.get(self.CS_VALUE) == value
+          same_readonly = local_record.get(self.CS_READONLY, False) == readonly
+          same_token = local_record.get(self.CS_TOKEN, None) == token
+          if same_owner and same_value and same_readonly and same_token:
+            continue
+
+        # Apply the peer record only to the local replica. HSync intentionally
+        # does not enqueue a broadcast because this node is catching up to peer
+        # state rather than originating a new write.
+        self.__chain_storage[key] = {
+          self.CS_KEY: key,
+          self.CS_VALUE: value,
+          self.CS_OWNER: record.get(self.CS_OWNER),
+          self.CS_READONLY: readonly,
+          self.CS_TOKEN: token,
+          self.CS_CONFIRMATIONS: -1,
+          self.CS_MIN_CONFIRMATIONS: 0,
+        }
+        merged_fields += 1
+        changed = True
+
+      if changed:
+        self.__save_chain_storage()
     return merged_fields
   
   ## START setter-getter methods
@@ -456,6 +616,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     None
     """
     self.__chain_storage[key][self.CS_CONFIRMATIONS] = 0
+    self.__chain_storage[key]["confirmed_peers"] = []
+    self.__chain_storage[key]["target_peers"] = self.__get_target_peers(
+      peers=peers, include_default_peers=include_default_peers,
+    )
     self.__chain_storage[key][self.CS_MIN_CONFIRMATIONS] = self.__get_min_peer_confirmations(
       peers=peers,
       include_default_peers=include_default_peers,
@@ -661,50 +825,80 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           color='y'
         )
         return False
-      need_store = True
-      existing_owner = None
-      existing_value = None
-      if key in self.__chain_storage:
-        existing_value = self.__get_key_value(key)
-        existing_owner = self.__get_key_owner(key)
-        is_readonly = self.__get_key_readonly(key)
-        existing_token = self.__get_key_token(key)
-        if token != existing_token:
+      secret_namespace = self.__secret_namespace(key)
+      if secret_namespace and not local_sync_storage_op:
+        if not self.__registry_member(self.ee_addr):
+          return False
+        if any(not self.__registry_member(peer, dauth_only=True) for peer in target_peers):
+          return False
+      with self.__persistence_lock:
+        if not self.__versioned_record(key, value):
+          return False
+        versioned_namespace = self.__namespace_for_key(key, ("DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS"))
+        if versioned_namespace:
+          owner = value.get("coordinator") if versioned_namespace == "DEEPLOY_OPERATIONS" else value.get("node_addr")
+          readonly = True
+        job_namespace = self.__namespace_for_key(key, ("DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS"))
+        if job_namespace and isinstance(value, dict) and "coordinator" in value:
+          owner, readonly, token = value["coordinator"], False, None
+        if secret_namespace == "DAUTH_JOB_SECRET_REVISIONS":
+          prefix = self.__hset_index(secret_namespace)
+          field = self.base64_to_str(key[len(prefix):], url_safe=True)
+          if field.endswith("|revoked"):
+            existing_marker = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
+            if not value or (existing_marker and value != existing_marker):
+              return False
+          elif value is not None and self.__revoked_secret(key) and not self.__erased_secret(key, value):
+            return False
+        need_store = True
+        existing_owner = None
+        existing_value = None
+        if key in self.__chain_storage:
+          existing_value = self.__get_key_value(key)
+          existing_owner = self.__get_key_owner(key)
+          is_readonly = self.__get_key_readonly(key)
+          existing_token = self.__get_key_token(key)
+          if token != existing_token:
+            if debug:
+              self.P(f" === Key {key} has a different token {existing_token} from {existing_owner} than the one provided {token} from {owner}", color='r')
+            need_store = False
+          elif value is None:
+            # Always allow delete (set to None) regardless of current value
+            if debug:
+              self.P(f" === Key {key} will be deleted (value=None)")
+            need_store = True
+          elif existing_value == value:
+            # Matching remote writes still need a durable copy before ACK.
+            # Matching local writes must re-establish remote confirmation.
+            if debug:
+              self.P(f" === Key {key} stored by {existing_owner} has the same value")
+            if local_sync_storage_op:
+              self.__save_chain_storage()
+              return True
+            # A previous timeout may have left only the local copy. Re-publish
+            # and collect distinct peer confirmations instead of claiming success.
+          elif is_readonly and existing_owner != owner:
+            if debug:
+              self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')
+            need_store = False
+        # end if key in chain storage
+        if need_store:
           if debug:
-            self.P(f" === Key {key} has a different token {existing_token} from {existing_owner} than the one provided {token} from {owner}", color='r')
-          need_store = False
-        elif value is None:
-          # Always allow delete (set to None) regardless of current value
-          if debug:
-            self.P(f" === Key {key} will be deleted (value=None)")
-          need_store = True
-        elif existing_value == value:
-          # Value already matches — no need to re-store or broadcast, but this is
-          # a success (the desired state is already achieved), not a failure.
-          if debug:
-            self.P(f" === Key {key} stored by {existing_owner} has the same value")
-          return True
-        elif is_readonly and existing_owner != owner:
-          if debug:
-            self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')
-          need_store = False
-      # end if key in chain storage
+            if value is None:
+              action_str = "deleting"
+            elif existing_owner not in [None, owner]:
+              action_str = "overwriting"
+            else:
+              action_str = "setting"
+            self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
+          self.__set_key_value(
+            key=key, value=value, owner=owner,
+            local_sync_storage_op=local_sync_storage_op,
+            readonly=readonly, token=token,
+            peers=peers,
+            include_default_peers=include_default_peers,
+          )
       if need_store:
-        if debug:
-          if value is None:
-            action_str = "deleting"
-          elif existing_owner not in [None, owner]:
-            action_str = "overwriting"
-          else:
-            action_str = "setting"
-          self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
-        self.__set_key_value(
-          key=key, value=value, owner=owner,
-          local_sync_storage_op=local_sync_storage_op,
-          readonly=readonly, token=token,
-          peers=peers,
-          include_default_peers=include_default_peers,
-        )
         if not local_sync_storage_op:
           # now send set-value (including confirmation request) to all
           op = {
@@ -728,12 +922,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           _prev_confirm = 0
           _retries = 0
           while not _done: # this LOCKS the calling thread set_value
-            recv_confirm = self.__get_key_confirmations(key)
+            with self.__persistence_lock:
+              # A concurrent write can replace this key while we wait. Its
+              # acknowledgments never establish replication of our value.
+              if value is not None and (
+                self.__get_key_owner(key) != owner or
+                self.__get_key_value(key) != value
+              ):
+                return False
+              recv_confirm = self.__get_key_confirmations(key)
+              min_confirm = self.__get_key_min_confirmations(key)
             if recv_confirm > _prev_confirm:
               _prev_confirm = recv_confirm
               if debug:
                 self.P(f" === {where}Key received '{key}' has {recv_confirm} confirmations")
-            if recv_confirm >= self.__get_key_min_confirmations(key):
+            if recv_confirm >= min_confirm:
               if debug:
                 self.P(f" === {where}KEY CONFIRMED '{key}': has enough ({recv_confirm}) confirmations")
               _done = True
@@ -830,6 +1033,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     )
     if len(allowed_peers) == 0:
       raise ValueError(f"No target peers resolved for hsync '{hkey}'.")
+
+    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+      if not self.__registry_member(self.ee_addr, dauth_only=True):
+        raise ValueError("Protected namespace requires a dAuth registry participant")
+      if any(not self.__registry_member(peer, dauth_only=True) for peer in allowed_peers):
+        raise ValueError("Protected namespace repair requires dAuth registry peers")
 
     request_id = self.uuid()
     self.__pending_hsync[request_id] = {
@@ -964,6 +1173,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     owner = data.get(self.CS_OWNER, None)
     readonly = data.get(self.CS_READONLY, False) # if the key is readonly local node consumers cannot overwrite it
     token = data.get(self.CS_TOKEN, None)
+    if self.__secret_namespace(key):
+      if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
+        return
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
     result = self._set_value(
@@ -992,7 +1204,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
 
 
-  def __exec_received_confirm(self, data):
+  def __exec_received_confirm(self, data, sender=None):
     """
     Process a confirmation for a previously broadcast store operation.
 
@@ -1011,18 +1223,24 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     confirm_by = data.get(self.CS_CONFIRM_BY, None)
     op = data.get(self.CS_OP, None)
     
-    local_owner = self.__get_key_owner(key)
-    local_value = self.__get_key_value(key)
     if self.cfg_chain_store_debug:
       self.P(f" === LOCAL: Received {op} from {confirm_by} for  {key}={value}, owner{owner}")
-    if value is None and key not in self.__chain_storage:
-      # Deletion confirmed — key already removed locally, nothing to increment
-      if self.cfg_chain_store_debug:
-        self.P(f" === LOCAL: Key {key} deletion confirmed by {confirm_by}")
-    elif owner == local_owner and value == local_value:
-      self.__increment_confirmations(key)
-      if self.cfg_chain_store_debug:
-        self.P(f" === LOCAL: Key {key} confirmed by {confirm_by}")
+    with self.__persistence_lock:
+      local_owner = self.__get_key_owner(key)
+      local_value = self.__get_key_value(key)
+      if value is None and key not in self.__chain_storage:
+        # Deletion confirmed — key already removed locally, nothing to increment
+        if self.cfg_chain_store_debug:
+          self.P(f" === LOCAL: Key {key} deletion confirmed by {confirm_by}")
+      elif owner == local_owner and value == local_value:
+        record = self.__chain_storage.get(key, {})
+        confirmed = record.setdefault("confirmed_peers", [])
+        if sender not in record.get("target_peers", []) or sender in confirmed:
+          return
+        confirmed.append(sender)
+        self.__increment_confirmations(key)
+        if self.cfg_chain_store_debug:
+          self.P(f" === LOCAL: Key {key} confirmed by {confirm_by}")
     return
 
 
@@ -1053,6 +1271,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if not isinstance(hkey, str) or len(hkey) == 0:
       return
 
+    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+      if not self.__registry_member(peers, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
+        return
     snapshot = self.__export_hset_snapshot(hkey)
     if self.cfg_chain_store_debug:
       self.P(
@@ -1110,6 +1331,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if hkey != pending.get(self.CS_HKEY, None):
       return
 
+    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+      if not self.__registry_member(sender, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
+        return
     snapshot = data.get(self.CS_SNAPSHOT, {})
     if not isinstance(snapshot, dict):
       return
@@ -1160,7 +1384,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if operation == self.CS_STORE:
       self.__exec_store(data, peers=sender) # make sure you send also to the sender
     elif operation == self.CS_CONFIRM:
-      self.__exec_received_confirm(data)
+      self.__exec_received_confirm(data, sender=sender)
     elif operation == self.CS_HSYNC_REQ:
       self.__exec_hsync_request(data, peers=sender)
     elif operation == self.CS_HSYNC_RESP:

@@ -18,6 +18,7 @@ from naeural_core import Logger
 from naeural_core.manager import Manager
 from naeural_core.config.mixins import _ConfigManagerCheckMixin
 from naeural_core.config.config_manager_commands import ConfigCommandHandlers
+from naeural_core.business.deployment_lifecycle import DeploymentLifecycle, SERVICE_KEY
 from naeural_core.config.runtime_secret_resolution import (
   overlay_canonical_secret_references,
 )
@@ -59,6 +60,10 @@ class ConfigManager(
   def startup(self):
     super().startup()
     self._dct_retrievers = self._dct_subalterns
+    self.shmem[SERVICE_KEY] = DeploymentLifecycle(
+      os.path.join(self.log.get_data_folder(), "deeploy_node_operations.json"),
+      self.owner.blockchain_manager.address,
+    )
 
     if self._subfolder_path is not None:
       save_path = os.path.join(self.log.get_data_folder(), self._subfolder_path)

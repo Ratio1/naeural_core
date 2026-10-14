@@ -125,3 +125,30 @@ class _PluginReadinessMixin:
       return self.uvicorn_server_started
     # All plugins: wait for init finalization
     return getattr(self, '_init_process_finalized', False)
+
+  def report_deployment_status(self, status, error_code=None):
+    """Expose safe progress to the independent node lifecycle reporter.
+
+    Parameters
+    ----------
+    status : str
+        initializing, pulling_image, starting, ready, failed, stopping or stopped.
+    error_code : str or None
+        Fixed error vocabulary from deployment_lifecycle.ERRORS. Exception
+        messages and configuration values are deliberately not accepted.
+    """
+    from naeural_core.business.deployment_lifecycle import ERRORS
+    if status not in ("initializing", "pulling_image", "starting", "ready", "failed", "stopping", "stopped"):
+      raise ValueError("Invalid deployment status")
+    if error_code is not None and error_code not in ERRORS:
+      raise ValueError("Invalid deployment error code")
+    self._deployment_status = status
+    self._deployment_error_code = error_code
+    if status == "ready":
+      self.set_plugin_ready(True)
+    elif status in ("initializing", "pulling_image", "starting", "failed", "stopping", "stopped"):
+      self.set_plugin_ready(False)
+
+  def set_deployment_stopped(self):
+    """Confirm external workload shutdown after verifying stop/removal."""
+    self._deployment_stopped = True

@@ -1,6 +1,7 @@
 import os
 
 from naeural_core import constants as ct
+from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY
 
 class ConfigCommandHandlers:
   
@@ -41,6 +42,33 @@ class ConfigCommandHandlers:
       return     
     #endif admin pipeline modification is not allowed 
       
+
+    operation = delta_config_stream.get(OPERATION_KEY)
+    if operation is not None:
+      lifecycle = self.shmem[SERVICE_KEY]
+      if operation.get("action") == "retire":
+        with lifecycle.lock:
+          current = self.dct_config_streams.get(stream_name, {})
+          if lifecycle.retire(stream_name, current, operation, sender_addr, validated_command):
+            manager = self.owner._business_manager
+            if manager is not None:
+              for plugin in list(manager.current_instances.values()):
+                if plugin is not None and plugin.get_stream_id() == stream_name:
+                  tracked_config = {OPERATION_KEY: operation}
+                  lifecycle.attach(tracked_config, plugin.get_signature(), plugin.get_instance_id(), plugin)
+                  plugin._deployment_operation_key = lifecycle.key(operation)
+            if current:
+              self.delete_config_stream(stream_name, initiator_id, session_id, verbose=verbose)
+        return
+      if not lifecycle.admit(delta_config_stream, sender_addr, validated_command):
+        return
+      if operation["action"] == "stop":
+        # A delayed stop cannot remove another deployment or its restoration.
+        current = self.dct_config_streams.get(stream_name, {})
+        current_operation = current.get(OPERATION_KEY)
+        if current_operation and lifecycle.key(current_operation) == lifecycle.key(operation):
+          self.delete_config_stream(stream_name, initiator_id, session_id, verbose=verbose)
+        return
 
     is_duplicate = self._check_duplicate_last(
       payload=delta_config_stream,
@@ -138,6 +166,8 @@ class ConfigCommandHandlers:
         # displayed=verbose >= 1,
       )      
     else:
+      if operation is not None:
+        lifecycle.fail(delta_config_stream, code="CONFIGURATION_REJECTED")
       self._create_notification(
         notif=ct.STATUS_TYPE.STATUS_ABNORMAL_FUNCTIONING, 
         notif_code=ct.NOTIFICATION_CODES.PIPELINE_FAILED,

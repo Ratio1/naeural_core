@@ -21,8 +21,10 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
 
   def test_suppressed_failure_is_retained_after_recovery(self):
     log = _FIXTURE._Log()
+    _DIAG.start(log)
     for instant, command, fields in (
         (10, 1, {"missing": 0}),
+        (10.05, 1, {"missing": 1, "reason": "no_free_slot"}),
         (10.1, 2, {"missing": 3, "reason": "no_free_slot"}),
         (10.2, 3, {"missing": 0}),
         (11.1, 4, {"missing": 0})):
@@ -54,7 +56,7 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
         comm.payload = payload
         result = manager._wait_for_result("DETECTOR", max_wait_time=1)
         self.assertIs(result[1], payload["DATA"])
-        record = next(r for r in manager.log.records() if r["event"] == "result")
+        record = next(r for r in manager.log.observations if r["event"] == "result")
         self.assertEqual(record.get("reason"), reason)
         self.assertEqual(record["expected_cmd_id"], 1)
         self.assertEqual(record["correlated"], observed_id == 1)
@@ -72,7 +74,7 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     manager._create_notification = lambda **kwargs: None
     snapshots = []
     def cleanup(*args, **kwargs):
-      snapshots.extend(r for r in manager.log.records() if r.get("reason") == "response_timeout")
+      snapshots.extend(r for r in manager.log.observations if r.get("reason") == "response_timeout")
       shm._np_mem_additional[:] = 0
     manager._cleanup_server = cleanup
     manager._close_server_on_null("DETECTOR", max_wait_time=5)
@@ -85,6 +87,10 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     self.assertIsNone(record["worker_exitcode"])
     self.assertEqual(record["occupied_before"], 1)
     self.assertEqual(record["free_slots"], 49)
+    self.assertEqual(_DIAG.occupancy_observation(shm), 0)
+    emitted = next(r for r in manager.log.records() if r["event"] == "timeout")
+    self.assertEqual(emitted["occupied_before"], 1)
+    self.assertEqual(emitted["expected_cmd_id"], 1)
     self.assertEqual(_DIAG.pending_observation("DETECTOR")["pending_count"], 0)
 
   def test_recent_result_cannot_suppress_first_timeout_snapshot(self):
@@ -93,7 +99,7 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     manager._create_notification = lambda **kwargs: None
     snapshots = []
     manager._cleanup_server = lambda *args, **kwargs: snapshots.extend(
-      r for r in manager.log.records() if r["event"] == "timeout")
+      r for r in manager.log.observations if r["event"] == "timeout")
     with mock.patch.object(_DIAG.time, "monotonic", return_value=10):
       _DIAG.observe(manager.log, "DETECTOR", "result", 1, missing=0)
     with mock.patch.object(_DIAG.time, "monotonic", return_value=10.1):
@@ -103,7 +109,8 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
 
   def test_rapid_timeout_repeats_retain_snapshot_within_rate_cap(self):
     log = _FIXTURE._Log()
-    for instant, worker_pid, occupied in ((10, 1, 2), (10.1, 2, 3), (11.1, 3, 4)):
+    _DIAG.start(log)
+    for instant, worker_pid, occupied in ((10, 1, 2), (10.1, 2, 3), (20.1, 3, 4)):
       with mock.patch.object(_DIAG.time, "monotonic", return_value=instant):
         _DIAG.observe(log, "DETECTOR", "timeout", correlated=False,
                       reason="response_timeout", worker_pid=worker_pid, occupied_before=occupied)
@@ -113,7 +120,7 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     self.assertEqual(records[-1]["suppressed_timeout_worker_pid"], 2)
     self.assertEqual(records[-1]["suppressed_timeout_occupied_before"], 3)
 
-  def test_request_tracking_is_bounded_and_expires(self):
+  def test_request_tracking_is_bounded_and_cleanup_discards_it(self):
     for command in range(200):
       _DIAG.remember_request("DETECTOR", command, "PREDICT", "DETECTOR",
                              _FIXTURE._request(1))
@@ -131,9 +138,8 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
       else:
         self.assertIn(type(value), (int, float, str, type(None)))
     assert_scalar_tree(_DIAG._PENDING)
-    _DIAG._DEADLINE = 0
-    self.assertFalse(_DIAG.enabled())
-    self.assertEqual(_DIAG._PENDING, {})
+    _DIAG.clear_requests("DETECTOR")
+    self.assertEqual(_DIAG.pending_observation("DETECTOR")["pending_count"], 0)
 
   def test_pending_aliases_share_worker_without_false_correlation(self):
     _DIAG.remember_request("DETECTOR", 1, "PREDICT", "ALIAS_A", _FIXTURE._request(1))
@@ -147,6 +153,7 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
 
   def test_sustained_errors_keep_ten_second_repeat_cadence(self):
     log = _FIXTURE._Log()
+    _DIAG.start(log)
     for instant in (10, 11, 12, 19, 20):
       with mock.patch.object(_DIAG.time, "monotonic", return_value=instant):
         _DIAG.observe(log, "DETECTOR", "send", int(instant), reason="no_free_slot", missing=1)
@@ -164,8 +171,9 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     self.assertNotIn("reason", fields)
     self.assertIsNone(fields["expected_images"])
     log = _FIXTURE._Log()
+    _DIAG.start(log)
     _DIAG.observe(log, "DETECTOR", "result", 1, **fields)
-    self.assertNotIn("secret_canary", "\n".join(log.lines))
+    self.assertNotIn("secret_canary", str(log.records()))
     self.assertTrue(log.records()[0]["anomaly"])
 
   def test_unknown_results_and_failed_sends_do_not_leave_pending_frames(self):
@@ -176,56 +184,88 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     self.assertEqual(_DIAG.pending_observation("DETECTOR")["pending_count"], 0)
     fields = _DIAG.result_observation("DETECTOR", {"CMD_ID": None, "DATA": {"INFERENCES": []}}, "DETECTOR")
     self.assertFalse(fields["correlated"])
-    self.assertEqual(fields["reason"], "unmatched_response")
+    self.assertFalse(fields.get("reason"))
+    self.assertFalse(fields.get("wrong_type"))
+    self.assertFalse(fields.get("missing"))
 
-  def test_fork_reset_and_output_cap_discard_pending_state(self):
+  def test_non_image_result_shapes_do_not_invent_image_failures(self):
+    """Only image requests establish the nested image-result contract."""
+    inputs = [{"INPUTS": [{"TYPE": "STRUCT_DATA", "STRUCT_DATA": 5}]}]
+    for rows in ({"score": 5}, _FIXTURE.np.array([5]), [[5]]):
+      with self.subTest(result_type=type(rows).__name__):
+        _DIAG.clear_requests("DETECTOR")
+        _DIAG.remember_request("DETECTOR", 1, "PREDICT", "DETECTOR", inputs)
+        fields = _DIAG.result_observation("DETECTOR", {
+          "CMD_ID": 1, "DATA": {"INFERENCES": rows}}, "DETECTOR")
+        self.assertTrue(fields["correlated"])
+        self.assertIsNone(fields["expected_images"])
+        self.assertFalse(fields.get("reason"))
+        self.assertFalse(fields.get("wrong_type"))
+        self.assertFalse(fields.get("missing"))
+
+  def test_zero_image_request_accepts_empty_result_stream(self):
+    """An expected zero-image stream is valid, rather than receiver loss."""
+    inputs = [{"INPUTS": [{"TYPE": "IMG", "IMG": None}]}]
+    _DIAG.remember_request("DETECTOR", 1, "PREDICT", "DETECTOR", inputs)
+    fields = _DIAG.result_observation("DETECTOR", {
+      "CMD_ID": 1, "DATA": {"INFERENCES": [[]]}}, "DETECTOR")
+    self.assertTrue(fields["correlated"])
+    self.assertEqual(fields["expected_images"], 0)
+    self.assertFalse(fields.get("reason"))
+    self.assertFalse(fields.get("missing"))
+
+  def test_evicted_request_is_uncorrelated_without_transport_failure(self):
+    """Bounded diagnostic tracking loss cannot prove a transport anomaly."""
+    for command in range(_DIAG._MAX_PENDING + 1):
+      _DIAG.remember_request("DETECTOR", command, "PREDICT", "ALIAS" if command else "OLD",
+                             _FIXTURE._request(1))
+    fields = _DIAG.result_observation("DETECTOR", {
+      "CMD_ID": 0, "DATA": {"INFERENCES": [[[]]]}}, "OLD")
+    self.assertFalse(fields["correlated"])
+    self.assertFalse(fields.get("reason"))
+    self.assertFalse(fields.get("wrong_type"))
+    self.assertFalse(fields.get("missing"))
+
+  def test_fork_reset_discards_pending_and_configuration_state(self):
+    """New child accounting cannot retain parent requests or cached workers."""
     _DIAG.remember_request("DETECTOR", 1, "PREDICT", "DETECTOR", _FIXTURE._request(1))
-    _DIAG._after_fork()
+    _FIXTURE._reset()
     self.assertEqual(_DIAG._PENDING, {})
     self.assertEqual(_DIAG._CONFIGURED, {})
     _DIAG.remember_request("DETECTOR", 2, "PREDICT", "DETECTOR", _FIXTURE._request(1))
-    _DIAG._LIMIT = 128
-    _DIAG.observe(_FIXTURE._Log(), "DETECTOR", "send", 2)
-    self.assertEqual(_DIAG._PENDING, {})
-    self.assertFalse(_DIAG.enabled())
+    self.assertEqual(_DIAG.pending_observation("DETECTOR")["pending_count"], 1)
 
-  def test_output_cap_cannot_be_repopulated_by_inflight_request_inspection(self):
-    inspecting, resume = threading.Event(), threading.Event()
-    original = _DIAG.time.monotonic
-    calls = [0]
-    def clock():
-      calls[0] += 1
-      if calls[0] == 2:
-        inspecting.set()
-        if not resume.wait(3):
-          raise RuntimeError("test synchronization timed out")
-      return original()
-    worker = threading.Thread(target=_DIAG.remember_request,
-      args=("DETECTOR", 1, "PREDICT", "DETECTOR", _FIXTURE._request(1)))
-    with mock.patch.object(_DIAG.time, "monotonic", side_effect=clock):
+  def test_contended_request_tracking_returns_without_waiting(self):
+    """A concurrent snapshot may drop diagnostics but cannot stall transport."""
+    finished = threading.Event()
+    _DIAG._LOCK.acquire()
+    worker = threading.Thread(target=lambda: (
+      _DIAG.remember_request("DETECTOR", 1, "PREDICT", "DETECTOR", _FIXTURE._request(1)),
+      finished.set()))
+    try:
       worker.start()
-      try:
-        self.assertTrue(inspecting.wait(3))
-        _DIAG._LIMIT = 128
-        _DIAG.observe(_FIXTURE._Log(), "DETECTOR", "send", 1)
-      finally:
-        resume.set()
-        worker.join(3)
+      self.assertTrue(finished.wait(1))
+    finally:
+      _DIAG._LOCK.release()
+      worker.join(3)
     self.assertFalse(worker.is_alive())
-    self.assertEqual(_DIAG._PENDING, {})
-    self.assertFalse(_DIAG.enabled())
+    self.assertEqual(_DIAG.pending_observation("DETECTOR")["pending_count"], 0)
 
-  def test_configuration_cap_record_does_not_restore_configuration_cache(self):
-    _DIAG._LIMIT = 128
+  def test_configuration_is_cached_without_disabling_request_tracking(self):
+    """Configuration logging is once per worker; subsequent requests persist."""
     worker = types.SimpleNamespace(pid=77, comm_method="shm")
     log = _FIXTURE._Log()
-    _DIAG.configuration_observation(log, "DETECTOR", "DETECTOR", worker,
-                                    _FIXTURE._buffer(), _FIXTURE._Comm())
-    self.assertEqual(log.records()[0]["event"], "output_cap")
-    self.assertEqual(_DIAG._CONFIGURED, {})
+    _DIAG.start(log)
+    _DIAG.start(log)
+    shm, comm = _FIXTURE._buffer(), _FIXTURE._Comm()
+    for _ in range(2):
+      _DIAG.configuration_observation(log, "DETECTOR", "DETECTOR", worker, shm, comm)
+    records = log.records(include_configuration=True)
+    self.assertEqual(len([r for r in records if r["event"] == "configuration"]), 1)
+    _DIAG.remember_request("DETECTOR", 1, "PREDICT", "DETECTOR", _FIXTURE._request(1))
+    self.assertEqual(_DIAG.pending_observation("DETECTOR")["pending_count"], 1)
 
   def test_actual_worker_selection_covers_alias_and_configuration(self):
-    _DIAG._TARGETS = ("TH_YFS_MSPN",)
     shm, comm = _FIXTURE._buffer(), _FIXTURE._Comm()
     manager = self.manager(shm, comm)
     worker = types.SimpleNamespace(server_name="TH_YFS_MSPN", pid=88)
@@ -235,9 +275,11 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     comm.payload = {"TYPE": "RESULT", "DATA": {"INFERENCES": [[[]]]}, "CMD_ID": 1}
     manager._wait_for_result("TH_YF8S", max_wait_time=1)
     records = manager.log.records(include_configuration=True)
-    self.assertEqual({r["event"] for r in records}, {"configuration", "send", "result"})
-    self.assertTrue(all(r["target"] == "TH_YFS_MSPN" for r in records))
-    self.assertTrue(all(r["requested_server"] == "TH_YF8S" for r in records))
+    self.assertEqual({r["event"] for r in records}, {"startup", "configuration"})
+    observations = [r for r in manager.log.observations if r["event"] != "configuration"]
+    self.assertEqual({r["event"] for r in observations}, {"send", "result"})
+    self.assertTrue(all(r["target"] == "TH_YFS_MSPN" for r in observations))
+    self.assertTrue(all(r["requested_server"] == "TH_YF8S" for r in observations))
     configuration = next(r for r in records if r["event"] == "configuration")
     self.assertEqual(configuration["worker_pid"], 88)
     self.assertEqual(configuration["capacity"], 50)
@@ -247,8 +289,8 @@ class DiagnosticEvidenceTests(_FIXTURE.ShmDiagnosticsTests):
     with mock.patch.dict(_FIXTURE._CV._pre_process.__globals__, {
         "get_serving_process_given_ai_engine": _FIXTURE._engine_utils.get_serving_process_given_ai_engine}):
       cv._pre_process()
-    self.assertEqual(cv.log.records()[0]["target"], "TH_YFS_MSPN")
-    self.assertEqual(cv.log.records()[0]["requested_server"], "TH_YF8S")
+    self.assertEqual(cv.log.observations[0]["target"], "TH_YFS_MSPN")
+    self.assertEqual(cv.log.observations[0]["requested_server"], "TH_YF8S")
 
   def test_configuration_uses_physical_worker_segment_across_pipe_alias(self):
     """Real covered aliases omit SHM; alternating handles must not relog it."""

@@ -214,7 +214,15 @@ class ServingManager(Manager):
     return str_id
   
   def startup(self):
+    """Initialize serving and its nonblocking, process-local diagnostics.
+
+    Returns
+    -------
+    None
+      Start the diagnostic sink before workers or inference can submit events.
+    """
     super().startup()
+    shm_diag.start(self.log)
     self.P("Initialising {} with following environment:\n{}".format(
       self.__class__.__name__,
       self.log.dict_pretty_format(self.cfg_serving_environment)
@@ -702,7 +710,7 @@ class ServingManager(Manager):
     return started
 
   def _send_message(self, server_name, command, inputs):
-    """Submit the existing request, optionally observing SHM admission.
+    """Submit the existing request and retain bounded SHM admission evidence.
 
     Parameters
     ----------
@@ -721,8 +729,8 @@ class ServingManager(Manager):
     server_name = self.get_server_name(server_name)
     self.__cmd_count += 1
     shm = self._servers[server_name].get(SMConst.SHM)
-    target = self.get_diagnostic_server_name(server_name) if shm_diag.enabled() else server_name
-    trace = shm_diag.request_observation(inputs, shm) if shm_diag.enabled(target) else None
+    target = self.get_diagnostic_server_name(server_name)
+    trace = shm_diag.request_observation(inputs, shm)
     if trace is not None:
       trace["requested_server"] = server_name
       entry = self._servers[server_name]
@@ -757,8 +765,12 @@ class ServingManager(Manager):
         self.P('Sending {}:{} to {} on {}'.format(command, self.__cmd_count, server_name, comm_eng), color='y')
       self.log.start_timer('pipe_send_message')
       if trace is not None:
-        trace['occupied_after'] = shm_diag.occupancy_observation(shm)
-        shm_diag.remember_request(target, self.__cmd_count, command, server_name, inputs)
+        # Count slots only after an already-observed admission failure. Healthy
+        # requests reuse conversion counters instead of rescanning shared flags.
+        if trace.get('missing'):
+          trace['occupied_after'] = shm_diag.occupancy_observation(shm)
+        shm_diag.remember_request(target, self.__cmd_count, command, server_name, inputs,
+                                  observation=trace)
       comm_eng.send(dct_cmd)
       self.log.stop_timer('pipe_send_message')
       if trace is not None:
@@ -800,7 +812,7 @@ class ServingManager(Manager):
     """
     assert max_wait_time is not None, "ERROR: max_wait_time != None is required"
     server_name = self.get_server_name(server_name)
-    target = self.get_diagnostic_server_name(server_name) if shm_diag.enabled() else server_name
+    target = self.get_diagnostic_server_name(server_name)
     if comm_eng is None:
       comm_eng = self._servers[server_name][SMConst.COMM]
     try:
@@ -817,20 +829,19 @@ class ServingManager(Manager):
       shm_diag.observe(self.log, target, "result", correlated=False,
                        requested_server=server_name, exception_type=type(exc).__name__)
       raise
-    if shm_diag.enabled(target):
-      try:
-        # Even the observation predicate can invoke user-defined equality;
-        # isolate it so diagnostics cannot change the original result path.
-        if not isinstance(payload, dict) or payload.get(SMConst.TYPE) != SMConst.RESULT:
-          return payload
-        fields = shm_diag.result_observation(target, payload, server_name)
-        shm_diag.observe(
-          self.log, target, "result", payload.get(SMConst.CMD_ID),
-          requested_server=server_name, **fields,
-        )
-      except Exception:
-        shm_diag.observe(self.log, target, "result", observation_error=True, correlated=False,
-                         requested_server=server_name)
+    try:
+      # Even the observation predicate can invoke user-defined equality;
+      # isolate it so diagnostics cannot change the original result path.
+      if not isinstance(payload, dict) or payload.get(SMConst.TYPE) != SMConst.RESULT:
+        return payload
+      fields = shm_diag.result_observation(target, payload, server_name)
+      shm_diag.observe(
+        self.log, target, "result", payload.get(SMConst.CMD_ID),
+        requested_server=server_name, **fields,
+      )
+    except Exception:
+      shm_diag.observe(self.log, target, "result", observation_error=True, correlated=False,
+                       requested_server=server_name)
     return payload
   
       
@@ -897,24 +908,24 @@ class ServingManager(Manager):
       Existing response deadline; None resolves the configured value.
     """
     requested = self.get_server_name(server_name)
-    target = self.get_diagnostic_server_name(requested) if shm_diag.enabled() else requested
-    if shm_diag.enabled(target):
-      try:
-        entry = self._servers.get(requested, {})
-        worker, shm = entry.get(SMConst.SERVER), entry.get(SMConst.SHM)
-        fields = shm_diag.pending_observation(target, requested)
-        fields.update(shm_diag.request_observation(None, shm))
-        occupied = fields.get("occupied_before")
-        fields.update(requested_server=requested, worker_pid=entry.get(SMConst.PID),
-                      worker_alive=worker.is_alive() if worker is not None else None,
-                      worker_exitcode=getattr(worker, "exitcode", None),
-                      free_slots=shm.maxlen - occupied if occupied is not None else None)
-        shm_diag.observe(self.log, target, "timeout", correlated=False,
-                         reason="response_timeout", **fields)
-      except Exception:
-        shm_diag.observe(self.log, target, "timeout", correlated=False,
-                         reason="response_timeout", observation_error=True,
-                         requested_server=requested)
+    target = self.get_diagnostic_server_name(requested)
+    try:
+      entry = self._servers.get(requested, {})
+      worker, shm = entry.get(SMConst.SERVER), entry.get(SMConst.SHM)
+      fields = shm_diag.pending_observation(target, requested)
+      fields.update(shm_diag.request_observation(None, shm))
+      occupied = shm_diag.occupancy_observation(shm)
+      fields["occupied_before"] = occupied
+      fields.update(requested_server=requested, worker_pid=entry.get(SMConst.PID),
+                    worker_alive=worker.is_alive() if worker is not None else None,
+                    worker_exitcode=getattr(worker, "exitcode", None),
+                    free_slots=shm.maxlen - occupied if occupied is not None else None)
+      shm_diag.observe(self.log, target, "timeout", correlated=False,
+                       reason="response_timeout", **fields)
+    except Exception:
+      shm_diag.observe(self.log, target, "timeout", correlated=False,
+                       reason="response_timeout", observation_error=True,
+                       requested_server=requested)
     if max_wait_time is None:
       max_wait_time = self._server_wait_time(server_name)
     msg = "Server '{}' error: no message returned from server (maybe timeout) in over {}s.".format(

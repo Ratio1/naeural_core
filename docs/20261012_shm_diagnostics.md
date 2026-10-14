@@ -1,5 +1,9 @@
 # Temporary serving SHM diagnostics
 
+Historical opt-in design. The current implementation is documented in
+[Always-on serving failure diagnostics](20261014_shm_diagnostics.md); the
+activation and expiry instructions below apply only to the earlier revision.
+
 These probes observe the existing failure path. They do not repair failed
 admission, resize/reclaim SHM, pad missing inference or change retries.
 

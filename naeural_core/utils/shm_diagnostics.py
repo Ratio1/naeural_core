@@ -1,17 +1,15 @@
-"""Opt-in, scalar-only observations of the existing serving transport.
+"""Always-on, bounded scalar evidence for the existing serving transport.
 
-``EE_SHM_DIAGNOSTICS`` is a JSON object with ``targets`` (one or two canonical
-serving names) and ``until`` (an absolute Unix timestamp). Configuration is read
-once per interpreter. The window is at most ten minutes and never renews on a
-worker restart past ``until``. No inference or wire data is modified here.
+Inference callers collect scalar counters and enqueue bounded failure evidence.
+Only the daemon output thread serializes records or invokes the runtime logger.
+The legacy ``EE_SHM_DIAGNOSTICS`` variable is ignored, including malformed values.
 """
 
 import json
 import os
-import re
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 
 _EVENTS = frozenset(("send", "receive", "result", "consumer", "configuration", "timeout"))
@@ -35,76 +33,276 @@ _FIELDS = frozenset((
   "oldest_pending_ms", "request_age_ms", "tracking_evictions", "failures", "missing_total",
   "first_failed_cmd_id", "last_failed_cmd_id", "first_failed_reason",
   "transport_kind", "segment_name", "max_elements", "max_rank", "dtype",
+  "tracking_status", "result_contract",
 )) | frozenset("fail_" + reason for reason in _REASONS) \
   | frozenset("suppressed_timeout_" + field for field in _TIMEOUT_FIELDS)
-_LOCK = threading.Lock()
-_STATE = {}
-_PENDING = {}
-_EVICTIONS = {}
-_CONFIGURED = {}
+_MAX_TARGETS = 64
+_MAX_STATES = 128
 _MAX_PENDING = 64
+_MAX_PENDING_TOTAL = 256
 _MAX_ENTRIES = 64
-_BYTES = 0
-_LIMIT = 1024 * 1024  # Per interpreter, shared by all selected targets/events.
-_TARGETS = ()
-_UNTIL = 0.0
-_DEADLINE = 0.0
-try:
-  _config = json.loads(os.environ.get("EE_SHM_DIAGNOSTICS", "{}"))
-  _targets = _config.get("targets", [])
-  _until = _config.get("until", 0)
-  if (isinstance(_targets, list) and 0 < len(_targets) <= 2
-      and all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", x)
-              for x in _targets)
-      and type(_until) in (int, float) and time.time() < _until <= time.time() + 600):
-    _TARGETS = tuple(x.upper() for x in _targets)
-    _UNTIL = _until
-    _DEADLINE = time.monotonic() + max(0, _until - time.time())
-except (ValueError, TypeError, AttributeError):
-  pass  # Invalid diagnostic configuration must not affect runtime startup.
+_MAX_IMAGE_ITEMS = 256
+_HISTORY_LIMIT = 128
+_HISTORY_SECONDS = 10.0
+_CONTEXT_LIMIT = 8
+_QUEUE_LIMIT = 32
+_OUTPUT_RECORDS_PER_SECOND = 32
+_OUTPUT_BYTES_PER_SECOND = 65536
+_LOCK = threading.Lock()
+_STATE = OrderedDict()
+_PENDING = OrderedDict()
+_EVICTIONS = {}
+_CONFIGURED = OrderedDict()
+_TRACKING_COMPLETE = OrderedDict()
+_LOSS_GENERATION = 0
+_APPLIED_LOSS_GENERATION = 0
+_IDENTITY_HISTORY_LOST = False
+_HISTORY = deque(maxlen=_HISTORY_LIMIT)
+_OUTPUT = deque(maxlen=_QUEUE_LIMIT)
+_WAKE = threading.Event()
+_STARTED = False
+_LOG = None
+_THREAD = None
+_COUNTERS = dict.fromkeys(("history_evictions", "history_expired", "state_evictions",
+                          "target_evictions", "tracking_evictions", "contention_drops",
+                          "output_drops", "logger_errors", "budget_drops", "startup_errors",
+                          "tracking_invalidations"), 0)
 
 
 def _after_fork():
-  """Reset child-local accounting and locks while preserving absolute expiry."""
-  global _LOCK, _STATE, _BYTES, _PENDING, _EVICTIONS, _CONFIGURED
+  """Reset child-local locks, bounded state and emitter lifecycle.
+
+  Notes
+  -----
+  Threads do not survive fork. The child must call ``start`` with its own logger
+  rather than retain the parent's logger or a permanently locked wake event.
+  """
+  global _LOCK, _STATE, _PENDING, _EVICTIONS, _CONFIGURED, _HISTORY, _OUTPUT
+  global _WAKE, _STARTED, _LOG, _THREAD, _COUNTERS
+  global _TRACKING_COMPLETE, _LOSS_GENERATION, _APPLIED_LOSS_GENERATION, _IDENTITY_HISTORY_LOST
   _LOCK = threading.Lock()
-  _STATE = {}
-  _BYTES = 0
-  _PENDING, _EVICTIONS, _CONFIGURED = {}, {}, {}
+  _STATE, _PENDING, _CONFIGURED = OrderedDict(), OrderedDict(), OrderedDict()
+  _EVICTIONS = {}
+  _TRACKING_COMPLETE = OrderedDict()
+  _LOSS_GENERATION, _APPLIED_LOSS_GENERATION = 0, 0
+  _IDENTITY_HISTORY_LOST = False
+  _HISTORY = deque(maxlen=_HISTORY_LIMIT)
+  _OUTPUT = deque(maxlen=_QUEUE_LIMIT)
+  _WAKE = threading.Event()
+  _STARTED, _LOG, _THREAD = False, None, None
+  _COUNTERS = dict.fromkeys(_COUNTERS, 0)
 
 
 if hasattr(os, "register_at_fork"):
-  # A serving child must never inherit a lock held by a parent business thread.
   os.register_at_fork(after_in_child=_after_fork)
 
 
-def enabled(target=None):
-  """Return whether this finite window includes the supplied serving name.
+def start(log):
+  """Start one asynchronous diagnostic emitter per interpreter.
 
   Parameters
   ----------
-  target : str or None
-      Canonical serving name; None checks whether any target is enabled.
+  log : Logger
+      Process-local runtime logger, retained until interpreter exit.
 
   Returns
   -------
   bool
-      False without allocation or clock access when diagnostics are disabled.
+      Whether this call started the emitter. Repeated calls are harmless.
+
+  Notes
+  -----
+  Call at manager/worker startup, outside inference execution. The status record
+  is asynchronous, so a broken logger never delays runtime startup.
   """
-  global _TARGETS
-  if not _TARGETS or _BYTES >= _LIMIT:
-    return False
-  if target is not None and target.upper() not in _TARGETS:
-    return False
-  if time.monotonic() >= _DEADLINE or time.time() >= _UNTIL:
-    # Expiry permanently restores the cheap off path in this interpreter.
-    _TARGETS = ()
+  global _STARTED, _LOG, _THREAD
+  try:
     with _LOCK:
-      _PENDING.clear()
-      _EVICTIONS.clear()
-      _CONFIGURED.clear()
+      if _STARTED:
+        return False
+      _LOG = log
+      _OUTPUT.append({"event": "startup", "pid": os.getpid(), "always_on": True,
+                      "history_limit": _HISTORY_LIMIT, "history_seconds": _HISTORY_SECONDS,
+                      "context_limit": _CONTEXT_LIMIT, "queue_limit": _QUEUE_LIMIT,
+                      "expiry": None, "legacy_env_ignored": "EE_SHM_DIAGNOSTICS" in os.environ})
+      try:
+        _THREAD = threading.Thread(target=_emit, name="shm-diagnostics", daemon=True)
+        _THREAD.start()
+      except Exception:
+        # A later successful retry must still emit exactly one startup status.
+        _OUTPUT.pop()
+        _LOG, _THREAD = None, None
+        _COUNTERS["startup_errors"] += 1
+        return False
+      _STARTED = True
+    _WAKE.set()
+    return True
+  except Exception:
+    # Failure to create a diagnostics thread must not abort runtime startup.
+    _COUNTERS["startup_errors"] += 1
     return False
-  return True
+
+
+def _emit():
+  """Serialize and log admitted records away from inference threads.
+
+  Notes
+  -----
+  A blocked logger can stall this daemon only. Pending records remain bounded;
+  output budgets renew every second instead of disabling diagnostics forever.
+  """
+  window, records, size = time.monotonic(), 0, 0
+  while True:
+    _WAKE.wait(0.1)
+    with _LOCK:
+      if not _OUTPUT:
+        _WAKE.clear()
+        continue
+      record = _OUTPUT.popleft()
+    now = time.monotonic()
+    if now - window >= 1:
+      window, records, size = now, 0, 0
+    try:
+      if "observed_at" in record:
+        record["queue_delay_ms"] = max(0, int((now - record["observed_at"]) * 1000))
+      line = "[SHM_DIAG] " + json.dumps(record, separators=(",", ":"), allow_nan=False)
+      encoded = len(line.encode("utf-8"))
+      if records >= _OUTPUT_RECORDS_PER_SECOND or size + encoded > _OUTPUT_BYTES_PER_SECOND:
+        _COUNTERS["budget_drops"] += 1
+        # Renew failed summary eligibility after budget loss. Merge only scalar
+        # aggregate evidence, never the history snapshot or logger references.
+        if record.get("anomaly") and record.get("failures"):
+          with _LOCK:
+            state = _STATE.get((record["target"], record["event"]))
+            if state is not None:
+              if not state["failures"]:
+                state["first_failed_cmd_id"] = record.get("first_failed_cmd_id")
+                state["first_failed_reason"] = record.get("first_failed_reason")
+              state["failures"] += record["failures"]
+              state["missing_total"] += record.get("missing_total", 0)
+              state["last_failed_cmd_id"] = record.get("last_failed_cmd_id")
+              state["suppressed"] += record.get("suppressed", 0)
+              for reason in _REASONS:
+                count = record.get("fail_" + reason, 0)
+                if count:
+                  state["reasons"][reason] = state["reasons"].get(reason, 0) + count
+              # Budget loss returns unresolved image failures to the episode,
+              # including when a later record already reset its aggregate.
+              state["image_failure_pending"] |= bool(
+                record.get("fail_cardinality") or record.get("fail_wrong_type"))
+              state["bad"] = False
+        continue
+      records += 1
+      size += encoded
+      _LOG.P(line)
+    except Exception:
+      _COUNTERS["logger_errors"] += 1
+
+
+def _acquire():
+  """Acquire diagnostic state without waiting for another producer.
+
+  Returns
+  -------
+  bool
+      False means evidence was dropped, never that inference should retry.
+
+  Notes
+  -----
+  Contention counters are best effort under simultaneous increments. They are
+  evidence of lost observation completeness, not transport correctness metrics.
+  """
+  if _LOCK.acquire(blocking=False):
+    return True
+  _COUNTERS["contention_drops"] += 1
+  return False
+
+
+def _tracking_loss():
+  """Mark a lost tracking mutation without acquiring the diagnostic lock.
+
+  Notes
+  -----
+  A scalar generation is enough to force conservative invalidation at the next
+  successful admission. It cannot grow an identity or request tombstone set.
+  """
+  global _LOSS_GENERATION
+  _LOSS_GENERATION += 1
+
+
+def _sync_tracking():
+  """Invalidate stale expectations after a dropped mutation, under the lock.
+
+  Notes
+  -----
+  Loss can hide a response or a failed-send cleanup. Existing identities stay
+  incomplete until an explicit worker lifecycle clear; new requests alone do
+  not prove that delayed old responses are impossible.
+  """
+  global _APPLIED_LOSS_GENERATION, _IDENTITY_HISTORY_LOST
+  if _APPLIED_LOSS_GENERATION != _LOSS_GENERATION:
+    for target in _TRACKING_COMPLETE:
+      _TRACKING_COMPLETE[target] = False
+    _PENDING.clear()
+    # A dropped admission may involve an identity never entered in the map.
+    _IDENTITY_HISTORY_LOST = True
+    _APPLIED_LOSS_GENERATION = _LOSS_GENERATION
+    _COUNTERS["tracking_invalidations"] += 1
+
+
+def _tracking_target(target, reset=False):
+  """Keep bounded identity completeness, under the diagnostic lock.
+
+  Parameters
+  ----------
+  target : str
+      Canonical physical worker identity.
+  reset : bool
+      Explicit worker lifecycle cleanup, which establishes a fresh boundary.
+
+  Notes
+  -----
+  Forgotten identities cannot retain individual loss markers indefinitely.
+  Once that bounded map evicts an identity, unseen identities default to
+  incomplete; explicit lifecycle clears can still restore their confidence.
+  """
+  global _IDENTITY_HISTORY_LOST
+  if target not in _TRACKING_COMPLETE:
+    if len(_TRACKING_COMPLETE) >= _MAX_TARGETS:
+      removed, _ = _TRACKING_COMPLETE.popitem(last=False)
+      _PENDING.pop(removed, None)
+      _EVICTIONS.pop(removed, None)
+      _IDENTITY_HISTORY_LOST = True
+      _COUNTERS["target_evictions"] += 1
+    _TRACKING_COMPLETE[target] = not _IDENTITY_HISTORY_LOST
+  _TRACKING_COMPLETE.move_to_end(target)
+  if reset:
+    _TRACKING_COMPLETE[target] = True
+
+
+def _scalars(fields):
+  """Copy allowlisted built-in scalars without retaining caller objects.
+
+  Parameters
+  ----------
+  fields : dict
+      Caller observations, which may include rejected arbitrary objects.
+
+  Returns
+  -------
+  dict
+      Scalar-only observations with bounded strings and integer magnitudes.
+  """
+  scalars = {}
+  for key, value in fields.items():
+    if key not in _FIELDS:
+      continue
+    value_type = type(value)
+    if (value is None or value_type is bool
+        or (value_type is int and value.bit_length() <= 64)
+        or (value_type is str and len(value) <= 96)):
+      scalars[key] = value
+  return scalars
 
 
 def serving_target(requested, worker=None, covered_by=None):
@@ -135,8 +333,8 @@ def serving_target(requested, worker=None, covered_by=None):
   return requested
 
 
-def remember_request(target, cmd_id, command, requested, inputs):
-  """Retain bounded scalar PREDICT expectations, never arrays or inputs.
+def remember_request(target, cmd_id, command, requested, inputs, observation=None):
+  """Retain bounded scalar PREDICT expectations without retaining inputs.
 
   Parameters
   ----------
@@ -145,97 +343,117 @@ def remember_request(target, cmd_id, command, requested, inputs):
   cmd_id : int
       Existing request ID.
   command : str
-      Existing command; only PREDICT has a correlated RESULT contract.
+      Only PREDICT has a correlated RESULT contract.
   inputs : object
-      Existing request, inspected without changing it.
+      Existing request; never retained or modified.
+  observation : dict or None
+      Locally generated ``request_observation`` result, avoiding a second image
+      scan. This internal argument must never be supplied from a wire payload;
+      its private tuple already contains validated scalar counts.
 
   Notes
   -----
-  At most 64 requests per selected target and 64 per-stream image counts per
-  request are retained. Larger/non-image requests keep outer counts only.
+  At most 64 requests per worker and 256 globally are retained. Per-stream
+  counts inspect at most 64 entries/256 items; larger requests retain only the
+  outer cardinality, explicitly leaving image expectations unavailable.
   """
-  if not enabled(target):
+  if (type(target) is not str or not 0 < len(target) <= 96
+      or type(requested) is not str or len(requested) > 96
+      or type(cmd_id) is not int or cmd_id.bit_length() > 64
+      or command != "PREDICT" or not isinstance(inputs, list)):
     return
   try:
-    if (type(cmd_id) is not int or command != "PREDICT" or not isinstance(inputs, list)
-        or type(requested) is not str or len(requested) > 96):
-      return
-    counts = [] if len(inputs) <= _MAX_ENTRIES else None
-    images = 0
-    if counts is not None:
-      for entry in inputs:
-        if not isinstance(entry, dict) or not isinstance(entry.get("INPUTS"), list):
-          counts = None
-          break
-        count = 0
-        for item in entry["INPUTS"]:
-          if not isinstance(item, dict) or type(item.get("TYPE")) is not str or item["TYPE"] != "IMG":
-            counts = None
-            break
-          count += item.get("IMG") is not None
-        if counts is None:
-          break
-        images += count
-        counts.append(count)
+    observation = observation if observation is not None else request_observation(inputs)
+    counts = observation.get("_image_counts")
+    # Private count tuples are produced locally, never passed to observe/logged.
+    if type(counts) is not tuple or len(counts) > _MAX_ENTRIES:
+      counts = None
     summary = {"requested": requested, "entries": len(inputs),
-               "images": images if counts is not None else None,
-               "counts": tuple(counts) if counts is not None else None,
-               "sent": time.monotonic()}
-    with _LOCK:
-      # A concurrent consumer may expire/cap collection during inspection.
-      if target.upper() not in _TARGETS or _BYTES >= _LIMIT:
-        return
-      pending = _PENDING.setdefault(target.upper(), OrderedDict())
-      if len(pending) >= _MAX_PENDING:
+               "images": observation["images"] if counts is not None else None,
+               "counts": counts, "sent": time.monotonic()}
+    if not _acquire():
+      _tracking_loss()
+      return
+    try:
+      _sync_tracking()
+      target = target.upper()
+      _tracking_target(target)
+      pending = _PENDING.setdefault(target, OrderedDict())
+      _PENDING.move_to_end(target)
+      if cmd_id not in pending and len(pending) >= _MAX_PENDING:
         pending.popitem(last=False)
-        _EVICTIONS[target.upper()] = _EVICTIONS.get(target.upper(), 0) + 1
+        _EVICTIONS[target] = _EVICTIONS.get(target, 0) + 1
+        _TRACKING_COMPLETE[target] = False
+        _COUNTERS["tracking_evictions"] += 1
       pending[cmd_id] = summary
+      # Find the oldest scalar record only when the global bound is exceeded.
+      if sum(len(value) for value in _PENDING.values()) > _MAX_PENDING_TOTAL:
+        owner = min((name for name in _PENDING if _PENDING[name]),
+                    key=lambda name: next(iter(_PENDING[name].values()))["sent"])
+        _PENDING[owner].popitem(last=False)
+        _EVICTIONS[owner] = _EVICTIONS.get(owner, 0) + 1
+        _TRACKING_COMPLETE[owner] = False
+        _COUNTERS["tracking_evictions"] += 1
+    finally:
+      _LOCK.release()
   except Exception:
     return
 
 
 def clear_requests(target, cmd_id=None):
-  """Discard completed/failed request evidence without touching SHM slots.
+  """Discard diagnostic request expectations without touching transport state.
 
   Parameters
   ----------
   target : str
-      Actual serving target.
+      Actual worker identity.
   cmd_id : int or None
-      One failed send, or None to discard the target after cleanup.
+      One failed send, or None for target cleanup.
   """
-  with _LOCK:
+  if not _acquire():
+    _tracking_loss()
+    return
+  try:
+    _sync_tracking()
     if cmd_id is None:
+      _tracking_target(target.upper(), reset=True)
       _PENDING.pop(target.upper(), None)
       _EVICTIONS.pop(target.upper(), None)
+      _CONFIGURED.pop(target.upper(), None)
     else:
       _PENDING.get(target.upper(), {}).pop(cmd_id, None)
+  finally:
+    _LOCK.release()
 
 
 def pending_observation(target, requested=None):
-  """Snapshot bounded pending IDs/count/age before cleanup.
+  """Snapshot bounded pending IDs/count/age before transport cleanup.
 
   Parameters
   ----------
   target : str
-      Actual serving target.
+      Actual worker identity.
   requested : str or None
-      Optional logical handle whose oldest expected ID is reported.
+      Optional alias whose expected ID is reported.
 
   Returns
   -------
   dict
-      Scalar snapshot; occupancy and process status belong to the caller.
+      Scalar snapshot, or observation-error evidence on contention.
   """
-  with _LOCK:
+  if not _acquire():
+    return {"observation_error": True}
+  try:
+    _sync_tracking()
     pending = _PENDING.get(target.upper(), {})
-    candidates = [(key, value) for key, value in pending.items()
-                  if requested is None or value["requested"] == requested]
-    first = candidates[0] if candidates else None
+    first = next(((key, value) for key, value in pending.items()
+                  if requested is None or value["requested"] == requested), None)
     oldest = next(iter(pending.values()), None)
     return {"pending_count": len(pending), "expected_cmd_id": first[0] if first else None,
             "oldest_pending_ms": max(0, int((time.monotonic() - oldest["sent"]) * 1000))
             if oldest else None, "tracking_evictions": _EVICTIONS.get(target.upper(), 0)}
+  finally:
+    _LOCK.release()
 
 
 def result_observation(target, payload, requested):
@@ -258,61 +476,96 @@ def result_observation(target, payload, requested):
   rows = data.get("INFERENCES") if isinstance(data, dict) else None
   fields = {"observed_cmd_id": observed if type(observed) is int else None,
             "entries": len(rows) if isinstance(rows, list) else None,
-            "missing": sum(isinstance(row, list) and not row for row in rows)
-            if isinstance(rows, list) else 0,
-            "wrong_type": not isinstance(rows, list), "correlated": False}
+            "missing": 0, "wrong_type": False, "correlated": False,
+            "tracking_status": "missing_expectation", "result_contract": "unverified"}
   meta = data.get("INFERENCES_META") if isinstance(data, dict) else None
   fields["error_marker"] = isinstance(meta, dict) and "ERROR" in meta
-  with _LOCK:
-    pending = _PENDING.get(target.upper(), {})
+  if not _acquire():
+    _tracking_loss()
+    fields["tracking_status"] = "contended"
+    return fields
+  try:
+    _sync_tracking()
+    target = target.upper()
+    pending = _PENDING.get(target, {})
+    complete = _TRACKING_COMPLETE.get(target, not _IDENTITY_HISTORY_LOST)
     expected = next(((key, value) for key, value in pending.items()
                      if value["requested"] == requested), None)
+    if not complete:
+      # A directly known request still establishes its own scalar cardinality.
+      # Without complete history, FIFO ordering cannot establish a mismatch.
+      summary = pending.get(observed) if type(observed) is int else None
+      expected = (observed, summary) if summary is not None and summary["requested"] == requested else None
+      fields["tracking_status"] = "incomplete"
     if expected is not None:
       key, summary = expected
       fields.update(expected_cmd_id=key, expected_entries=summary["entries"],
                     expected_images=summary["images"],
+                    tracking_status="known" if complete else "incomplete_known",
                     request_age_ms=max(0, int((time.monotonic() - summary["sent"]) * 1000)))
       fields["correlated"] = type(observed) is int and observed == key
-      if not fields["correlated"]:
+      counts = summary["counts"]
+      if counts is not None:
+        fields["result_contract"] = "structured_images"
+      if complete and not fields["correlated"]:
         fields["reason"] = "cmd_id_mismatch"
-      elif fields["wrong_type"] or any(not isinstance(row, list) for row in rows):
-        fields.update(wrong_type=True, reason="wrong_type")
-      elif len(rows) != summary["entries"]:
-        fields["reason"] = "cardinality"
-      elif summary["counts"] is not None:
-        fields["returned_images"] = sum(len(row) for row in rows)
-        if any(len(row) != count for row, count in zip(rows, summary["counts"])):
+      elif counts is not None:
+        # Arbitrary non-image servings may return dicts/arrays. List-of-lists
+        # cardinality is established only by a known structured image request.
+        if not isinstance(rows, list):
+          fields.update(wrong_type=True, reason="wrong_type")
+        elif len(rows) != summary["entries"]:
           fields["reason"] = "cardinality"
-    else:
-      fields["reason"] = "unmatched_response"
+        else:
+          returned_images, missing = 0, 0
+          wrong_type, cardinality = False, False
+          for row, count in zip(rows, counts):
+            if not isinstance(row, list):
+              wrong_type = True
+              continue
+            size = len(row)
+            returned_images += size
+            missing += count > 0 and size == 0
+            cardinality |= size != count
+          fields["missing"] = missing
+          if wrong_type:
+            fields.update(wrong_type=True, reason="wrong_type")
+          else:
+            fields["returned_images"] = returned_images
+            if cardinality:
+              fields["reason"] = "cardinality"
     # Arrival consumes only the observed known ID; unexpected messages do not
     # erase the expected request or change which result the runtime returns.
     if type(observed) is int:
       pending.pop(observed, None)
+  finally:
+    _LOCK.release()
   return fields
 
 
 def configuration_observation(log, target, requested, worker, shm, comm):
-  """Emit scalar capacity/identity once per selected worker/segment lifecycle.
+  """Queue scalar capacity once per worker/segment lifecycle.
 
   Parameters
   ----------
   log : Logger
-      Existing runtime logger.
+      Runtime logger; actual output uses the logger passed to ``start``.
   target, requested : str
-      Actual worker and original handle.
+      Actual worker and requested handle.
   worker, shm, comm : object or None
-      Existing objects; diagnostics never attach, allocate or change them.
+      Existing runtime objects, observed without changing them.
   """
-  if not enabled(target):
-    return
   try:
     target = target.upper()
     pid = getattr(worker, "pid", None)
     identity = (pid, id(shm))
-    with _LOCK:
+    if not _acquire():
+      return
+    try:
       if _CONFIGURED.get(target) == identity:
         return
+    finally:
+      _LOCK.release()
     fields = {"requested_server": requested, "worker_pid": pid,
               "transport_kind": getattr(worker, "comm_method", type(comm).__name__),
               "shm": shm is not None}
@@ -320,11 +573,15 @@ def configuration_observation(log, target, requested, worker, shm, comm):
       fields.update(initialized=bool(shm.initialized), capacity=int(shm.maxlen),
                     segment_name=getattr(shm, "_mem_name", None),
                     max_elements=int(shm._max_element_size), max_rank=int(shm.shape_offset),
-                    dtype=str(shm._np_mem.dtype))
-    if observe(log, target, "configuration", correlated=False, **fields):
-      with _LOCK:
-        if target in _TARGETS and _BYTES < _LIMIT:
-          _CONFIGURED[target] = identity
+                    dtype=str(shm._np_mem.dtype), occupied_before=occupancy_observation(shm))
+    if observe(log, target, "configuration", correlated=False, **fields) and _acquire():
+      try:
+        if target not in _CONFIGURED and len(_CONFIGURED) >= _MAX_TARGETS:
+          _CONFIGURED.popitem(last=False)
+          _COUNTERS["target_evictions"] += 1
+        _CONFIGURED[target] = identity
+      finally:
+        _LOCK.release()
   except Exception:
     return
 
@@ -349,7 +606,7 @@ def array_observation(trace, data, slot, reason, reading=False):
     ordinal = trace.get("arrays", 0)
     trace["arrays"] = ordinal + 1
     if data is not None:
-      trace["bytes"] = trace.get("bytes", 0) + int(data.nbytes)
+      trace["bytes"] = trace.get("bytes", 0) + data.nbytes
     if reason is None:
       key = "read_ok" if reading else "admitted"
       trace[key] = trace.get(key, 0) + 1
@@ -364,34 +621,54 @@ def array_observation(trace, data, slot, reason, reading=False):
 
 
 def request_observation(inputs, shm=None):
-  """Return scalar request counts without walking/copying image contents.
+  """Return bounded scalar image counts and cheap segment metadata.
 
   Parameters
   ----------
   inputs : object
-      Existing serving request; only standard list/dict image entries count.
+      Standard list/dict image request, inspected without reading pixels.
   shm : NumpySharedMemory or None
-      Existing segment, observed without attaching or changing slot flags.
+      Existing segment; occupancy is sampled separately on failures only.
 
   Returns
   -------
   dict
-      Counts and optional non-atomic occupancy observation.
+      Counters plus a private scalar ``_image_counts`` tuple when the bounded
+      scan covers every image entry. Unknown counts are explicitly None.
   """
   trace = {"arrays": 0, "bytes": 0, "admitted": 0, "missing": 0,
-           "shm": shm is not None, "images": 0}
+           "shm": shm is not None, "images": None}
   try:
     if isinstance(inputs, list):
       trace["entries"] = len(inputs)
-      for entry in inputs:
-        if isinstance(entry, dict) and isinstance(entry.get("INPUTS"), list):
-          trace["images"] += sum(
-            isinstance(item, dict) and type(item.get("TYPE")) is str and item["TYPE"] == "IMG"
-            and item.get("IMG") is not None for item in entry["INPUTS"]
-          )
+      counts = [] if len(inputs) <= _MAX_ENTRIES else None
+      inspected, images = 0, 0
+      if counts is not None:
+        for entry in inputs:
+          items = entry.get("INPUTS") if isinstance(entry, dict) else None
+          if not isinstance(items, list):
+            counts = None
+            break
+          inspected += len(items)
+          if inspected > _MAX_IMAGE_ITEMS:
+            counts = None
+            break
+          count = 0
+          for item in items:
+            item_type = item.get("TYPE") if isinstance(item, dict) else None
+            if type(item_type) is not str or item_type != "IMG":
+              counts = None
+              break
+            count += item.get("IMG") is not None
+          if counts is None:
+            break
+          counts.append(count)
+          images += count
+      if counts is not None:
+        trace["images"] = images
+        trace["_image_counts"] = tuple(counts)
     if shm is not None:
       trace.update(initialized=bool(shm.initialized), capacity=int(shm.maxlen))
-      trace["occupied_before"] = occupancy_observation(shm)
   except Exception:
     trace["observation_error"] = True
   return trace
@@ -419,112 +696,141 @@ def occupancy_observation(shm):
 
 
 def observe(log, target, event, cmd_id=None, **fields):
-  """Emit bounded scalar evidence; logging failures never alter execution.
+  """Record bounded history or enqueue rate-limited failure evidence.
 
   Parameters
   ----------
   log : Logger
-      Existing runtime logger.
+      Kept for caller compatibility; output uses the process startup logger.
   target : str
-      Canonical serving name, matched against the explicit target selection.
+      Actual serving identity, at most 96 characters.
   event : str
-      One of send, receive, result, consumer, configuration or timeout.
+      Existing send/receive/result/consumer/configuration/timeout boundary.
   cmd_id : int or None
-      Existing IPC command ID; None means the boundary is uncorrelated.
+      Existing IPC identifier; None explicitly means uncorrelated.
   **fields : scalar
-      Allowlisted observations. Arbitrary values and unknown keys are omitted.
+      Only allowlisted built-in scalars are copied into retained evidence.
+
+  Returns
+  -------
+  bool
+      Whether output was queued; successful transport history needs no output.
 
   Notes
   -----
-  Each target/event emits at most once per second; repeats are summarized every
-  ten seconds. A change between healthy/error emits at the next eligible call.
-  Suppressed failures survive in fixed reason counters and first/last failed
-  IDs; a healthy summary with pending failure evidence is eligible after one
-  second. Healthy/error repeats otherwise keep the ten-second cadence.
-  Timeout events have an independent one-second gate and retain the first
-  suppressed snapshot until the next eligible timeout. State has at most twelve
-  keys. Output stops at one MiB per interpreter, with a
-  final cap record. This is a local cap, not a cross-process global guarantee.
+  First failures emit immediately. Repeats aggregate at ten seconds; recovery
+  emits after a one-second floor with suppressed failures preserved. Healthy
+  send/receive/result events enter a 128-record, ten-second deque. Failure
+  context includes at most eight events. Every state collection is bounded;
+  contention/output pressure drops observations rather than delaying inference.
   """
-  if not enabled(target) or event not in _EVENTS:
-    return
-  global _BYTES
+  if (event not in _EVENTS or type(target) is not str or not 0 < len(target) <= 96):
+    return False
   try:
     now = time.monotonic()
     target = target.upper()
+    fields = _scalars(fields)
+    if fields.get("reason") is not None and fields["reason"] not in _REASONS:
+      fields["reason"] = "other"
+    # Internal count tuples never cross this boundary or survive in history.
+    cmd_id = cmd_id if type(cmd_id) is int and cmd_id.bit_length() <= 64 else None
     anomaly = bool(fields.get("missing") or fields.get("wrong_type") or fields.get("error_marker")
                    or fields.get("exception_type") or fields.get("reason")
                    or fields.get("observation_error"))
-    with _LOCK:
-      if _BYTES >= _LIMIT:
-        return
-      state = _STATE.setdefault((target, event), {
-        "last": -float("inf"), "bad": None, "count": 0, "suppressed": 0,
-        "failures": 0, "missing_total": 0, "reasons": {}, "first_failed_cmd_id": None,
-        "last_failed_cmd_id": None, "first_failed_reason": None,
-        "timeout_snapshot": None,
-      })
+    if not _acquire():
+      return False
+    try:
+      while _HISTORY and now - _HISTORY[0]["time"] > _HISTORY_SECONDS:
+        _HISTORY.popleft()
+        _COUNTERS["history_expired"] += 1
+      if not anomaly and event in ("send", "receive", "result"):
+        if len(_HISTORY) == _HISTORY_LIMIT:
+          _COUNTERS["history_evictions"] += 1
+        _HISTORY.append(dict(time=now, target=target, event=event, cmd_id=cmd_id, **fields))
+      key = (target, event)
+      if key not in _STATE:
+        # Healthy traffic needs history only until this boundary has failed.
+        if not anomaly and event != "configuration":
+          return False
+        if len(_STATE) >= _MAX_STATES:
+          _STATE.popitem(last=False)
+          _COUNTERS["state_evictions"] += 1
+        _STATE[key] = {"last": -float("inf"), "bad": False, "image_failure_pending": False, "count": 0,
+                       "suppressed": 0, "failures": 0, "missing_total": 0, "reasons": {},
+                       "first_failed_cmd_id": None, "last_failed_cmd_id": None,
+                       "first_failed_reason": None, "timeout_snapshot": None}
+      _STATE.move_to_end(key)
+      state = _STATE[key]
+      if event == "result" and not anomaly:
+        verified = fields.get("tracking_status") in ("known", "incomplete_known")
+        if not verified or (state["image_failure_pending"]
+                            and fields.get("result_contract") != "structured_images"):
+          # Receipt remains in recent history, but missing diagnostic evidence
+          # cannot prove recovery from a previously verified result failure.
+          return False
       state["count"] += 1
       if anomaly:
         reason = fields.get("reason")
-        if type(reason) is not str or reason not in _REASONS:
+        if reason not in _REASONS:
           reason = "transport_exception" if fields.get("exception_type") else \
             "observation_error" if fields.get("observation_error") else \
             "error_marker" if fields.get("error_marker") else "other"
         if not state["failures"]:
-          state.update(first_failed_cmd_id=cmd_id if type(cmd_id) is int else None,
-                       first_failed_reason=reason)
+          state.update(first_failed_cmd_id=cmd_id, first_failed_reason=reason)
         state["failures"] += 1
-        state["last_failed_cmd_id"] = cmd_id if type(cmd_id) is int else None
+        state["last_failed_cmd_id"] = cmd_id
         state["reasons"][reason] = state["reasons"].get(reason, 0) + 1
+        # Keep this across suppressed and emitted summaries: a later transport
+        # failure must not hide an earlier unresolved image-contract failure.
+        state["image_failure_pending"] |= reason in ("cardinality", "wrong_type")
         if type(fields.get("missing")) is int:
           state["missing_total"] += fields["missing"]
       elapsed = now - state["last"]
-      if elapsed < 1 or (event not in ("configuration", "timeout") and elapsed < 10
-                         and state["bad"] == anomaly and not (state["failures"] and not anomaly)):
-        if event == "timeout" and state["timeout_snapshot"] is None:
-          state["timeout_snapshot"] = {
-            "suppressed_timeout_" + key: value for key, value in fields.items()
-            if key in _TIMEOUT_FIELDS and (value is None or type(value) in (int, bool)
-                                          or (type(value) is str and len(value) <= 96))
-          }
-        state["suppressed"] += 1
-        return
-      record = {
-        "event": event, "target": target, "pid": os.getpid(),
-        "window_until": _UNTIL, "cmd_id": cmd_id if type(cmd_id) is int else None,
-        "observations": state["count"], "suppressed": state["suppressed"],
-        "anomaly": anomaly, "recovery": state["bad"] is True and not anomaly,
-        "failures": state["failures"], "missing_total": state["missing_total"],
-      }
+      recovery = not anomaly and (state["bad"] or state["failures"])
+      eligible = event == "configuration" or (anomaly and (not state["bad"] or elapsed >= 10)) \
+        or recovery
+      if not eligible or elapsed < 1:
+        if anomaly:
+          state["suppressed"] += 1
+          if event == "timeout" and state["timeout_snapshot"] is None:
+            state["timeout_snapshot"] = {"suppressed_timeout_" + field: fields[field]
+                                         for field in _TIMEOUT_FIELDS if field in fields}
+        return False
+      record = {"event": event, "target": target, "pid": os.getpid(), "cmd_id": cmd_id,
+                "observations": state["count"], "suppressed": state["suppressed"],
+                "anomaly": anomaly, "recovery": recovery, "failures": state["failures"],
+                "missing_total": state["missing_total"], "observed_at": now}
       if state["failures"]:
         record.update(first_failed_cmd_id=state["first_failed_cmd_id"],
                       last_failed_cmd_id=state["last_failed_cmd_id"],
                       first_failed_reason=state["first_failed_reason"])
         record.update(("fail_" + reason, count) for reason, count in state["reasons"].items())
-      if state["timeout_snapshot"] is not None:
+      if state["timeout_snapshot"]:
         record.update(state["timeout_snapshot"])
-      for key, value in fields.items():
-        if key in _FIELDS and (value is None or type(value) in (int, bool)
-                              or (type(value) is str and len(value) <= 96)):
-          record[key] = value
-      line = "[SHM_DIAG] " + json.dumps(record, separators=(",", ":"))
-      size = len(line.encode("utf-8"))
-      if size > 2048 or _BYTES + size + 128 > _LIMIT:
-        line = '[SHM_DIAG] {"event":"output_cap","collection_stopped":true}'
-        _BYTES = _LIMIT
-        _PENDING.clear()
-        _EVICTIONS.clear()
-        _CONFIGURED.clear()
-      else:
-        _BYTES += size
-      state.update(last=now, bad=anomaly, count=0, suppressed=0)
-      state.update(failures=0, missing_total=0, reasons={}, first_failed_cmd_id=None,
+      record.update(fields)
+      if anomaly or recovery:
+        recent = []
+        for item in reversed(_HISTORY):
+          if item["target"] == target:
+            recent.append(dict(item))
+            if len(recent) == _CONTEXT_LIMIT:
+              break
+        record["recent"] = list(reversed(recent))
+      record["diagnostic_counters"] = dict(_COUNTERS)
+      if not _STARTED or len(_OUTPUT) >= _QUEUE_LIMIT:
+        _COUNTERS["output_drops"] += 1
+        return False
+      _OUTPUT.append(record)
+      state.update(last=now, bad=anomaly,
+                   image_failure_pending=state["image_failure_pending"] if anomaly else False,
+                   count=0, suppressed=0, failures=0,
+                   missing_total=0, reasons={}, first_failed_cmd_id=None,
                    last_failed_cmd_id=None, first_failed_reason=None, timeout_snapshot=None)
-    # Reserve budget under the lock, but never hold it through logger I/O.
-    log.P(line)
+    finally:
+      _LOCK.release()
+    # The daemon polls its wake event; producers never acquire its event lock.
     return True
   except Exception:
-    # Only the new observation is best effort. Callers retain their original
-    # inference/transport exceptions and must never catch them through here.
-    return
+    # Only diagnostic evidence is best effort. Original runtime exceptions and
+    # transport decisions stay entirely with the existing caller.
+    return False

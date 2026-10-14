@@ -352,7 +352,7 @@ class ModelServingProcess(
     -------
     tuple
       Existing command, restored data, server name, command ID and timestamp.
-      Optional scalar observations distinguish receipt from successful reads.
+      Bounded scalar observations distinguish receipt from successful reads.
     """
     payload, msg_type, msg_data, msg_server_name, msg_id, msg_ts = None, None, None, None, None, None
     if not wait:
@@ -376,8 +376,9 @@ class ModelServingProcess(
         self.P(f'Received payload with keys: {payload.keys()}')
         self.P(f'payload[`SERVER_NAME`]={payload.get("SERVER_NAME")}')
       msg_type = payload['TYPE']
-      trace = shm_diag.request_observation(payload['DATA'], self.npy_shm) \
-        if shm_diag.enabled(self.server_name) else None
+      # Conversion already visits every SHM reference; count those visits there.
+      # Inspect image-entry counts only once, after reconstruction.
+      trace = shm_diag.request_observation(None, self.npy_shm)
       if trace is not None:
         trace["requested_server"] = payload.get("SERVER_NAME")
       try:
@@ -802,6 +803,7 @@ class ModelServingProcess(
       
       n_predicts = 0
       self._create_logger() # uses only server_name
+      shm_diag.start(self.log)
       self.create_numpy_shared_memory()
       # prepare config
       self._setup_config() 

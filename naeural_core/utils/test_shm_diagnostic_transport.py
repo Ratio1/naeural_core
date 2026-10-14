@@ -39,7 +39,7 @@ def _child(pipe, names, target, enabled):
   """Restore the production request and send a synthetic model response."""
   harness = _FIXTURE.ShmDiagnosticsTests()
   harness.setUp()
-  _FIXTURE._DIAG._TARGETS = (target,) if enabled else ()
+  harness.diagnostics(enabled)
   shm, segments = _storage(names)
   worker = harness.worker(shm, pipe)
   worker.server_name = target
@@ -52,13 +52,14 @@ def _child(pipe, names, target, enabled):
     worker._send_message("RESULT", result, cmd_id=cmd_id)
     pipe.send({"command": command, "requested": requested, "values": values,
                "records": worker.log.records(),
+               "observations": worker.log.observations,
                "occupied": int(np.count_nonzero(shm._np_mem_additional[:, 0]))})
   finally:
     del shm._np_mem, shm._np_mem_additional
     for segment in segments:
       segment.close()
     pipe.close()
-    harness.patch.stop()
+    harness.doCleanups()
 
 
 class DiagnosticTransportTests(unittest.TestCase):
@@ -68,7 +69,7 @@ class DiagnosticTransportTests(unittest.TestCase):
     harness = _FIXTURE.ShmDiagnosticsTests()
     harness.setUp()
     target, requested = ("TH_YFS_MSPN", "TH_YF8S") if alias else ("DETECTOR", "DETECTOR")
-    _FIXTURE._DIAG._TARGETS = (target,) if enabled else ()
+    harness.diagnostics(enabled)
     shm, segments = _storage()
     context = mp.get_context("spawn")
     parent, child = context.Pipe()
@@ -101,12 +102,13 @@ class DiagnosticTransportTests(unittest.TestCase):
       self.assertEqual(evidence["values"], expected)
       records = manager.log.records()
       if enabled:
-        self.assertEqual({r["event"] for r in records}, {"send", "result"})
-        self.assertTrue(all(r["target"] == target for r in records + evidence["records"]))
-        self.assertTrue(all(r["requested_server"] == requested for r in records))
-        received = next(r for r in evidence["records"] if r["event"] == "receive")
+        self.assertEqual({r["event"] for r in records}, {"send", "result"} if count > 50 else set())
+        observations = manager.log.observations
+        self.assertTrue(all(r["target"] == target for r in observations + evidence["observations"]))
+        self.assertTrue(all(r["requested_server"] == requested for r in observations))
+        received = next(r for r in evidence["observations"] if r["event"] == "receive")
         self.assertEqual(received["requested_server"], requested)
-        result = next(r for r in records if r["event"] == "result")
+        result = next(r for r in observations if r["event"] == "result")
         self.assertTrue(result["correlated"])
         self.assertEqual(result["expected_entries"], count)
         self.assertEqual(result.get("reason"), "cardinality" if count > 50 else None)
@@ -123,7 +125,7 @@ class DiagnosticTransportTests(unittest.TestCase):
       for segment in segments:
         segment.close()
         segment.unlink()
-      harness.patch.stop()
+      harness.doCleanups()
 
   def test_capacity_failure_is_observed_without_changing_data_or_slots(self):
     for count in (50, 51):
@@ -135,7 +137,9 @@ class DiagnosticTransportTests(unittest.TestCase):
         self.assertEqual(disabled[2], enabled[2])
 
   def test_actual_worker_selection_captures_alias_at_both_boundaries(self):
-    self._run(1, True, alias=True)
+    for count in (1, 51):
+      with self.subTest(count=count):
+        self._run(count, True, alias=True)
 
 
 if __name__ == "__main__":

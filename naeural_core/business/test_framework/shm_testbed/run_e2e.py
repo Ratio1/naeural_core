@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import statistics
@@ -36,12 +37,23 @@ def write_json(path, value):
 
 
 def main():
-  """Exercise real capture, serving, business consumption and MQTT, then clean up."""
+  """Exercise real capture, serving, always-on diagnostics and loopback MQTT.
+
+  Returns
+  -------
+  None
+    Persist bounded evidence and clean up only this isolated testbed. The
+    retained --diagnostics on spelling is a compatibility alias; off is rejected
+    because diagnostics no longer have an activation switch.
+  """
   parser = argparse.ArgumentParser()
   parser.add_argument("--root", type=Path, required=True)
   parser.add_argument("--core-source", type=Path, required=True)
-  parser.add_argument("--diagnostics", choices=("on", "off"), default="on")
+  parser.add_argument("--diagnostics", choices=("on", "off"), default="on",
+                      help="Legacy alias: on is always-on; off is no longer supported")
   args = parser.parse_args()
+  if args.diagnostics == "off":
+    parser.error("SHM diagnostics are always on; use the dated core diagnostics guide for baseline benchmarking")
   root = args.root.resolve()
   assert root.parent.name.startswith("r1-pr225-shm-e2e-"), root
   assert not root.exists(), "Use a fresh run directory"
@@ -93,11 +105,17 @@ def main():
       (config / "streams/probe.json", pipeline), (evidence / "control.json", {"phase": "normal", "count": 1})):
     write_json(path, value)
   (config / "mosquitto.conf").write_text("listener 1883 127.0.0.1\nallow_anonymous true\npersistence false\n")
+  # The broker has its own unprivileged UID and mounts only this non-secret
+  # loopback configuration. Runtime/evidence directories remain private.
+  (config / "mosquitto.conf").chmod(0o644)
   created = []
-  report = {"passed": False, "diagnostics": args.diagnostics, "edge_image": EDGE,
+  report = {"passed": False, "diagnostics": "always_on", "edge_image": EDGE,
     "broker_image": BROKER, "phases": {}}
   try:
     command = ["run", "-d", "--name", node, "--network", "none", "--cap-drop", "ALL",
+      # With every capability dropped, container root cannot write another
+      # user's 0700 bind mounts. Use the test-directory owner's numeric identity.
+      "--user", f"{os.getuid()}:{os.getgid()}",
       "--security-opt", "no-new-privileges", "--memory", "3g", "--memory-swap", "3g",
       "--cpus", "2", "--pids-limit", "256", "--entrypoint", "python3", "-w", "/runtime",
       "-e", "PYTHONPATH=/opt/core:/edge_node", "-e", "PYTHONDONTWRITEBYTECODE=1",
@@ -106,9 +124,6 @@ def main():
       "-e", "R1_SHM_EVIDENCE=/evidence", "-e", "R1_SHM_CONTROL=/evidence/control.json",
       "-v", f"{source}:/opt/core:ro", "-v", f"{fixture}:/testbed:ro",
       "-v", f"{config}:/test-config:ro", "-v", f"{runtime}:/runtime", "-v", f"{evidence}:/evidence"]
-    if args.diagnostics == "on":
-      command.extend(["-e", "EE_SHM_DIAGNOSTICS=" + json.dumps({
-        "targets": ["SHM_COVERED_DETECTOR"], "until": time.time() + 590})])
     for filename, target in (("shm_frames.py", "data"), ("shm_probe.py", "business"),
         ("shm_covered_detector.py", "serving"), ("shm_toy_detector.py", "serving")):
       command.extend(["-v", f"{fixture / filename}:/edge_node/extensions/{target}/{filename}:ro"])
@@ -171,17 +186,21 @@ def main():
     logs = output.stdout + output.stderr
     diagnostics = [json.loads(line.split("[SHM_DIAG] ", 1)[1].split("\x1b", 1)[0])
       for line in logs.splitlines() if "[SHM_DIAG] " in line]
-    if args.diagnostics == "on":
-      assert {"configuration", "send", "receive", "result", "consumer", "timeout"} <= {row["event"] for row in diagnostics}
-      assert any(row.get("requested_server") == "SHM_TOY_DETECTOR" for row in diagnostics)
-      assert any(row.get("reason") == "no_free_slot" or row.get("fail_no_free_slot", 0) > 0 for row in diagnostics)
-      assert any(row.get("reason") == "cardinality" or row.get("fail_cardinality", 0) > 0 for row in diagnostics)
-      assert any(row["event"] == "timeout" and row.get("expected_cmd_id") is not None
-        and row.get("worker_alive") is True for row in diagnostics)
-      assert all(row.get("target") == "SHM_COVERED_DETECTOR" for row in diagnostics)
-      assert len([row for row in diagnostics if row["event"] == "configuration"]) == len(workers), "Configuration repeated within one worker lifecycle"
-    else:
-      assert not diagnostics, "Disabled diagnostics emitted records"
+    assert {"startup", "configuration", "send", "receive", "result", "consumer", "timeout"} <= {row["event"] for row in diagnostics}
+    assert any(row.get("requested_server") == "SHM_TOY_DETECTOR" for row in diagnostics)
+    assert any(row.get("reason") == "no_free_slot" or row.get("fail_no_free_slot", 0) > 0 for row in diagnostics)
+    assert any(row.get("reason") == "cardinality" or row.get("fail_cardinality", 0) > 0 for row in diagnostics)
+    assert any(row["event"] == "timeout" and row.get("expected_cmd_id") is not None
+      and row.get("worker_alive") is True for row in diagnostics)
+    # During timeout teardown the alias temporarily has no physical worker.
+    # Consumer absence evidence then names its requested handle; transport and
+    # configuration evidence must still resolve the physical worker identity.
+    assert all(row.get("target") == "SHM_COVERED_DETECTOR" or (
+      row["event"] == "consumer" and row.get("reason") == "absent_model"
+      and row.get("target") == row.get("requested_server") == "SHM_TOY_DETECTOR"
+    ) for row in diagnostics if row["event"] != "startup")
+    assert len([row for row in diagnostics if row["event"] == "configuration"]) == len(workers), "Configuration repeated within one worker lifecycle"
+    assert any(row.get("anomaly") and row.get("recent") for row in diagnostics), "Failure context missing"
     provenance = json.loads((evidence / "provenance.json").read_text())
     assert all(hashlib.sha256((source / name).read_bytes()).hexdigest() == digest
       for name, digest in provenance["source_sha256"].items())

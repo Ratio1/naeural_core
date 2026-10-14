@@ -940,12 +940,17 @@ class CVPluginExecutor(BasePluginExecutor,
 
     def _pre_process(self):
       """
-      Pre-process upstream data:
-        1. Create list with ai-engine/model for each inference
-        2. Filter within location with threshold
+      Observe result cardinality, then apply the existing CV filtering chain.
+
+      Returns
+      -------
+      None
+        Preserve inference/filtering behavior. Diagnostic records contain scalar
+        counts only and never retain the images or detection dictionaries.
       """ 
       dct_images = self.dataapi_images()
-      if shm_diag.enabled():
+      # Empty-input iterations have no image inference contract to validate.
+      if dct_images:
         # Observe raw results before metadata filtering or tracking. Configured
         # detectors establish expectation even when the model key is absent.
         # CMD_ID is already stripped here: never claim request correlation.
@@ -966,20 +971,19 @@ class CVPluginExecutor(BasePluginExecutor,
             requested = target.upper()
             manager = getattr(self, "global_shmem", {}).get("serving_manager")
             target = manager.get_diagnostic_server_name(requested) if manager is not None else requested
-            if shm_diag.enabled(target):
-              # Dispatch preserves the same (engine, instance) inference key.
-              rows = raw_inferences.get(handle) if isinstance(raw_inferences, dict) else None
-              count = len(rows) if isinstance(rows, list) else None
-              wrong_type = not isinstance(rows, list) or any(not isinstance(row, list) for row in rows)
-              reason = "absent_model" if isinstance(raw_inferences, dict) and handle not in raw_inferences \
-                else "wrong_type" if wrong_type \
-                else "cardinality" if count != len(dct_images) else None
-              shm_diag.observe(
-                self.log, target, "consumer", correlated=False,
-                requested_server=requested,
-                stream=self.instance_hash, images=len(dct_images), result_entries=count,
-                wrong_type=wrong_type, reason=reason,
-              )
+            # Dispatch preserves the same (engine, instance) inference key.
+            rows = raw_inferences.get(handle) if isinstance(raw_inferences, dict) else None
+            count = len(rows) if isinstance(rows, list) else None
+            wrong_type = not isinstance(rows, list) or any(not isinstance(row, list) for row in rows)
+            reason = "absent_model" if isinstance(raw_inferences, dict) and handle not in raw_inferences \
+              else "wrong_type" if wrong_type \
+              else "cardinality" if count != len(dct_images) else None
+            shm_diag.observe(
+              self.log, target, "consumer", correlated=False,
+              requested_server=requested,
+              stream=self.instance_hash, images=len(dct_images), result_entries=count,
+              wrong_type=wrong_type, reason=reason,
+            )
         except Exception:
           # Observation alone is best effort; the original path below still
           # owns all validation, filtering, tracking and exceptions.

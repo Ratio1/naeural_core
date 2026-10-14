@@ -7,6 +7,8 @@ slot flags/data; no operating-system shared-memory segments are opened.
 """
 
 import ast
+import contextlib
+import threading
 import importlib.util
 import json
 import pathlib
@@ -18,6 +20,10 @@ import unittest
 from unittest import mock
 
 import numpy as np
+
+
+_BARRIERS = {}
+_BARRIER_COUNT = 0
 
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -91,8 +97,14 @@ class _Log:
   def __init__(self):
     self.lines = []
     self.timers = []
+    self.observations = []
 
   def P(self, message, **kwargs):
+    if message.startswith("[SHM_DIAG] "):
+      record = json.loads(message[len("[SHM_DIAG] "):])
+      if record["event"] == "_test_barrier":
+        _BARRIERS[record["token"]].set()
+        return
     self.lines.append(message)
 
   def start_timer(self, name):
@@ -102,9 +114,52 @@ class _Log:
     self.timers.append(("stop", name))
 
   def records(self, include_configuration=False):
-    records = [json.loads(line[len("[SHM_DIAG] "):]) for line in self.lines
+    """Read emitted records belonging to observations admitted by this logger."""
+    _drain()
+    sink = _DIAG._LOG
+    lines = sink.lines if sink is not None else self.lines
+    records = [json.loads(line[len("[SHM_DIAG] "):]) for line in lines
                if line.startswith("[SHM_DIAG] ")]
-    return records if include_configuration else [r for r in records if r["event"] != "configuration"]
+    identities = {(r["target"], r["event"], r["cmd_id"]) for r in self.observations}
+    records = [r for r in records if r["event"] == "startup" or
+               (r.get("target"), r["event"], r.get("cmd_id")) in identities]
+    return records if include_configuration else [r for r in records
+               if r["event"] not in ("configuration", "startup")]
+
+
+def _drain(timeout=3):
+  """Acknowledge a FIFO test barrier after prior asynchronous log calls finish."""
+  global _BARRIER_COUNT
+  if not _DIAG._STARTED:
+    return
+  _BARRIER_COUNT += 1
+  token = str(_BARRIER_COUNT)
+  barrier = _BARRIERS[token] = threading.Event()
+  with _DIAG._LOCK:
+    if len(_DIAG._OUTPUT) >= _DIAG._QUEUE_LIMIT:
+      raise AssertionError("test drain requires space for its FIFO barrier")
+    _DIAG._OUTPUT.append({"event": "_test_barrier", "token": token})
+  _DIAG._WAKE.set()
+  try:
+    if not barrier.wait(timeout):
+      raise AssertionError("diagnostic emitter did not acknowledge its FIFO barrier")
+  finally:
+    _BARRIERS.pop(token, None)
+
+
+def _reset():
+  """Reset scalar evidence after draining while preserving the live emitter."""
+  _drain()
+  with _DIAG._LOCK:
+    for state in (_DIAG._STATE, _DIAG._PENDING, _DIAG._EVICTIONS,
+                  _DIAG._CONFIGURED, _DIAG._HISTORY, _DIAG._TRACKING_COMPLETE):
+      state.clear()
+    _DIAG._LOSS_GENERATION = _DIAG._APPLIED_LOSS_GENERATION = 0
+    _DIAG._IDENTITY_HISTORY_LOST = False
+    for key in _DIAG._COUNTERS:
+      _DIAG._COUNTERS[key] = 0
+    if _DIAG._LOG is not None:
+      _DIAG._LOG.lines.clear()
 
 
 class _Comm:
@@ -163,13 +218,37 @@ class ShmDiagnosticsTests(unittest.TestCase):
   """Pin transport/consumer invariance and diagnostic evidence/privacy."""
 
   def setUp(self):
-    self.patch = mock.patch.multiple(_DIAG, _TARGETS=("DETECTOR",),
-                                    _UNTIL=time.time() + 600,
-                                    _DEADLINE=time.monotonic() + 600,
-                                    _STATE={}, _BYTES=0, _LIMIT=1024 * 1024,
-                                    _PENDING={}, _EVICTIONS={}, _CONFIGURED={})
+    """Isolate process-local state and spy on admission, before async logging."""
+    self.budget_patch = mock.patch.multiple(_DIAG, _OUTPUT_RECORDS_PER_SECOND=100000,
+                                           _OUTPUT_BYTES_PER_SECOND=100000000)
+    self.budget_patch.start()
+    self.addCleanup(self.budget_patch.stop)
+    _reset()
+    self._baseline = None
+    original = _DIAG.observe
+    def observe(log, target, event, cmd_id=None, **fields):
+      log.observations.append(dict(target=target, event=event, cmd_id=cmd_id, **fields))
+      return original(log, target, event, cmd_id, **fields)
+    self.patch = mock.patch.object(_DIAG, "observe", side_effect=observe)
     self.patch.start()
     self.addCleanup(self.patch.stop)
+    self.addCleanup(self._stop_baseline)
+    self.addCleanup(_drain)
+
+  def _stop_baseline(self):
+    """Restore product observations after a test-only baseline comparison."""
+    if self._baseline is not None:
+      self._baseline.close()
+      self._baseline = None
+
+  def diagnostics(self, active=True):
+    """Compare real methods with observability mocked out, without a runtime gate."""
+    self._stop_baseline()
+    _reset()
+    if not active:
+      self._baseline = contextlib.ExitStack()
+      for name in ("observe", "configuration_observation", "remember_request"):
+        self._baseline.enter_context(mock.patch.object(_DIAG, name, return_value=None))
 
   def manager(self, shm, comm):
     manager = _Manager()
@@ -178,6 +257,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
     manager._servers = {"DETECTOR": {"SHM": shm, "COMM": comm}}
     manager._ServingManager__cmd_count = 0
     manager.P = manager.log.P
+    _DIAG.start(manager.log)
     manager.show_servers = lambda: None
     return manager
 
@@ -186,6 +266,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
     worker.log, worker._full_debug = _Log(), False
     worker.server_name, worker.npy_shm, worker.comm_eng = "DETECTOR", shm, comm
     worker.time, worker.P = time.time, worker.log.P
+    _DIAG.start(worker.log)
     return worker
 
   def consumer(self, engines, startup_params, raw, calls):
@@ -193,6 +274,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
     cv = _CV()
     cv.log, cv.instance_hash, cv._coords_type = _Log(), "bounded-instance", "set"
     cv.cfg_ai_engine, cv.cfg_startup_ai_engine_params = engines, startup_params
+    _DIAG.start(cv.log)
     cv.dataapi_images = lambda: {0: np.zeros((1, 1, 3))}
     cv.dataapi_inferences = lambda: raw
     cv.dataapi_images_inferences = lambda: raw
@@ -200,7 +282,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
     cv._get_detector_ai_engine = lambda: cv._get_detector_ai_engines()[0]
     cv.cfg_meta_type_mapping, cv.cfg_meta_nms_iou_thr = {}, 0.5
     def filtering(data):
-      calls.append(("filter", len(cv.log.records())))
+      calls.append(("filter", len(cv.log.observations)))
       return data
     cv._filter_confidence_threshold = filtering
     cv._filter_object_types = lambda data: data
@@ -220,8 +302,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
       with self.subTest(count=count, occupied=occupied, doubled=doubled, auxiliary=auxiliary):
         results = []
         for enabled in (False, True):
-          _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
-          _DIAG._STATE.clear()
+          self.diagnostics(enabled)
           shm, comm = _buffer(occupied), _Comm()
           request = _request(count, doubled, auxiliary)
           original = request[0]["INPUTS"][0]["IMG"]
@@ -235,14 +316,18 @@ class ShmDiagnosticsTests(unittest.TestCase):
                     for entry in restored for item in entry["INPUTS"]]
           results.append((values, shm._np_mem_additional.tolist(), comm.calls, manager.log.timers))
           if enabled:
-            sent, received = manager.log.records()[0], worker.log.records()[0]
+            sent = next(r for r in manager.log.observations if r["event"] == "send")
+            received = next(r for r in worker.log.observations if r["event"] == "receive")
             self.assertEqual(sent["missing"], failures)
             self.assertEqual(received["missing"], failures)
             self.assertEqual(sent["cmd_id"], received["cmd_id"])
-            self.assertEqual(sent["occupied_before"], occupied)
-            self.assertEqual(sent["occupied_after"], min(50, occupied + count * (2 if doubled or auxiliary else 1)))
+            if failures:
+              self.assertEqual(sent["occupied_after"], min(50, occupied + count * (2 if doubled or auxiliary else 1)))
+              self.assertTrue(manager.log.records())
+            else:
+              self.assertEqual(manager.log.records() + worker.log.records(), [])
             self.assertEqual(received.get("read_ok", 0), sent["admitted"])
-            self.assertNotIn("secret_canary", "\n".join(manager.log.lines + worker.log.lines))
+            self.assertNotIn("secret_canary", json.dumps(manager.log.records() + worker.log.records()))
           else:
             self.assertEqual(manager.log.records() + worker.log.records(), [])
         self.assertEqual(results[0], results[1])
@@ -276,8 +361,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
 
   def test_ipc_errors_retain_exception_and_idle_is_silent(self):
     for enabled in (False, True):
-      _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
-      _DIAG._STATE.clear()
+      self.diagnostics(enabled)
       manager = self.manager(_buffer(), _Comm(failure=OSError("secret_canary")))
       with self.assertRaisesRegex(ValueError, "Comm pipe exception"):
         manager._send_message("DETECTOR", "PREDICT", _request(1))
@@ -299,8 +383,10 @@ class ShmDiagnosticsTests(unittest.TestCase):
       self.assertEqual(worker._get_message(), (None,) * 5)
       self.assertEqual(worker.log.records(), [])
 
-  def test_suppression_recovery_expiry_caps_and_log_failure(self):
+  def test_suppression_recovery_and_log_failure(self):
+    """Aggregate repeats and retain recovery even when the output sink fails."""
     log = _Log()
+    _DIAG.start(log)
     with mock.patch.object(_DIAG.time, "monotonic", return_value=10):
       _DIAG.observe(log, "DETECTOR", "send", 1, missing=1, reason="no_free_slot")
       for _ in range(100):
@@ -311,26 +397,21 @@ class ShmDiagnosticsTests(unittest.TestCase):
     with mock.patch.object(_DIAG.time, "monotonic", return_value=21):
       _DIAG.observe(log, "DETECTOR", "send", 4, missing=0)
     self.assertTrue(log.records()[-1]["recovery"])
-    _DIAG._DEADLINE = 0
-    _DIAG.observe(log, "DETECTOR", "receive", 5, reason="expired")
-    self.assertEqual(len(log.records()), 3)
-    _DIAG._DEADLINE = time.monotonic() + 60
-    _DIAG._TARGETS = ("DETECTOR",)
-    _DIAG._BYTES, _DIAG._LIMIT = 0, 128
-    _DIAG.observe(log, "DETECTOR", "receive", 6)
-    self.assertEqual(log.records()[-1]["event"], "output_cap")
-    self.assertEqual(_DIAG._BYTES, _DIAG._LIMIT)
-    _DIAG._BYTES, _DIAG._LIMIT = 0, 1024 * 1024
-    log.P = mock.Mock(side_effect=RuntimeError("logger unavailable"))
-    _DIAG.observe(log, "DETECTOR", "consumer", 7, secret="secret_canary")
+    sink = _DIAG._LOG
+    with mock.patch.object(sink, "P", side_effect=RuntimeError("logger unavailable")):
+      _DIAG.observe(log, "DETECTOR", "consumer", 7, reason="wrong_type", secret="secret_canary")
+      deadline = time.perf_counter() + 3
+      while not _DIAG._COUNTERS["logger_errors"] and time.perf_counter() < deadline:
+        threading.Event().wait(0.001)
+      self.assertGreater(_DIAG._COUNTERS["logger_errors"], 0)
+    _drain()
 
   def test_consumer_observes_before_filters_without_changing_outputs(self):
     for rows, reason in [([[]], None), ([], "cardinality"), ([7], "wrong_type"), (None, "wrong_type"),
                          ("absent", "absent_model")]:
       outcomes = []
       for enabled in (False, True):
-        _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
-        _DIAG._STATE.clear()
+        self.diagnostics(enabled)
         calls = []
         raw = {} if rows == "absent" else {"detector": rows}
         cv = self.consumer("detector", {}, raw, calls)
@@ -347,11 +428,25 @@ class ShmDiagnosticsTests(unittest.TestCase):
             self.assertEqual(api.dataapi_specific_image_inferences(idx=0, how='dict'), {'detector': []})
         self.assertEqual(calls, [("filter", int(enabled))])
         if enabled:
-          record = cv.log.records()[0]
+          record = cv.log.observations[0]
           self.assertEqual(record["reason"], reason)
           self.assertFalse(record["correlated"])
           self.assertIsNone(record["cmd_id"])
       self.assertEqual(outcomes[0], outcomes[1])
+
+  def test_consumer_without_images_keeps_downstream_flow_without_anomaly(self):
+    """Empty-input plugins establish no image cardinality expectation."""
+    outcomes = []
+    for active in (False, True):
+      self.diagnostics(active)
+      calls = []
+      cv = self.consumer("detector", {}, {}, calls)
+      cv.dataapi_images = lambda: {}
+      outcomes.append(cv._pre_process())
+      self.assertEqual(calls, [("filter", 0)])
+      self.assertEqual(cv.log.observations, [])
+      self.assertEqual(cv.log.records(), [])
+    self.assertEqual(outcomes[0], outcomes[1])
 
   def test_consumer_target_matches_business_manager_model_instances(self):
     """Select the real workers produced by flat/keyed per-engine startup config."""
@@ -389,12 +484,11 @@ class ShmDiagnosticsTests(unittest.TestCase):
         outcomes = []
         for enabled in (False, True):
           with self.subTest(engines=engines, params=startup_params, enabled=enabled):
-            _DIAG._TARGETS = tuple(targets) if enabled else ()
-            _DIAG._STATE.clear()
+            self.diagnostics(enabled)
             calls = []
             cv = self.consumer(engines, startup_params, raw, calls)
             outcomes.append(cv._pre_process())
-            records = cv.log.records()
+            records = cv.log.observations
             self.assertEqual({r["target"] for r in records}, targets if enabled else set())
             self.assertTrue(all(r["reason"] is None and not r["correlated"] for r in records))
             self.assertEqual(calls, [("filter", len(targets) if enabled else 0)])
@@ -415,8 +509,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
     for payload in (None, {"TYPE": "RESULT", "DATA": {"INFERENCES": [[], [[]]]}, "CMD_ID": 71}):
       outcomes = []
       for enabled in (False, True):
-        _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
-        _DIAG._STATE.clear()
+        self.diagnostics(enabled)
         manager, events = self.manager(None, _Comm(payload)), []
         manager._server_wait_time = lambda _: 5
         manager._create_notification = lambda **kwargs: events.append(("notification", kwargs))
@@ -425,29 +518,36 @@ class ShmDiagnosticsTests(unittest.TestCase):
         result = manager._wait_for_result("DETECTOR", max_wait_time=5)
         outcomes.append((result, events, manager._servers["DETECTOR"]["COMM"].calls))
         if enabled:
-          record = manager.log.records()[0]
+          record = next(r for r in manager.log.observations
+                        if r["event"] == ("timeout" if payload is None else "result"))
           if payload is None:
             self.assertEqual(record["reason"], "response_timeout")
             self.assertFalse(record["correlated"])
           else:
             self.assertEqual(record["cmd_id"], 71)
-            self.assertEqual(record["missing"], 1)
+            self.assertFalse(record.get("correlated"))
+            self.assertFalse(record.get("missing"))
       self.assertEqual(outcomes[0], outcomes[1])
 
-  def test_configuration_is_opt_in_targeted_finite_and_off_has_no_clock(self):
-    cases = [("", False), ("invalid", False), ("[]", False),
-             (json.dumps({"targets": ["DETECTOR"], "until": time.time() - 1}), False),
-             (json.dumps({"targets": ["DETECTOR"], "until": time.time() + 700}), False),
-             (json.dumps({"targets": ["A", "B", "C"], "until": time.time() + 50}), False),
-             (json.dumps({"targets": ["DETECTOR"], "until": time.time() + 50}), True)]
-    for configuration, expected in cases:
-      with self.subTest(configuration=configuration), mock.patch.dict(os.environ, {"EE_SHM_DIAGNOSTICS": configuration}):
+  def test_legacy_configuration_cannot_disable_actual_failures(self):
+    """Absent, invalid and expired legacy switches all leave evidence enabled."""
+    for configuration in (None, "", "private-malformed-config", "[]", '{"targets": [], "until": 0}'):
+      environment = dict(os.environ)
+      environment.pop("EE_SHM_DIAGNOSTICS", None)
+      if configuration is not None:
+        environment["EE_SHM_DIAGNOSTICS"] = configuration
+      with self.subTest(configuration=configuration), mock.patch.dict(os.environ, environment, clear=True):
         module = _load_file("config_subject", _ROOT / "utils/shm_diagnostics.py")
-        self.assertEqual(module.enabled("DETECTOR"), expected)
-        self.assertFalse(module.enabled("UNSELECTED"))
-        if not expected:
-          with mock.patch.object(module.time, "monotonic", side_effect=AssertionError("off clock")):
-            self.assertFalse(module.enabled())
+        log = _Log()
+        module.start(log)
+        module.observe(log, "UNSELECTED", "send", 1, missing=1, reason="no_free_slot")
+        deadline = time.perf_counter() + 3
+        while not any("no_free_slot" in line for line in log.lines) and time.perf_counter() < deadline:
+          threading.Event().wait(0.001)
+        records = [json.loads(line[len("[SHM_DIAG] "):]) for line in log.lines
+                   if line.startswith("[SHM_DIAG] ")]
+        self.assertTrue(any(record.get("reason") == "no_free_slot" for record in records))
+        self.assertNotIn("private-malformed-config", json.dumps(records))
 
   def test_result_type_inspection_preserves_envelope_and_result_consumer(self):
     """A failing diagnostic predicate must leave the original consumer in charge."""
@@ -461,8 +561,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
     for kind in (np.array(["RESULT", "RESULT"]), ResultType("RESULT")):
       for enabled in (False, True):
         with self.subTest(kind=type(kind).__name__, enabled=enabled):
-          _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
-          _DIAG._STATE.clear()
+          self.diagnostics(enabled)
           payload = {"TYPE": kind, "DATA": {"INFERENCES": [[]]}, "CMD_ID": 72}
           comm = _Comm(payload)
           manager = self.manager(None, comm)
@@ -488,26 +587,25 @@ class ShmDiagnosticsTests(unittest.TestCase):
               manager._wait_for_result("DETECTOR", max_wait_time=1)
           self.assertEqual(comm.calls, ["poll", "recv"])
 
-  def test_fork_reset_preserves_expiry_and_does_not_inherit_a_locked_gate(self):
-    deadline, until = _DIAG._DEADLINE, _DIAG._UNTIL
-    original = _DIAG._LOCK
+  def test_fork_reset_does_not_inherit_a_locked_gate(self):
+    """A forked child receives fresh locks and bounded process-local state."""
+    module = _load_file("fork_reset_subject", _ROOT / "utils/shm_diagnostics.py")
+    original = module._LOCK
     original.acquire()
     try:
-      _DIAG._BYTES = 100
-      _DIAG._after_fork()
-      self.assertIsNot(original, _DIAG._LOCK)
-      self.assertTrue(_DIAG._LOCK.acquire(blocking=False))
-      _DIAG._LOCK.release()
-      self.assertEqual((_DIAG._DEADLINE, _DIAG._UNTIL), (deadline, until))
-      self.assertEqual((_DIAG._BYTES, _DIAG._STATE), (0, {}))
+      module._after_fork()
+      self.assertIsNot(original, module._LOCK)
+      self.assertTrue(module._LOCK.acquire(blocking=False))
+      module._LOCK.release()
+      self.assertEqual(module._STATE, {})
+      self.assertEqual(module._PENDING, {})
     finally:
       original.release()
 
   def test_conversion_and_worker_send_exceptions_are_not_swallowed(self):
     states = []
     for enabled in (False, True):
-      _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
-      _DIAG._STATE.clear()
+      self.diagnostics(enabled)
       shm, comm = _buffer(), _Comm()
       manager = self.manager(shm, comm)
       with self.assertRaises(ValueError):
@@ -530,8 +628,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
     for use_shm in (False, True):
       results = []
       for enabled in (False, True):
-        _DIAG._TARGETS = ("DETECTOR",) if enabled else ()
-        _DIAG._STATE.clear()
+        self.diagnostics(enabled)
         shm, comm = _buffer() if use_shm else None, _Comm()
         request = [{"INPUTS": [{"TYPE": np.array([1, 2]), "IMG": np.zeros((4, 4, 3), dtype=np.uint8)}]}]
         manager = self.manager(shm, comm)

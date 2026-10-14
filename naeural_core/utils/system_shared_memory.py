@@ -6,7 +6,6 @@ TODO:
 """
 
 import numpy as np
-import sys
 import traceback
 
 from naeural_core import DecentrAIObject
@@ -25,7 +24,9 @@ class NumpySharedMemory(DecentrAIObject):
       maxlen=MAXLEN, **kwargs
   ):
     """
-    Opens an already existing kernel level shared memory depending of python version.
+    Exclusively create or attach the assigned kernel-level shared-memory names.
+    A failed acquisition leaves initialized=False and exposes error_message and
+    error_type; it never changes the requested role or allocates private storage.
     In case this is used as a buffer there will be an additional memory zone used
     to store the availability of the memory and the shape of the numpy array.
     It will have the shape (maxlen, 1 + shape_offset) and each line will be structured as follows:
@@ -66,6 +67,9 @@ class NumpySharedMemory(DecentrAIObject):
     """
     self.initiator = create
     self.error_message = None
+    self.error_type = None
+    self.cleanup_errors = []
+    self.cleanup_errors_dropped = 0
     self.initialized = False
     self.version = __VER__
     self._mem_name = mem_name
@@ -82,8 +86,18 @@ class NumpySharedMemory(DecentrAIObject):
       self._np_shape = (maxlen, prod_shape)
       self._np_bytes = maxlen * self._np_bytes
       self._max_element_size = prod_shape
+    # Ownership follows individual successful creations, never the requested role
+    # alone: a control collision must not unlink someone else's allocation.
     self._mmap_obj = None
+    self._mmap_obj_additional = None
     self._shm = None
+    self._shm_additional = None
+    self._owns_shm = False
+    self._owns_shm_additional = False
+    self._fd_open = False
+    self._fd_open_additional = False
+    self._np_mem = None
+    self._np_mem_additional = None
     super(NumpySharedMemory, self).__init__(**kwargs)
     return
 
@@ -105,8 +119,18 @@ class NumpySharedMemory(DecentrAIObject):
   def instance_type(self):
     return self.get_instance_type(self.initiator)
 
-  def _set_error(self, err):
+  def _set_error(self, err, error_type=None):
+    """Expose an initialization/use failure without changing the requested role.
+
+    Parameters
+    ----------
+    err : str
+      Existing human-readable failure contract.
+    error_type : str or None
+      Exception class name for allocation retry classification.
+    """
     self.error_message = err
+    self.error_type = error_type
     self.P(err, color='error')
     self.initialized = False
     return
@@ -123,7 +147,16 @@ class NumpySharedMemory(DecentrAIObject):
     self.error_message = self._init_mem()
     if self.error_message is None:
       self.initialized = True
-      self.P(f"Shared memory '{self._mem_name}'[{self.instance_type}] successfully initialized")
+      try:
+        self.P(f"Shared memory '{self._mem_name}'[{self.instance_type}] successfully initialized")
+      except BaseException:
+        # The constructor has not yet returned ownership to its caller. A log
+        # failure at this point still has to roll back the acquired allocation.
+        try:
+          self.shutdown()
+        except BaseException:
+          pass
+        raise
     # endif initialized
     return
   
@@ -142,167 +175,118 @@ class NumpySharedMemory(DecentrAIObject):
     return
 
   def _posix_ipc_open(self):
-    try:
-      import posix_ipc 
-      import mmap
+    """Acquire the exact assigned POSIX names without changing roles.
 
-      def initialize_posix_shared_memory(
-          flags, mode, mem_name, mem_size, np_shape, np_type
-      ):
-        self.P("Initializing ({} - {}) posix_ipc SharedMemory {}".format(
-          flags, mode, mem_name))
+    Returns
+    -------
+    str or None
+      Initialization error, or None after successful acquisition.
+    """
+    return self._open_memory(use_mp=False)
 
-        shm = posix_ipc.SharedMemory(
-          name=mem_name,
-          # posix_ipc.O_RDWR is not available in 1.0.4 version O_RDWR=2 O_CREAT=512, CRRW=514
-          flags=flags,
-          size=int(mem_size),
-        )
-        # mmap
-        self.P(f"Initializing mmap on fd: {shm.fd}, size: {shm.size}")
-        mmap_obj = mmap.mmap(shm.fd, shm.size)
-        # memoryview of mmap
-        mmap_ptr = memoryview(mmap_obj)
-        # after mmap we are done with the fd
-        shm.close_fd()
-        # finally the numpy
-        self.P("Initializing shmem ndarray")
-        np_mem = np.ndarray(
-          shape=np_shape,
-          dtype=np_type,
-          buffer=mmap_ptr,
-        )
-        self.P("Done initializing shmem.")
-
-        return shm, mmap_obj, np_mem
-
-      # open shm
-      _O_RDWR = 2
-      _O_CREAT = 64
-      flags = _O_RDWR if not self.initiator else _O_CREAT | _O_RDWR
-      mode = "creating" if self.initiator else "open r/w"
-      mem_init_kwargs = {
-        'flags': flags,
-        'mode': mode,
-        'mem_name': self._mem_name,
-        'mem_size': self._np_bytes,
-        'np_shape': self._np_shape,
-        'np_type': self._np_type,
-      }
-      self._shm, self._mmap_obj, self._np_mem = initialize_posix_shared_memory(**mem_init_kwargs)
-      if self.is_buffer:
-        # additional memory for buffer mode
-        # This will be used to store the availability of memory and the shape of the numpy array
-        mem_init_kwargs['mem_name'] = f'{self._mem_name}_additional'
-        mem_init_kwargs['np_shape'] = (self.maxlen, 1 + self.shape_offset)
-        mem_init_kwargs['np_type'] = np.int32
-        mem_init_kwargs['mem_size'] = self.maxlen * (1 + self.shape_offset) * np.dtype(np.int32).itemsize
-        self._shm_additional, self._mmap_obj_additional, self._np_mem_additional = initialize_posix_shared_memory(**mem_init_kwargs)
-      # endif buffer mode
-      error_msg = None
-    except:
-      full_err = traceback.format_exc()
-      error_msg =  "ERROR in posix_ipc ShareMemory('{}') open: {}\n{}".format(
-        self._mem_name,
-        sys.exc_info()[0], full_err,
-      )
-      self._set_error(error_msg)
-      self._create_notification(
-         notif='EXCEPTION',
-         msg=error_msg,
-      )
-      # fake numpy buffer
-      self._np_mem = np.zeros(
-        shape=self._np_shape,
-        dtype=self._np_type,
-      )
-      if self.is_buffer:
-        self._np_mem_additional = np.zeros(
-          shape=(self.maxlen, 1 + self.shape_offset),
-          dtype=np.int32,
-        )
-    return error_msg
-  
   def _mp_open(self):
+    """Acquire the exact assigned multiprocessing names without role fallback.
+
+    Returns
+    -------
+    str or None
+      Initialization error, or None after successful acquisition.
+    """
+    return self._open_memory(use_mp=True)
+
+  def _open_memory(self, use_mp):
+    """Acquire data/control as one transaction, then expose NumPy views.
+
+    Parameters
+    ----------
+    use_mp : bool
+      Select multiprocessing.SharedMemory or the retained posix_ipc backend.
+
+    Returns
+    -------
+    str or None
+      Failure text after owned-resource rollback, or None on success.
+
+    Notes
+    -----
+    Attach accepts larger externally produced segments, but never smaller ones.
+    Only newly created control metadata is initialized; image pages are untouched.
+    """
+    segments = [("", self._mem_name, int(self._np_bytes), self._np_shape, self._np_type)]
+    if self.is_buffer:
+      shape = (self.maxlen, 1 + self.shape_offset)
+      size = int(self.maxlen * (1 + self.shape_offset) * np.dtype(np.int32).itemsize)
+      segments.append(("_additional", f"{self._mem_name}_additional", size, shape, np.int32))
     try:
-      from multiprocessing import shared_memory
-
-      def initialize_mp_shared_memory(
-          create, mem_name, mem_size, np_shape, np_type
-      ):
-        try:
-          # Attempt to create the shared memory object.
-          shm = shared_memory.SharedMemory(
-            create=create,
-            name=mem_name,
-            size=int(mem_size),
-          )
-        except Exception as exc:
-          # If the shared memory object already exists, attempt to open it.
-          # If the shared memory object does not exist, create it.
-          initial_instance_type = self.get_instance_type(create)
-          current_instance_type = self.get_instance_type(not create)
-          self.P(f"Failed to create shared memory '{mem_name}'[{initial_instance_type}]: {exc}\n"
-                 f"Attempting to open shared memory '{mem_name}'[{current_instance_type}]")
-          create = not create
-          shm = shared_memory.SharedMemory(
-            create=create,
-            name=mem_name,
-            size=int(mem_size),
-          )
-        # endtry create shared memory
-        # Create a numpy array from the shared memory object.
-        # The numpy array will be used to read and write data to the shared memory object.
-        np_mem = np.ndarray(
-          np_shape,
-          dtype=np_type,
-          buffer=shm.buf,
-        )
-        return shm, np_mem, create
-
-      mem_init_kwargs = {
-        'create': self.initiator,
-        'mem_name': self._mem_name,
-        'mem_size': self._np_bytes,
-        'np_shape': self._np_shape,
-        'np_type': self._np_type,
-      }
-      self._shm, self._np_mem, self.initiator = initialize_mp_shared_memory(**mem_init_kwargs)
-      if self.is_buffer:
-        # additional memory for buffer mode
-        # This will be used to store the availability of memory and the shape of the numpy array
-        mem_init_kwargs['mem_name'] = f'{self._mem_name}_additional'
-        mem_init_kwargs['np_shape'] = (self.maxlen, 1 + self.shape_offset)
-        mem_init_kwargs['np_type'] = np.int32
-        mem_init_kwargs['mem_size'] = int(self.maxlen * (1 + self.shape_offset) * np.dtype(np.int32).itemsize)
-        mem_init_kwargs['create'] = self.initiator
-        self._shm_additional, self._np_mem_additional, _ = initialize_mp_shared_memory(**mem_init_kwargs)
-      # endif buffer mode
-      error_msg = None
-    except:
-      full_err = traceback.format_exc()
-      error_msg =  "ERROR in multiprocessing ShareMemory('{}') open: {}\n{}".format(
-        self._mem_name,
-        sys.exc_info()[0], full_err,
+      if use_mp:
+        from multiprocessing import shared_memory
+      else:
+        import posix_ipc
+        import mmap
+      # Save every returned handle immediately. Subsequent acquisition, mapping,
+      # size validation or ndarray failures can then clean the whole transaction.
+      for suffix, name, size, shape, dtype in segments:
+        if use_mp:
+          handle = shared_memory.SharedMemory(name=name, create=self.initiator, size=size)
+        else:
+          flags = posix_ipc.O_CREX if self.initiator else 0
+          try:
+            handle = posix_ipc.SharedMemory(name=name, flags=flags, size=size if self.initiator else 0)
+          except posix_ipc.ExistentialError as exc:
+            error_class = FileExistsError if self.initiator else FileNotFoundError
+            raise error_class(str(exc)) from exc
+        setattr(self, "_shm" + suffix, handle)
+        setattr(self, "_owns_shm" + suffix, bool(self.initiator))
+        if not use_mp:
+          setattr(self, "_fd_open" + suffix, True)
+        if handle.size < size:
+          raise ValueError(f"Shared memory '{name}' has {handle.size} bytes; requires at least {size}")
+      for suffix, name, size, shape, dtype in segments:
+        handle = getattr(self, "_shm" + suffix)
+        if use_mp:
+          buffer = handle.buf
+        else:
+          buffer = mmap.mmap(handle.fd, handle.size)
+          setattr(self, "_mmap_obj" + suffix, buffer)
+          handle.close_fd()
+          setattr(self, "_fd_open" + suffix, False)
+        setattr(self, "_np_mem" + suffix, np.ndarray(shape, dtype=dtype, buffer=buffer))
+      if self.is_buffer and self._owns_shm_additional:
+        self._np_mem_additional[:] = 0
+      return None
+    except BaseException as exc:
+      error_type = type(exc).__name__
+      error_msg = "ERROR in {} ShareMemory('{}') open: {}\n{}".format(
+        "multiprocessing" if use_mp else "posix_ipc", self._mem_name,
+        error_type, traceback.format_exc(),
       )
-      self._set_error(error_msg)
-      self._create_notification(
-         notif='EXCEPTION',
-         msg=error_msg,
-      )
-      # fake numpy buffer
-      self._np_mem = np.zeros(
-        shape=self._np_shape,
-        dtype=self._np_type,        
-      )
-      if self.is_buffer:
-        self._np_mem_additional = np.zeros(
-          shape=(self.maxlen, 1 + self.shape_offset),
-          dtype=np.int32,
-        )
-      # endif buffer mode
-      
-    return error_msg
+      # Drop any local exported buffer before closing its backing mapping.
+      buffer = None
+      # Publish the original failure before cleanup/reporting can itself fail.
+      self.error_message = error_msg
+      self.error_type = error_type
+      self.initialized = False
+      try:
+        self.shutdown()
+      except BaseException:
+        # Cleanup has already attempted both resources and retained its scalar
+        # errors. A reporting exception must not replace acquisition failure.
+        pass
+      if not isinstance(exc, Exception):
+        # Interrupts still roll back owned objects, but keep process-control
+        # semantics instead of becoming an ordinary failed-initialization object.
+        raise
+      # Ordinary reporting failures must preserve failed initialization and its
+      # original classification, so the caller can select its transport fallback.
+      try:
+        self._set_error(error_msg, error_type=error_type)
+      except Exception:
+        pass
+      try:
+        self._create_notification(notif='EXCEPTION', msg=error_msg)
+      except Exception:
+        pass
+      return error_msg
 
   def get_position(self, position):
     """
@@ -444,21 +428,80 @@ class NumpySharedMemory(DecentrAIObject):
     return None
 
   def shutdown(self):
-    self.P(f"Shutdown NumpySharedMemory {self._mem_name}[{self.instance_type}]...")
-    if self._mmap_obj is not None:
-      self._mmap_obj.close()
-      if self.is_buffer:
-        self._mmap_obj_additional.close()
-    if self._shm is not None:
-      del self._np_mem
-      self._shm.close()
-      if self.initiator:
-        self._shm.unlink()
-      if self.is_buffer:
-        del self._np_mem_additional
-        self._shm_additional.close()
-        if self.initiator:
-          self._shm_additional.unlink()
+    """Close both resources independently and unlink only owned creations.
+
+    Returns
+    -------
+    None
+      Cleanup failures remain in ``cleanup_errors`` as bounded scalar records.
+
+    Raises
+    ------
+    BaseException
+      The first process-control exception is re-raised after all cleanup attempts.
+
+    Notes
+    -----
+    Failed closes remain retryable. Successful unlink clears ownership so repeat
+    shutdown cannot delete a later foreign allocation with the same fixed name.
+    """
+    self.initialized = False
+    self._np_mem = None
+    self._np_mem_additional = None
+    new_errors = []
+    control_error = None
+    for suffix in ("", "_additional"):
+      name = self._mem_name + suffix
+      handle = getattr(self, "_shm" + suffix)
+      mapping = getattr(self, "_mmap_obj" + suffix)
+      operations = []
+      if mapping is not None:
+        operations.append(("close_mapping", mapping.close, "_mmap_obj" + suffix, None))
+      if handle is not None:
+        if self.uses_mp:
+          operations.append(("close", handle.close, None, None))
+        elif getattr(self, "_fd_open" + suffix):
+          operations.append(("close_fd", handle.close_fd, "_fd_open" + suffix, False))
+        if getattr(self, "_owns_shm" + suffix):
+          operations.append(("unlink", handle.unlink, "_owns_shm" + suffix, False))
+      close_failed = False
+      for operation, action, attr, value in operations:
+        try:
+          action()
+        except BaseException as exc:
+          if not isinstance(exc, Exception) and control_error is None:
+            control_error = exc
+          missing = isinstance(exc, FileNotFoundError)
+          if operation == "unlink" and not self.uses_mp:
+            import posix_ipc
+            missing = missing or isinstance(exc, posix_ipc.ExistentialError)
+          if operation == "unlink" and missing:
+            # Another owner/tracker may already have removed the object. Do not
+            # retain permission to unlink a new allocation reusing this name.
+            setattr(self, "_owns_shm" + suffix, False)
+            continue
+          if operation != "unlink":
+            close_failed = True
+          new_errors.append({"segment": name, "operation": operation, "exception_type": type(exc).__name__})
+        else:
+          if attr is not None:
+            setattr(self, attr, value)
+      if not close_failed and not getattr(self, "_owns_shm" + suffix):
+        setattr(self, "_shm" + suffix, None)
+    # Do not let a reporting failure prevent either segment's cleanup attempt.
+    for error in new_errors:
+      if len(self.cleanup_errors) == 32:
+        self.cleanup_errors.pop(0)
+        self.cleanup_errors_dropped += 1
+      self.cleanup_errors.append(error)
+    try:
+      if new_errors:
+        self.P(f"Shared memory cleanup failures: {new_errors}", color='error')
+    finally:
+      # A second interrupt or reporting failure must not replace the first
+      # process-control exception or skip cleanup of the sibling resource.
+      if control_error is not None:
+        raise control_error
     return
 
 

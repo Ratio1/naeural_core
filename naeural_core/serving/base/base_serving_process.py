@@ -474,11 +474,17 @@ class ModelServingProcess(
     return
 
   def create_numpy_shared_memory(self):
-    """
-    Create a numpy shared memory object for accessing data loaded by the serving manager.
+    """Attach only to the exact image allocation assigned by the manager.
+
     Returns
     -------
+    None
 
+    Raises
+    ------
+    RuntimeError
+      Attachment failed. The enclosing startup exception path reports failure
+      before READY; a child must never accept SHM placeholders without storage.
     """
     if self.npy_shm_kwargs is not None and self.comm_method != 'pipe':
       self.npy_shm = NumpySharedMemory(
@@ -486,6 +492,9 @@ class ModelServingProcess(
         create=False,
         log=self.log
       )
+      if not self.npy_shm.initialized:
+        raise RuntimeError("Serving SHM attachment failed: {} ({})".format(
+          self.npy_shm_kwargs['mem_name'], self.npy_shm.error_type))
     return
 
   def inprocess_startup(self):

@@ -19,10 +19,11 @@ import os
 import shutil
 import threading
 import traceback
+from uuid import uuid4
 
 
-from time import sleep, time, strftime, gmtime
-from collections import OrderedDict, defaultdict
+from time import sleep, time, strftime, gmtime, monotonic
+from collections import OrderedDict, defaultdict, deque
 
 # os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -180,6 +181,16 @@ class ServingManager(Manager):
     self.log_timeouts_last_ts = None
     self.log_timeouts_period = log_timeouts_period
     self._servers = {}
+    # Allocation identities must survive neither a worker restart nor a new
+    # manager session. Logical model names remain unchanged for routing.
+    self._shm_session = uuid4().hex
+    self._shm_generation = 0
+    self._shm_created = 0
+    self._shm_cleanup_attempts = 0
+    self._shm_failures = deque(maxlen=32)
+    self._shm_failure_count = 0
+    self._shm_failure_log_ts = None
+    self._shm_legacy_names = OrderedDict()
     self._timeouts = {}
     self._collector_call_counter = 0
     self.__cmd_count = 0
@@ -227,6 +238,8 @@ class ServingManager(Manager):
       self.__class__.__name__,
       self.log.dict_pretty_format(self.cfg_serving_environment)
     ), color='b')
+    # Observe leftovers even when startup has no requested physical workers.
+    self.P('\n'.join(self._shm_inventory_lines()), color='b')
     self._create_servers()
     return
 
@@ -446,6 +459,248 @@ class ServingManager(Manager):
     """
     return self.cfg_serving_environment.get(ct.SERVING.COMM_METHOD, SMConst.DEFAULT_COMM_METHOD)
 
+  def _record_shm_failure(self, server_name, phase, error_type, segment=None):
+    """Retain bounded lifecycle evidence without replacing a runtime failure.
+
+    Parameters
+    ----------
+    server_name, phase, error_type : str
+      Logical worker, failed operation and exception class; never raw payloads.
+    segment : str or None
+      Assigned allocation identity, when known. Repeated failures are summarized
+      immediately at most once per ten seconds and at the normal model dump.
+    """
+    record = dict(server=str(server_name)[:96], phase=phase,
+                  error_type=error_type, segment=segment, time=time())
+    self._shm_failures.append(record)
+    self._shm_failure_count += 1
+    now = monotonic()
+    if self._shm_failure_log_ts is None or now - self._shm_failure_log_ts >= 10:
+      self._shm_failure_log_ts = now
+      try:
+        self.P("SHM lifecycle failure: {} (total={})".format(
+          record, self._shm_failure_count), color='error')
+      except Exception:
+        # A failed diagnostic sink must not prevent the remaining cleanup.
+        pass
+
+  def _shm_summary_lines(self, npy_shm, context):
+    """Describe one existing allocation using metadata, never image contents.
+
+    Parameters
+    ----------
+    npy_shm : NumpySharedMemory
+      The physical worker's allocation; this function never opens a segment.
+    context : str
+      ``startup``, ``after_collection`` or a non-quiescent ``snapshot``.
+
+    Returns
+    -------
+    list[str]
+      Compact log-only fields. Nonzero occupancy is suspicious only after
+      collection; neither the flag count nor this sample proves ownership.
+    """
+    occupied = shm_diag.occupancy_observation(npy_shm)
+    free = None if occupied is None else npy_shm.maxlen - occupied
+    data_bytes = getattr(npy_shm._shm, 'size', None)
+    control_bytes = getattr(npy_shm._shm_additional, 'size', None)
+    expected_control = npy_shm.maxlen * (1 + npy_shm.shape_offset) * 4
+    residual = occupied if context == 'after_collection' else 'unchecked'
+    return [
+      "  SHM: initialized={} role={} segment={} control={}_additional".format(
+        npy_shm.initialized, npy_shm.instance_type, npy_shm._mem_name, npy_shm._mem_name),
+      "  SHM slots: capacity={} occupied={} free={} context={} suspected_residual_slots={}".format(
+        npy_shm.maxlen, occupied, free, context, residual),
+      "  SHM bytes (capacity, not RSS): data={}/{} control={}/{} (actual/expected)".format(
+        data_bytes, int(npy_shm._np_bytes), control_bytes, expected_control),
+    ]
+
+  def _shm_inventory_lines(self):
+    """Inspect a bounded Linux namespace without attaching or reclaiming it.
+
+    Returns
+    -------
+    list[str]
+      Lifecycle counts, recent failures and at most sixteen possible leftover
+      names. At most 256 directory entries are inspected. Unknown names may
+      belong to another live manager; incomplete visibility is explicit.
+    """
+    owned = set()
+    for entry in self._servers.values():
+      shm = entry.get(SMConst.SHM)
+      if shm is not None:
+        owned.update((shm._mem_name, shm._mem_name + '_additional'))
+    legacy = set(self._shm_legacy_names)
+    legacy.update(name + '_additional' for name in self._shm_legacy_names)
+    candidates, count, total_bytes, truncated, errors = [], 0, 0, False, 0
+    status = 'complete'
+    try:
+      with os.scandir('/dev/shm') as entries:
+        for index, entry in enumerate(entries):
+          if index == 256:
+            truncated = True
+            break
+          if entry.name in owned or not (entry.name.startswith('r1s_') or entry.name in legacy):
+            continue
+          try:
+            info = entry.stat(follow_symlinks=False)
+          except OSError:
+            errors += 1
+            continue
+          count += 1
+          total_bytes += info.st_size
+          if len(candidates) < 16:
+            candidates.append("{}:{}B".format(entry.name, info.st_size))
+    except OSError as exc:
+      status = 'unavailable:' + type(exc).__name__
+    if status == 'complete' and (truncated or errors):
+      status = 'incomplete'
+    # A failed directory read is unknown visibility, never a healthy zero.
+    visible_count = count if not status.startswith('unavailable:') else 'unknown'
+    visible_bytes = total_bytes if not status.startswith('unavailable:') else 'unknown'
+    lines = [
+      "SHM lifecycle: created_pairs={} cleanup_attempts={} failures={} retained={} dropped={}".format(
+        self._shm_created, self._shm_cleanup_attempts, self._shm_failure_count,
+        len(self._shm_failures), max(0, self._shm_failure_count - len(self._shm_failures))),
+      "SHM namespace: status={} scanned_limit=256 truncated={} stat_errors={} possible_leftovers={} sampled_bytes={} shown={}".format(
+        status, truncated, errors, visible_count, visible_bytes, len(candidates)),
+    ]
+    if candidates:
+      lines.append("  Possible leftovers (ownership unproven): " + ', '.join(candidates))
+    for failure in list(self._shm_failures)[-8:]:
+      lines.append("  Recent SHM failure: {}".format(failure))
+    return lines
+
+  def _create_serving_shm(self, server_name, inprocess, comm_method):
+    """Allocate a fresh worker generation or choose pipe before child startup.
+
+    Parameters
+    ----------
+    server_name : str
+      Logical model identity, including its configured instance.
+    inprocess : bool
+      Local models do not need or own IPC image storage.
+    comm_method : str
+      Existing configured transport choice.
+
+    Returns
+    -------
+    tuple
+      Allocation, exact child attachment kwargs, and effective transport.
+      Only name collisions receive up to three fresh-identity attempts.
+    """
+    self._shm_legacy_names[server_name] = None
+    self._shm_legacy_names.move_to_end(server_name)
+    if len(self._shm_legacy_names) > 64:
+      self._shm_legacy_names.popitem(last=False)
+    if inprocess or comm_method == 'pipe':
+      return None, None, comm_method
+    self.P('\n'.join(self._shm_inventory_lines()))
+    kwargs = dict(mem_size=0,
+                  np_shape=self.cfg_serving_environment.get('SHM_MAX_IMAGE_SHAPE', ct.SERVING.SHM_IMG_MAX_SHAPE),
+                  np_type='uint8', is_buffer=True,
+                  maxlen=max(ct.SERVING.SHM_MAX_LEN,
+                             self.cfg_serving_environment.get('SHM_MAX_LEN', ct.SERVING.SHM_MAX_LEN)))
+    model = ''.join(c if c.isascii() and c.isalnum() else '_' for c in server_name)[:48]
+    for _ in range(3):
+      self._shm_generation += 1
+      kwargs['mem_name'] = 'r1s_{}_{}_{}'.format(self._shm_session, self._shm_generation, model)
+      shm = NumpySharedMemory(**kwargs, create=True, log=self.log)
+      try:
+        if shm.initialized:
+          self._shm_created += 1
+          occupied = shm_diag.occupancy_observation(shm)
+          expected = (int(shm._np_bytes), shm.maxlen * (1 + shm.shape_offset) * 4)
+          actual = (shm._shm.size, shm._shm_additional.size)
+          # POSIX objects keep their declared file lengths; Windows may round
+          # mapping sizes to page granularity. Neither backend may be undersized.
+          size_valid = actual == expected if os.name == 'posix' else all(
+            observed >= required for observed, required in zip(actual, expected))
+          if occupied == 0 and size_valid:
+            self.P('\n'.join(self._shm_summary_lines(shm, 'startup')))
+            return shm, kwargs, comm_method
+          error_type = 'UnexpectedStartupSize' if not size_valid else 'UnexpectedStartupOccupancy'
+        else:
+          error_type = shm.error_type
+      except BaseException:
+        self._release_server_resources(server_name, None, (), shm)
+        raise
+      self._record_shm_failure(server_name, 'create', error_type, kwargs['mem_name'])
+      self._release_server_resources(server_name, None, (), shm)
+      if error_type != 'FileExistsError':
+        break
+    self.P("SHM unavailable for '{}'; using pipe before worker startup".format(server_name), color='error')
+    return None, None, 'pipe'
+
+  def _release_server_resources(self, server_name, server, comm_engs, npy_shm,
+                                wait=False, terminate=False):
+    """Attempt independent cleanup steps and retain the first runtime error.
+
+    Parameters
+    ----------
+    server_name : str
+      Logical owner of these resources.
+    server : serving process or None
+      May be a constructed process that has not started yet.
+    comm_engs : iterable
+      Parent-owned communication endpoints to close.
+    npy_shm : NumpySharedMemory or None
+      Only this allocation can be closed/unlinked by the utility's owner rules.
+    wait, terminate : bool
+      Existing bounded process-stop behavior; cleanup proceeds if it fails.
+
+    Returns
+    -------
+    BaseException or None
+      First failure for the caller to propagate, unless it is already handling
+      an earlier error. Subsequent errors remain visible in bounded diagnostics.
+    """
+    first_error = None
+    segment = None if npy_shm is None else npy_shm._mem_name
+    if server is not None:
+      try:
+        if server.inprocess:
+          server.shutdown()
+        elif server.pid is not None:
+          if terminate and server.is_alive():
+            server.terminate()
+          if wait:
+            server.join(5)
+            if server.exitcode is None:
+              server.kill()
+              server.join(5)
+              if server.is_alive():
+                raise RuntimeError('Serving process remains alive after kill')
+      except BaseException as exc:
+        first_error = exc
+        self._record_shm_failure(server_name, 'process_cleanup', type(exc).__name__, segment)
+    for comm in comm_engs:
+      if comm is None:
+        continue
+      try:
+        comm.close()
+      except BaseException as exc:
+        if first_error is None:
+          first_error = exc
+        self._record_shm_failure(server_name, 'comm_close', type(exc).__name__, segment)
+    if npy_shm is not None:
+      self._shm_cleanup_attempts += 1
+      previous_errors = len(npy_shm.cleanup_errors) + npy_shm.cleanup_errors_dropped
+      try:
+        npy_shm.shutdown()
+      except BaseException as exc:
+        if first_error is None:
+          first_error = exc
+        self._record_shm_failure(server_name, 'shm_shutdown', type(exc).__name__, segment)
+      for error in npy_shm.cleanup_errors:
+        self._record_shm_failure(server_name, error['operation'], error['exception_type'], error['segment'])
+      # Historical failed closes remain diagnostic evidence even if this retry
+      # succeeded; they must not turn a successful retry into a fresh failure.
+      current_errors = len(npy_shm.cleanup_errors) + npy_shm.cleanup_errors_dropped
+      if current_errors > previous_errors and first_error is None:
+        first_error = RuntimeError('Shared memory cleanup incomplete')
+    return first_error
+
   def _server_wait_time(self, server_name):
     server_name = self.get_server_name(server_name)
     if server_name not in self._servers:
@@ -456,6 +711,23 @@ class ServingManager(Manager):
     return wait_time
 
   def _create_server(self, server_name, server_class_name=None, upstream_config=None, inprocess=False):
+    """Start and register a worker while retaining ownership until success.
+
+    Parameters
+    ----------
+    server_name, server_class_name : str
+      Logical instance identity and optional implementation class.
+    upstream_config : dict or None
+      Existing model startup overrides.
+    inprocess : bool
+      Run locally without allocating an IPC image buffer.
+
+    Returns
+    -------
+    str or None
+      Registered identity on success, or None for a failed worker handshake.
+      Runtime exceptions propagate after all owned cleanup has been attempted.
+    """
     upstream_config = upstream_config or {}
     if server_name in self._servers:
       self.P("Serving process '{}' already created".format(server_name), color='r')
@@ -538,140 +810,110 @@ class ServingManager(Manager):
         _default_config[k] = v
     # end CUSTOM_DOWNLOADABLE_MODEL
 
-    # create serving process
-    _version = "0.0"
-    if isinstance(_default_config, dict):
-      _version = _default_config.get("MODULE_VERSION", "0.0.0")
-    self.log.start_timer('create_server_new()')
-    max_img_shape = self.cfg_serving_environment.get('SHM_MAX_IMAGE_SHAPE', ct.SERVING.SHM_IMG_MAX_SHAPE)
-    comm_method = self.get_comm_method()
-    if comm_method == 'pipe':
-      self.P(f"Attempting to use pipe communication for server '{server_name}'")
-    npy_shm_kwargs = {
-      'mem_name': self.get_server_name(server_name),
-      'mem_size': 0,  # irrelevant for buffer mode
-      'np_shape': max_img_shape,
-      'np_type': 'uint8',
-      'is_buffer': True,
-      'maxlen': self.cfg_serving_environment.get('SHM_MAX_LEN', ct.SERVING.SHM_MAX_LEN),
-    }
-    self.owner.set_loop_stage('3.serving.start.{}.shm_starting'.format(server_name))
-    self.log.start_timer('create_server_shm_start()')
-    npy_shm = None if comm_method == 'pipe' else NumpySharedMemory(**npy_shm_kwargs, create=True, log=self.log)
-    if npy_shm is not None and not npy_shm.initialized:
-      self.P(
-        f"Failed to initialize shared memory for server '{server_name}'. Defaulting to pipe communication",
-        color='error'
+    # The manager owns startup resources until the entire registration path
+    # succeeds. Every failure, including constructor/start/READY/config errors,
+    # reaches the same independent cleanup steps.
+    npy_shm, _server = None, None
+    startup_complete, failed_with_exception = False, False
+    try:
+      _version = _default_config.get("MODULE_VERSION", "0.0.0") if isinstance(_default_config, dict) else "0.0"
+      self.log.start_timer('create_server_new()')
+      self.owner.set_loop_stage('3.serving.start.{}.shm_starting'.format(server_name))
+      self.log.start_timer('create_server_shm_start()')
+      npy_shm, npy_shm_kwargs, comm_method = self._create_serving_shm(
+        server_name, inprocess, self.get_comm_method())
+      self.log.stop_timer('create_server_shm_start()')
+      _server = _Class(
+        server_name=server_name,
+        comm_eng=comm_client,
+        full_debug=self.full_debug,
+        inprocess=inprocess,
+        default_config=_default_config,
+        upstream_config=upstream_config,
+        log=log,
+        environment_variables=self.cfg_serving_environment,
+        version=_version,
+        npy_shm_kwargs=npy_shm_kwargs,
+        comm_method=comm_method,
       )
-      comm_method = 'pipe'
-      npy_shm = None
-    # endif initializing shared memory failed
-    self.log.stop_timer('create_server_shm_start()')
-    _server = _Class(
-      server_name=server_name,
-      comm_eng=comm_client,  # None if inprocess
-      full_debug=self.full_debug,
-      inprocess=inprocess,
-      default_config=_default_config,
-      upstream_config=upstream_config,
-      log=log,
-      environment_variables=self.cfg_serving_environment,
-      version=_version,
-      npy_shm_kwargs=npy_shm_kwargs,
-      comm_method=comm_method,
-    )
-    
-    self.log.stop_timer('create_server_new()')
+      self.log.stop_timer('create_server_new()')
 
-    success = True
-    if _server.inprocess:
-      self.P("Model '{}' forced startup done".format(server_name), color='y')
-      self.P("  Model '{}' serving process will NOT be running in parallel".format(server_name), color='y')
-      self.P("  All logs will be deferred to current one.", color='y')
-      self._servers[server_name] = {
-        SMConst.SERVER: _server,
-        # no need for comm but gonna put it anyway
-        SMConst.COMM: comm_server,
-        SMConst.PID : os.getpid(),
-        SMConst.CREATED_DATE : self.log.now_str(nice_print=True, short=True),
-      }
-    else:
-      self.owner.set_loop_stage('3.serving.start.{}.starting'.format(server_name))
-      self.log.start_timer('create_server_start()')
-      self.P("Running process {}...".format(_server))
-      _server.daemon = True # TODO: must see if all servings work ok
-      _server.start()
-      # sleep 1-2 second to allow subprocess to "breath"
-      sleep(2)
-      _exit_code = _server.exitcode
-      _pid = _server.pid
-      self.owner.set_loop_stage('3.serving.start.{}.postsleep'.format(server_name))
-      if _exit_code is not None:
-        self.P("Serving process '{}' ended with code {}".format(server_name, _exit_code), color='r')
-        comm_server.close()
-        success = False
-        if npy_shm is not None:
-          npy_shm.shutdown()
+      if _server.inprocess:
+        self.P("Model '{}' running in the current process without SHM".format(server_name), color='y')
+        self._servers[server_name] = {
+          SMConst.SERVER: _server,
+          SMConst.COMM: comm_server,
+          SMConst.PID: os.getpid(),
+          SMConst.CREATED_DATE: self.log.now_str(nice_print=True, short=True),
+        }
       else:
-        self.P("Serving process '{}' is running with PID {}".format(server_name, _pid))
-        # now we wait for "READY" status
-        self.P("  Waiting until '{}' responds".format(server_name))
+        self.owner.set_loop_stage('3.serving.start.{}.starting'.format(server_name))
+        self.log.start_timer('create_server_start()')
+        self.P("Running process {}...".format(_server))
+        _server.daemon = True
+        _server.start()
+        sleep(2)
+        self.owner.set_loop_stage('3.serving.start.{}.postsleep'.format(server_name))
+        if _server.exitcode is not None:
+          self.P("Serving process '{}' ended with code {}".format(server_name, _server.exitcode), color='r')
+          self._record_shm_failure(server_name, 'worker_startup', 'EarlyWorkerExit',
+                                   None if npy_shm is None else npy_shm._mem_name)
+          return None
+        self.P("Serving process '{}' is running with PID {}".format(server_name, _server.pid))
         self.owner.set_loop_stage('3.serving.start.{}.wait'.format(server_name), is_dangerous=False)
         result = self._wait_for_result(
-          server_name=server_name, 
-          comm_eng=comm_server, 
-          max_wait_time=float('inf'),
-        )
+          server_name=server_name, comm_eng=comm_server, max_wait_time=float('inf'))
         self.owner.set_loop_stage('3.serving.start.{}.received'.format(server_name))
-        msg_type, msg_data = None, None
-        if result is not None:          
-          msg_type, msg_data = result
-        if isinstance(msg_type, str) and msg_type.upper() == SMConst.READY:
-          self.P("Received '{}' from '{}': {}".format(
-            msg_type, server_name, msg_data), color='g')
-          dct_server = {
-            SMConst.SERVER: _server,
-            SMConst.COMM: comm_server,
-            SMConst.SHM: npy_shm,
-            SMConst.PID: _pid,
-            SMConst.CREATED_DATE : self.log.now_str(nice_print=True, short=False),
-          }
-          self._servers[server_name] = dct_server
-          # now copy locally the remote configuration just to make sure all is good
-          self._servers[server_name][SMConst.SERVER].config_model = self.get_server_config(server_name)
-          self._servers[server_name][SMConst.SERVER].config_data = self._servers[server_name][SMConst.SERVER].config_model
-        else:
+        msg_type, msg_data = result if result is not None else (None, None)
+        if not isinstance(msg_type, str) or msg_type.upper() != SMConst.READY:
           self._show_serving_error(server_name, result)
-          self.P("Serving process '{}' FAILED. Closing pipes and process...".format(server_name), color='error')
-          comm_server.close()
-          _server.terminate()
-          if npy_shm is not None:
-            npy_shm.shutdown()
-          self.P("  Serving process '{}' terminated: {}".format(server_name, _server), color='r')
-          success = False
-        # end if-else READY
-      # end if-else exit_code is None
-      self.log.stop_timer('create_server_start()')
-    # end running in parallel
+          self._record_shm_failure(server_name, 'worker_startup', 'WorkerNotReady',
+                                   None if npy_shm is None else npy_shm._mem_name)
+          return None
+        self.P("Received '{}' from '{}': {}".format(msg_type, server_name, msg_data), color='g')
+        self._servers[server_name] = {
+          SMConst.SERVER: _server,
+          SMConst.COMM: comm_server,
+          SMConst.SHM: npy_shm,
+          SMConst.PID: _server.pid,
+          SMConst.CREATED_DATE: self.log.now_str(nice_print=True, short=False),
+        }
+        _server.config_model = self.get_server_config(server_name)
+        _server.config_data = _server.config_model
+        self.log.stop_timer('create_server_start()')
 
-    if success:
       self.log.start_timer('create_server_parents()')
-      # now lets populate similar "lower-level" servers if not already loaded
       similar_processes = _server.get_server_parents()
       covered_servers = _default_config.get(ct.COVERED_SERVERS, [])
       if server_class_name != server_name:
         covered_servers.append(server_class_name)
       self._maybe_complete_servers(server_name, similar_processes, covered_servers)
-  
-      # finally lets initialize server usage
       self._reset_usage(server_name)
-      self.P("Server '{}' succesfully created.".format(server_name), color='g')
+      self.P("Server '{}' successfully created.".format(server_name), color='g')
       self.show_servers()
       self.log.stop_timer('create_server_parents()')
-      
-    self.log.stop_timer('create_server')
-    return server_name if success else None
-  
+      self.log.stop_timer('create_server')
+      startup_complete = True
+      return server_name
+    except BaseException as exc:
+      failed_with_exception = True
+      self._record_shm_failure(server_name, 'worker_startup', type(exc).__name__,
+                               None if npy_shm is None else npy_shm._mem_name)
+      raise
+    finally:
+      if not startup_complete:
+        cleanup_error = self._release_server_resources(
+          server_name, _server, (comm_server, comm_client), npy_shm,
+          wait=True, terminate=True)
+        # A failed config/alias setup may already have installed registry entries.
+        # Remove only entries belonging to this failed physical worker.
+        for name, entry in list(self._servers.items()):
+          if _server is not None and entry.get(SMConst.SERVER) is _server:
+            del self._servers[name]
+        shm_diag.clear_requests(server_name)
+        if cleanup_error is not None and not failed_with_exception:
+          raise cleanup_error
+
   def _show_serving_error(self, server_name, result):
     # TODO: on every error deallocate parallel serving process
     server_name = self.get_server_name(server_name)
@@ -845,53 +1087,37 @@ class ServingManager(Manager):
     return payload
   
       
-  def _cleanup_server(self, server_name, wait=False, terminate=False):    
-    # cleanup and maybe even kill
+  def _cleanup_server(self, server_name, wait=False, terminate=False):
+    """Retire one physical worker and attempt all of its owned cleanup steps.
+
+    Parameters
+    ----------
+    server_name : str
+      Physical worker identity; covered aliases cannot own cleanup.
+    wait, terminate : bool
+      Preserve the existing bounded process stop policy. Communication and SHM
+      cleanup still run when process teardown raises, and the first error is
+      propagated after retiring the registry entries.
+    """
     server_name = self.get_server_name(server_name)
-    if server_name not in self._servers:
+    entry = self._servers.get(server_name)
+    if entry is None:
       return
-    
-    covered_by = self._servers[server_name].get(SMConst.COVERED_BY)
+    covered_by = entry.get(SMConst.COVERED_BY)
     if covered_by is not None:
-      self.P("Attempted to cleanup the server '{}' covered by '{}'".format(
-        server_name, covered_by), color='r'
-      )
+      self.P("Attempted to cleanup '{}' covered by '{}'".format(server_name, covered_by), color='r')
       return
-    
-    _server = self._get_server(server_name)
     self.P("Proceeding to serving process '{}' cleanup...".format(server_name), color='m')
-    if _server.inprocess:
-      self.P("  Parallel serving disabled. Cannot totally stop serving module '{}'".format(server_name), color='r')
-      _server.shutdown()
-      del _server
-    else:
-      if terminate and _server.is_alive():
-        self.P("  Forcing '{}' termination: {}...".format(server_name, _server), color='m')
-        _server.terminate()
-      if wait:
-        self.P("  Waiting for serving process '{}' ...".format(server_name), color='m')
-        _server.join(5)
-        if _server.exitcode is None:
-          self.P("  Serving process '{}' did not respond to join()".format(server_name), color='r')
-          _server.kill()
-        #endif exitcode is None
-      #endif wait  
-      self.P("  Serving process status: {}".format(_server), color='m'
-      )
-      self.P("  Closing comm pipe for for serving process '{}' ...".format(server_name), color='m')
-      self._servers[server_name][SMConst.COMM].close()
-      if self._servers[server_name].get(SMConst.SHM) is not None:
-        self._servers[server_name][SMConst.SHM].shutdown()
-    
+    error = self._release_server_resources(
+      server_name, entry[SMConst.SERVER], (entry.get(SMConst.COMM),),
+      entry.get(SMConst.SHM), wait=wait, terminate=terminate)
     del self._servers[server_name]
     shm_diag.clear_requests(server_name)
-    remaining_servers = list(self._servers.keys())
-    for svr in remaining_servers:
-      if self._servers[svr].get(SMConst.COVERED_BY) == server_name:
-        self.P("  Deleting covered server '{}' due to main server shutdown".format(svr), color='m')
-        del self._servers[svr]
-    return
-
+    for name, candidate in list(self._servers.items()):
+      if candidate.get(SMConst.COVERED_BY) == server_name:
+        del self._servers[name]
+    if error is not None:
+      raise error
 
   def _get_server(self, server_name):
     server_name = self.get_server_name(server_name)
@@ -1199,43 +1425,67 @@ class ServingManager(Manager):
       )
   
   def stop_server(self, server_name):
+    """Stop a physical worker without allowing a failed STOP to bypass cleanup.
+
+    Parameters
+    ----------
+    server_name : str
+      Serving identity. A STOP failure is preserved after cleanup; secondary
+      cleanup failures are retained separately in the bounded SHM summary.
+    """
     server_name = self.get_server_name(server_name)
-    _server = self._get_server(server_name)
-    if _server is None:
-      # already stopped
+    server = self._get_server(server_name)
+    if server is None:
       return
     covered_by = self.is_covered_by(server_name)
     if covered_by is not None:
       self.P("Serving process {} is covered by {}. Aborting shutdown".format(
-        server_name,
-        covered_by,
-      ), color='m')
+        server_name, covered_by), color='m')
       return
-    if _server is None:
-      self.P("Serving process {} does not exist. Probably already stopped".format(server_name), color='r')
-      return
-    if not _server.inprocess:
-      self.P("  Stopping serving process '{}' (PID:{}) ...".format(server_name, _server.pid), color='y')
-      self._send_message(
-        server_name=server_name, 
-        command=SMConst.STOP, 
-        inputs=None
-      )
-    # run cleanup no matter what
-    self._cleanup_server(server_name, wait=True)
-    if not _server.inprocess:
-      self.P("  Serving process {} has been gracefully stopped.".format(server_name), color='y')
-    return
-  
+    try:
+      if not server.inprocess:
+        self.P("Stopping serving process '{}' (PID:{})...".format(server_name, server.pid), color='y')
+        self._send_message(server_name=server_name, command=SMConst.STOP, inputs=None)
+    except BaseException as exc:
+      self._record_shm_failure(server_name, 'stop_send', type(exc).__name__)
+      try:
+        self._cleanup_server(server_name, wait=True, terminate=True)
+      except BaseException:
+        # Cleanup records its own failure; preserve the original STOP exception.
+        pass
+      raise
+    else:
+      self._cleanup_server(server_name, wait=True)
+    if not server.inprocess:
+      self.P("Serving process '{}' stopped and resources cleaned.".format(server_name), color='y')
+
   def stop_all_servers(self):
+    """Attempt every physical worker's cleanup before propagating failure.
+
+    Raises
+    ------
+    BaseException
+      The first worker teardown failure, after all remaining workers receive
+      their own cleanup attempt. Covered aliases never own extra resources.
+    """
     self.P("Stopping all serving processes...", color='y')
     self.get_active_servers(show=True)
     gpu_info1 = self.log.gpu_info()
     if gpu_info1 is not None and len(gpu_info1) > 0:
       self.P("GPU0 free mem before shutdown: {} GB".format(gpu_info1[0]['FREE_MEM']), color='g')
-    server_names = list(self._servers.keys())
-    for server_name in server_names:      
-      self.stop_server(server_name)
+    server_names = [name for name, entry in self._servers.items()
+                    if entry.get(SMConst.COVERED_BY) is None]
+    first_error = None
+    for server_name in server_names:
+      try:
+        self.stop_server(server_name)
+      except BaseException as exc:
+        # stop_server has already attempted this worker's owned cleanup. A
+        # failed STOP or close must not strand the next worker's allocation.
+        if first_error is None:
+          first_error = exc
+    if first_error is not None:
+      raise first_error
     gpu_info2 = self.log.gpu_info()
     if gpu_info2 is not None and len(gpu_info2) > 0:
       self.P("GPU0 free mem after shutdown: {} GB".format(gpu_info2[0]['FREE_MEM']), color='g')
@@ -1617,7 +1867,26 @@ class ServingManager(Manager):
   def get_active_server_names(self):
     return list(self._servers.keys())
 
-  def get_active_servers(self, show=True, color='b'):
+  def get_active_servers(self, show=True, color='b', shm_context='snapshot'):
+    """Return unchanged heartbeat rows and optionally print serving/SHM state.
+
+    Parameters
+    ----------
+    show : bool
+      Only printed summaries inspect SHM metadata and the bounded namespace.
+      The asynchronous heartbeat path passes False and performs neither scan.
+    color : str
+      Existing logger color for the summary.
+    shm_context : str
+      ``after_collection`` is supplied only by the orchestrator's post-inference
+      timer dump. Other callers cannot infer leaks from in-flight occupancy.
+
+    Returns
+    -------
+    list[OrderedDict]
+      Existing public heartbeat schema, one row per physical worker. Additional
+      diagnostics remain log-only and never inspect image contents or issue IPC.
+    """
     res = []
     lines = []
     if show:
@@ -1661,8 +1930,20 @@ class ServingManager(Manager):
         lines.append("  Last run: {}".format(str_last_run))
         lines.append("  Run cnt:  {}".format(count))
         lines.append("  Idle/Max: {:.0f}s/{:.0f}s".format(idle_time, self._server_collector_timedelta))
+        if covered_by is not None:
+          lines.append("  SHM: covered handle; request transport=pipe; allocation reported under {}".format(covered_by))
+        elif self._get_server(server_name).inprocess:
+          lines.append("  SHM: transport=inprocess; no allocation")
+        else:
+          shm = self._servers[server_name].get(SMConst.SHM)
+          if shm is None:
+            lines.append("  SHM: transport=pipe; no allocation")
+          else:
+            lines.extend(self._shm_summary_lines(shm, shm_context))
         self.P("\n".join(lines), color=color)
         lines = []
+    if show:
+      self.P('\n'.join(self._shm_inventory_lines()), color=color)
     return res
   
   def show_servers(self, title="Current servers:", color='b'):

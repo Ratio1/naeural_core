@@ -2231,7 +2231,9 @@ class Orchestrator(DecentrAIObject,
         self.__loop_stage = "10.1.3"
         self._app_monitor.log_sys_mon_info(color=ct.COLORS.STATUS)        
         self.__loop_stage = "10.1.4"
-        self._serving_manager.get_active_servers(show=True, color='d')
+        # This main-loop stage follows result collection. Other summary callers
+        # can run mid-request and retain the default non-quiescent context.
+        self._serving_manager.get_active_servers(show=True, color='d', shm_context='after_collection')
   
       self.__loop_stage = "10.1.5"
       if False:

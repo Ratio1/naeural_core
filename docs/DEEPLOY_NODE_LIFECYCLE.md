@@ -71,7 +71,7 @@ These are bounded recent snapshots, not a permanent event log. Tombstones and
 operation journal records are retained; operator retention must not discard aborts
 while delayed commands can still arrive.
 
-## Revision secrets and transaction wrappers
+## Revision secrets
 
 `DEEPLOY_SPECS.secret_revision` participates in runtime secret cache identity and
 is forwarded as `revision` to the SDK's signed dAuth request. An in-flight request
@@ -79,26 +79,12 @@ for another revision cannot satisfy a restored configuration. Definitive secret
 validation/rejection errors publish `SECRET_RESOLUTION_FAILED`; transport,
 registry, and replica synchronization failures remain retryable.
 
-BCWrapper exposes `prepare_node_update`, `send_prepared_transaction`, and
-`get_transaction_receipt`. The controller persists prepared signed bytes before
-broadcast and reconciles the same transaction across retries; Core does not
-allocate a second transaction as part of these wrappers.
-
 ## Limits
 
 The receiving oracle owns coordination. There is no distributed election,
 failover, or cross-oracle admission lock. Node tombstones and local active-attempt
 tracking prevent scoped replay and cleanup of superseded attempts; they do not
 provide global concurrent mutation serialization.
-
-All plugin node-update writers share `bc.node_update_transaction_lock`, stored on
-the shared blockchain engine. The coordinator must hold this lock across prepare,
-durable CStore reservation, and broadcast. Legacy `submit_node_update` acquires
-the lock and defers with a retryable error while the newest verified snapshot of
-any locally coordinated operation retains `settlement.transaction`. Old ring
-slots are ignored when a newer snapshot exists. This reservation survives process
-restart through CStore and must remain present until a receipt proves mining,
-even if membership already matches. This is local signer coordination only.
 
 Tracked plugin construction is serialized with lifecycle admission and reporting;
 the lock is acquired after prior-instance shutdown and is never held across that

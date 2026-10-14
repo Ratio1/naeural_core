@@ -16,6 +16,7 @@ windows: set PYTHONPATH=%PYTHONPATH%;C:\work\
 """
 
 import os
+import itertools
 import shutil
 import threading
 import traceback
@@ -181,6 +182,9 @@ class ServingManager(Manager):
     self.log_timeouts_last_ts = None
     self.log_timeouts_period = log_timeouts_period
     self._servers = {}
+    # Failed teardown is not routable, but its process/handles remain owned.
+    # A new generation of the same worker is blocked until these are released.
+    self._pending_cleanup = {}
     # Allocation identities must survive neither a worker restart nor a new
     # manager session. Logical model names remain unchanged for routing.
     self._shm_session = uuid4().hex
@@ -321,7 +325,16 @@ class ServingManager(Manager):
     return self._timeouts[server_name]
 
   def _assign_server(self, replaced_server, main_server):
+    """Assign coverage only after the old physical worker's resources retire.
+
+    Parameters
+    ----------
+    replaced_server, main_server : str
+      Normalized alias and physical serving identities. An alias must not hide
+      unfinished cleanup belonging to a former worker with the same name.
+    """
     assert main_server in self._servers
+    self._retry_pending_cleanup(replaced_server)
     if replaced_server not in self._servers:
       self._servers[replaced_server] = {}
     for prop in SMConst.BASE_PROPS:
@@ -530,6 +543,10 @@ class ServingManager(Manager):
       shm = entry.get(SMConst.SHM)
       if shm is not None:
         owned.update((shm._mem_name, shm._mem_name + '_additional'))
+    for entry in self._pending_cleanup.values():
+      shm = entry['shm']
+      if shm is not None:
+        owned.update((shm._mem_name, shm._mem_name + '_additional'))
     legacy = set(self._shm_legacy_names)
     legacy.update(name + '_additional' for name in self._shm_legacy_names)
     candidates, count, total_bytes, truncated, errors = [], 0, 0, False, 0
@@ -564,7 +581,14 @@ class ServingManager(Manager):
         len(self._shm_failures), max(0, self._shm_failure_count - len(self._shm_failures))),
       "SHM namespace: status={} scanned_limit=256 truncated={} stat_errors={} possible_leftovers={} sampled_bytes={} shown={}".format(
         status, truncated, errors, visible_count, visible_bytes, len(candidates)),
+      "SHM pending cleanup: workers={} shown={}".format(
+        len(self._pending_cleanup), min(16, len(self._pending_cleanup))),
     ]
+    for name, entry in itertools.islice(self._pending_cleanup.items(), 16):
+      shm = entry['shm']
+      lines.append("  Pending cleanup: server={} process={} comms={} segment={}".format(
+        name, entry['server'] is not None, len(entry['comms']),
+        None if shm is None else shm._mem_name))
     if candidates:
       lines.append("  Possible leftovers (ownership unproven): " + ', '.join(candidates))
     for failure in list(self._shm_failures)[-8:]:
@@ -589,6 +613,7 @@ class ServingManager(Manager):
       Allocation, exact child attachment kwargs, and effective transport.
       Only name collisions receive up to three fresh-identity attempts.
     """
+    self._retry_pending_cleanup(server_name)
     self._shm_legacy_names[server_name] = None
     self._shm_legacy_names.move_to_end(server_name)
     if len(self._shm_legacy_names) > 64:
@@ -626,7 +651,11 @@ class ServingManager(Manager):
         self._release_server_resources(server_name, None, (), shm)
         raise
       self._record_shm_failure(server_name, 'create', error_type, kwargs['mem_name'])
-      self._release_server_resources(server_name, None, (), shm)
+      cleanup_error = self._release_server_resources(server_name, None, (), shm)
+      if cleanup_error is not None:
+        # Do not allocate another generation or hide an owned failed cleanup
+        # behind pipe fallback. The pending entry is the retry authority.
+        raise cleanup_error
       if error_type != 'FileExistsError':
         break
     self.P("SHM unavailable for '{}'; using pipe before worker startup".format(server_name), color='error')
@@ -634,7 +663,7 @@ class ServingManager(Manager):
 
   def _release_server_resources(self, server_name, server, comm_engs, npy_shm,
                                 wait=False, terminate=False):
-    """Attempt independent cleanup steps and retain the first runtime error.
+    """Release independent resources, retaining every unfinished operation.
 
     Parameters
     ----------
@@ -654,9 +683,25 @@ class ServingManager(Manager):
     BaseException or None
       First failure for the caller to propagate, unless it is already handling
       an earlier error. Subsequent errors remain visible in bounded diagnostics.
+      Unfinished resources remain in ``_pending_cleanup`` outside inference
+      routing. Successful steps are removed individually so retries cannot
+      repeat an in-process model shutdown or a successfully closed endpoint.
     """
     first_error = None
     segment = None if npy_shm is None else npy_shm._mem_name
+    pending = self._pending_cleanup.setdefault(
+      server_name, dict(server=None, comms=(), shm=None))
+    # Register ownership before teardown. Nested startup cleanup may supply
+    # only endpoints after an allocation helper has retained its failed SHM.
+    # Merge by identity so that neither call can overwrite the other's handles.
+    if server is not None:
+      pending['server'] = server
+    comm_engs = tuple(comm for comm in comm_engs if comm is not None)
+    for comm in comm_engs:
+      if not any(comm is retained for retained in pending['comms']):
+        pending['comms'] += (comm,)
+    if npy_shm is not None:
+      pending['shm'] = npy_shm
     if server is not None:
       try:
         if server.inprocess:
@@ -671,18 +716,22 @@ class ServingManager(Manager):
               server.join(5)
               if server.is_alive():
                 raise RuntimeError('Serving process remains alive after kill')
+          if server.is_alive():
+            raise RuntimeError('Serving process cleanup incomplete')
       except BaseException as exc:
         first_error = exc
         self._record_shm_failure(server_name, 'process_cleanup', type(exc).__name__, segment)
+      else:
+        pending['server'] = None
     for comm in comm_engs:
-      if comm is None:
-        continue
       try:
         comm.close()
       except BaseException as exc:
         if first_error is None:
           first_error = exc
         self._record_shm_failure(server_name, 'comm_close', type(exc).__name__, segment)
+      else:
+        pending['comms'] = tuple(retained for retained in pending['comms'] if retained is not comm)
     if npy_shm is not None:
       self._shm_cleanup_attempts += 1
       previous_errors = len(npy_shm.cleanup_errors) + npy_shm.cleanup_errors_dropped
@@ -699,7 +748,40 @@ class ServingManager(Manager):
       current_errors = len(npy_shm.cleanup_errors) + npy_shm.cleanup_errors_dropped
       if current_errors > previous_errors and first_error is None:
         first_error = RuntimeError('Shared memory cleanup incomplete')
+      # The utility retains a handle/mapping when close or owned unlink fails.
+      # Historical errors alone do not mean resources remain after a retry.
+      if all(handle is None for handle in (
+          npy_shm._shm, npy_shm._shm_additional,
+          npy_shm._mmap_obj, npy_shm._mmap_obj_additional)):
+        pending['shm'] = None
+      elif first_error is None:
+        first_error = RuntimeError('Shared memory cleanup incomplete')
+    if pending['server'] is None and not pending['comms'] and pending['shm'] is None:
+      del self._pending_cleanup[server_name]
     return first_error
+
+  def _retry_pending_cleanup(self, server_name):
+    """Retry only manager-owned failed resources before shutdown or replacement.
+
+    Parameters
+    ----------
+    server_name : str
+      Physical worker identity. No namespace lookup or foreign unlink occurs.
+
+    Raises
+    ------
+    BaseException
+      First retry failure. The remaining ownership is retained for a later
+      attempt, and callers must not start a replacement generation.
+    """
+    pending = self._pending_cleanup.get(server_name)
+    if pending is None:
+      return
+    error = self._release_server_resources(
+      server_name, pending['server'], pending['comms'], pending['shm'],
+      wait=True, terminate=True)
+    if error is not None:
+      raise error
 
   def _server_wait_time(self, server_name):
     server_name = self.get_server_name(server_name)
@@ -729,6 +811,7 @@ class ServingManager(Manager):
       Runtime exceptions propagate after all owned cleanup has been attempted.
     """
     upstream_config = upstream_config or {}
+    self._retry_pending_cleanup(server_name)
     if server_name in self._servers:
       self.P("Serving process '{}' already created".format(server_name), color='r')
       return server_name
@@ -1097,7 +1180,8 @@ class ServingManager(Manager):
     wait, terminate : bool
       Preserve the existing bounded process stop policy. Communication and SHM
       cleanup still run when process teardown raises, and the first error is
-      propagated after retiring the registry entries.
+      propagated after retiring the routing entries. Unfinished resources stay
+      manager-owned in the separate cleanup registry for shutdown/retry.
     """
     server_name = self.get_server_name(server_name)
     entry = self._servers.get(server_name)
@@ -1434,6 +1518,8 @@ class ServingManager(Manager):
       cleanup failures are retained separately in the bounded SHM summary.
     """
     server_name = self.get_server_name(server_name)
+    if server_name in self._pending_cleanup:
+      self._retry_pending_cleanup(server_name)
     server = self._get_server(server_name)
     if server is None:
       return
@@ -1475,6 +1561,10 @@ class ServingManager(Manager):
       self.P("GPU0 free mem before shutdown: {} GB".format(gpu_info1[0]['FREE_MEM']), color='g')
     server_names = [name for name, entry in self._servers.items()
                     if entry.get(SMConst.COVERED_BY) is None]
+    previously_pending = set(self._pending_cleanup)
+    # Dedupe against scheduled physical workers, never covered aliases: an
+    # alias with the same logical name cannot suppress an old owner's cleanup.
+    server_names.extend(name for name in previously_pending if name not in server_names)
     first_error = None
     for server_name in server_names:
       try:
@@ -1482,6 +1572,17 @@ class ServingManager(Manager):
       except BaseException as exc:
         # stop_server has already attempted this worker's owned cleanup. A
         # failed STOP or close must not strand the next worker's allocation.
+        if first_error is None:
+          first_error = exc
+    # The launcher may exit immediately after this final shutdown. Give newly
+    # interrupted/failed cleanup one bounded retry here, rather than assuming
+    # another stop_all call. Never loop until success on persistent failures.
+    for server_name in list(self._pending_cleanup):
+      if server_name in previously_pending:
+        continue
+      try:
+        self._retry_pending_cleanup(server_name)
+      except BaseException as exc:
         if first_error is None:
           first_error = exc
     if first_error is not None:

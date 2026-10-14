@@ -15,6 +15,7 @@ from multiprocessing import shared_memory
 import os
 import pathlib
 import re
+import signal
 import sys
 import threading
 import time
@@ -162,10 +163,11 @@ _ENV = dict(os=os, re=re, uuid=uuid, uuid4=uuid.uuid4, monotonic=time.monotonic,
 _Manager = _source_class("serving/serving_manager.py", "ServingManager", {
   "__init__", "startup", "get_server_name", "get_comm_method", "_create_server",
   "_create_serving_shm", "_release_server_resources", "_record_shm_failure",
+  "_retry_pending_cleanup",
   "_shm_summary_lines", "_shm_inventory_lines", "_cleanup_server", "stop_server",
   "stop_all_servers",
   "_get_server", "is_covered_by", "get_active_servers", "get_diagnostic_server_name",
-  "_send_message",
+  "_send_message", "_assign_server", "_check_equal_servers", "_maybe_complete_servers",
 }, _ENV, base=_RuntimeBase)
 _WORKER_ENV = dict(_ENV)
 _Worker = _source_class("serving/base/base_serving_process.py", "ModelServingProcess", {
@@ -277,6 +279,18 @@ def _transport_child(pipe, kwargs):
     pipe.close()
 
 
+def _blocked_cleanup_child(ready, release):
+  """Wait in a real spawned worker until explicitly released or terminated.
+
+  Parameters
+  ----------
+  ready, release : multiprocessing.Event
+    Isolated parent handshakes; no runtime service or shared image is accessed.
+  """
+  ready.set()
+  release.wait(30)
+
+
 class ServingShmLifecycleTests(unittest.TestCase):
   """Pin creation ownership, minimum capacity and cleanup under failed startup."""
 
@@ -321,7 +335,7 @@ class ServingShmLifecycleTests(unittest.TestCase):
 
   def test_model_receives_exact_parent_allocation_before_start(self):
     manager = _manager()
-    self.addCleanup(manager._cleanup_server, "DETECTOR")
+    self.addCleanup(manager._cleanup_server, "DETECTOR", wait=True)
     self.assertEqual(manager._create_server("DETECTOR"), "DETECTOR")
     entry = manager._servers["DETECTOR"]
     self.assertEqual(entry["SERVER"].kwargs["npy_shm_kwargs"]["mem_name"], entry["SHM"]._mem_name)
@@ -335,13 +349,18 @@ class ServingShmLifecycleTests(unittest.TestCase):
           flags = np.zeros((100, 11), dtype=np.int32)
           if defect == "occupied":
             flags[0, 0] = 1
-          return types.SimpleNamespace(initialized=True, instance_type="Creator",
+          shm = types.SimpleNamespace(initialized=True, instance_type="Creator",
             maxlen=100, shape_offset=10, _np_bytes=1200, is_buffer=True,
             _np_mem_additional=flags, _mem_name=kwargs["mem_name"],
             _shm=types.SimpleNamespace(size=1201 if defect == "data_size" else 1200),
             _shm_additional=types.SimpleNamespace(size=4401 if defect == "control_size" else 4400),
-            cleanup_errors=[], cleanup_errors_dropped=0,
-            shutdown=lambda: closed.append(True))
+            _mmap_obj=None, _mmap_obj_additional=None,
+            cleanup_errors=[], cleanup_errors_dropped=0)
+          def shutdown():
+            closed.append(True)
+            shm._shm = shm._shm_additional = None
+          shm.shutdown = shutdown
+          return shm
         with mock.patch.dict(_ENV, NumpySharedMemory=malformed):
           shm, kwargs, method = manager._create_serving_shm("DETECTOR", False, "shm")
         self.assertIsNone(shm)
@@ -356,6 +375,7 @@ class ServingShmLifecycleTests(unittest.TestCase):
           attempts.append(kwargs)
           return types.SimpleNamespace(initialized=False, error_type=failures[len(attempts)-1],
             _mem_name=kwargs["mem_name"], cleanup_errors=[], cleanup_errors_dropped=0,
+            _shm=None, _shm_additional=None, _mmap_obj=None, _mmap_obj_additional=None,
             shutdown=lambda: closed.append(kwargs["mem_name"]))
         def fallback_model(**kwargs):
           # All unsuccessful owned attempts must be retired before the child
@@ -469,6 +489,11 @@ class ServingShmLifecycleTests(unittest.TestCase):
           for record in manager._shm_failures))
         self.assertNotIn("private-canary", "\n".join(manager._shm_inventory_lines()))
         _assert_absent(self, [allocations[0]._mem_name, allocations[0]._mem_name + "_additional"])
+        expected_comms = (comm, other_comm) if phase == "constructor" else (comm,)
+        self.assertEqual(manager._pending_cleanup["DETECTOR"]["comms"], expected_comms)
+        comm.close_error = other_comm.close_error = None
+        manager.stop_all_servers()
+        self.assertEqual(manager._pending_cleanup, {})
 
   def test_successful_cleanup_retry_preserves_history_without_fresh_failure(self):
     manager = _manager()
@@ -489,6 +514,312 @@ class ServingShmLifecycleTests(unittest.TestCase):
     self.assertIsNone(shm._shm)
     self.assertEqual(shm.cleanup_errors, history)
     _assert_absent(self, [name, name + "_additional"])
+
+  def test_real_sigint_during_join_retains_worker_for_manager_shutdown(self):
+    """Prove manager shutdown recovers a real SIGINT-interrupted worker join."""
+    manager = _manager()
+    shm, _, _ = self.allocate(manager)
+    names = (shm._mem_name, shm._mem_name + "_additional")
+    context = mp.get_context("spawn")
+    ready, release = context.Event(), context.Event()
+    worker = context.Process(target=_blocked_cleanup_child, args=(ready, release), daemon=True)
+    worker.inprocess, worker.server_name = False, "DETECTOR"
+    comm, peer = context.Pipe()
+    interrupt = threading.Timer(0.2, os.kill, args=(os.getpid(), signal.SIGINT))
+    try:
+      worker.start()
+      self.assertTrue(ready.wait(10), "real worker did not reach its blocking wait")
+      manager._servers = {
+        "DETECTOR": {"SERVER": worker, "COMM": comm, "SHM": shm, "PID": worker.pid},
+        "ALIAS": {"SERVER": worker, "COMM": comm, "COVERED_BY": "DETECTOR"},
+      }
+      interrupt.start()
+      with self.assertRaises(KeyboardInterrupt):
+        manager._cleanup_server("DETECTOR", wait=True)
+      # Incomplete cleanup is owned but cannot be selected for prediction or
+      # included in the heartbeat. Recovery must come from manager shutdown.
+      self.assertIs(manager._pending_cleanup["DETECTOR"]["server"], worker)
+      self.assertEqual(manager._servers, {})
+      self.assertIsNone(manager._get_server("DETECTOR"))
+      self.assertIsNone(manager._get_server("ALIAS"))
+      self.assertEqual(manager.get_active_servers(show=False), [])
+      manager.stop_all_servers()
+      self.assertFalse(worker.is_alive())
+      self.assertEqual(manager._pending_cleanup, {})
+      _assert_absent(self, names)
+    finally:
+      interrupt.cancel()
+      if interrupt.ident is not None:
+        interrupt.join(2)
+      # Also reclaim this test's own resources if an assertion or implementation
+      # failure prevents the manager from reaching its ordinary retry path.
+      if worker.pid is not None:
+        if worker.is_alive():
+          worker.terminate()
+        worker.join(5)
+        if worker.is_alive():
+          worker.kill()
+          worker.join(5)
+      comm.close()
+      peer.close()
+      shm.shutdown()
+
+  def test_unlink_failure_is_retained_and_retried_by_manager_shutdown(self):
+    """Recover an owned real segment through the manager after one bad unlink."""
+    manager = _manager()
+    shm, _, _ = self.allocate(manager)
+    name, data_handle = shm._mem_name, shm._shm
+    comm, worker = _Comm(), _Process()
+    manager._servers["DETECTOR"] = {"SERVER": worker, "COMM": comm, "SHM": shm}
+    with mock.patch.object(data_handle, "unlink", side_effect=PermissionError("one-time unlink")):
+      with self.assertRaises(RuntimeError):
+        manager._cleanup_server("DETECTOR", wait=True)
+    self.assertEqual(manager._servers, {})
+    self.assertEqual(manager._pending_cleanup["DETECTOR"], {"server": None, "comms": (), "shm": shm})
+    # Inspect only the exact name created above; this attachment never performs
+    # cleanup and therefore cannot hide a missing manager retry.
+    handle = shared_memory.SharedMemory(name=name)
+    handle.close()
+    manager.stop_all_servers()
+    self.assertEqual(manager._pending_cleanup, {})
+    self.assertEqual(comm.calls.count("close"), 1)
+    _assert_absent(self, [name, name + "_additional"])
+
+  def test_persistent_pending_cleanup_blocks_both_new_generation_entries(self):
+    """Fail closed before discovery or generation allocation when unlink fails."""
+    manager = _manager()
+    shm, _, _ = self.allocate(manager)
+    manager._servers["DETECTOR"] = {"SERVER": _Process(), "COMM": _Comm(), "SHM": shm}
+    generation = manager._shm_generation
+    with mock.patch.object(shm._shm, "unlink", side_effect=PermissionError("persistent unlink")):
+      with self.assertRaises(RuntimeError):
+        manager._cleanup_server("DETECTOR", wait=True)
+      discovery = mock.Mock(side_effect=AssertionError("model discovery before old cleanup"))
+      manager._get_module_name_and_class = discovery
+      allocator = mock.Mock(side_effect=AssertionError("new allocation before old cleanup"))
+      with mock.patch.dict(_ENV, NumpySharedMemory=allocator):
+        for action in (lambda: manager._create_server("DETECTOR"),
+            lambda: manager._create_serving_shm("DETECTOR", False, "shm")):
+          with self.subTest(action=action):
+            with self.assertRaises(RuntimeError):
+              action()
+      discovery.assert_not_called()
+      allocator.assert_not_called()
+      self.assertEqual(manager._shm_generation, generation)
+      self.assertIs(manager._pending_cleanup["DETECTOR"]["shm"], shm)
+      self.assertEqual(manager._servers, {})
+    manager.stop_all_servers()
+    self.assertEqual(manager._pending_cleanup, {})
+    _assert_absent(self, [shm._mem_name, shm._mem_name + "_additional"])
+
+  def test_constructor_failure_keeps_original_and_retains_failed_unlink(self):
+    """Keep failed startup ownership even when the constructor never returns."""
+    manager, allocations = _manager(), []
+    original = LookupError("original constructor failure")
+    def allocation(**kwargs):
+      shm = _SHM.NumpySharedMemory(**kwargs)
+      allocations.append(shm)
+      self.addCleanup(shm.shutdown)
+      return shm
+    def failing_model(**kwargs):
+      raise original
+    real_unlink = shared_memory.SharedMemory.unlink
+    def failed_owned_unlink(handle):
+      if allocations and handle is allocations[0]._shm:
+        raise PermissionError("startup unlink")
+      return real_unlink(handle)
+    manager._get_module_name_and_class = lambda **kwargs: ("test", "Process", failing_model, {})
+    with mock.patch.dict(_ENV, NumpySharedMemory=allocation), \
+        mock.patch.object(shared_memory.SharedMemory, "unlink", failed_owned_unlink):
+      with self.assertRaises(LookupError) as caught:
+        manager._create_server("DETECTOR")
+    self.assertIs(caught.exception, original)
+    self.assertEqual(len(allocations), 1)
+    self.assertEqual(manager._servers, {})
+    self.assertIs(manager._pending_cleanup["DETECTOR"]["shm"], allocations[0])
+    manager.stop_all_servers()
+    self.assertEqual(manager._pending_cleanup, {})
+    _assert_absent(self, [allocations[0]._mem_name, allocations[0]._mem_name + "_additional"])
+
+  def test_failed_candidate_cleanup_prevents_retry_allocation_or_pipe_start(self):
+    """Retain an incomplete failed candidate before collision retry or fallback."""
+    manager, allocations = _manager(), []
+    def allocation(**kwargs):
+      shm = _SHM.NumpySharedMemory(**kwargs)
+      allocations.append(shm)
+      self.addCleanup(shm.shutdown)
+      # The production utility can return an incompletely cleaned candidate
+      # after startup failure. Use real owned handles to exercise that boundary.
+      shm.initialized, shm.error_type = False, "FileExistsError"
+      return shm
+    model = mock.Mock(side_effect=AssertionError("worker constructed after failed candidate cleanup"))
+    manager._get_module_name_and_class = lambda **kwargs: ("test", "Process", model, {})
+    real_unlink = shared_memory.SharedMemory.unlink
+    def failed_owned_unlink(handle):
+      if allocations and handle is allocations[0]._shm:
+        raise PermissionError("candidate unlink")
+      return real_unlink(handle)
+    with mock.patch.dict(_ENV, NumpySharedMemory=allocation), \
+        mock.patch.object(shared_memory.SharedMemory, "unlink", failed_owned_unlink):
+      with self.assertRaises(RuntimeError):
+        manager._create_server("DETECTOR")
+      self.assertEqual(len(allocations), 1)
+      self.assertIs(manager._pending_cleanup["DETECTOR"]["shm"], allocations[0])
+      self.assertEqual(manager._servers, {})
+      model.assert_not_called()
+    manager.stop_all_servers()
+    self.assertEqual(manager._pending_cleanup, {})
+    _assert_absent(self, [allocations[0]._mem_name, allocations[0]._mem_name + "_additional"])
+
+  def test_partial_release_preserves_all_independently_failed_endpoints(self):
+    """Never overwrite pending references when a later release omits them."""
+    manager = _manager()
+    first_error, second_error = OSError("first close"), PermissionError("second close")
+    first, second = _Comm(first_error), _Comm(second_error)
+    self.assertIs(manager._release_server_resources("DETECTOR", None, (first, second), None), first_error)
+    self.assertEqual(manager._pending_cleanup["DETECTOR"]["comms"], (first, second))
+    # A startup finally block can revisit the same owner with only the resources
+    # that reached its own scope. It must not erase an earlier failed candidate.
+    self.assertIsNone(manager._release_server_resources("DETECTOR", None, (), None))
+    self.assertEqual(manager._pending_cleanup["DETECTOR"]["comms"], (first, second))
+    first.close_error = None
+    self.assertIsNone(manager._release_server_resources("DETECTOR", None, (first,), None))
+    self.assertEqual(manager._pending_cleanup["DETECTOR"]["comms"], (second,))
+    second.close_error = None
+    manager.stop_server("DETECTOR")
+    self.assertEqual(manager._pending_cleanup, {})
+    self.assertEqual((first.calls.count("close"), second.calls.count("close")), (2, 2))
+
+  def test_live_worker_without_wait_remains_owned_until_stop_retry(self):
+    """Retire routing immediately while preserving an unstopped worker handle."""
+    manager = _manager()
+    worker, comm = _Process(), _Comm()
+    manager._servers["DETECTOR"] = {"SERVER": worker, "COMM": comm}
+    with self.assertRaises(RuntimeError):
+      manager._cleanup_server("DETECTOR")
+    self.assertEqual(manager._servers, {})
+    self.assertEqual(manager._pending_cleanup["DETECTOR"], {"server": worker, "comms": (), "shm": None})
+    manager.stop_server("DETECTOR")
+    self.assertFalse(worker.is_alive())
+    self.assertEqual(manager._pending_cleanup, {})
+    self.assertEqual(comm.calls.count("close"), 1)
+
+  def test_stop_all_retries_new_failure_once_and_preserves_first_error(self):
+    """Bound the same-call retry while preserving its original exception."""
+    manager = _manager()
+    original = PermissionError("first close")
+    comm = _Comm()
+    close = mock.Mock(side_effect=[original, None])
+    comm.close = close
+    manager._servers["DETECTOR"] = {"SERVER": _Process(), "COMM": comm}
+    with self.assertRaises(PermissionError) as caught:
+      manager.stop_all_servers()
+    self.assertIs(caught.exception, original)
+    self.assertEqual(close.call_count, 2)
+    self.assertEqual(manager._servers, {})
+    self.assertEqual(manager._pending_cleanup, {})
+
+  def test_pending_summary_excludes_owned_pair_from_unknown_inventory(self):
+    """Show non-routable cleanup ownership without misclassifying its own pair."""
+    manager = _manager()
+    shm, _, _ = self.allocate(manager)
+    manager._servers["DETECTOR"] = {"SERVER": _Process(), "COMM": _Comm(), "SHM": shm}
+    with mock.patch.object(shm._shm, "unlink", side_effect=PermissionError("pending unlink")):
+      with self.assertRaises(RuntimeError):
+        manager._cleanup_server("DETECTOR", wait=True)
+    stats = []
+    entries = [types.SimpleNamespace(name=name,
+      stat=lambda follow_symlinks, name=name: stats.append(name) or types.SimpleNamespace(st_size=10))
+      for name in (shm._mem_name, shm._mem_name + "_additional", "r1s_other_manager")]
+    scanner = mock.MagicMock()
+    scanner.__enter__.return_value = iter(entries)
+    with mock.patch.object(os, "scandir", return_value=scanner), \
+        mock.patch.object(_DIAG, "occupancy_observation", side_effect=AssertionError("pending slot scan")):
+      self.assertEqual(manager.get_active_servers(show=True), [])
+    text = "\n".join(manager.log.lines)
+    self.assertEqual(stats, ["r1s_other_manager"])
+    self.assertIn("pending", text.lower())
+    self.assertIn("DETECTOR", text)
+    self.assertIn("possible_leftovers=1", text)
+    self.assertIsNone(manager._get_server("DETECTOR"))
+    manager.stop_all_servers()
+    self.assertEqual(manager._pending_cleanup, {})
+
+  def test_coverage_assignment_waits_for_old_cleanup_and_retires_failed_coverer(self):
+    """Prevent a new alias from hiding an old worker's failed owned unlink."""
+    manager = _manager()
+    old_shm, _, _ = self.allocate(manager)
+    manager._servers["DETECTOR"] = {"SERVER": _Process(), "COMM": _Comm(), "SHM": old_shm}
+    manager._maybe_complete_servers = types.MethodType(_Manager._maybe_complete_servers, manager)
+    processes = []
+    def model(**kwargs):
+      """Retain each constructed worker boundary to prove failed startup exits."""
+      process = _Process(**kwargs)
+      processes.append(process)
+      return process
+    manager._get_module_name_and_class = lambda **kwargs: (
+      "test", "Process", model, {"COVERED_SERVERS": ["DETECTOR"]})
+    allocations, endpoints = [], []
+    def allocation(**kwargs):
+      """Track only this test's new coverer allocations for cleanup evidence."""
+      shm = _SHM.NumpySharedMemory(**kwargs)
+      allocations.append(shm)
+      self.addCleanup(shm.shutdown)
+      return shm
+    def communications(**kwargs):
+      """Track both independently owned endpoints of each startup attempt."""
+      pair = (_Comm(), _Comm())
+      endpoints.append(pair)
+      return pair
+    with mock.patch.dict(_ENV, NumpySharedMemory=allocation, comm_generator=communications):
+      with mock.patch.object(old_shm._shm, "unlink", side_effect=PermissionError("old alias unlink")):
+        with self.assertRaises(RuntimeError):
+          manager._cleanup_server("DETECTOR", wait=True)
+        with self.assertRaises(RuntimeError):
+          manager._create_server("SECOND")
+        self.assertEqual(manager._servers, {})
+        self.assertIs(manager._pending_cleanup["DETECTOR"]["shm"], old_shm)
+        self.assertNotIn("SECOND", manager._pending_cleanup)
+        self.assertEqual(len(allocations), 1)
+        self.assertFalse(processes[0].is_alive())
+        self.assertEqual([comm.calls.count("close") for comm in endpoints[0]], [1, 1])
+        _assert_absent(self, [allocations[0]._mem_name, allocations[0]._mem_name + "_additional"])
+      # Retrying actual startup now retires the old owner before assigning the
+      # same logical name as an alias. The failed coverer's generation stays gone.
+      self.assertEqual(manager._create_server("SECOND"), "SECOND")
+    self.assertEqual(manager._pending_cleanup, {})
+    self.assertEqual(manager._servers["DETECTOR"]["COVERED_BY"], "SECOND")
+    self.assertIs(manager._servers["DETECTOR"]["SERVER"], manager._servers["SECOND"]["SERVER"])
+    _assert_absent(self, [old_shm._mem_name, old_shm._mem_name + "_additional"])
+    manager.stop_all_servers()
+    self.assertEqual(manager._servers, {})
+    _assert_absent(self, [allocations[1]._mem_name, allocations[1]._mem_name + "_additional"])
+
+  def test_stop_all_retries_pending_owner_despite_same_name_covered_alias(self):
+    """Defensively recover prior alias-shadowed ownership during final stop."""
+    manager = _manager()
+    old_shm, _, _ = self.allocate(manager)
+    manager._servers["DETECTOR"] = {"SERVER": _Process(), "COMM": _Comm(), "SHM": old_shm}
+    with mock.patch.object(old_shm._shm, "unlink", side_effect=PermissionError("old alias unlink")):
+      with self.assertRaises(RuntimeError):
+        manager._cleanup_server("DETECTOR", wait=True)
+    self.assertEqual(manager._create_server("SECOND"), "SECOND")
+    second_entry = manager._servers["SECOND"]
+    second_shm = second_entry["SHM"]
+    self.addCleanup(second_shm.shutdown)
+    # Simulate state created before the assignment gate existed. This bypass is
+    # deliberate: ordinary production alias assignment now refuses this state.
+    manager._servers["DETECTOR"] = {
+      "SERVER": second_entry["SERVER"], "COMM": second_entry["COMM"],
+      "PID": second_entry["PID"], "COVERED_BY": "SECOND",
+    }
+    self.assertIs(manager._pending_cleanup["DETECTOR"]["shm"], old_shm)
+    manager.stop_all_servers()
+    self.assertEqual(manager._servers, {})
+    self.assertEqual(manager._pending_cleanup, {})
+    self.assertIn("All servers stopped.", manager.log.lines)
+    _assert_absent(self, [old_shm._mem_name, old_shm._mem_name + "_additional",
+      second_shm._mem_name, second_shm._mem_name + "_additional"])
 
   def test_stop_all_retires_later_workers_after_first_worker_failure(self):
     for operation, exception_class in (("stop", LookupError), ("comm_close", OSError),
@@ -521,7 +852,7 @@ class ServingShmLifecycleTests(unittest.TestCase):
           manager.stop_all_servers()
         self.assertIs(caught.exception, original)
         self.assertEqual(manager._servers, {})
-        self.assertEqual(first_comm.calls.count("close"), 1)
+        self.assertEqual(first_comm.calls.count("close"), 2 if operation == "comm_close" else 1)
         self.assertEqual(second_comm.calls.count("close"), 1)
         self.assertEqual(sum(isinstance(call, tuple) and call[0] == "send" for call in second_comm.calls), 1)
         self.assertIn("join", second_worker.calls)

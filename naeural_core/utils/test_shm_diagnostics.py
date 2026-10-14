@@ -74,8 +74,6 @@ _Manager = _methods("serving/serving_manager.py", "ServingManager",
                      "get_diagnostic_server_name"], dict(_ENV))
 _Worker = _methods("serving/base/base_serving_process.py", "ModelServingProcess",
                    ["_get_message", "_send_message"], dict(_ENV))
-_CV = _methods("business/base/cv_plugin_executor.py", "CVPluginExecutor",
-               ["_pre_process"], dict(_ENV))
 _DataAPI = _methods("business/mixins_base/dataapi.py", "_DataAPIMixin",
                     ["dataapi_specific_image_inferences"], {})
 _BusinessManager = _methods("business/business_manager.py", "BusinessManager",
@@ -86,6 +84,9 @@ with mock.patch.dict(sys.modules, {
   _stable_engines = _load_file("stable_engines_subject", _ROOT / "serving/ai_engines/stable.py")
 with mock.patch.dict(sys.modules, {"naeural_core.serving.ai_engines": _stable_engines}):
   _engine_utils = _load_file("engine_utils_subject", _ROOT / "serving/ai_engines/utils.py")
+_CV = _methods("business/base/cv_plugin_executor.py", "CVPluginExecutor",
+               ["_pre_process", "_get_detector_ai_engines", "_get_detector_ai_engine"],
+               dict(_ENV, AI_ENGINES=_stable_engines.AI_ENGINES))
 _DataHandler = _methods("main/main_loop_data_handler.py", "MainLoopDataHandler",
                         ["append_inferences"], {"json": json,
                           "get_ai_engine_given_serving_process": _engine_utils.get_ai_engine_given_serving_process})
@@ -278,8 +279,6 @@ class ShmDiagnosticsTests(unittest.TestCase):
     cv.dataapi_images = lambda: {0: np.zeros((1, 1, 3))}
     cv.dataapi_inferences = lambda: raw
     cv.dataapi_images_inferences = lambda: raw
-    cv._get_detector_ai_engines = lambda: engines if isinstance(engines, list) else [engines]
-    cv._get_detector_ai_engine = lambda: cv._get_detector_ai_engines()[0]
     cv.cfg_meta_type_mapping, cv.cfg_meta_nms_iou_thr = {}, 0.5
     def filtering(data):
       calls.append(("filter", len(cv.log.observations)))
@@ -413,8 +412,8 @@ class ShmDiagnosticsTests(unittest.TestCase):
       for enabled in (False, True):
         self.diagnostics(enabled)
         calls = []
-        raw = {} if rows == "absent" else {"detector": rows}
-        cv = self.consumer("detector", {}, raw, calls)
+        raw = {} if rows == "absent" else {"general_detector": rows}
+        cv = self.consumer("general_detector", {}, raw, calls)
         outcomes.append(cv._pre_process())
         if rows == [] or rows == [[]]:
           api = _DataAPI()
@@ -425,7 +424,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
             with self.assertRaises(IndexError):
               api.dataapi_specific_image_inferences(idx=0, how='dict')
           else:
-            self.assertEqual(api.dataapi_specific_image_inferences(idx=0, how='dict'), {'detector': []})
+            self.assertEqual(api.dataapi_specific_image_inferences(idx=0, how='dict'), {'general_detector': []})
         self.assertEqual(calls, [("filter", int(enabled))])
         if enabled:
           record = cv.log.observations[0]
@@ -440,7 +439,7 @@ class ShmDiagnosticsTests(unittest.TestCase):
     for active in (False, True):
       self.diagnostics(active)
       calls = []
-      cv = self.consumer("detector", {}, {}, calls)
+      cv = self.consumer("general_detector", {}, {}, calls)
       cv.dataapi_images = lambda: {}
       outcomes.append(cv._pre_process())
       self.assertEqual(calls, [("filter", 0)])
@@ -454,9 +453,15 @@ class ShmDiagnosticsTests(unittest.TestCase):
     cases = [
       (custom, {"MODEL_INSTANCE_ID": "helmet"}),
       (custom, {custom: {"MODEL_INSTANCE_ID": "helmet"}}),
+      (custom.upper(), {"MODEL_INSTANCE_ID": "helmet"}),
+      (custom.upper(), {custom: {"MODEL_INSTANCE_ID": "helmet"}}),
       ([custom, general], {custom: {"MODEL_INSTANCE_ID": "helmet"},
                             general: {"MODEL_INSTANCE_ID": "road"}}),
+      ([custom.upper(), general.upper()], {custom: {"MODEL_INSTANCE_ID": "helmet"},
+                                            general: {"MODEL_INSTANCE_ID": "road"}}),
       (general, {}),
+      (general.upper(), {}),
+      ([general.upper()], {}),
       (custom, {"MODEL_INSTANCE_ID": "ignored", custom: {"MODEL_INSTANCE_ID": "keyed"}}),
       ([general, nano], {"MODEL_INSTANCE_ID": "ignored"}),
     ]
@@ -497,13 +502,43 @@ class ShmDiagnosticsTests(unittest.TestCase):
 
         # A bare-key result from another identity must not hide a missing
         # configured instance, even when its cardinality looks healthy.
-        if custom in (engines if isinstance(engines, list) else [engines]):
+        if custom in [engine.lower() for engine in (engines if isinstance(engines, list) else [engines])]:
           raw = {custom: [[]]}
           _DIAG._STATE.clear()
           cv = self.consumer(engines, startup_params, raw, [])
           cv._pre_process()
           record = next(r for r in cv.log.records() if r["target"].startswith("TH_YOLO_SECOND_STAGE_"))
           self.assertEqual(record["reason"], "absent_model")
+
+  def test_uppercase_consumer_diagnostics_leave_real_filter_selectors_unchanged(self):
+    """Observe routed uppercase detectors without normalizing filtering state.
+
+    Notes
+    -----
+    Exact source selectors remain case-sensitive. The diagnostic-only selection
+    must cover missing results for scalar/list configurations while passing the
+    original selector result to the downstream metadata filtering call.
+    """
+    for engines in ("general_detector", "GENERAL_DETECTOR", ["GENERAL_DETECTOR"]):
+      with self.subTest(engines=engines):
+        self.diagnostics()
+        calls = []
+        cv = self.consumer(engines, {}, {}, calls)
+        configured = list(engines) if isinstance(engines, list) else engines
+        selected = cv._get_detector_ai_engine()
+        expected = "general_detector" if engines == "general_detector" else None
+        self.assertEqual(selected, expected)
+        self.assertEqual(cv._get_detector_ai_engines(), [expected] if expected else [])
+        cv._maybe_process_meta_types = mock.Mock(side_effect=lambda data, **kwargs: data)
+        result = cv._pre_process()
+        cv._maybe_process_meta_types.assert_called_once_with(
+          {}, meta_type_mapping={}, ai_engine=selected, nms_iou_thr=0.5,
+        )
+        self.assertEqual(cv.cfg_ai_engine, configured)
+        self.assertEqual(result["DCT_INSTANCE_INFERENCES"], {})
+        self.assertEqual(calls, [("filter", 1)])
+        self.assertEqual(len(cv.log.observations), 1)
+        self.assertEqual(cv.log.observations[0]["reason"], "absent_model")
 
   def test_result_timeout_and_result_envelope_are_preserved(self):
     for payload in (None, {"TYPE": "RESULT", "DATA": {"INFERENCES": [[], [[]]]}, "CMD_ID": 71}):

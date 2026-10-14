@@ -957,7 +957,16 @@ class CVPluginExecutor(BasePluginExecutor,
         try:
           raw_inferences = self.dataapi_inferences()
           startup_params = self.cfg_startup_ai_engine_params
-          for model in self._get_detector_ai_engines():
+          # BusinessManager routes lowercase names, including list entries.
+          # Select diagnostics from that same configuration without changing
+          # the case-sensitive selectors used by inference filtering/tracking.
+          configured_engines = self.cfg_ai_engine
+          if not isinstance(configured_engines, list):
+            configured_engines = [configured_engines]
+          normalized_engines = {engine.lower() for engine in configured_engines}
+          diagnostic_detectors = [engine for engine in AI_ENGINES
+                                  if 'detector' in engine and engine in normalized_engines]
+          for model in diagnostic_detectors:
             # Match BusinessManager's single-engine flat/keyed and multi-engine
             # keyed startup config, retaining the actual worker instance.
             engine = model.lower()

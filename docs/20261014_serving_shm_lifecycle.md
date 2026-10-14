@@ -11,6 +11,8 @@ generation. Logical model identities and inference routing do not change.
   counter and a bounded model label. The worker receives that exact name through
   its existing startup arguments. Only collisions receive up to three attempts;
   other allocation failures use the existing pipe fallback before child startup.
+  A failed cleanup of an owned candidate blocks retries and pipe fallback until
+  those resources are released; fallback must not hide a leaked allocation.
 - Each successfully created object is owned independently. Partial initialization
   rolls back only owned objects. Both objects receive cleanup attempts despite
   close/unlink failures. Failed closes remain retryable; attachers never unlink.
@@ -21,6 +23,12 @@ generation. Logical model identities and inference routing do not change.
   attachment fails cannot reach READY. Cleanup preserves the original failure.
   All-worker shutdown attempts the remaining workers before rethrowing the first
   teardown failure; one failed STOP cannot strand the next worker's allocation.
+- Incomplete cleanup is retained separately from inference routing. The manager
+  keeps only unfinished process, endpoint and SHM operations, retries them before
+  replacing that worker, and includes them in final shutdown. That final call
+  also makes one bounded retry for newly failed cleanup, preserving the original
+  exception even when the retry succeeds. Persistent failures remain explicit;
+  retries are bounded and cannot guarantee recovery from an OS-level failure.
 - Effective serving capacity is `max(100, configured SHM_MAX_LEN)`; omitted means
   100. The generic utility's default remains unchanged for non-serving callers.
   External capture producers keep their explicitly assigned names.
@@ -56,6 +64,11 @@ known legacy model names. Candidates cover the `r1s_` namespace and exact known
 legacy data/control names; this is not a complete host-wide orphan inventory.
 Truncation, stat errors and unavailable access are explicit. Unavailable counts
 are `unknown`. No discovery attaches, registers or deletes a foreign object.
+The summary also reports pending-cleanup worker count and at most 16 identities,
+with remaining process/endpoint/segment ownership. Pending allocations are
+recognized as manager-owned rather than classified as possible foreign leftovers.
+The ownership registry is never truncated like diagnostic history; blocking a
+replacement prevents repeated failed generations for the same worker.
 
 Failure history retains 32 scalar records, shows the most recent eight and counts
 dropped history. Immediate manager lifecycle reports are limited to one per ten
@@ -90,6 +103,27 @@ rejects the 101st admission and returns occupancy to zero. This does not replace
 GPU-model or 100-camera load acceptance. The retained POSIX backend is exercised
 through an API adapter with real shared-memory file descriptors and mmap when
 `posix_ipc` is unavailable.
+Cleanup regressions also use a real spawned worker interrupted by SIGINT during
+join, and real tiny SHM with injected unlink failure. Recovery must come through
+the manager's shutdown/retry path, not an extra test-only reference to the object.
+
+The accompanying hotfix corrects a regression in `9f31d28`: independent cleanup
+attempts were followed by unconditional registry removal even when resources
+remained. The preceding implementation retained its active entry when cleanup
+raised, but stopped attempting subsequent resources/workers. Both shortcomings
+are addressed by retaining unfinished ownership outside routing and continuing
+independent cleanup. Silent Creator/User role switching and unchecked inference
+indexing predate the reviewed three commits. They must not be confused with this
+new cleanup regression; this patch does not change the inference indexing API.
+
+A pre-existing constructor boundary remains outside this manager hotfix: if the
+SHM utility constructor raises before returning its object and its own rollback
+also fails, the manager never receives the handle to retain. An interrupted
+constructor log combined with an unlink failure reproduces this on both old and
+current code. Manager retention covers allocations returned to it, including
+failed-initialization objects; it does not guarantee recovery from that earlier
+boundary. A separate utility ownership-transfer change and focused review would
+be needed. Persistent OS cleanup failures and hard kills also remain limitations.
 
 Publish core before building E2 with the 100-slot template. Check the effective
 configuration and aggregate SHM budget, then observe an authorized E2-only

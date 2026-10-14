@@ -16,6 +16,10 @@ Each case warms both variants and alternates their order in paired rounds. The
 44-frame HD case has 243.3 MB of input plus slot storage, far below one GB. The
 same 44-frame tiny case exposes absolute diagnostic CPU cost. JSON stdout contains
 only aggregate measurements, source hashes and bounded diagnostic counters.
+The source guard pins conversion wrappers, placeholders, NumPy binding and
+buffer admission/read dependencies. Allocation/shutdown are excluded because
+the fixture constructs an instance without startup and supplies NumPy storage;
+their lifecycle changes must be verified separately.
 """
 
 import argparse
@@ -85,6 +89,53 @@ def _module(name, source):
   module = types.ModuleType(name)
   exec(compile(source, name, "exec"), module.__dict__)
   return module
+
+
+def _conversion_sources(source):
+  """Select exact source dependencies executed by the conversion fixture.
+
+  Parameters
+  ----------
+  source : str
+      Complete shared-memory utility snapshot.
+
+  Returns
+  -------
+  dict
+      Qualified dependency names mapped to exact original source segments.
+
+  Notes
+  -----
+  Both variants bypass initialization/shutdown and mock ``_add_warning``.
+  Diagnostic ``array_observation`` intentionally differs between variants;
+  its import binding is pinned here and its complete utility is hashed in the
+  report. Any conversion/dependency body change requires baseline review.
+  """
+  tree = ast.parse(source)
+  functions = ("ndarray_to_shm", "replace_ndarray_with_shm",
+               "shm_to_ndarray", "replace_shm_with_ndarray")
+  buffer_methods = ("check_data", "first_buffer_position", "add_data_to_buffer", "read_buffer_data")
+  selected = {}
+  for node in tree.body:
+    if isinstance(node, ast.FunctionDef) and node.name in functions:
+      assert not node.decorator_list, "conversion decorators require baseline review"
+      selected[node.name] = ast.get_source_segment(source, node)
+    elif isinstance(node, ast.ClassDef) and node.name == "NumpySharedMemoryPlaceholder":
+      selected[node.name] = ast.get_source_segment(source, node)
+    elif isinstance(node, ast.ClassDef) and node.name == "NumpySharedMemory":
+      for method in node.body:
+        if isinstance(method, ast.FunctionDef) and method.name in buffer_methods:
+          assert not method.decorator_list, "buffer conversion decorators require baseline review"
+          selected[node.name + "." + method.name] = ast.get_source_segment(source, method)
+    elif isinstance(node, ast.Import) and any(alias.name == "numpy" for alias in node.names):
+      selected["numpy_import"] = ast.get_source_segment(source, node)
+    elif isinstance(node, ast.ImportFrom) and node.module == "naeural_core.utils.shm_diagnostics":
+      selected["diagnostic_import"] = ast.get_source_segment(source, node)
+  expected = set(functions) | {"NumpySharedMemory." + name for name in buffer_methods} | {
+    "NumpySharedMemoryPlaceholder", "numpy_import", "diagnostic_import",
+  }
+  assert set(selected) == expected, "conversion dependency missing; baseline comparison requires review"
+  return selected
 
 
 def _methods(source, class_name, names, namespace):
@@ -409,8 +460,12 @@ def main():
     parser.error("rounds must be 2..32, requests 1..100 and warmup 1..20")
   started = time.perf_counter()
   baseline, candidate = _sources(True), _sources()
-  assert baseline["utils/system_shared_memory.py"] == candidate["utils/system_shared_memory.py"], \
-    "conversion implementation changed; baseline comparison requires review"
+  baseline_conversion = _conversion_sources(baseline["utils/system_shared_memory.py"])
+  candidate_conversion = _conversion_sources(candidate["utils/system_shared_memory.py"])
+  changed_dependencies = [name for name in baseline_conversion
+                          if baseline_conversion[name] != candidate_conversion[name]]
+  assert not changed_dependencies, \
+    "conversion implementation changed; baseline comparison requires review: " + ", ".join(changed_dependencies)
   variants = {"baseline_off": _variant("baseline", baseline),
               "always_on": _variant("candidate", candidate)}
   report = {"baseline_commit": _BASELINE, "python": platform.python_version(),
@@ -418,6 +473,10 @@ def main():
             "scope": "synthetic extracted real methods; NumPy storage/in-memory envelopes; no model/GPU/IPC",
             "candidate_source_sha256": {path: hashlib.sha256(source.encode()).hexdigest()
                                         for path, source in candidate.items()},
+            "matched_conversion_source_sha256": {
+              name: hashlib.sha256(source.encode()).hexdigest()
+              for name, source in candidate_conversion.items()
+            },
             "cases": [_measure(variants, shape, args.rounds, args.requests, args.warmup)
                       for shape in ((720, 1280, 3), (4, 4, 3))],
             "blocked_sink_probe": _blocked_probe(candidate)}

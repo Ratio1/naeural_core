@@ -31,6 +31,7 @@ from naeural_core.config.runtime_secret_resolution import (
   get_dauth_pipeline_identity,
 )
 from naeural_core.business import BusinessManager
+from naeural_core.business.deployment_lifecycle import SERVICE_KEY
 from naeural_core.comm import CommunicationManager
 from naeural_core.serving import ServingManager
 from naeural_core.io_formatters import IOFormatterManager
@@ -1051,7 +1052,10 @@ class Orchestrator(DecentrAIObject,
 
       job_id = cache_key[1]
       try:
-        response = self._fetch_dauth_job_secret_bundle(job_id)
+        revision = pipeline_config.get(ct.CONFIG_STREAM.DEEPLOY_SPECS, {}).get("secret_revision")
+        response = self._fetch_dauth_job_secret_bundle(
+          job_id, **({"revision": revision} if revision is not None else {}),
+        )
         secret_plugins = extract_dauth_plugins_secret_tree(
           response=response,
           expected_job_id=job_id,
@@ -1076,6 +1080,10 @@ class Orchestrator(DecentrAIObject,
             "next_retry": failure_time + delay,
           }
           self._runtime_dct_config_streams.pop(pipeline_name, None)
+        if isinstance(exc, (ValueError, RuntimeSecretResolutionError)):
+          lifecycle = getattr(self, "_app_shmem", {}).get(SERVICE_KEY)
+          if lifecycle is not None:
+            lifecycle.fail(pipeline_config, code="SECRET_RESOLUTION_FAILED")
         error_detail = (
           str(exc)
           if isinstance(exc, RuntimeSecretResolutionError)
@@ -1103,7 +1111,7 @@ class Orchestrator(DecentrAIObject,
       resolved_count += 1
     return resolved_count
 
-  def _fetch_dauth_job_secret_bundle(self, job_id):
+  def _fetch_dauth_job_secret_bundle(self, job_id, revision=None):
     """Fetch one bundle behind a hard resolver deadline and shutdown check."""
     self._ensure_runtime_secret_resolution_state()
     existing_worker = self._runtime_secret_request_worker
@@ -1115,7 +1123,7 @@ class Orchestrator(DecentrAIObject,
       self._runtime_secret_request_worker = None
       self._runtime_secret_request_outcome = None
       self._runtime_secret_request_job_id = None
-      if completed_job_id == str(job_id):
+      if completed_job_id == (str(job_id), revision):
         if "error" in outcome:
           raise outcome["error"]
         if "response" in outcome:
@@ -1128,6 +1136,7 @@ class Orchestrator(DecentrAIObject,
         outcome["response"] = self.blockchain_manager.get_dauth_job_secret_bundle(
           job_id=job_id,
           request_timeout=RUNTIME_SECRET_REQUEST_TIMEOUT,
+          **({"revision": revision} if revision is not None else {}),
         )
       except Exception as exc:
         outcome["error"] = exc
@@ -1139,7 +1148,7 @@ class Orchestrator(DecentrAIObject,
     )
     self._runtime_secret_request_worker = worker
     self._runtime_secret_request_outcome = outcome
-    self._runtime_secret_request_job_id = str(job_id)
+    self._runtime_secret_request_job_id = (str(job_id), revision)
     worker.start()
     deadline = monotonic() + RUNTIME_SECRET_REQUEST_DEADLINE_SECONDS
     while worker.is_alive():

@@ -151,6 +151,10 @@ def _make_common_stubs():
     "naeural_core.constants": constants,
     "naeural_core.manager": _module("naeural_core.manager", Manager=_Manager),
     "naeural_core.business": business,
+    "naeural_core.business.deployment_lifecycle": _module(
+      "naeural_core.business.deployment_lifecycle",
+      OPERATION_KEY="DEEPLOY_OPERATION", SERVICE_KEY="deeploy_lifecycle",
+    ),
     "naeural_core.business.base": business_base,
     "naeural_core.business.mixins_base": mixins_base,
     "naeural_core.business.mixins_base.threading": _module(

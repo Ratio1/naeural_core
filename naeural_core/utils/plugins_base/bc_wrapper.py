@@ -1,4 +1,5 @@
 from time import time, sleep
+from threading import RLock
 import traceback
 
 from naeural_core.bc import DefaultBlockEngine
@@ -6,6 +7,8 @@ from naeural_core.bc import DefaultBlockEngine
 from ratio1.const.evm_net import EVM_NET_DATA
 
 class BCWrapper:
+  _node_update_lock_creation = RLock()
+
   def __init__(self, blockchain_manager : DefaultBlockEngine, owner):
     self.__bc : DefaultBlockEngine = blockchain_manager
     self.__owner = owner
@@ -927,7 +930,105 @@ class BCWrapper:
     nodes : list
         The list of new nodes running the job
     """
-    return self.__bc.web3_submit_node_update(job_id=job_id, nodes=nodes)
+    with self.node_update_transaction_lock:
+      self._ensure_node_update_nonce_available()
+      return self.__bc.web3_submit_node_update(job_id=job_id, nodes=nodes)
+
+  @property
+  def node_update_transaction_lock(self):
+    """Return the signer-local lock shared by every plugin on this engine.
+
+    The deployment coordinator holds it across preparation, durable reservation,
+    and broadcast. Legacy node-update writers acquire it in submit_node_update.
+    This mutex does not coordinate other processes or other oracle signers.
+    """
+    with self._node_update_lock_creation:
+      if not hasattr(self.__bc, "_node_update_transaction_lock"):
+        self.__bc._node_update_transaction_lock = RLock()
+      return self.__bc._node_update_transaction_lock
+
+  def _ensure_node_update_nonce_available(self):
+    """Defer legacy updates while a durable deployment transaction is pending.
+
+    Select the newest signed snapshot per operation before checking reservations;
+    older ring slots can retain transactions which have already been mined. The
+    local replica survives restart and is read on every submission. Failure to
+    read it propagates, preventing an unsafe transaction while CStore is absent.
+    """
+    records = self.__owner.chainstore_hgetall("DEEPLOY_OPERATIONS")
+    if not isinstance(records, dict):
+      raise RuntimeError("Node update deferred while deployment state is unavailable.")
+    latest = {}
+    for field, record in records.items():
+      if not isinstance(record, dict) or record.get("coordinator") != self.address or record.get("EE_SENDER") != self.address:
+        continue
+      if record.get("network") != self.get_evm_network():
+        continue
+      operation_id, sequence = record.get("operation_id"), record.get("sequence")
+      if not isinstance(operation_id, str) or type(sequence) is not int:
+        continue
+      if field not in (operation_id, operation_id + "|" + str(sequence % 8)):
+        continue
+      if not self.verify(record, return_full_info=True).valid:
+        continue
+      current = latest.get(operation_id)
+      if current is None or sequence > current["sequence"]:
+        latest[operation_id] = record
+    if any(record.get("settlement", {}).get("transaction") for record in latest.values()):
+      raise RuntimeError("Node update deferred while a deployment transaction is pending.")
+
+  def prepare_node_update(self, job_id, nodes, network=None):
+    """Prepare signed transaction bytes for durable journaling before broadcast.
+
+    Parameters
+    ----------
+    job_id : int
+        Paid deployment job identity.
+    nodes : list
+        Exact target membership to confirm.
+    network : str or None
+        Optional network override.
+
+    Returns
+    -------
+    dict
+        Signed raw transaction, transaction hash, nonce and chain identity.
+    """
+    return self.__bc.web3_prepare_node_update(job_id=job_id, nodes=nodes, network=network)
+
+  def send_prepared_transaction(self, raw_transaction, network=None):
+    """Broadcast previously journaled signed bytes without allocating a nonce.
+
+    Parameters
+    ----------
+    raw_transaction : str
+        Signed transaction bytes encoded as hexadecimal.
+    network : str or None
+        Optional network override.
+
+    Returns
+    -------
+    str
+        Transaction hash returned by the RPC.
+    """
+    return self.__bc.web3_send_prepared_transaction(raw_transaction=raw_transaction, network=network)
+
+  def get_transaction_receipt(self, tx_hash, network=None):
+    """Return a mined receipt, or None while transaction outcome is unknown.
+
+    Parameters
+    ----------
+    tx_hash : str
+        Hash persisted with the prepared transaction.
+    network : str or None
+        Optional network override.
+
+    Returns
+    -------
+    dict or None
+        Receipt supplied by the SDK when available.
+    """
+    return self.__bc.web3_get_transaction_receipt(transaction_hash=tx_hash, network=network)
 
   def submit_attestation(
     self,

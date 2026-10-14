@@ -131,6 +131,16 @@ class RuntimeSecretPureHelperTests(unittest.TestCase):
       get_dauth_pipeline_identity("secret_pipeline", second),
     )
 
+  def test_secret_revision_participates_in_cache_identity(self):
+    first = _pipeline()
+    second = deepcopy(first)
+    first["DEEPLOY_SPECS"]["secret_revision"] = "revision-one"
+    second["DEEPLOY_SPECS"]["secret_revision"] = "revision-two"
+    self.assertNotEqual(
+      get_dauth_pipeline_identity("secret_pipeline", first),
+      get_dauth_pipeline_identity("secret_pipeline", second),
+    )
+
   def test_environment_references_are_runtime_only_and_include_list_scalars(self):
     canonical = {
       "VALUE": "$EE_PRESENT",
@@ -259,6 +269,31 @@ class OrchestratorRuntimeSecretTests(unittest.TestCase):
     with orchestrator._runtime_config_lock:
       orchestrator._current_dct_config_streams = deepcopy(streams)
     orchestrator._reconcile_runtime_streams(streams)
+
+  def test_definitive_secret_failure_reports_safe_lifecycle_error(self):
+    failures = []
+    for error, expected in ((ValueError("invalid secret bundle"), 1), (RuntimeError("connection unavailable"), 0)):
+      failures.clear()
+      orchestrator = self._make_orchestrator([error])
+      class Lifecycle:
+        def fail(self, pipeline, code):
+          failures.append((pipeline["NAME"], code))
+      orchestrator._app_shmem = {"deeploy_lifecycle": Lifecycle()}
+      self._set_canonical(orchestrator, {"secret_pipeline": _pipeline()})
+      self.assertEqual(orchestrator._resolve_runtime_streams_once(now=10), 0)
+      self.assertEqual(len(failures), expected)
+      if expected:
+        self.assertEqual(failures[0], ("secret_pipeline", "SECRET_RESOLUTION_FAILED"))
+
+  def test_revision_is_forwarded_to_signed_dauth_request(self):
+    orchestrator = self._make_orchestrator([_bundle()])
+    canonical = _pipeline()
+    canonical["DEEPLOY_SPECS"]["secret_revision"] = "previous-secret-cid"
+    self._set_canonical(orchestrator, {"secret_pipeline": canonical})
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=10), 1)
+    self.assertEqual(orchestrator._blockchain_manager.calls, [
+      ("7", {"request_timeout": (5, 20), "revision": "previous-secret-cid"}),
+    ])
 
   def test_retry_success_runtime_separation_and_redacted_view(self):
     orchestrator = self._make_orchestrator([

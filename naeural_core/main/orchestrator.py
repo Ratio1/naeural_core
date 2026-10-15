@@ -31,7 +31,7 @@ from naeural_core.config.runtime_secret_resolution import (
   get_dauth_pipeline_identity,
 )
 from naeural_core.business import BusinessManager
-from naeural_core.business.deployment_lifecycle import SERVICE_KEY
+from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY
 from naeural_core.comm import CommunicationManager
 from naeural_core.serving import ServingManager
 from naeural_core.io_formatters import IOFormatterManager
@@ -1052,7 +1052,11 @@ class Orchestrator(DecentrAIObject,
 
       job_id = cache_key[1]
       try:
-        revision = pipeline_config.get(ct.CONFIG_STREAM.DEEPLOY_SPECS, {}).get("secret_revision")
+        specs = pipeline_config.get(ct.CONFIG_STREAM.DEEPLOY_SPECS, {})
+        revision = specs.get("secret_revision")
+        if revision is None and ("secret_revision" in specs or specs.get("revision", 0) != 0
+                                 or pipeline_config.get(OPERATION_KEY) is not None):
+          raise ValueError("Versioned pipeline requires a secret revision.")
         response = self._fetch_dauth_job_secret_bundle(
           job_id, **({"revision": revision} if revision is not None else {}),
         )

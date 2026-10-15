@@ -88,6 +88,14 @@ for another revision cannot satisfy a restored configuration. Definitive secret
 validation/rejection errors publish `SECRET_RESOLUTION_FAILED`; transport,
 registry, and replica synchronization failures remain retryable.
 
+Existing persisted pipelines without lifecycle metadata may omit
+`secret_revision`, including after restart with an empty runtime cache. The SDK
+sends an unversioned request; dAuth authorizes it only against the existing raw
+CID, current placement, and matching current secret bundle. A tracked pipeline,
+nonzero revision, or explicit null secret revision cannot use this path. New
+deployments and both target/restoration plans of the first update always carry
+immutable secret revisions; they never fall back to unversioned secrets.
+
 ## Limits
 
 The receiving oracle owns coordination. There is no distributed election,

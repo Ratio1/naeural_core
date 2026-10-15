@@ -295,6 +295,20 @@ class OrchestratorRuntimeSecretTests(unittest.TestCase):
       ("7", {"request_timeout": (5, 20), "revision": "previous-secret-cid"}),
     ])
 
+  def test_tracked_pipeline_cannot_downgrade_to_unversioned_secret_resolution(self):
+    for markers in ({"secret_revision": None}, {"revision": 1}, {"operation": True}):
+      with self.subTest(markers=markers):
+        orchestrator = self._make_orchestrator([_bundle()])
+        canonical = _pipeline()
+        if markers.get("operation"):
+          canonical["DEEPLOY_OPERATION"] = {"operation_id": "op"}
+        else:
+          canonical["DEEPLOY_SPECS"].update(markers)
+        self._set_canonical(orchestrator, {"secret_pipeline": canonical})
+        self.assertEqual(orchestrator._resolve_runtime_streams_once(now=10), 0)
+        self.assertEqual(orchestrator._blockchain_manager.calls, [])
+        self.assertEqual(orchestrator._get_runtime_streams_snapshot(), {})
+
   def test_retry_success_runtime_separation_and_redacted_view(self):
     orchestrator = self._make_orchestrator([
       RuntimeError("temporarily unavailable"),

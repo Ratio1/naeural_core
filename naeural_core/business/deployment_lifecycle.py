@@ -12,12 +12,16 @@ import re
 import tempfile
 import threading
 import time
+import uuid
 from copy import deepcopy
 
 
 OPERATION_KEY = "DEEPLOY_OPERATION"
 SERVICE_KEY = "deeploy_lifecycle"
 OBSERVATION_HKEY = "DEEPLOY_NODE_OPERATIONS"
+# Shared by lifecycle objects in this interpreter; recreating a journal reader
+# is not evidence that the process owning native plugin threads has exited.
+PROCESS_ID = uuid.uuid4().hex
 ERRORS = {
   "PLUGIN_LOAD_FAILED": "Plugin code could not be loaded.",
   "PLUGIN_INIT_FAILED": "Plugin initialization failed.",
@@ -45,6 +49,7 @@ class DeploymentLifecycle:
   def __init__(self, path, node_addr):
     self.path = path
     self.node_addr = node_addr
+    self.process_id = PROCESS_ID
     self.lock = threading.RLock()
     self.records = {}
     self.plugins = {}
@@ -217,6 +222,9 @@ class DeploymentLifecycle:
                            for item in self.records.get(previous_key, {}).get("instances", [])}
         for instance in self.records[self.key(operation)]["instances"]:
           prior = prior_instances.get((instance["signature"], instance["instance_id"]), {})
+          for field in ("process_id", "process_bound"):
+            if field in prior:
+              instance[field] = prior[field]
           if prior.get("runtime_artifacts"):
             instance["runtime_artifacts"] = deepcopy(prior["runtime_artifacts"])
         if previous_key not in self.records:
@@ -259,8 +267,23 @@ class DeploymentLifecycle:
     except Exception:
       return {}
 
-  def attach(self, config, signature, instance_id, plugin):
-    """Associate a runtime instance with the accepted attempt for observation."""
+  def attach(self, config, signature, instance_id, plugin, plugin_class=None):
+    """Journal construction ownership and associate a runtime instance.
+
+    Parameters
+    ----------
+    config : dict
+        Accepted pipeline carrying the operation identity.
+    signature : str
+        Resolved plugin signature.
+    instance_id : str
+        Instance identity within the pipeline.
+    plugin : object or None
+        Constructed runtime, or None before construction begins.
+    plugin_class : type or None
+        Successfully resolved class, supplied before its constructor runs.
+        External workload ownership must be declared on the class.
+    """
     operation = config.get(OPERATION_KEY)
     if operation is None:
       return
@@ -270,6 +293,10 @@ class DeploymentLifecycle:
       for instance in self.records[key]["instances"]:
         if (instance["signature"], instance["instance_id"]) == (signature, instance_id):
           instance["possibly_started"] = True
+          workload_owner = plugin if plugin is not None else plugin_class
+          if workload_owner is not None:
+            instance["process_id"] = self.process_id
+            instance["process_bound"] = getattr(workload_owner, "_deployment_external_workload", False) is False
           artifacts = self._runtime_artifacts(plugin)
           if artifacts:
             instance["runtime_artifacts"] = artifacts
@@ -302,9 +329,12 @@ class DeploymentLifecycle:
         instance["runtime_artifacts"] = artifacts
       if plugin is None:
         if record["aborted"]:
-          # No constructor succeeded in this process. A restart can leave an
-          # external workload alive, so only never-started instances qualify.
+          # Native threads from an earlier process cannot survive its exit.
+          # Unknown classes and external runners still need scoped cleanup.
           if not instance.get("possibly_started", False):
+            instance["status"] = "stopped"
+          elif (instance.get("process_bound") is True and instance.get("process_id")
+                and instance["process_id"] != self.process_id):
             instance["status"] = "stopped"
           elif record.get("active", False) and self._cleanup is not None:
             # Hold the admission lock across scoped orphan cleanup: a new
@@ -380,6 +410,8 @@ class DeploymentLifecycle:
       record.pop("active")
       for instance in record["instances"]:
         instance.pop("possibly_started", None)
+        instance.pop("process_id", None)
+        instance.pop("process_bound", None)
       signer(record, add_data=True, use_digest=True)
       field = key + "|" + self.node_addr
       prefix = "hs:" + hashlib.sha256(OBSERVATION_HKEY.encode()).hexdigest()[:10] + ":"

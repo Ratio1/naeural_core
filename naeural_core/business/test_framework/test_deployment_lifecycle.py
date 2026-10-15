@@ -134,6 +134,58 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.lifecycle = DeploymentLifecycle(self.path, "node")
     self.assertEqual(self.publish()["status"], "stopping")
 
+  def restart_process(self):
+    with patch.object(module, "PROCESS_ID", "next-process", create=True):
+      self.lifecycle = DeploymentLifecycle(self.path, "node")
+
+  def test_native_stop_completes_after_process_exit(self):
+    self.lifecycle.admit(config(), "oracle", True)
+    self.lifecycle.attach(config(), "WORKER", "worker", plugin(ready=True))
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    self.restart_process()
+    observed = self.publish()
+    self.assertEqual(observed["status"], "stopped")
+    for private in ("process_id", "process_bound", "possibly_started"):
+      self.assertNotIn(private, observed["instances"][0])
+    self.assertFalse(self.lifecycle.admit(config(), "oracle", True))
+
+  def test_native_constructor_failure_requires_process_exit(self):
+    self.lifecycle.admit(config(), "oracle", True)
+    native_class = type("NativePlugin", (), {})
+    self.lifecycle.attach(config(), "WORKER", "worker", None, plugin_class=native_class)
+    self.lifecycle.fail(config(), "WORKER", "worker", "PLUGIN_INIT_FAILED")
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    self.assertEqual(self.publish()["status"], "stopping")
+    self.lifecycle = DeploymentLifecycle(self.path, "node")
+    self.assertEqual(self.publish()["status"], "stopping")
+    self.restart_process()
+    self.assertEqual(self.publish()["status"], "stopped")
+
+  def test_process_exit_does_not_confirm_external_or_unknown_workloads(self):
+    for external in (True, None):
+      with self.subTest(external=external):
+        self.path = os.path.join(self.directory.name, str(external) + ".json")
+        self.lifecycle = DeploymentLifecycle(self.path, "node")
+        self.lifecycle.admit(config(), "oracle", True)
+        runtime = plugin(external=True) if external else None
+        self.lifecycle.attach(config(), "WORKER", "worker", runtime)
+        self.lifecycle.admit(config("stop"), "oracle", True)
+        self.restart_process()
+        self.assertEqual(self.publish()["status"], "stopping")
+        self.lifecycle._cleanup = lambda *args: True
+        self.assertEqual(self.publish()["status"], "stopped")
+
+  def test_retirement_preserves_native_process_exit_evidence(self):
+    previous = config(revision=1)
+    previous["DEEPLOY_SPECS"] = {"job_id": 7, "revision": 1}
+    self.lifecycle.admit(previous, "oracle", True)
+    self.lifecycle.attach(previous, "WORKER", "worker", plugin(ready=True))
+    self.restart_process()
+    operation = config(action="retire", attempt="retire", revision=1)["DEEPLOY_OPERATION"]
+    operation.update(job_id=7, expected_previous_operation_id="operation")
+    self.assertTrue(self.lifecycle.retire("app", previous, operation, "oracle", True))
+    self.assertEqual(self.publish()["status"], "stopped")
+
   def test_publication_retries_and_sequence_survives_restart(self):
     self.lifecycle.admit(config(), "oracle", True)
     first = self.publish(succeed=False)

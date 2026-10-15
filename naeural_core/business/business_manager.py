@@ -849,6 +849,11 @@ class BusinessManager(Manager):
             continue
           #endif
 
+          if operation:
+            # Persist the resolved class's workload ownership before constructor
+            # side effects. Only a later process may prove native threads gone.
+            lifecycle.attach(pipeline, signature, instance_id, None, plugin_class=_cls_def)
+
           self.comm_shared_memory['payloads'][instance_hash] = deque(maxlen=1000)
           self.comm_shared_memory['commands'][instance_hash] = deque(maxlen=1000)
 

@@ -45,7 +45,7 @@ accepts the fixed vocabulary in `deployment_lifecycle.py`; readiness still uses
 `is_plugin_ready()` and semaphore semantics are unchanged.
 
 A dead plugin thread is insufficient for external workload cleanup. Runners
-owning external workloads must declare `_deployment_external_workload = True`
+owning external workloads must declare `_deployment_external_workload = True` on the class
 and call `set_deployment_stopped()` only after verifying actual shutdown. A
 runner can implement static `cleanup_deployment_instance(app_id, instance_id)`
 to reap its deterministic scoped workload after restart; it must use a bounded
@@ -53,6 +53,15 @@ timeout, preserve persistent volumes, and return True only after confirming
 absence. Core invokes it without constructing or starting the plugin, while
 holding the local admission lock. Superseded attempts cannot reap a newer
 workload with the same name. Without such evidence cleanup remains unresolved.
+
+Before construction, the journal records the resolved class's native/external
+classification and the owning interpreter's process identity. A native instance
+with no runtime object can be confirmed stopped after that process exits. A new
+journal reader in the same process is insufficient. Unknown classifications,
+same-process constructor/cleanup failures, and external workloads still require
+cleanup evidence. Retirement preserves this classification and process identity;
+both fields remain private to the node journal. Custom code that owns external
+workloads must honor the runner declaration and cleanup contract above.
 
 The signing node writes HSET `DEEPLOY_NODE_OPERATIONS`, fields:
 

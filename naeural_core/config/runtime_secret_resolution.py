@@ -76,7 +76,7 @@ def get_dauth_pipeline_identity(pipeline_name, pipeline_config):
   Returns
   -------
   tuple
-      ``(pipeline_name, job_id, date_updated, redacted_hash)``.
+      ``(pipeline_name, job_id, date_updated, redacted_hash, secret_revision)``.
 
   Raises
   ------
@@ -110,7 +110,7 @@ def get_dauth_pipeline_identity(pipeline_name, pipeline_config):
       "canonical PLUGINS configuration is not JSON serializable"
     ) from exc
   redacted_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-  return (str(pipeline_name), str(job_id), str(date_updated), redacted_hash)
+  return (str(pipeline_name), str(job_id), str(date_updated), redacted_hash, specs.get("secret_revision"))
 
 
 def extract_dauth_plugins_secret_tree(response, expected_job_id):

@@ -441,6 +441,7 @@ class _BasePluginLoopMixin(object):
       plugin_loop_initialized = True
     except Exception as exc:
       info = traceback.format_exc()
+      self._deployment_error_code = "PLUGIN_INIT_FAILED"
       self.P(f"CRITICAL ERROR in plugin loop initialization: {exc}. Resuming to plugin cleanup:\n{info}", color='r')
     
     if plugin_loop_initialized:
@@ -526,6 +527,7 @@ class _BasePluginLoopMixin(object):
             sleep(sleep_time)
           self.end_timer('loop_sleep')
         except:
+          self._deployment_error_code = "PLUGIN_EXECUTION_FAILED"
           self._plugin_loop_in_exec = False
           SLEEP_ON_LOOP_ERROR = 10
           msg = "CRITICAL ERROR in business plugin loop (sleep {}) on: {}".format(
@@ -544,7 +546,9 @@ class _BasePluginLoopMixin(object):
 
     try:
       self.__cleanup()
+      self._deployment_cleanup_complete = True
     except Exception as exc:
+      self._deployment_error_code = "PLUGIN_STOP_FAILED"
       info = traceback.format_exc()
       self.P(f"CRITICAL ERROR in cleanup: {exc}:\n{info}", color='r')
 

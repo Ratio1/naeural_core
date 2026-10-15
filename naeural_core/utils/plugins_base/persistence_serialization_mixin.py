@@ -2,6 +2,9 @@
 TODO: delete
 """
 import os
+import json
+import pickle
+import tempfile
 from naeural_core import constants as ct
 
 
@@ -53,10 +56,20 @@ class _PersistenceSerializationMixin(object):
     return self.__persistence_fld
 
 
-  def _helper_persistence_serialization_save(self, obj, subfolder_path=None, verbose=True):
+  def _helper_persistence_serialization_save(self, obj, subfolder_path=None, verbose=True, strict=False):
     self._maybe_setup_persistence_fld()
     if subfolder_path is None:
       subfolder_path = self._persistence_fld
+
+    if strict:
+      folder = os.path.join(self.log.get_data_folder(), subfolder_path.lstrip("/"))
+      self._save_cache_file_strict(os.path.join(folder, "object.pickle"), obj)
+      self._save_cache_file_strict(
+        os.path.join(folder, "metadata.json"),
+        {"SERIALIZATION_SIGNATURE": self.cfg_serialization_signature},
+        as_json=True,
+      )
+      return
 
     self.log.save_pickle_to_data(
       data=obj,
@@ -73,6 +86,40 @@ class _PersistenceSerializationMixin(object):
     )
     return
     
+  @staticmethod
+  def _save_cache_file_strict(path, data, as_json=False):
+    """Persist a cache file atomically and propagate write/fsync failures.
+
+    Parameters
+    ----------
+    path : str
+        Destination in the plugin cache directory.
+    data : object
+        Serializable snapshot owned by the calling persistence operation.
+    as_json : bool
+        Write JSON metadata instead of the pickle payload when True.
+    """
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".cache-", dir=folder)
+    try:
+      with os.fdopen(fd, "wb") as stream:
+        if as_json:
+          stream.write(json.dumps(data).encode("utf-8"))
+        else:
+          pickle.dump(data, stream, protocol=pickle.HIGHEST_PROTOCOL)
+        stream.flush()
+        os.fsync(stream.fileno())
+      os.replace(temporary, path)
+      directory = os.open(folder, os.O_RDONLY)
+      try:
+        os.fsync(directory)
+      finally:
+        os.close(directory)
+    finally:
+      if os.path.exists(temporary):
+        os.unlink(temporary)
+
   def _helper_persistence_serialization_load(self, subfolder_path=None, default=None, verbose=True):
     self._maybe_setup_persistence_fld()
     if subfolder_path is None:
@@ -194,7 +241,7 @@ class _PersistenceSerializationMixin(object):
     return
   
   
-  def cacheapi_save_pickle(self, obj, verbose=True):
+  def cacheapi_save_pickle(self, obj, verbose=True, strict=False):
     """
     Save object to the current plugin instance cache folder
 
@@ -203,9 +250,12 @@ class _PersistenceSerializationMixin(object):
     obj : any
         the picklable object to be saved
     verbose : bool, optional
-        show information during process, by default True
+        Show information during process, by default True.
+    strict : bool, optional
+        Propagate disk write/fsync failures and atomically replace the cache.
+        Required when returning a network acknowledgment of persistence.
     """
-    self.persistence_serialization_save(obj, verbose=verbose)
+    self._helper_persistence_serialization_save(obj, verbose=verbose, strict=strict)
     return
   
   

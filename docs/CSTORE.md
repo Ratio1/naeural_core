@@ -233,7 +233,10 @@ late direct writes or merge repair.
 Canonical `DEEPLOY_DEPLOYED_JOBS` pointers are signed envelopes containing
 `job_id`, `revision`, `operation_id`, `coordinator`, `pipeline_cid`, and `deleted`.
 Current `DAUTH_JOB_SECRETS` bundles carry equivalent signed writer metadata and
-`deployment_revision`. These generations increase across successful deployment,
+`deployment_revision`. A registered dAuth custodian may sign these bundles for
+the registered protocol-oracle coordinator after verifying its lifecycle request;
+public pointers must still be signed by that coordinator. Signature-only retry
+differences include both node and EVM signature metadata. These generations increase across successful deployment,
 restoration and deletion commits; restored runtime configuration may retain an
 older content revision. Receivers verify registry signer and job-field binding,
 reject lower generations and divergent equal-generation payloads, and ignore

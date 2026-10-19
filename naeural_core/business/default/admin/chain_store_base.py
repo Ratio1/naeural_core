@@ -352,9 +352,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     try:
       field = self.base64_to_str(key[len(self.__hset_index(namespace)):], url_safe=True)
       principal = value.get("coordinator")
+      author = value.get("EE_SENDER")
+      # dAuth attests the coordinator's verified operation when publishing its
+      # custodied current bundle. Public pointers remain coordinator-signed.
+      authorized_author = author == principal or (
+        namespace == "DAUTH_JOB_SECRETS" and self.__registry_member(author, dauth_only=True)
+      )
       if (value.get("job_id") != field or not isinstance(value.get("operation_id"), str)
-          or not value["operation_id"] or value.get("EE_SENDER") != principal
-          or not self.__registry_member(principal) or not self.bc.verify(value, return_full_info=True).valid):
+          or not value["operation_id"] or not authorized_author
+          or not self.__registry_member(principal)
+          or not self.bc.verify(value, return_full_info=True, log_hash_sign_fails=False).valid):
         return False
       if namespace == "DEEPLOY_DEPLOYED_JOBS":
         if type(value.get("deleted")) is not bool:
@@ -368,7 +375,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if version < local_version:
           return False
         if version == local_version:
-          signature_keys = {"EE_SIGN", "EE_SENDER", "EE_HASH", "EE_SIGN_CANON_V"}
+          signature_keys = {"EE_SIGN", "EE_SENDER", "EE_HASH", "EE_SIGN_CANON_V", "EE_ETH_SENDER", "EE_ETH_SIGN"}
           return ({key: item for key, item in value.items() if key not in signature_keys}
                   == {key: item for key, item in local.items() if key not in signature_keys})
     except Exception:

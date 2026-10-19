@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "naeural_core"
-version = "7.7.332"
+version = "7.7.333"
 authors = [
   { name="Andrei Ionut Damian", email="andrei.damian@me.com" },
   { name="Cristan Bleotiu", email="cristibleotiu@gmail.com" },
@@ -26,7 +26,7 @@ dependencies = [
   "pynvml>=11.4",
   "pyyaml>=6.0",
   "pyarrow>=15",
-  "ratio1>=3.5.58",
+  "ratio1>=3.5.59",
   "minio",
   "gql",
   "opencv-python-headless",

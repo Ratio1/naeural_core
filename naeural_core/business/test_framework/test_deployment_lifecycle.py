@@ -469,6 +469,26 @@ class ProtectedChainStoreTest(unittest.TestCase):
     self.assertEqual(errors, [])
     self.assertEqual(store.storage[key][store.CS_VALUE]["revision"], 3)
 
+  def test_dauth_can_attest_secret_custody_but_cannot_sign_coordinator_pointer(self):
+    store = self.store()
+    value = dict(job_id="7", deployment_revision=2, operation_id="op", coordinator="oracle",
+                 EE_SENDER="registry", EE_SIGN="valid", EE_ETH_SENDER="0xregistry", EE_ETH_SIGN="eth1",
+                 pipeline_cid="cid", deleted=False, job_secrets={"token": "private"})
+    key = _hset_key("DAUTH_JOB_SECRETS", "7")
+    self.assertTrue(store._set_value(key, value, local_sync_storage_op=True))
+    # Repair/retry on another registered custodian keeps the same semantic value.
+    second = dict(value, EE_SENDER="registry-other", EE_ETH_SENDER="0xother", EE_ETH_SIGN="eth2")
+    self.assertTrue(store._set_value(key, second, local_sync_storage_op=True))
+    for changed in (dict(second, EE_SENDER="attacker"), dict(second, EE_SIGN="forged"),
+                    dict(second, coordinator="attacker"), dict(second, job_secrets={"token": "changed"}),
+                    dict(second, deployment_revision=1)):
+      self.assertFalse(store._set_value(key, changed, local_sync_storage_op=True))
+    pointer = dict(value, revision=2)
+    pointer.pop("deployment_revision")
+    self.assertFalse(store._set_value(_hset_key("DEEPLOY_DEPLOYED_JOBS", "7"), pointer, local_sync_storage_op=True))
+    pointer.update(EE_SENDER="oracle")
+    self.assertTrue(store._set_value(_hset_key("DEEPLOY_DEPLOYED_JOBS", "7"), pointer, local_sync_storage_op=True))
+
   def test_job_generation_signature_and_field_binding_cannot_be_forged(self):
     store = self.store()
     key = _hset_key("DEEPLOY_DEPLOYED_JOBS", "7")

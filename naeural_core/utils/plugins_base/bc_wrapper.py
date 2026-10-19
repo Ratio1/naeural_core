@@ -75,6 +75,7 @@ class BCWrapper:
     str_signature: str = None, 
     sender_address: str = None,
     return_full_info : bool = True,
+    log_hash_sign_fails: bool = True,
   ) -> bool:
     """
     Verifies a signature using the public key of the signer
@@ -92,7 +93,11 @@ class BCWrapper:
         Default `None` will be taken from the data
         
     return_full_info: bool, optional
-        whether to return the full verification info. Default `True`      
+        whether to return the full verification info. Default `True`
+
+    log_hash_sign_fails: bool, optional
+        Whether the engine may log signature failures. Default `True`. Pass
+        `False` when the signed message can contain secret values.
     
 
     Returns
@@ -105,6 +110,7 @@ class BCWrapper:
       signature=str_signature, 
       sender_address=sender_address,
       return_full_info=return_full_info,
+      log_hash_sign_fails=log_hash_sign_fails,
     )
 
   def encrypt_str(self, str_data : str, str_recipient : str):
@@ -670,6 +676,31 @@ class BCWrapper:
     return self.__bc.get_network_data(network)
   
   
+  def reconcile_dauth_job_secrets(self, payload, network=None, request_timeout=(10, 60)):
+    """
+    Reconcile job secrets on dAuth through the SDK client.
+
+    Parameters
+    ----------
+    payload : dict
+        Job ID, expected pipeline CID, prepared configs and optional scale-up
+        identity aliases. The SDK signs the request with this node's identity.
+    network : str, optional
+        Network whose dAuth endpoint and signer registry are used. Defaults to
+        the underlying blockchain engine's network.
+    request_timeout : tuple or float, optional
+        HTTP timeout forwarded unchanged to the SDK, default ``(10, 60)``.
+
+    Returns
+    -------
+    dict
+        SDK-authenticated result containing redacted configs and their CID.
+        Secret bundles are not returned. SDK errors propagate unchanged.
+    """
+    return self.__bc.reconcile_dauth_job_secrets(
+      payload=payload, network=network, request_timeout=request_timeout,
+    )
+
   def get_node_license_info(
     self, 
     node_address: str = None, 

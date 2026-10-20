@@ -436,6 +436,13 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     return ver
 
   def get_git_server_version(self):
+    """Fetch the server version with a 60-second connect/read timeout.
+
+    Returns
+    -------
+    str or None
+        Parsed version, or None when the request or version parsing fails.
+    """
     ver = None
     branch = self.docker_branch if self.runs_in_docker else self.log.git_branch
     token = self.cfg_version_token
@@ -449,7 +456,7 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
         if token not in [None, "", "git_version_access_token", "token_for_accessing_private_repositories"]:
           headers = {'Authorization': 'token ' + token}      
         self.P("Retrieving version with url: {} and headers: {}".format(url0, headers))
-        resp0 = self.requests.get(url0, headers=headers)
+        resp0 = self.requests.get(url0, headers=headers, timeout=60)
         status_code = resp0.status_code
         resp = resp0.content.decode()
         self.P("Retrieved for `{}:{}` status: {} data:\n{}".format(

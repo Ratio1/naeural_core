@@ -1,10 +1,12 @@
 """Offline tests of durable node admission, aborts and lifecycle observations."""
 import collections
+import gc
 import importlib.util
 import json
 import os
 import tempfile
 import unittest
+import weakref
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,8 +93,73 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.lifecycle.attach(config(), "WORKER", "worker", instance)
     self.lifecycle.admit(config("stop"), "oracle", True)
     self.assertEqual(self.publish()["status"], "stopping")
+    self.assertIs(self.lifecycle.plugins[("operation|deploy", "WORKER", "worker")], instance)
     instance._deployment_stopped = True
     self.assertEqual(self.publish()["status"], "stopped")
+
+  def test_stopped_retirements_release_all_plugin_aliases_but_keep_evidence(self):
+    class Runtime:
+      pass
+    references = []
+    for revision in range(24):
+      previous = config(revision=revision)
+      previous["DEEPLOY_OPERATION"]["operation_id"] = "previous-" + str(revision)
+      previous["DEEPLOY_SPECS"] = {"job_id": 7, "revision": revision}
+      self.lifecycle.admit(previous, "oracle", True)
+      runtime = Runtime()
+      runtime.__dict__.update(vars(plugin(alive=False, stopped=True)))
+      runtime.get_deployment_runtime_artifacts = lambda: {"image_id": "sha256:" + "a" * 64}
+      references.append(weakref.ref(runtime))
+      self.lifecycle.attach(previous, "WORKER", "worker", runtime)
+      retirement = config("retire", "retire", revision)
+      retirement["DEEPLOY_OPERATION"].update(
+        operation_id="retire-" + str(revision), job_id=7,
+        expected_previous_operation_id=previous["DEEPLOY_OPERATION"]["operation_id"],
+      )
+      self.lifecycle.retire("app", previous, retirement["DEEPLOY_OPERATION"], "oracle", True)
+      self.lifecycle.attach(retirement, "WORKER", "worker", runtime)
+      if revision == 0:
+        with patch.object(self.lifecycle, "_save", side_effect=OSError("disk unavailable")):
+          with self.assertRaises(OSError):
+            self.publish()
+        self.assertEqual(len(self.lifecycle.plugins), 2)
+        self.assertEqual(self.writes, [])
+      self.assertEqual(self.publish()["status"], "stopped")
+      del runtime
+    gc.collect()
+    self.assertTrue(all(reference() is None for reference in references))
+    self.assertEqual(self.lifecycle.plugins, {})
+    self.lifecycle._cleanup = lambda *args: self.fail("Confirmed stop must not be reaped again")
+    self.lifecycle.publish(lambda *args, **kwargs: True, lambda *args, **kwargs: None)
+    restored = DeploymentLifecycle(self.path, "node")
+    for revision in range(24):
+      record = restored.records["retire-" + str(revision) + "|retire"]
+      self.assertTrue(record["aborted"])
+      self.assertEqual(record["status"], "stopped")
+      self.assertEqual(record["instances"][0]["runtime_artifacts"]["image_id"], "sha256:" + "a" * 64)
+
+  def test_throwing_cleanup_does_not_withhold_another_jobs_observations(self):
+    healthy = config()
+    self.lifecycle.admit(healthy, "oracle", True)
+    self.lifecycle.attach(healthy, "WORKER", "worker", plugin(ready=True))
+    broken = config()
+    broken["NAME"] = "broken"
+    broken["DEEPLOY_OPERATION"]["operation_id"] = "broken"
+    self.lifecycle.admit(broken, "oracle", True)
+    self.lifecycle.attach(broken, "WORKER", "worker", None)
+    broken["DEEPLOY_OPERATION"]["action"] = "stop"
+    self.lifecycle.admit(broken, "oracle", True)
+    def cleanup(*args):
+      raise RuntimeError("Docker client unavailable")
+    self.lifecycle._cleanup = cleanup
+    for now in (100, 111):
+      with patch.object(module.time, "time", return_value=now):
+        with self.assertRaisesRegex(RuntimeError, "workload observation failed"):
+          self.publish()
+    self.assertEqual(len(self.writes), 4)
+    self.assertTrue(all(value["app_id"] == "app" and value["status"] == "ready"
+                        for _, value, _ in self.writes))
+    self.assertEqual(self.lifecycle.records["broken|deploy"]["status"], "stopping")
 
   def test_successful_reaper_releases_business_manager_restore_barrier(self):
     import ast

@@ -323,6 +323,9 @@ class DeploymentLifecycle:
   def _observe(self, key, record):
     """Aggregate plugin evidence without executing plugin workload methods."""
     for instance in record["instances"]:
+      if record["aborted"] and instance["status"] == "stopped":
+        # Stop evidence remains valid after releasing the runtime object.
+        continue
       plugin = self.plugins.get((key, instance["signature"], instance["instance_id"]))
       artifacts = self._runtime_artifacts(plugin)
       if artifacts:
@@ -388,13 +391,26 @@ class DeploymentLifecycle:
     """
     with self.lock:
       pending = []
+      stopped_plugins = set()
+      observation_failed = False
       for key, record in self.records.items():
         # Do not refresh timestamps for historical readiness without observing
         # that workload. Only a rejected command needs an inactive failure report.
         if not record.get("active", False) and "error" not in record:
           continue
         if record.get("active", False):
-          self._observe(key, record)
+          try:
+            self._observe(key, record)
+          except Exception:
+            # One workload's observer/reaper cannot withhold other jobs' reports.
+            observation_failed = True
+            continue
+        if record["aborted"]:
+          for instance in record["instances"]:
+            if instance["status"] == "stopped":
+              plugin = self.plugins.get((key, instance["signature"], instance["instance_id"]))
+              if plugin is not None:
+                stopped_plugins.add(id(plugin))
         fingerprint = {name: value for name, value in record.items() if name not in ("sequence", "updated_at")}
         last_time, last_value = self._published.get(key, (0, None))
         if last_value == fingerprint and (time.time() - last_time < 10 or record["status"] in ("stopped", "failed") or not record.get("active", False)):
@@ -404,6 +420,11 @@ class DeploymentLifecycle:
         pending.append((key, deepcopy(record), deepcopy(fingerprint)))
       if pending:
         self._save()
+      if stopped_plugins:
+        # Retirement may retain the same object under both deploy and retire
+        # identities. Release all aliases only after stop evidence is persisted.
+        self.plugins = {key: plugin for key, plugin in self.plugins.items()
+                        if id(plugin) not in stopped_plugins}
     for key, record, fingerprint in pending:
       peers = record.pop("peers")
       record.pop("aborted")
@@ -422,6 +443,10 @@ class DeploymentLifecycle:
                          peers=peers, include_default_peers=False, timeout=1, max_retries=0) and success
       if success:
         self._published[key] = (time.time(), fingerprint)
+    if observation_failed:
+      # Preserve the worker's existing throttled error notification after all
+      # independently observed jobs have had their publication opportunity.
+      raise RuntimeError("Deployment workload observation failed; retrying.")
 
   def start(self, setter_provider, signer, report_error, cleanup=None):
     """Start an independent bounded publication worker once CStore is ready."""

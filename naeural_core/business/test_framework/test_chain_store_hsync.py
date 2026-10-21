@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import unittest
+from threading import RLock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -230,6 +231,7 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self.saved_storage = []
     self._now = 0.0
     self._ChainStoreBasePlugin__chain_storage = copy.deepcopy(storage or {})
+    self._ChainStoreBasePlugin__persistence_lock = RLock()
     self._ChainStoreBasePlugin__chain_peers = list(default_peers or [])
     self._ChainStoreBasePlugin__pending_hsync = {}
     self._ChainStoreBasePlugin__last_chain_peers_refresh = self._now
@@ -277,7 +279,7 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
   def uuid(length=8):  # pylint: disable=unused-argument
     return "req-" + "1" * length
 
-  def cacheapi_save_pickle(self, value, verbose=True):  # pylint: disable=unused-argument
+  def cacheapi_save_pickle(self, value, verbose=True, strict=False):  # pylint: disable=unused-argument
     self.saved_storage.append(copy.deepcopy(value))
 
   def cacheapi_load_pickle(self, default=None, verbose=True):  # pylint: disable=unused-argument

@@ -14,6 +14,7 @@ from copy import deepcopy
 from naeural_core import constants as ct
 from naeural_core import Logger
 from naeural_core.manager import Manager
+from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY
 
 from collections import deque, defaultdict
 
@@ -112,6 +113,14 @@ class BusinessManager(Manager):
     super().startup()
     self._dct_current_instances = self._dct_subalterns # this allows usage of `self.get_subaltern(instance_hash)`
     self._initialize_admin_async_dispatch()
+    lifecycle = self.shmem.get(SERVICE_KEY)
+    if lifecycle is not None:
+      lifecycle.start(
+        lambda: self.plugins_shmem.get("__chain_storage_set"),
+        self.owner.blockchain_manager.sign,
+        self.P,
+        cleanup=self._cleanup_deployment_instance,
+      )
     if self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True):
       self.P(
         "Plugin timing env: python={} dont_write_bytecode={} env_PYTHONDONTWRITEBYTECODE={}".format(
@@ -122,6 +131,32 @@ class BusinessManager(Manager):
         color='b',
       )
     return
+
+  def _cleanup_deployment_instance(self, app_id, signature, instance_id):
+    """Verify external workload cleanup after restart without starting a plugin.
+
+    Parameters
+    ----------
+    app_id : str
+        Pipeline whose aborted attempt still has a cleanup obligation.
+    signature : str
+        Plugin class owning the workload-specific cleanup implementation.
+    instance_id : str
+        Instance identity used to derive a scoped external workload name.
+
+    Returns
+    -------
+    bool
+        True only when the runner positively verifies workload absence.
+    """
+    _, _, plugin_class, _ = self._get_module_name_and_class(
+      locations=ct.PLUGIN_SEARCH.LOC_BIZ_PLUGINS, name=signature,
+      suffix=ct.PLUGIN_SEARCH.SUFFIX_BIZ_PLUGINS, verbose=0,
+      safety_check=True, safe_locations=ct.PLUGIN_SEARCH.SAFE_BIZ_PLUGINS,
+      safe_imports=ct.PLUGIN_SEARCH.SAFE_BIZ_IMPORTS,
+    )
+    cleanup = getattr(plugin_class, "cleanup_deployment_instance", None)
+    return cleanup is not None and cleanup(app_id, instance_id) is True
 
   @property
   def current_instances(self):
@@ -503,7 +538,11 @@ class BusinessManager(Manager):
     """
     self._ensure_admin_async_dispatch_health()
     self.owner.set_loop_stage('2.bm.refresh.entry_update_streams')
-    self._dct_config_streams = dct_config_streams
+    lifecycle = self.shmem.get(SERVICE_KEY)
+    self._dct_config_streams = {
+      name: config for name, config in dct_config_streams.items()
+      if lifecycle is None or lifecycle.allowed(config)
+    }
     self.owner.set_loop_stage('2.bm.refresh._check_instances')
     current_instances = self._check_instances()
     self._refresh_admin_instance_hashes(current_instances)
@@ -734,12 +773,31 @@ class BusinessManager(Manager):
         start_thread_s = 0.0
         update_config_s = 0.0
       is_new_instance = False
+      construction_lock = None
+      operation = None
       try:
         obj_identification = (stream_name, signature, instance_id)
         instance_hash = self.log.hash_object(obj_identification, size=5)
         self._dct_hash_mappings[instance_hash] = obj_identification
         current_instances.append(instance_hash)
+        lifecycle = self.shmem.get(SERVICE_KEY)
+        pipeline = self._dct_config_streams[stream_name]
+        operation = pipeline.get(OPERATION_KEY)
+        existing = self._dct_current_instances.get(instance_hash)
+        if operation and existing is not None and getattr(existing, "_deployment_operation_key", None) != lifecycle.key(operation):
+          # A revision change gets a fresh plugin lifecycle; old readiness must
+          # not confirm the new revision while config update is still pending.
+          if not self._stop_plugin(instance_hash, require_confirmation=True):
+            continue
         if instance_hash not in self._dct_current_instances:
+          if operation:
+            # Keep stop evidence from racing constructor side effects. This
+            # lock starts after replacement shutdown, never across thread join.
+            construction_lock = lifecycle.lock
+            construction_lock.acquire()
+            if not lifecycle.allowed(pipeline):
+              continue
+            lifecycle.attach(pipeline, signature, instance_id, None)
           is_new_instance = True
           self._dct_instance_hash_log[instance_hash] = {
             ct.PAYLOAD_DATA.INITIATOR_ID  : initiator_id,
@@ -776,6 +834,8 @@ class BusinessManager(Manager):
           
           if _cls_def is None:
             self._dct_current_instances[instance_hash] = None
+            if operation:
+              lifecycle.fail(pipeline, signature, instance_id, "PLUGIN_LOAD_FAILED")
             msg = "Error loading business plugin <{}:{}> - No code/script defined.".format(signature, instance_id)
             self.P(msg + " on stream {}".format(stream_name), color='r')
             self._create_notification(
@@ -788,6 +848,11 @@ class BusinessManager(Manager):
             )
             continue
           #endif
+
+          if operation:
+            # Persist the resolved class's workload ownership before constructor
+            # side effects. Only a later process may prove native threads gone.
+            lifecycle.attach(pipeline, signature, instance_id, None, plugin_class=_cls_def)
 
           self.comm_shared_memory['payloads'][instance_hash] = deque(maxlen=1000)
           self.comm_shared_memory['commands'][instance_hash] = deque(maxlen=1000)
@@ -844,6 +909,8 @@ class BusinessManager(Manager):
             self.set_loop_stage('2.bm.refresh.new_instance_done: {}:{}:{}'.format(stream_name, signature, instance_id))
           except Exception as exc:
             plugin = None
+            if operation:
+              lifecycle.fail(pipeline, signature, instance_id, "PLUGIN_INIT_FAILED")
             trace = traceback.format_exc()
             msg = "Plugin init FAILED for business plugin {} instance {}".format(signature, instance_id)
             info = str(exc)
@@ -861,6 +928,9 @@ class BusinessManager(Manager):
             )
           #end try-except
 
+          if operation and plugin is not None:
+            plugin._deployment_operation_key = lifecycle.key(operation)
+            lifecycle.attach(pipeline, signature, instance_id, plugin)
           self._dct_current_instances[instance_hash] = plugin
           self.__maybe_register_special_plugin_instance_hash(instance_hash=instance_hash, signature=signature)
 
@@ -894,7 +964,13 @@ class BusinessManager(Manager):
             self.set_loop_stage('2.bm.refresh.maybe_update_instance_config.DONE: {}:{}:{}'.format(stream_name, signature, instance_id))
           #endif
         #endif
+      except Exception:
+        if operation:
+          lifecycle.fail(pipeline, signature, instance_id, "PLUGIN_INIT_FAILED")
+        raise
       finally:
+        if construction_lock is not None:
+          construction_lock.release()
         if is_new_instance and debug_load_timings:
           iter_total_s = perf_counter() - iter_start
           total_elapsed_s = perf_counter() - total_start
@@ -921,14 +997,35 @@ class BusinessManager(Manager):
 
     return current_instances
 
-  def _stop_plugin(self, instance_hash):
+  def _stop_plugin(self, instance_hash, require_confirmation=False):
+    """Stop a plugin, retaining it when deployment shutdown is unconfirmed.
+
+    Parameters
+    ----------
+    instance_hash : str
+        Runtime instance identity.
+    require_confirmation : bool
+        Also require shutdown evidence for the previous untracked revision.
+
+    Returns
+    -------
+    bool
+        True only when this instance can be removed from runtime tracking.
+    """
     plugin = self._dct_current_instances[instance_hash]
 
     if plugin is None:
-      return
+      self._dct_current_instances.pop(instance_hash, None)
+      return True
 
     if self._run_on_threads:
       plugin.stop_thread()
+      if require_confirmation or getattr(plugin, "_deployment_operation_key", None):
+        # A join timeout or failed workload close is not stopped evidence.
+        if plugin.thread.is_alive():
+          return False
+        if getattr(plugin, "_deployment_external_workload", False) and not getattr(plugin, "_deployment_stopped", False):
+          return False
 
     plugin = self._dct_current_instances.pop(instance_hash)
     self._dct_stop_timings.pop(instance_hash, None)
@@ -936,7 +1033,7 @@ class BusinessManager(Manager):
   
     sleep(0.1)
     gc.collect()
-    return
+    return True
 
   def maybe_stop_finished_plugins(self):
     """
@@ -970,7 +1067,7 @@ class BusinessManager(Manager):
         del self._graceful_stop_instances[instance_hash]
       return
 
-    if plugin.done_loop:
+    if plugin.done_loop and not getattr(plugin, "_deployment_operation_key", None):
       self.P("Received STOP for already stopped {}:{}".format(instance_hash, plugin), color='r')
       # TODO: maybe add a sleep so that we do not spam this thing
       self._graceful_stop_instances.pop(instance_hash, 0)
@@ -1008,6 +1105,9 @@ class BusinessManager(Manager):
     for _hash in keys:
       self._send_stop_signal_to_plugin(instance_hash=_hash, forced=True)
     self.P("Done stopping all business plugins.", color='y')
+    lifecycle = self.shmem.get(SERVICE_KEY)
+    if lifecycle is not None:
+      lifecycle.close()
     return
 
   def _deallocate_unused_instances(self, current_instances):

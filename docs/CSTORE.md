@@ -186,3 +186,61 @@ Larger follow-ups:
 - delete/tombstone reconciliation when exact mirror behavior is required
 - automatic app bootstrap wrappers if the platform later decides to own startup
   hydration instead of leaving it to apps
+
+## Deployment lifecycle persistence and protected namespaces
+
+CStore writes now require the strict cache path: atomic pickle/metadata replace,
+file and directory fsync, and propagated failures before acknowledgment. A
+same-value retransmission rechecks persistence/replication. Confirmation counts
+use distinct authenticated transport senders from the actual target set. These
+are durable replica acknowledgments, not consensus, CAS, or distributed locking.
+
+The writer's local copy is persisted before broadcast. Self is excluded from the
+remote target set. A positive configured `MIN_CONFIRMATIONS` takes precedence;
+otherwise the threshold is `floor(remote target count / 2) + 1`. With no remote
+targets a local-origin write returns False before persistence; there is no
+local-only successful acceptance mode. A configured minimum above the reachable
+target count times out. Explicit targets are exclusive only when
+`include_default_peers=False`. The same rules apply after a same-value retry.
+These acknowledgments preserve CStore records across process restarts with the
+same data volume; they do not replicate R1FS content or elect a replacement
+coordinator. Generic `value=None` deletes retain the historical asynchronous
+confirmation behavior; lifecycle secret erasure uses a retained non-null
+revocation marker and redacted tombstone, which receive normal confirmations.
+
+`DEEPLOY_OPERATIONS` and `DEEPLOY_NODE_OPERATIONS` contain signed sequence records.
+Writes and HSync reject invalid signatures, mismatched field identities, and
+lower per-field sequences. Record ownership is derived from the signed principal,
+not an untrusted snapshot wrapper. Operation signers must be registered oracles
+or dAuth registry members. Current fields and eight sequence-modulo slots provide
+bounded recent history; generic HSync namespaces retain their existing semantics.
+
+Both `DAUTH_JOB_SECRETS` and `DAUTH_JOB_SECRET_REVISIONS` are protected. Remote
+writes require an authenticated registered oracle/dAuth sender and a dAuth
+recipient. Local secret writes may originate on an oracle, but network targets
+must be dAuth registry participants. Protected HSync request, response, export,
+and merge require dAuth registry membership, failing closed on registry lookup
+failure. HSync never exports token-bearing records because that API supplies no
+token capability.
+
+Revision fields ending in `|revoked` are immutable once populated. Identical
+retransmission is allowed; deletion/change is rejected. Revocation wins over
+stale payload snapshots. Only deletion or the exact redacted
+`{job_id, revision, revoked: true}` tombstone matching the revocation marker is
+accepted for a revoked payload field. No plaintext secret can be restored by
+late direct writes or merge repair.
+
+Canonical `DEEPLOY_DEPLOYED_JOBS` pointers are signed envelopes containing
+`job_id`, `revision`, `operation_id`, `coordinator`, `pipeline_cid`, and `deleted`.
+Current `DAUTH_JOB_SECRETS` bundles carry equivalent signed writer metadata and
+`deployment_revision`. A registered dAuth custodian may sign these bundles for
+the registered protocol-oracle coordinator after verifying its lifecycle request;
+public pointers must still be signed by that coordinator. Signature-only retry
+differences include both node and EVM signature metadata. These generations increase across successful deployment,
+restoration and deletion commits; restored runtime configuration may retain an
+older content revision. Receivers verify registry signer and job-field binding,
+reject lower generations and divergent equal-generation payloads, and ignore
+signature-only differences for idempotent retries. Once versioned, a field cannot
+be replaced by an unversioned write or deletion. A signed higher generation
+allows explicit reuse after deletion. Both direct writes and HSync enforce the
+same rules, preventing stale cached pipeline discovery from reviving deletion.

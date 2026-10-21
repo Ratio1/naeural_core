@@ -263,6 +263,8 @@ class _DeeployChainstoreResponseMixin:
     Returns:
         bool: True if response should be sent, False otherwise.
     """
+    if getattr(self, "_deployment_operation_key", None) is not None:
+      return False
     response_key = self._get_chainstore_response_key()
     if response_key is None:
       return False

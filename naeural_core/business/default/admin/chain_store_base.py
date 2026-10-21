@@ -26,6 +26,7 @@ TODO:
 
 
 from threading import RLock
+from ratio1.const.base import BCct
 
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
 
@@ -375,7 +376,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if version < local_version:
           return False
         if version == local_version:
-          signature_keys = {"EE_SIGN", "EE_SENDER", "EE_HASH", "EE_SIGN_CANON_V", "EE_ETH_SENDER", "EE_ETH_SIGN"}
+          signature_keys = {"EE_SIGN", "EE_SENDER", "EE_HASH", BCct.SIGN_CANON_V, "EE_ETH_SENDER", "EE_ETH_SIGN"}
           return ({key: item for key, item in value.items() if key not in signature_keys}
                   == {key: item for key, item in local.items() if key not in signature_keys})
     except Exception:

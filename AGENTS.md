@@ -404,3 +404,5 @@ Latest:
 - `2026-10-15`: Existing unversioned pipelines retain dAuth secret resolution after restart. Core rejects missing secret revisions on tracked/nonzero-revision pipelines; SDK omission is only for existing unversioned metadata, and dAuth enforces current CID/runner authorization. The first update captures immutable target and restoration secret revisions. Cross-stack restart coverage lives in Edge's `test_unversioned_secret_resolution.py`.
 
 - `2026-10-20`: Lifecycle reconciliation through SDK 3.5.59 leaves bundles on dAuth. CStore accepts registered dAuth signatures on current job-secret bundles for a registered coordinator, preserves coordinator-only public pointer signatures, and ignores node/EVM signature metadata only for identical-generation semantic retries. Run protected CStore lifecycle tests and Edge cross-stack custody tests.
+
+- `2026-10-21`: SDK signing metadata uses `BCct.SIGN_CANON_V` (`SIGN_CANON_V`); exclude that constant, not `EE_SIGN_CANON_V`, when comparing authenticated CStore publication retries.

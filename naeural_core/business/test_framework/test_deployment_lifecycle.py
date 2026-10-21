@@ -12,6 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from ratio1.const.base import BCct
 
 from test_chain_store_hsync import _ChainStoreRuntimeHarness, _hset_key, _hset_record
 
@@ -560,6 +561,7 @@ class ProtectedChainStoreTest(unittest.TestCase):
     self.assertTrue(store._set_value(key, value, local_sync_storage_op=True))
     # Repair/retry on another registered custodian keeps the same semantic value.
     second = dict(value, EE_SENDER="registry-other", EE_ETH_SENDER="0xother", EE_ETH_SIGN="eth2")
+    second[BCct.SIGN_CANON_V] = "v2"
     self.assertTrue(store._set_value(key, second, local_sync_storage_op=True))
     for changed in (dict(second, EE_SENDER="attacker"), dict(second, EE_SIGN="forged"),
                     dict(second, coordinator="attacker"), dict(second, job_secrets={"token": "changed"}),

@@ -438,7 +438,7 @@ class DeploymentLifecycle:
       prefix = "hs:" + hashlib.sha256(OBSERVATION_HKEY.encode()).hexdigest()[:10] + ":"
       success = True
       for field_name in (field + "|" + str(record["sequence"] % 8), field):
-        storage_key = prefix + base64.urlsafe_b64encode(field_name.encode()).decode().rstrip("=")
+        storage_key = prefix + base64.urlsafe_b64encode(field_name.encode()).decode()
         success = setter(storage_key, record, owner=self.node_addr, readonly=True,
                          peers=peers, include_default_peers=False, timeout=1, max_retries=0) and success
       if success:

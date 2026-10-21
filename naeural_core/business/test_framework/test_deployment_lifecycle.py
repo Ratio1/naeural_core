@@ -1,4 +1,5 @@
 """Offline tests of durable node admission, aborts and lifecycle observations."""
+import base64
 import collections
 import gc
 import importlib.util
@@ -261,6 +262,20 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.assertGreater(second["sequence"], first["sequence"])
     self.assertNotEqual(self.writes[0][0], self.writes[2][0])
     self.assertEqual(self.writes[1][0], self.writes[3][0])
+
+  def test_publication_keys_decode_without_restoring_base64_padding(self):
+    for attempt in ("deploy", "restore", "retire"):
+      for operation_id in ("operation", "operation1", "operation12"):
+        pipeline = config(action="retire" if attempt == "retire" else "start", attempt=attempt)
+        pipeline["DEEPLOY_OPERATION"]["operation_id"] = operation_id
+        self.lifecycle.admit(pipeline, "oracle", True)
+        self.publish()
+    for key, record, _ in self.writes:
+      with self.subTest(key=key):
+        # Match the production CStore decoder; the store test harness repairs padding.
+        field = base64.urlsafe_b64decode(key.split(":", 2)[2]).decode()
+        expected = record["operation_id"] + "|" + record["attempt"] + "|node"
+        self.assertIn(field, (expected, expected + "|" + str(record["sequence"] % 8)))
 
   def test_abort_is_published_immediately_after_ready(self):
     self.lifecycle.admit(config(), "oracle", True)

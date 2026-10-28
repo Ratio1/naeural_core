@@ -198,7 +198,30 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     )
 
   def _prepare_comm_config_instance(self, config_instance):
+    """Apply runtime MQTT options without changing the persisted config.
+
+    Parameters
+    ----------
+    config_instance : dict
+      Broker and topic settings for a central or local communicator.
+
+    Returns
+    -------
+    dict
+      Independent runtime parameters, including dAuth broker candidates only
+      when HOST matches the primary allocated in EE_MQTT_HOST. Explicit HOSTS
+      and unrelated local or custom broker configurations take precedence.
+    """
     config_instance = deepcopy(config_instance)
+    if (
+      "HOSTS" not in config_instance
+      and "HOSTS" not in (self._environment_variables or {})
+      and config_instance.get(ct.COMMS.HOST)
+      and config_instance[ct.COMMS.HOST] == self.__runtime_value("EE_MQTT_HOST")
+    ):
+      hosts = self.__runtime_value("EE_MQTT_HOSTS")
+      if hosts:
+        config_instance["HOSTS"] = hosts
     qos_overrides = [
       (
         ct.COMMS.COMMUNICATION_CTRL_CHANNEL,

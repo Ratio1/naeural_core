@@ -721,14 +721,16 @@ class _CmdAPIMixin(object):
 
   # STOP STREAM SECTION
   if True:
-    def _cmdapi_stop_stream(self, node_address=None, stream_name=None):
+    def _cmdapi_stop_stream(self, node_address=None, stream_name=None, command_content=None):
       node_address = node_address or self.node_addr
       stream_name = stream_name or self.get_stream_id()
-      self.cmdapi_register_command(node_address=node_address, command_type=COMMANDS.DELETE_CONFIG, command_content=stream_name)
+      if command_content is None:
+        command_content = stream_name
+      self.cmdapi_register_command(node_address=node_address, command_type=COMMANDS.DELETE_CONFIG, command_content=command_content)
       return
     
-    def cmdapi_stop_pipeline(self, node_address, name):
-      self._cmdapi_stop_stream(node_address=node_address, stream_name=name)
+    def cmdapi_stop_pipeline(self, node_address, name, command_content=None):
+      self._cmdapi_stop_stream(node_address=node_address, stream_name=name, command_content=command_content)
       return
     
     def cmdapi_stop_current_pipeline(self):

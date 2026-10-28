@@ -49,6 +49,55 @@ class _PolicyHarness:
 
 class TestCommunicationHeartbeatPolicy(unittest.TestCase):
 
+  def test_dauth_broker_candidates_follow_the_matching_primary(self):
+    """Pass dAuth JSON to the wrapper without mutating persisted settings."""
+    hosts = '["mqtt-b", "mqtt-c", "mqtt-d", "mqtt-a"]'
+    harness = _PolicyHarness({"EE_MQTT_HOST": "mqtt-b", "EE_MQTT_HOSTS": hosts})
+    config = {ct.COMMS.HOST: "mqtt-b", ct.COMMS.PORT: 8883}
+
+    prepared = harness.manager._prepare_comm_config_instance(config)
+
+    self.assertEqual(prepared["HOSTS"], hosts)
+    self.assertEqual(prepared[ct.COMMS.HOST], "mqtt-b")
+    self.assertNotIn("HOSTS", config)
+
+  def test_dauth_broker_candidates_preserve_custom_and_local_hosts(self):
+    """An unrelated MQTT connection never inherits the network's brokers."""
+    harness = _PolicyHarness({
+      "EE_MQTT_HOST": "mqtt-a", "EE_MQTT_HOSTS": '["mqtt-a", "mqtt-b"]',
+    })
+    for host in ("localhost", "custom-broker"):
+      with self.subTest(host=host):
+        prepared = harness.manager._prepare_comm_config_instance({ct.COMMS.HOST: host})
+        self.assertNotIn("HOSTS", prepared)
+
+  def test_dauth_broker_candidates_preserve_explicit_lists(self):
+    """Explicit empty lists also opt out of environment alternatives."""
+    harness = _PolicyHarness({
+      "EE_MQTT_HOST": "mqtt-a", "EE_MQTT_HOSTS": '["mqtt-a", "mqtt-b"]',
+    })
+    for hosts in ([], ["mqtt-a", "custom-fallback"]):
+      with self.subTest(hosts=hosts):
+        prepared = harness.manager._prepare_comm_config_instance({ct.COMMS.HOST: "mqtt-a", "HOSTS": hosts})
+        self.assertEqual(prepared["HOSTS"], hosts)
+
+  def test_environment_broker_opt_out_survives_communicator_config_merge(self):
+    """Generated upstream settings must not override COMMUNICATION_ENVIRONMENT."""
+    for hosts in ([], ["mqtt-a", "custom-fallback"]):
+      with self.subTest(hosts=hosts):
+        environment = {
+          "HOSTS": hosts, "EE_MQTT_HOST": "mqtt-a", "EE_MQTT_HOSTS": '["mqtt-a", "mqtt-b"]',
+        }
+        harness = _PolicyHarness(environment)
+        prepared = harness.manager._prepare_comm_config_instance({ct.COMMS.HOST: "mqtt-a"})
+        comm = BaseCommThread.__new__(BaseCommThread)
+        comm._default_config = {}
+        comm._upstream_config = prepared
+        comm.P = lambda *args, **kwargs: None
+        env_config = comm._merge_prepare_config(delta_config=environment)
+        effective = comm._merge_prepare_config(default_config=env_config)
+        self.assertEqual(effective["HOSTS"], hosts)
+
   def test_channel_qos_overrides_preserve_channel_topics(self):
     harness = _PolicyHarness({
       "EE_MQTT_HEARTBEAT_QOS": "1",

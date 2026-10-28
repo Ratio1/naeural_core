@@ -316,21 +316,50 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return self.__namespace_for_key(key, ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"))
 
   def __revoked_secret(self, key, snapshot=None):
-    """Preserve revocation markers and reject payload resurrection after revoke."""
+    """Check whether a secret revision has a local or incoming revocation.
+
+    Parameters
+    ----------
+    key : str
+      Composed secret payload or revocation-marker key.
+    snapshot : dict, optional
+      Incoming namespace records considered alongside local storage.
+
+    Returns
+    -------
+    bool
+      Whether a populated marker exists under the exact HSET key encoding.
+    """
     if self.__secret_namespace(key) != "DAUTH_JOB_SECRET_REVISIONS":
       return False
     prefix = self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")
     field = self.base64_to_str(key[len(prefix):], url_safe=True)
-    marker = key if field.endswith("|revoked") else prefix + self.str_to_base64(field + "|revoked", url_safe=True).rstrip("=")
+    # Preserve Base64 padding, matching the key written by chainstore_hset.
+    marker = key if field.endswith("|revoked") else prefix + self.str_to_base64(field + "|revoked", url_safe=True)
     return bool(self.__chain_storage.get(marker, {}).get(self.CS_VALUE)) or bool((snapshot or {}).get(marker, {}).get(self.CS_VALUE))
 
   def __erased_secret(self, key, value, snapshot=None):
-    """Accept only the exact redacted tombstone bound to its revocation marker."""
+    """Validate a redacted tombstone against its exact revocation marker.
+
+    Parameters
+    ----------
+    key : str
+      Composed secret payload key.
+    value : object
+      Candidate redacted tombstone; plaintext fields are not permitted.
+    snapshot : dict, optional
+      Incoming namespace records considered alongside local storage.
+
+    Returns
+    -------
+    bool
+      Whether the tombstone identity matches a local or incoming marker.
+    """
     if not isinstance(value, dict) or set(value) != {"job_id", "revision", "revoked"} or value.get("revoked") is not True:
       return False
     prefix = self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")
     field = self.base64_to_str(key[len(prefix):], url_safe=True)
-    marker_key = prefix + self.str_to_base64(field + "|revoked", url_safe=True).rstrip("=")
+    marker_key = prefix + self.str_to_base64(field + "|revoked", url_safe=True)
     marker = self.__chain_storage.get(marker_key, {}).get(self.CS_VALUE) or (snapshot or {}).get(marker_key, {}).get(self.CS_VALUE)
     return isinstance(marker, dict) and marker.get("job_id") == value["job_id"] and marker.get("revision") == value["revision"]
 

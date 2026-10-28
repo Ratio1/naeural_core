@@ -225,7 +225,9 @@ token capability.
 
 Revision fields ending in `|revoked` are immutable once populated. Identical
 retransmission is allowed; deletion/change is rejected. Revocation wins over
-stale payload snapshots. Only deletion or the exact redacted
+stale payload snapshots. Marker lookups preserve the writer's URL-safe Base64
+padding so direct writes and snapshot repair find the same persisted keys.
+Only deletion or the exact redacted
 `{job_id, revision, revoked: true}` tombstone matching the revocation marker is
 accepted for a revoked payload field. No plaintext secret can be restored by
 late direct writes or merge repair.

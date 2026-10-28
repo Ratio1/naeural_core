@@ -1333,7 +1333,18 @@ class BasePluginExecutor(
     return
 
   def add_inputs(self, inp):
-    # RUNNING IN MAIN THREAD (MAIN LOOP)
+    """Admit inputs without running memory scans on the delivery thread.
+
+    Parameters
+    ----------
+    inp : dict
+      Upstream input snapshot, optionally copied before enqueueing.
+
+    Notes
+    -----
+    Overflow diagnostics use counters and are limited to once per minute.
+    The bounded deque retains its existing oldest-input eviction behavior.
+    """
     if self.is_outside_working_hours:
       # if outside working hours do not add data just skip it
       return
@@ -1367,30 +1378,22 @@ class BasePluginExecutor(
         # now we log the issue for maintenance!
         self._last_logged_queue_full_count = self.queue_full_delays_count
         self._last_logged_queue_full_time = time()
-        # now we measure queue size
-        queue_size_gb = self.get_plugin_queue_memory() / (1024**3)
-        plugin_size_gb = self.get_plugin_used_memory() / (1024**3)
-        # end measure queue size
+        self.queue_full_warning = True
+        # Recursive memory scans can stall delivery precisely when overloaded.
         try:
-          info = "Queue ovrflw {} (q:{}), Lps {:.1f} c/cfg: {:.1f}/{:.0f}, Q/P: {:.3f}/{:.3f} GB, lost: {}".format(
+          info = "Queue ovrflw {} (q:{}), Lps {:.1f} c/cfg: {:.1f}/{:.0f}, lost: {}".format(
             self.queue_full_delays_count, self.cfg_max_inputs_queue_size,
             self.actual_plugin_resolution, self.get_plugin_loop_resolution(), self.cfg_plugin_loop_resolution,
-            queue_size_gb, plugin_size_gb,
             self.lost_inputs_count,
           )
         except:
-          info = "Queue ovrflw {} (q:{}), Lps {} c/cfg: {}/{}, Q/P: {}/{} GB, lost: {}".format(
+          info = "Queue ovrflw {} (q:{}), Lps {} c/cfg: {}/{}, lost: {}".format(
             self.queue_full_delays_count, self.cfg_max_inputs_queue_size,
             self.actual_plugin_resolution, self.get_plugin_loop_resolution(), self.cfg_plugin_loop_resolution,
-            queue_size_gb, plugin_size_gb,
             self.lost_inputs_count,
           )
 
         self.P(info, color='r')
-        PRC_QUEUE_EXCEED_TOTAL_MEMORY = 0.01
-        if queue_size_gb > PRC_QUEUE_EXCEED_TOTAL_MEMORY * self.log.total_memory:
-          self.P("WARNING: queue exceeds {:.0f}% of total memory size".format(
-            PRC_QUEUE_EXCEED_TOTAL_MEMORY * 100), color='r')
         msg = 'Queue overload in {}'.format(self)
         self._create_abnormal_notification(
           msg=msg,

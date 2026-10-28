@@ -406,3 +406,4 @@ Latest:
 - `2026-10-20`: Lifecycle reconciliation through SDK 3.5.59 leaves bundles on dAuth. CStore accepts registered dAuth signatures on current job-secret bundles for a registered coordinator, preserves coordinator-only public pointer signatures, and ignores node/EVM signature metadata only for identical-generation semantic retries. Run protected CStore lifecycle tests and Edge cross-stack custody tests.
 
 - `2026-10-21`: SDK signing metadata uses `BCct.SIGN_CANON_V` (`SIGN_CANON_V`); exclude that constant, not `EE_SIGN_CANON_V`, when comparing authenticated CStore publication retries.
+- `2026-10-22`: `BasePluginExecutor.add_inputs` uses counter-only overflow diagnostics, throttled to once per minute; never run recursive queue/plugin memory scans on the delivery thread. Explicit memory diagnostic methods retain their existing accounting boundaries. Run `test_plugin_queue_overflow.py` alongside `test_plugin_memory_scan.py` for this path.

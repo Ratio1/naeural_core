@@ -189,21 +189,24 @@ Larger follow-ups:
 
 ## Deployment lifecycle persistence and protected namespaces
 
-CStore writes now require the strict cache path: atomic pickle/metadata replace,
-file and directory fsync, and propagated failures before acknowledgment. A
-same-value retransmission rechecks persistence/replication. Confirmation counts
-use distinct authenticated transport senders from the actual target set. These
-are durable replica acknowledgments, not consensus, CAS, or distributed locking.
+Each accepted write saves the full store through the regular cache path after the
+persistence lock is released. Save failures are logged, not propagated, and the
+next accepted write saves again; an acknowledgment means the replica applied the
+write in memory, not that it reached disk. A same-value remote retransmission is
+acknowledged without another save; a same-value local write re-publishes and
+collects confirmations again. Confirmation counts use distinct authenticated
+transport senders from the actual target set. These are replica acknowledgments,
+not consensus, CAS, or distributed locking.
 
-The writer's local copy is persisted before broadcast. Self is excluded from the
+The writer's local copy is applied and saved before broadcast. Self is excluded from the
 remote target set. A positive configured `MIN_CONFIRMATIONS` takes precedence;
 otherwise the threshold is `floor(remote target count / 2) + 1`. With no remote
 targets a local-origin write returns False before persistence; there is no
 local-only successful acceptance mode. A configured minimum above the reachable
 target count times out. Explicit targets are exclusive only when
 `include_default_peers=False`. The same rules apply after a same-value retry.
-These acknowledgments preserve CStore records across process restarts with the
-same data volume; they do not replicate R1FS content or elect a replacement
+Records saved to disk survive process restarts with the same data volume; these
+acknowledgments do not replicate R1FS content or elect a replacement
 coordinator. Generic `value=None` deletes retain the historical asynchronous
 confirmation behavior; lifecycle secret erasure uses a retained non-null
 revocation marker and redacted tombstone, which receive normal confirmations.

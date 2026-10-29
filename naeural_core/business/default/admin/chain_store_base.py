@@ -288,8 +288,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   
   def __save_chain_storage(self):
-    with self.__persistence_lock:
-      self.cacheapi_save_pickle(self.deepcopy(self.__chain_storage), verbose=True, strict=True)
+    # Callers persist after releasing the persistence lock so disk I/O never
+    # blocks other writers or confirmations. Save failures are logged by the
+    # cache helper and the next accepted write saves the full store again.
+    self.cacheapi_save_pickle(self.__chain_storage, verbose=True)
     self.__last_chain_storage_save = self.time()
     return
 
@@ -604,8 +606,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         merged_fields += 1
         changed = True
 
-      if changed:
-        self.__save_chain_storage()
+    if changed:
+      self.__save_chain_storage()
     return merged_fields
   
   ## START setter-getter methods
@@ -723,6 +725,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     When ``value`` is ``None``, the key is deleted locally. The existing
     delete semantics and related trade-offs described below are preserved.
+    The caller must hold the persistence lock and save the chain storage
+    after releasing it.
     """
     # key should be composed of the chainstore app identity and the actual key
     # so if two chainstore apps are running on the same node, they will not overwrite each other
@@ -738,7 +742,6 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # delete. If confirmed-deletes are needed in the future, introduce a dedicated CS_DELETE
       # operation with its own confirmation tracking (e.g. a __pending_deletes dict).
       self.__chain_storage.pop(chain_key, None)
-      self.__save_chain_storage()
       return
     self.__chain_storage[chain_key] = {
       self.CS_KEY       : key,
@@ -755,7 +758,6 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if local_sync_storage_op:
       # set the confirmations to -1 to indicate that the key is remote synced on this node
       self.__set_confirmations(key, -1) # set to -1 to indicate that the key is remote synced on this node
-    self.__save_chain_storage()
     return
 
 
@@ -905,12 +907,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               self.P(f" === Key {key} will be deleted (value=None)")
             need_store = True
           elif existing_value == value:
-            # Matching remote writes still need a durable copy before ACK.
+            # Matching remote writes are already applied locally.
             # Matching local writes must re-establish remote confirmation.
             if debug:
               self.P(f" === Key {key} stored by {existing_owner} has the same value")
             if local_sync_storage_op:
-              self.__save_chain_storage()
               return True
             # A previous timeout may have left only the local copy. Re-publish
             # and collect distinct peer confirmations instead of claiming success.
@@ -936,6 +937,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             include_default_peers=include_default_peers,
           )
       if need_store:
+        self.__save_chain_storage()
         if not local_sync_storage_op:
           # now send set-value (including confirmation request) to all
           op = {

@@ -411,12 +411,14 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     store._ChainStoreBasePlugin__exec_received_confirm(data, sender="peer2")
     self.assertEqual(store.storage["key"][store.CS_CONFIRMATIONS], 2)
 
-  def test_remote_retransmission_retries_failed_persistence(self):
+  def test_remote_write_saves_once_outside_persistence_lock(self):
     store = self.make_store()
-    store.cacheapi_save_pickle = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    lock = store._ChainStoreBasePlugin__persistence_lock
+    saves = []
+    store.cacheapi_save_pickle = lambda *args, **kwargs: saves.append(lock._is_owned())
     for _ in range(2):
-      with self.assertRaises(ValueError):
-        store._set_value("key", "value", owner="node", local_sync_storage_op=True)
+      self.assertTrue(store._set_value("key", "value", owner="node", local_sync_storage_op=True))
+    self.assertEqual(saves, [False])
 
   def test_old_ack_cannot_confirm_a_concurrent_replacement(self):
     from threading import Event, Thread

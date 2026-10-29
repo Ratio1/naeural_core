@@ -71,10 +71,15 @@ The signing node writes HSET `DEEPLOY_NODE_OPERATIONS`, fields:
 Snapshots contain operation/attempt/revision/coordinator, node/app identity,
 status, per-instance signature/ID/status/safe error, monotonically increasing
 sequence, and Unix `updated_at`. They are signed with
-`sign(record, add_data=True, use_digest=True)`. Ready observations continue at
-approximately ten-second intervals; stopped/failed unchanged observations stop
-after acknowledged publication. Sequence is persisted before publication.
-Consumers must verify signatures, expected node/operation identity, and freshness.
+`sign(record, add_data=True, use_digest=True)`. A snapshot is published only
+when its observable state changes, with a `PUBLISH_TIMEOUT` (15 s) confirmation
+wait, and is retried on the next pass until a write is confirmed. There is no
+periodic refresh. Once a ready snapshot of an attempt is confirmed, the journal
+marks it reported and nothing more is published for that attempt, including
+after a node restart, unless the coordinator stops or retires it; workload
+liveness after deployment comes from NetMon. Sequence is persisted before
+publication. Consumers must verify signatures and expected node/operation
+identity; `updated_at` is not a liveness signal.
 
 These are bounded recent snapshots, not a permanent event log. Tombstones and
 operation journal records are retained; operator retention must not discard aborts

@@ -19,6 +19,8 @@ from copy import deepcopy
 OPERATION_KEY = "DEEPLOY_OPERATION"
 SERVICE_KEY = "deeploy_lifecycle"
 OBSERVATION_HKEY = "DEEPLOY_NODE_OPERATIONS"
+# Seconds a report write waits for peer confirmation before the next pass retries it.
+PUBLISH_TIMEOUT = 15
 # Shared by lifecycle objects in this interpreter; recreating a journal reader
 # is not evidence that the process owning native plugin threads has exited.
 PROCESS_ID = uuid.uuid4().hex
@@ -382,6 +384,11 @@ class DeploymentLifecycle:
   def publish(self, setter, signer):
     """Persist, sign and retry node snapshots outside the main/plugin loops.
 
+    A snapshot is published only when its observable state changes, and is
+    retried until a write is confirmed. Once a ready snapshot of an attempt is
+    confirmed, nothing more is published for it unless the coordinator stops or
+    retires it: deployment reporting is over and NetMon owns workload liveness.
+
     Parameters
     ----------
     setter : callable
@@ -411,9 +418,10 @@ class DeploymentLifecycle:
               plugin = self.plugins.get((key, instance["signature"], instance["instance_id"]))
               if plugin is not None:
                 stopped_plugins.add(id(plugin))
+        elif record.get("ready_reported", False):
+          continue
         fingerprint = {name: value for name, value in record.items() if name not in ("sequence", "updated_at")}
-        last_time, last_value = self._published.get(key, (0, None))
-        if last_value == fingerprint and (time.time() - last_time < 10 or record["status"] in ("stopped", "failed") or not record.get("active", False)):
+        if self._published.get(key) == fingerprint:
           continue
         record["sequence"] += 1
         record["updated_at"] = time.time()
@@ -425,10 +433,13 @@ class DeploymentLifecycle:
         # identities. Release all aliases only after stop evidence is persisted.
         self.plugins = {key: plugin for key, plugin in self.plugins.items()
                         if id(plugin) not in stopped_plugins}
+    ready_reported = []
     for key, record, fingerprint in pending:
+      ready = record["status"] == "ready" and not record["aborted"]
       peers = record.pop("peers")
       record.pop("aborted")
       record.pop("active")
+      record.pop("ready_reported", None)
       for instance in record["instances"]:
         instance.pop("possibly_started", None)
         instance.pop("process_id", None)
@@ -440,9 +451,18 @@ class DeploymentLifecycle:
       for field_name in (field + "|" + str(record["sequence"] % 8), field):
         storage_key = prefix + base64.urlsafe_b64encode(field_name.encode()).decode()
         success = setter(storage_key, record, owner=self.node_addr, readonly=True,
-                         peers=peers, include_default_peers=False, timeout=1, max_retries=0) and success
+                         peers=peers, include_default_peers=False, timeout=PUBLISH_TIMEOUT,
+                         max_retries=0) and success
       if success:
-        self._published[key] = (time.time(), fingerprint)
+        self._published[key] = fingerprint
+        if ready:
+          ready_reported.append(key)
+    if ready_reported:
+      # Persist the end of reporting so a node restart does not re-announce it.
+      with self.lock:
+        for key in ready_reported:
+          self.records[key]["ready_reported"] = True
+        self._save()
     if observation_failed:
       # Preserve the worker's existing throttled error notification after all
       # independently observed jobs have had their publication opportunity.

@@ -158,7 +158,8 @@ class DeploymentLifecycleTest(unittest.TestCase):
       with patch.object(module.time, "time", return_value=now):
         with self.assertRaisesRegex(RuntimeError, "workload observation failed"):
           self.publish()
-    self.assertEqual(len(self.writes), 4)
+    # One confirmed ready snapshot (current + slot key); it is not refreshed.
+    self.assertEqual(len(self.writes), 2)
     self.assertTrue(all(value["app_id"] == "app" and value["status"] == "ready"
                         for _, value, _ in self.writes))
     self.assertEqual(self.lifecycle.records["broken|deploy"]["status"], "stopping")
@@ -287,6 +288,40 @@ class DeploymentLifecycleTest(unittest.TestCase):
     stopping = self.publish()
     self.assertEqual(stopping["status"], "stopping")
     self.assertGreater(stopping["sequence"], ready["sequence"])
+
+  def test_unchanged_observations_are_not_republished(self):
+    self.lifecycle.admit(config(), "oracle", True)
+    self.lifecycle.attach(config(), "WORKER", "worker", plugin())
+    self.assertEqual(self.publish()["status"], "starting")
+    written = len(self.writes)
+    with patch.object(module.time, "time", return_value=module.time.time() + 3600):
+      self.lifecycle.publish(lambda *args, **kwargs: self.fail("unchanged snapshot republished"),
+                             lambda *args, **kwargs: None)
+    self.assertEqual(len(self.writes), written)
+
+  def test_confirmed_ready_ends_reporting_across_restart(self):
+    self.lifecycle.admit(config(), "oracle", True)
+    self.lifecycle.attach(config(), "WORKER", "worker", plugin(ready=True))
+    self.assertEqual(self.publish()["status"], "ready")
+    self.assertTrue(all(kwargs["timeout"] == module.PUBLISH_TIMEOUT for _, _, kwargs in self.writes))
+    self.assertNotIn("ready_reported", self.writes[-1][1])
+    silent = lambda *args, **kwargs: self.fail("ready attempt reported again")
+    self.lifecycle.plugins[("operation|deploy", "WORKER", "worker")] = plugin(alive=False)
+    self.lifecycle.publish(silent, lambda *args, **kwargs: None)
+    self.lifecycle = DeploymentLifecycle(self.path, "node")
+    self.lifecycle.publish(silent, lambda *args, **kwargs: None)
+
+  def test_unconfirmed_ready_is_retried_until_confirmed(self):
+    self.lifecycle.admit(config(), "oracle", True)
+    self.lifecycle.attach(config(), "WORKER", "worker", plugin(ready=True))
+    first = self.publish(succeed=False)
+    second = self.publish()
+    self.assertEqual((first["status"], second["status"]), ("ready", "ready"))
+    self.assertGreater(second["sequence"], first["sequence"])
+    written = len(self.writes)
+    self.lifecycle.publish(lambda *args, **kwargs: self.fail("confirmed ready reported again"),
+                           lambda *args, **kwargs: None)
+    self.assertEqual(len(self.writes), written)
 
   def test_recent_snapshot_storage_is_bounded(self):
     self.lifecycle.admit(config(), "oracle", True)

@@ -25,7 +25,7 @@ TODO:
 """
 
 
-from threading import RLock
+from threading import Lock, RLock
 from ratio1.const.base import BCct
 
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
@@ -87,6 +87,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SNAPSHOT = "snapshot"
   CS_RESPONSE = "response"
   CS_SENDER = "sender"
+  CS_SAVE_RETRY_INTERVAL = 5  # seconds between retries of a failed chain storage save
   
   
   
@@ -100,6 +101,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     self.__ops = self.deque()
     self.__persistence_lock = RLock()
+    self.__save_lock = Lock()
+    self.__chain_storage_dirty = False
+    self.__last_chain_storage_save = 0
     
     try:
       self.__chain_storage = self.cacheapi_load_pickle(default={}, verbose=True)
@@ -288,11 +292,36 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   
   def __save_chain_storage(self):
-    # Callers persist after releasing the persistence lock so disk I/O never
-    # blocks other writers or confirmations. Save failures are logged by the
-    # cache helper and the next accepted write saves the full store again.
-    self.cacheapi_save_pickle(self.__chain_storage, verbose=True)
-    self.__last_chain_storage_save = self.time()
+    # Callers persist after releasing the persistence lock. Records are copied
+    # shallowly under that lock so concurrent writers and confirmations cannot
+    # change the store while it is pickled; the disk write runs outside it.
+    # The save lock keeps snapshots landing on disk in the order they were
+    # taken. A failed write marks the store dirty and process() retries it.
+    with self.__save_lock:
+      with self.__persistence_lock:
+        snapshot = {
+          key: {
+            field: list(value) if isinstance(value, list) else value
+            for field, value in record.items()
+          } if isinstance(record, dict) else record
+          for key, record in self.__chain_storage.items()
+        }
+        self.__chain_storage_dirty = False
+      self.__last_chain_storage_save = self.time()
+      try:
+        self.cacheapi_save_pickle(snapshot, verbose=False, strict=True)
+      except Exception as exc:
+        self.__chain_storage_dirty = True
+        self.P(f" === Chain storage save failed, will retry: {exc}", color='r')
+    return
+
+
+  def __maybe_retry_save(self):
+    if not self.__chain_storage_dirty:
+      return
+    if self.time() - self.__last_chain_storage_save < self.CS_SAVE_RETRY_INTERVAL:
+      return
+    self.__save_chain_storage()
     return
 
 
@@ -1435,4 +1464,5 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   def process(self):
     self.__maybe_refresh_chain_peers()
     self.__maybe_broadcast()
+    self.__maybe_retry_save()
     return 

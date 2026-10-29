@@ -420,6 +420,37 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
       self.assertTrue(store._set_value("key", "value", owner="node", local_sync_storage_op=True))
     self.assertEqual(saves, [False])
 
+  def test_save_writes_a_snapshot_not_the_live_store(self):
+    store = self.make_store()
+    saved = []
+    store.cacheapi_save_pickle = lambda obj, *args, **kwargs: saved.append(obj)
+    store._set_value("key", "value", owner="node", local_sync_storage_op=True)
+    live = store.storage["key"]
+    snapshot = saved[-1]["key"]
+    self.assertIsNot(saved[-1], store.storage)
+    self.assertIsNot(snapshot, live)
+    live["confirmed_peers"] = live.get("confirmed_peers", [])
+    live["confirmed_peers"].append("peer1")
+    self.assertNotIn("peer1", snapshot.get("confirmed_peers", []))
+
+  def test_failed_save_is_retried_from_process(self):
+    store = self.make_store()
+    attempts = []
+    def flaky_save(obj, *args, **kwargs):
+      attempts.append(obj)
+      if len(attempts) == 1:
+        raise OSError("disk full")
+    store.cacheapi_save_pickle = flaky_save
+    self.assertTrue(store._set_value("key", "value", owner="node", local_sync_storage_op=True))
+    self.assertTrue(store._ChainStoreBasePlugin__chain_storage_dirty)
+    store._ChainStoreBasePlugin__maybe_retry_save()
+    self.assertEqual(len(attempts), 1)
+    store._now += store.CS_SAVE_RETRY_INTERVAL
+    store._ChainStoreBasePlugin__maybe_retry_save()
+    self.assertEqual(len(attempts), 2)
+    self.assertIn("key", attempts[-1])
+    self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)
+
   def test_old_ack_cannot_confirm_a_concurrent_replacement(self):
     from threading import Event, Thread
     store = self.make_store()

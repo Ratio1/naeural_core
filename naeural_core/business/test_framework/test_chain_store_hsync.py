@@ -3,7 +3,7 @@ import copy
 import hashlib
 import json
 import unittest
-from threading import RLock
+from threading import Lock, RLock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -232,6 +232,9 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._now = 0.0
     self._ChainStoreBasePlugin__chain_storage = copy.deepcopy(storage or {})
     self._ChainStoreBasePlugin__persistence_lock = RLock()
+    self._ChainStoreBasePlugin__save_lock = Lock()
+    self._ChainStoreBasePlugin__chain_storage_dirty = False
+    self._ChainStoreBasePlugin__last_chain_storage_save = 0
     self._ChainStoreBasePlugin__chain_peers = list(default_peers or [])
     self._ChainStoreBasePlugin__pending_hsync = {}
     self._ChainStoreBasePlugin__last_chain_peers_refresh = self._now

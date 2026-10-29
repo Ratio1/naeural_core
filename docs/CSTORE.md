@@ -189,10 +189,12 @@ Larger follow-ups:
 
 ## Deployment lifecycle persistence and protected namespaces
 
-Each accepted write saves the full store through the regular cache path after the
-persistence lock is released. Save failures are logged, not propagated, and the
-next accepted write saves again; an acknowledgment means the replica applied the
-write in memory, not that it reached disk. A same-value remote retransmission is
+Each accepted write still saves the full store before returning (and, for remote
+writes, before the acknowledgment is sent): records are copied shallowly under the
+persistence lock, then the copy is pickled, fsynced and atomically replaced
+outside it, so disk I/O no longer blocks other writers or confirmations. A failed
+save is logged and retried from `process()`; it never fails the write, so an
+acknowledgment means the replica applied the write, not that it reached disk. A same-value remote retransmission is
 acknowledged without another save; a same-value local write re-publishes and
 collects confirmations again. Confirmation counts use distinct authenticated
 transport senders from the actual target set. These are replica acknowledgments,

@@ -63,7 +63,7 @@ def _hset_index(hkey):
 
 
 def _hset_key(hkey, field):
-  encoded = base64.urlsafe_b64encode(field.encode("utf-8")).decode("utf-8").rstrip("=")
+  encoded = base64.urlsafe_b64encode(field.encode("utf-8")).decode("utf-8")
   return _hset_index(hkey) + encoded
 
 
@@ -261,7 +261,7 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
   def str_to_base64(value, url_safe=True):  # pylint: disable=unused-argument
     raw = value.encode("utf-8")
     encoded = base64.urlsafe_b64encode(raw) if url_safe else base64.b64encode(raw)
-    return encoded.decode("utf-8").rstrip("=")
+    return encoded.decode("utf-8")
 
   @staticmethod
   def base64_to_str(value, url_safe=True):  # pylint: disable=unused-argument
@@ -341,6 +341,16 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
 
 
 class TestChainStoreHsync(unittest.TestCase):
+  def test_hash_key_helpers_match_production_writer_padding(self):
+    writer = _PeerSelectionHarness()
+    writer.str_to_base64 = lambda value, **kwargs: base64.urlsafe_b64encode(value.encode("utf-8")).decode("utf-8")
+    writer.get_hash = _ChainStoreRuntimeHarness.get_hash
+    for field in ("7|revision|revoked", "7|revisionx|revoked", "7|revisionxx|revoked"):
+      with self.subTest(field=field):
+        expected = writer._BasePluginAPIMixin__hset_key("DAUTH_JOB_SECRET_REVISIONS", field)
+        self.assertEqual(_hset_key("DAUTH_JOB_SECRET_REVISIONS", field), expected)
+        self.assertEqual(_hset_index("DAUTH_JOB_SECRET_REVISIONS") + _ChainStoreRuntimeHarness.str_to_base64(field), expected)
+
   def test_default_peer_refresh_uses_summary_control_liveness(self):
     requester = _ChainStoreRuntimeHarness("peer-requester")
     requester.bc = _WhitelistBlockEngine(["peer-1", "peer-2"])

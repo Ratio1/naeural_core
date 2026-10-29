@@ -617,26 +617,33 @@ class ProtectedChainStoreTest(unittest.TestCase):
     self.assertEqual(store._ChainStoreBasePlugin__export_hset_snapshot("players"), {})
 
   def test_revoked_revision_cannot_be_resurrected_by_stale_snapshot(self):
-    store = self.store()
-    hkey = "DAUTH_JOB_SECRET_REVISIONS"
-    marker_key, marker = _hset_record(hkey, "7|revision|revoked", {"job_id": "7", "revision": "revision"}, "oracle")
-    payload_key, payload = _hset_record(hkey, "7|revision", {"secret": "old"}, "oracle")
-    store.storage[marker_key] = marker
-    store._ChainStoreBasePlugin__merge_hset_snapshot(hkey, {payload_key: payload})
-    self.assertNotIn(payload_key, store.storage)
-    self.assertEqual(store.storage[marker_key][store.CS_VALUE], marker[store.CS_VALUE])
-    self.assertFalse(store._set_value(marker_key, None, owner="oracle", local_sync_storage_op=True))
-    self.assertFalse(store._set_value(payload_key, {"secret": "old"}, owner="oracle", local_sync_storage_op=True))
+    for revision in ("revision", "revisionx", "revisionxx"):
+      with self.subTest(revision=revision):
+        store = self.store()
+        hkey = "DAUTH_JOB_SECRET_REVISIONS"
+        marker_key, marker = _hset_record(hkey, "7|" + revision + "|revoked", {"job_id": "7", "revision": revision}, "oracle")
+        payload_key, payload = _hset_record(hkey, "7|" + revision, {"secret": "old"}, "oracle")
+        store.storage[marker_key] = marker
+        self.assertFalse(store._set_value(payload_key, {"secret": "old"}, owner="oracle", local_sync_storage_op=True))
+        store._ChainStoreBasePlugin__merge_hset_snapshot(hkey, {payload_key: payload})
+        self.assertNotIn(payload_key, store.storage)
+        self.assertEqual(store.storage[marker_key][store.CS_VALUE], marker[store.CS_VALUE])
+        self.assertFalse(store._set_value(marker_key, None, owner="oracle", local_sync_storage_op=True))
 
   def test_snapshot_revocation_wins_regardless_of_field_order(self):
-    store = self.store()
-    hkey = "DAUTH_JOB_SECRET_REVISIONS"
-    marker_key, marker = _hset_record(hkey, "7|revision|revoked", {"job_id": "7", "revision": "revision"}, "oracle")
-    payload_key, payload = _hset_record(hkey, "7|revision", {"secret": "old"}, "oracle")
-    store.storage[payload_key] = payload
-    store._ChainStoreBasePlugin__merge_hset_snapshot(hkey, {payload_key: payload, marker_key: marker})
-    self.assertNotIn(payload_key, store.storage)
-    self.assertIn(marker_key, store.storage)
+    for marker_first in (False, True):
+      with self.subTest(marker_first=marker_first):
+        store = self.store()
+        hkey = "DAUTH_JOB_SECRET_REVISIONS"
+        marker_key, marker = _hset_record(hkey, "7|revisionx|revoked", {"job_id": "7", "revision": "revisionx"}, "oracle")
+        payload_key, payload = _hset_record(hkey, "7|revisionx", {"secret": "old"}, "oracle")
+        store.storage[payload_key] = payload
+        snapshot = {payload_key: payload, marker_key: marker}
+        if marker_first:
+          snapshot = dict(reversed(list(snapshot.items())))
+        store._ChainStoreBasePlugin__merge_hset_snapshot(hkey, snapshot)
+        self.assertNotIn(payload_key, store.storage)
+        self.assertIn(marker_key, store.storage)
 
   def test_signed_sequence_prevents_slot_regression_and_forged_sequence(self):
     store = self.store()
@@ -660,15 +667,23 @@ class ProtectedChainStoreTest(unittest.TestCase):
     self.assertNotIn(key, store.storage)
 
   def test_revocation_retry_and_exact_erased_tombstone_are_idempotent(self):
-    store = self.store()
-    marker_key = _hset_key("DAUTH_JOB_SECRET_REVISIONS", "7|revision|revoked")
-    marker = {"job_id": "7", "revision": "revision"}
-    for _ in range(2):
-      self.assertTrue(store._set_value(marker_key, marker, owner="oracle", local_sync_storage_op=True))
-    payload_key = _hset_key("DAUTH_JOB_SECRET_REVISIONS", "7|revision")
-    tombstone = dict(marker, revoked=True)
-    self.assertTrue(store._set_value(payload_key, tombstone, owner="oracle", local_sync_storage_op=True))
-    self.assertFalse(store._set_value(payload_key, dict(tombstone, secret="leak"), owner="oracle", local_sync_storage_op=True))
+    for revision in ("revision", "revisionx", "revisionxx"):
+      with self.subTest(revision=revision):
+        store = self.store()
+        hkey = "DAUTH_JOB_SECRET_REVISIONS"
+        marker_key = _hset_key(hkey, "7|" + revision + "|revoked")
+        marker = {"job_id": "7", "revision": revision}
+        for _ in range(2):
+          self.assertTrue(store._set_value(marker_key, marker, owner="oracle", local_sync_storage_op=True))
+        self.assertFalse(store._set_value(marker_key, dict(marker, revision="other"), owner="oracle", local_sync_storage_op=True))
+        payload_key = _hset_key(hkey, "7|" + revision)
+        tombstone = dict(marker, revoked=True)
+        self.assertTrue(store._set_value(payload_key, tombstone, owner="oracle", local_sync_storage_op=True))
+        self.assertFalse(store._set_value(payload_key, dict(tombstone, secret="leak"), owner="oracle", local_sync_storage_op=True))
+        store.storage.pop(payload_key)
+        _, erased = _hset_record(hkey, "7|" + revision, tombstone, "oracle")
+        store._ChainStoreBasePlugin__merge_hset_snapshot(hkey, {payload_key: erased})
+        self.assertEqual(store.storage[payload_key][store.CS_VALUE], tombstone)
 
   def test_signed_operation_requires_registered_coordinator(self):
     store = self.store()

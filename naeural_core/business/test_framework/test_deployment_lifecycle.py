@@ -262,8 +262,9 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.lifecycle = DeploymentLifecycle(self.path, "node")
     second = self.publish()
     self.assertGreater(second["sequence"], first["sequence"])
-    self.assertNotEqual(self.writes[0][0], self.writes[2][0])
-    self.assertEqual(self.writes[1][0], self.writes[3][0])
+    # The unconfirmed recent-slot write skips the current-snapshot write.
+    self.assertEqual(len(self.writes), 3)
+    self.assertNotEqual(self.writes[0][0], self.writes[1][0])
 
   def test_publication_keys_decode_without_restoring_base64_padding(self):
     for attempt in ("deploy", "restore", "retire"):
@@ -322,6 +323,20 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.lifecycle.publish(lambda *args, **kwargs: self.fail("confirmed ready reported again"),
                            lambda *args, **kwargs: None)
     self.assertEqual(len(self.writes), written)
+
+  def test_stop_and_failure_reports_are_written_first(self):
+    def pipeline(operation_id, action="start"):
+      result = config(action)
+      result["NAME"] = operation_id
+      result["DEEPLOY_OPERATION"]["operation_id"] = operation_id
+      return result
+    for operation_id in ("operation", "stopped", "failed"):
+      self.lifecycle.admit(pipeline(operation_id), "oracle", True)
+    self.lifecycle.admit(pipeline("stopped", "stop"), "oracle", True)
+    self.lifecycle.fail(pipeline("failed"))
+    self.publish(succeed=False)
+    self.assertEqual([record["operation_id"] for _, record, _ in self.writes],
+                     ["stopped", "failed", "operation"])
 
   def test_recent_snapshot_storage_is_bounded(self):
     self.lifecycle.admit(config(), "oracle", True)
@@ -408,7 +423,9 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.assertFalse(self.lifecycle.retire("app", previous, operation, "oracle", True))
     self.assertTrue(self.lifecycle.records["operation|deploy"]["active"])
     self.assertFalse(self.lifecycle.records["operation|retire"]["active"])
-    observed = self.publish()
+    self.publish()
+    # The rejection is a failure report, so it is written before the live deploy.
+    observed = next(record for _, record, _ in self.writes if record["attempt"] == "retire")
     self.assertEqual(observed["status"], "failed")
     self.assertEqual(observed["error"]["code"], "CONFIGURATION_REJECTED")
 

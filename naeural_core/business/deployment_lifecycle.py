@@ -433,6 +433,9 @@ class DeploymentLifecycle:
         # identities. Release all aliases only after stop evidence is persisted.
         self.plugins = {key: plugin for key, plugin in self.plugins.items()
                         if id(plugin) not in stopped_plugins}
+    # Stop and failure reports drive coordinator decisions; do not queue them
+    # behind writes that may each wait PUBLISH_TIMEOUT for unreachable peers.
+    pending.sort(key=lambda item: not (item[1]["aborted"] or item[1]["status"] == "failed"))
     ready_reported = []
     for key, record, fingerprint in pending:
       ready = record["status"] == "ready" and not record["aborted"]
@@ -450,9 +453,10 @@ class DeploymentLifecycle:
       success = True
       for field_name in (field + "|" + str(record["sequence"] % 8), field):
         storage_key = prefix + base64.urlsafe_b64encode(field_name.encode()).decode()
-        success = setter(storage_key, record, owner=self.node_addr, readonly=True,
-                         peers=peers, include_default_peers=False, timeout=PUBLISH_TIMEOUT,
-                         max_retries=0) and success
+        # One unconfirmed write already fails the snapshot; skip the second wait.
+        success = success and setter(storage_key, record, owner=self.node_addr, readonly=True,
+                                     peers=peers, include_default_peers=False,
+                                     timeout=PUBLISH_TIMEOUT, max_retries=0)
       if success:
         self._published[key] = fingerprint
         if ready:

@@ -73,8 +73,9 @@ status, per-instance signature/ID/status/safe error, monotonically increasing
 sequence, and Unix `updated_at`. They are signed with
 `sign(record, add_data=True, use_digest=True)`. A snapshot is published only
 when its observable state changes, with a `PUBLISH_TIMEOUT` (15 s) confirmation
-wait, and is retried on the next pass until a write is confirmed. There is no
-periodic refresh. Once a ready snapshot of an attempt is confirmed, the journal
+wait, and is retried on the next pass until a write is confirmed. Stop and failure
+snapshots are written first in each pass, and a snapshot's second field is
+skipped once its first write is unconfirmed. There is no periodic refresh. Once a ready snapshot of an attempt is confirmed, the journal
 marks it reported and nothing more is published for that attempt, including
 after a node restart, unless the coordinator stops or retires it; workload
 liveness after deployment comes from NetMon. Sequence is persisted before

@@ -24,6 +24,38 @@ UNUSEFULL_HB_KEYS = [
   ct.HB.TIMERS,
 ]
 
+# Fields kept in every stored heartbeat except each node's newest one, which
+# stays complete. These are the values NetMon reads from history plus resource
+# numbers useful when debugging the last two hours. Any other field is dropped
+# from history, so a new time-series field must be added here.
+HISTORY_HB_KEYS = (
+  ct.HB.CURRENT_TIME,
+  ct.HB.RECEIVED_TIME,
+  ct.PAYLOAD_DATA.EE_TIMESTAMP,
+  ct.PAYLOAD_DATA.EE_TIMEZONE,
+  ct.HB.CPU_USED,
+  ct.HB.AVAILABLE_MEMORY,
+  ct.HB.GPUS,
+  ct.HB.DEVICE_STATUS,
+  ct.HB.TEMPERATURE_INFO,
+  ct.HB.UPTIME,
+  ct.HB.PROCESS_MEMORY,
+  ct.HB.MACHINE_MEMORY,
+  ct.HB.AVAILABLE_DISK,
+  ct.HB.TOTAL_DISK,
+  ct.HB.COMM_INFO.IN_KB,
+  ct.HB.COMM_INFO.OUT_KB,
+  ct.HB.SERVING_PIDS,
+  ct.HB.NR_INFERENCES,
+  ct.HB.NR_PAYLOADS,
+  ct.HB.NR_STREAMS_DATA,
+  ct.HB.IS_ALERT_RAM,
+  ct.HB.EE_HB_TIME,
+)
+
+# Nodes silent for longer than this keep only their newest heartbeat.
+HISTORY_OFFLINE_TRIM_SECONDS = 24 * 60 * 60
+
 class NetMonCt:
   PIPELINES = 'pipelines'
   PLUGINS_STATUSES = 'plugins_statuses'
@@ -318,13 +350,15 @@ class NetworkMonitor(DecentrAIObject):
         # end for sort required entries
 
         for addr_no_prefix in new_network_heartbeats:
-          for hb in new_network_heartbeats[addr_no_prefix][:-1]:
-            self.__pop_repeating_info_from_heartbeat(hb)
-          # endfor pop repeating info
+          heartbeats = new_network_heartbeats[addr_no_prefix]
+          if self.__heartbeat_age_seconds(heartbeats[-1]) > HISTORY_OFFLINE_TRIM_SECONDS:
+            heartbeats = heartbeats[-1:]
+          # also compacts files saved before HISTORY_HB_KEYS existed
+          heartbeats[:-1] = [self.__compact_history_heartbeat(hb) for hb in heartbeats[:-1]]
           for key_to_delete in UNUSEFULL_HB_KEYS:
-            new_network_heartbeats[addr_no_prefix][-1].pop(key_to_delete, None)
-            
-          new_network_heartbeats[addr_no_prefix] = deque(new_network_heartbeats[addr_no_prefix], maxlen=self.HB_HISTORY)
+            heartbeats[-1].pop(key_to_delete, None)
+
+          new_network_heartbeats[addr_no_prefix] = deque(heartbeats, maxlen=self.HB_HISTORY)
         # endfor pop repeating info
 
         self.__network_heartbeats = new_network_heartbeats
@@ -358,53 +392,67 @@ class NetworkMonitor(DecentrAIObject):
     return self.__blockchain_manager.node_address_to_eth_address(addr)
 
 
-  def __pop_repeating_info_from_heartbeat(self, hb):
-    """This method will remove the extra info from the heartbeat that is not required for time series analysis"""
-    hb.pop(ct.HB.ACTIVE_PLUGINS, None)
-    hb.pop(ct.HB.CONFIG_STREAMS, None)
-    hb.pop(ct.HB.DCT_STATS, None)
-    hb.pop(ct.HB.COMM_STATS, None)
-    
-    hb.pop(ct.HB.R1FS_ID, None)
-    hb.pop(ct.HB.R1FS_ONLINE, None)
+  def __compact_history_heartbeat(self, hb):
+    """
+    Build the reduced heartbeat kept in history.
 
-    hb.pop(ct.HB.EE_WHITELIST, None)
-    hb.pop(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, None)
+    Parameters
+    ----------
+    hb : dict
+      Stored heartbeat that is no longer the node's newest one.
 
-    hb.pop(ct.HB.TIMERS, None)
-    hb.pop(ct.HB.DEVICE_LOG, None)
-    hb.pop(ct.HB.ERROR_LOG, None)
+    Returns
+    -------
+    dict
+      New dict holding only `HISTORY_HB_KEYS`. Values are not copied.
 
-    hb.pop(ct.PAYLOAD_DATA.EE_VERSION, None)
-    hb.pop(ct.HB.LOGGER_VERSION, None)
-    hb.pop(ct.HB.VERSION, None)
-    hb.pop(ct.HB.PY_VER, None)
-    hb.pop(ct.HB.HEARTBEAT_VERSION, None)
+    Notes
+    -----
+    Keys are taken from `HISTORY_HB_KEYS`, so every history heartbeat shares
+    the same key objects in memory and in the pickled file, instead of the
+    per-heartbeat strings created by `json.loads`.
+    """
+    compact_hb = {key: hb[key] for key in HISTORY_HB_KEYS if key in hb}
+    temperature_info = compact_hb.get(ct.HB.TEMPERATURE_INFO)
+    if isinstance(temperature_info, dict) and "message" in temperature_info:
+      # The sensor status text is one of a few fixed messages; readings stay.
+      compact_hb[ct.HB.TEMPERATURE_INFO] = {
+        key: value for key, value in temperature_info.items() if key != "message"
+      }
+    return compact_hb
 
-    hb.pop(ct.HB.GIT_BRANCH, None)
-    hb.pop(ct.HB.CONDA_ENV, None)
-    hb.pop(ct.HB.CPU, None)
-    hb.pop(ct.HB.CPU_NR_CORES, None)
-    hb.pop(ct.HB.DEFAULT_CUDA, None)
-    hb.pop(ct.HB.GPU_INFO, None)
-    hb.pop(ct.HB.MACHINE_IP, None)
-    hb.pop(ct.HB.SECURED, None)
-    hb.pop(ct.HB.EE_IS_SUPER, None)
-    hb.pop(ct.HB.DID, None)
-    hb.pop(ct.HB.R1FS_RELAY, None)
-    hb.pop(ct.HB.COMM_RELAY, None)
 
-    hb.pop(ct.PAYLOAD_DATA.EE_ID, None)
-    hb.pop(ct.PAYLOAD_DATA.INITIATOR_ID, None)
-    hb.pop(ct.PAYLOAD_DATA.EE_IS_ENCRYPTED, None)
-    hb.pop(ct.PAYLOAD_DATA.EE_EVENT_TYPE, None)
-    hb.pop(ct.PAYLOAD_DATA.EE_FORMATTER, None)
+  def __heartbeat_age_seconds(self, hb, dt_now=None):
+    """
+    Return the seconds elapsed since a heartbeat was received.
 
-    # Pop all tags starting with EE_NT
-    for key in list(hb.keys()):
-      if key and key.startswith(ct.HB.PREFIX_EE_NODETAG):
-        hb.pop(key, None)
-    return
+    Parameters
+    ----------
+    hb : dict
+      Stored heartbeat.
+    dt_now : datetime, optional
+      Reference local time. Defaults to now.
+
+    Returns
+    -------
+    float
+      Elapsed seconds, using `RECEIVED_TIME` in local time when present and
+      the sender's `EE_TIMESTAMP` and timezone otherwise.
+    """
+    ts = hb.get(ct.HB.RECEIVED_TIME)
+    tz = self.log.timezone
+
+    if ts is None:
+      # if heartbeat is too old, we can't know when it was received
+      # so we use the timestamp of the heartbeat
+      ts = hb[ct.PAYLOAD_DATA.EE_TIMESTAMP]
+      tz = hb.get(ct.PAYLOAD_DATA.EE_TIMEZONE)
+
+    dt_remote_to_local = self.log.utc_to_local(ts, tz, fmt=ct.HB.TIMESTAMP_FORMAT)
+    if dt_now is None:
+      dt_now = dt.now()
+    return dt_now.timestamp() - dt_remote_to_local.timestamp()
+
 
   def __pop_repeating_info_from_previous_heartbeat(self, addr):
     __addr_no_prefix = self.__remove_address_prefix(addr)
@@ -504,12 +552,11 @@ class NetworkMonitor(DecentrAIObject):
     Return a compacted replacement for a historical heartbeat.
 
     Do not mutate the existing stored dict in-place: readers may already hold a
-    reference returned by ``network_node_last_heartbeat`` / history helpers. A
-    shallow dict copy lets us drop bulky keys cheaply, then we only deepcopy the
+    reference returned by ``network_node_last_heartbeat`` / history helpers. The
+    compact dict keeps only ``HISTORY_HB_KEYS``, then we only deepcopy the
     smaller retained values to avoid sharing nested objects with old readers.
     """
-    hb_compact = dict(hb)
-    self.__pop_repeating_info_from_heartbeat(hb_compact)
+    hb_compact = self.__compact_history_heartbeat(hb)
     return {
       key: deepcopy(value)
       for key, value in hb_compact.items()
@@ -2252,6 +2299,29 @@ class NetworkMonitor(DecentrAIObject):
       return ret
     
     
+    def _trim_offline_nodes_history(self):
+      """
+      Keep only the newest heartbeat of nodes silent for over a day.
+
+      Returns
+      -------
+      None
+
+      Notes
+      -----
+      Runs before each save, so nodes that go offline while the process is
+      running stop holding two hours of history in memory and in `db.pkl`.
+      Loading applies the same rule in `_set_network_heartbeats`.
+      """
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        for hb_deque in self.__network_heartbeats.values():
+          if len(hb_deque) > 1 and self.__heartbeat_age_seconds(hb_deque[-1]) > HISTORY_OFFLINE_TRIM_SECONDS:
+            last_hb = hb_deque[-1]
+            hb_deque.clear()
+            hb_deque.append(last_hb)
+      return
+
+
     def _snapshot_network_heartbeats_for_save(self):
       """
       Build a detached heartbeat snapshot suitable for persistence.
@@ -2286,6 +2356,7 @@ class NetworkMonitor(DecentrAIObject):
       self.P("Saving network map status...")
       self.start_timer("network_save_status")
       netmon_lock_start = time()
+      self._trim_offline_nodes_history()
       heartbeats_snapshot = self._snapshot_network_heartbeats_for_save()
       netmon_lock_elapsed = time() - netmon_lock_start
       epoch_save_start = time()

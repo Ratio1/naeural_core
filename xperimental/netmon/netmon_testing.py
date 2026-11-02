@@ -52,9 +52,10 @@ class UnsafeNetworkMonitor(NetworkMonitor):
       self._NetworkMonitor__maybe_register_hb_pipelines(addr, data)
       # mutate previous hb in place (old behavior)
       if len(self._NetworkMonitor__network_heartbeats[__addr_no_prefix]) >= 2:
-        self._NetworkMonitor__pop_repeating_info_from_heartbeat(
-          self._NetworkMonitor__network_heartbeats[__addr_no_prefix][-2]
-        )
+        previous_hb = self._NetworkMonitor__network_heartbeats[__addr_no_prefix][-2]
+        compact_hb = self._NetworkMonitor__compact_history_heartbeat(previous_hb)
+        previous_hb.clear()
+        previous_hb.update(compact_hb)
 
 
 def _make_logger():

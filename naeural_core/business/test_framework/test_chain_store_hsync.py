@@ -38,6 +38,9 @@ class _FakeNetworkProcessorPlugin:
 
     return decorator
 
+  def on_close(self):
+    return
+
 
 ChainStoreBasePlugin = _load_class_from_source(
   _BASE_DIR / "business" / "default" / "admin" / "chain_store_base.py",

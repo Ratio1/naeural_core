@@ -87,7 +87,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SNAPSHOT = "snapshot"
   CS_RESPONSE = "response"
   CS_SENDER = "sender"
-  CS_SAVE_RETRY_INTERVAL = 5  # seconds between retries of a failed chain storage save
+  CS_SAVE_INTERVAL = 5  # seconds between process() flushes of a dirty chain storage
   
   
   
@@ -296,7 +296,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # shallowly under that lock so concurrent writers and confirmations cannot
     # change the store while it is pickled; the disk write runs outside it.
     # The save lock keeps snapshots landing on disk in the order they were
-    # taken. A failed write marks the store dirty and process() retries it.
+    # taken. A failed write marks the store dirty so the next flush retries it.
     with self.__save_lock:
       with self.__persistence_lock:
         snapshot = {
@@ -316,10 +316,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
 
 
-  def __maybe_retry_save(self):
+  def __maybe_flush_chain_storage(self):
+    """
+    Save the chain storage if it changed and the last save is old enough.
+
+    Accepted writes only mark the store dirty, so one full-store save covers
+    every write made during the last `CS_SAVE_INTERVAL` seconds. The same
+    path retries a failed save.
+
+    Returns
+    -------
+    None
+    """
     if not self.__chain_storage_dirty:
       return
-    if self.time() - self.__last_chain_storage_save < self.CS_SAVE_RETRY_INTERVAL:
+    if self.time() - self.__last_chain_storage_save < self.CS_SAVE_INTERVAL:
       return
     self.__save_chain_storage()
     return
@@ -636,7 +647,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         changed = True
 
     if changed:
-      self.__save_chain_storage()
+      # Saved by the next periodic flush in process().
+      self.__chain_storage_dirty = True
     return merged_fields
   
   ## START setter-getter methods
@@ -754,8 +766,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     When ``value`` is ``None``, the key is deleted locally. The existing
     delete semantics and related trade-offs described below are preserved.
-    The caller must hold the persistence lock and save the chain storage
-    after releasing it.
+    The caller must hold the persistence lock and mark the chain storage
+    dirty after releasing it.
     """
     # key should be composed of the chainstore app identity and the actual key
     # so if two chainstore apps are running on the same node, they will not overwrite each other
@@ -966,7 +978,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             include_default_peers=include_default_peers,
           )
       if need_store:
-        self.__save_chain_storage()
+        # Saved by the next periodic flush in process(). The flag is set after
+        # the change is in the store, so a concurrent snapshot that clears it
+        # either contains this write or is followed by another flush.
+        self.__chain_storage_dirty = True
         if not local_sync_storage_op:
           # now send set-value (including confirmation request) to all
           op = {
@@ -1464,5 +1479,19 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   def process(self):
     self.__maybe_refresh_chain_peers()
     self.__maybe_broadcast()
-    self.__maybe_retry_save()
-    return 
+    self.__maybe_flush_chain_storage()
+    return
+
+
+  def on_close(self):
+    """
+    Save pending chain storage changes before the plugin stops.
+
+    Returns
+    -------
+    None
+    """
+    if self.__chain_storage_dirty:
+      self.__save_chain_storage()
+    super().on_close()
+    return

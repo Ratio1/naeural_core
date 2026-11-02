@@ -463,20 +463,52 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     store._ChainStoreBasePlugin__exec_received_confirm(data, sender="peer2")
     self.assertEqual(store.storage["key"][store.CS_CONFIRMATIONS], 2)
 
-  def test_remote_write_saves_once_outside_persistence_lock(self):
+  def test_writes_are_saved_once_per_interval_outside_persistence_lock(self):
     store = self.make_store()
     lock = store._ChainStoreBasePlugin__persistence_lock
     saves = []
-    store.cacheapi_save_pickle = lambda *args, **kwargs: saves.append(lock._is_owned())
-    for _ in range(2):
-      self.assertTrue(store._set_value("key", "value", owner="node", local_sync_storage_op=True))
-    self.assertEqual(saves, [False])
+    store.cacheapi_save_pickle = lambda obj, *args, **kwargs: saves.append((lock._is_owned(), sorted(obj)))
+    for key in ("key1", "key2"):
+      self.assertTrue(store._set_value(key, "value", owner="node", local_sync_storage_op=True))
+    self.assertEqual(saves, [])
+    store._now += store.CS_SAVE_INTERVAL
+    store.process()
+    self.assertEqual(saves, [(False, ["key1", "key2"])])
+    self.assertTrue(store._set_value("key3", "value", owner="node", local_sync_storage_op=True))
+    store.process()
+    self.assertEqual(len(saves), 1)
+    store._now += store.CS_SAVE_INTERVAL
+    store.process()
+    store.process()
+    self.assertEqual(len(saves), 2)
+    self.assertIn("key3", saves[-1][1])
+
+  def test_same_value_remote_write_does_not_mark_store_dirty(self):
+    store = self.make_store()
+    store._set_value("key", "value", owner="node", local_sync_storage_op=True)
+    store._ChainStoreBasePlugin__chain_storage_dirty = False
+    self.assertTrue(store._set_value("key", "value", owner="node", local_sync_storage_op=True))
+    self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)
+
+  def test_close_saves_pending_writes(self):
+    store = self.make_store()
+    saved = []
+    store.cacheapi_save_pickle = lambda obj, *args, **kwargs: saved.append(obj)
+    store.on_close()
+    self.assertEqual(saved, [])
+    store._set_value("key", "value", owner="node", local_sync_storage_op=True)
+    store.on_close()
+    self.assertEqual(len(saved), 1)
+    self.assertIn("key", saved[0])
+    self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)
 
   def test_save_writes_a_snapshot_not_the_live_store(self):
     store = self.make_store()
     saved = []
     store.cacheapi_save_pickle = lambda obj, *args, **kwargs: saved.append(obj)
     store._set_value("key", "value", owner="node", local_sync_storage_op=True)
+    store._now += store.CS_SAVE_INTERVAL
+    store.process()
     live = store.storage["key"]
     snapshot = saved[-1]["key"]
     self.assertIsNot(saved[-1], store.storage)
@@ -494,11 +526,14 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
         raise OSError("disk full")
     store.cacheapi_save_pickle = flaky_save
     self.assertTrue(store._set_value("key", "value", owner="node", local_sync_storage_op=True))
-    self.assertTrue(store._ChainStoreBasePlugin__chain_storage_dirty)
-    store._ChainStoreBasePlugin__maybe_retry_save()
+    store._now += store.CS_SAVE_INTERVAL
+    store.process()
     self.assertEqual(len(attempts), 1)
-    store._now += store.CS_SAVE_RETRY_INTERVAL
-    store._ChainStoreBasePlugin__maybe_retry_save()
+    self.assertTrue(store._ChainStoreBasePlugin__chain_storage_dirty)
+    store.process()
+    self.assertEqual(len(attempts), 1)
+    store._now += store.CS_SAVE_INTERVAL
+    store.process()
     self.assertEqual(len(attempts), 2)
     self.assertIn("key", attempts[-1])
     self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)

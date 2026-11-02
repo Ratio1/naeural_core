@@ -189,18 +189,20 @@ Larger follow-ups:
 
 ## Deployment lifecycle persistence and protected namespaces
 
-Each accepted write still saves the full store before returning (and, for remote
-writes, before the acknowledgment is sent): records are copied shallowly under the
+An accepted write only marks the store dirty. `process()` saves the full store at
+most every `CS_SAVE_INTERVAL` (5 s), so one save covers every write made in that
+window, and `on_close()` saves pending changes at shutdown. A crash can lose
+writes from the last few seconds. For each save, records are copied shallowly under the
 persistence lock, then the copy is pickled, fsynced and atomically replaced
-outside it, so disk I/O no longer blocks other writers or confirmations. A failed
-save is logged and retried from `process()`; it never fails the write, so an
+outside it, so disk I/O does not block other writers or confirmations. A failed
+save is logged and retried by the next flush; it never fails the write, so an
 acknowledgment means the replica applied the write, not that it reached disk. A same-value remote retransmission is
 acknowledged without another save; a same-value local write re-publishes and
 collects confirmations again. Confirmation counts use distinct authenticated
 transport senders from the actual target set. These are replica acknowledgments,
 not consensus, CAS, or distributed locking.
 
-The writer's local copy is applied and saved before broadcast. Self is excluded from the
+The writer's local copy is applied before broadcast. Self is excluded from the
 remote target set. A positive configured `MIN_CONFIRMATIONS` takes precedence;
 otherwise the threshold is `floor(remote target count / 2) + 1`. With no remote
 targets a local-origin write returns False before persistence; there is no

@@ -835,10 +835,10 @@ class TestNetmonRegisterHeartbeatProfile(unittest.TestCase):
     older, newest = harness.netmon.get_box_heartbeats(addr)
 
     self.assertLessEqual(set(older), set(HISTORY_HB_KEYS))
-    for key in (ct.HB.STOP_LOG, ct.HB.LOOPS_TIMINGS, ct.HB.GPU_INFO, "EE_SIGN"):
+    for key in (ct.HB.STOP_LOG, ct.HB.LOOPS_TIMINGS, ct.HB.GPU_INFO, ct.HB.UPTIME, ct.HB.TOTAL_DISK, "EE_SIGN"):
       self.assertNotIn(key, older)
       self.assertIn(key, newest)
-    self.assertEqual(older[ct.HB.UPTIME], 3600)
+    self.assertEqual(older[ct.HB.AVAILABLE_DISK], 850.0)
     self.assertEqual(older[ct.HB.TEMPERATURE_INFO]["max_temp"], 44)
     self.assertNotIn("message", older[ct.HB.TEMPERATURE_INFO])
     self.assertIn("message", newest[ct.HB.TEMPERATURE_INFO])

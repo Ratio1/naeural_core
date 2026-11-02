@@ -192,7 +192,9 @@ Larger follow-ups:
 An accepted write only marks the store dirty. `process()` saves the full store at
 most every `CS_SAVE_INTERVAL` (5 s), so one save covers every write made in that
 window, and `on_close()` saves pending changes at shutdown. A crash can lose
-writes from the last few seconds. For each save, records are copied shallowly under the
+writes from the last few seconds. Do not reintroduce a full-store fsync per write:
+on mainnet oracles it took 65% of the plugin loop and kept the input queue full.
+Run `test_deployment_lifecycle.py` and `test_chain_store_hsync.py` for this path. For each save, records are copied shallowly under the
 persistence lock, then the copy is pickled, fsynced and atomically replaced
 outside it, so disk I/O does not block other writers or confirmations. A failed
 save is logged and retried by the next flush; it never fails the write, so an
@@ -245,7 +247,8 @@ Current `DAUTH_JOB_SECRETS` bundles carry equivalent signed writer metadata and
 `deployment_revision`. A registered dAuth custodian may sign these bundles for
 the registered protocol-oracle coordinator after verifying its lifecycle request;
 public pointers must still be signed by that coordinator. Signature-only retry
-differences include both node and EVM signature metadata. These generations increase across successful deployment,
+differences include both node and EVM signature metadata; the SDK signing-version
+field is `BCct.SIGN_CANON_V` (`SIGN_CANON_V`), not `EE_SIGN_CANON_V`. These generations increase across successful deployment,
 restoration and deletion commits; restored runtime configuration may retain an
 older content revision. Receivers verify registry signer and job-field binding,
 reject lower generations and divergent equal-generation payloads, and ignore

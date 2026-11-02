@@ -14,7 +14,7 @@ from unittest import mock
 
 from naeural_core import constants as ct
 from naeural_core.core_logging import Logger
-from naeural_core.main.net_mon import NetworkMonitor
+from naeural_core.main.net_mon import HISTORY_HB_KEYS, NetworkMonitor
 
 
 PROFILE_NODES_ENV = "EE_NETMON_PROFILE_NODES"
@@ -813,6 +813,83 @@ class TestNetmonRegisterHeartbeatProfile(unittest.TestCase):
 
     self.assertEqual(len(history["cpu_hist"]), 1)
     self.assertEqual(history["timestamps"], ["2026-01-01 00:00:00"])
+
+  def test_history_heartbeats_keep_only_history_fields(self):
+    harness = _NetmonHarness()
+    addr = "0xNODE_HISTORY_FIELDS"
+    for hb_idx in range(2):
+      body = harness.make_heartbeat_body(addr, 0, hb_idx, payload_scale=4)
+      body[ct.HB.STOP_LOG] = [["2026-01-01 00:00:00", "stage", 1.5]]
+      body[ct.HB.TEMPERATURE_INFO]["message"] = "Temperature sensors found"
+      hb = {
+        ct.HB.ENCODED_DATA: harness.log.compress_text(json.dumps(body)),
+        ct.EE_ID: body[ct.EE_ID],
+        ct.HB.EE_ADDR: addr,
+        ct.PAYLOAD_DATA.EE_TIMESTAMP: body[ct.PAYLOAD_DATA.EE_TIMESTAMP],
+        ct.PAYLOAD_DATA.EE_TIMEZONE: body[ct.PAYLOAD_DATA.EE_TIMEZONE],
+        ct.PAYLOAD_DATA.EE_EVENT_TYPE: ct.HEARTBEAT,
+        "EE_SIGN": "signature",
+      }
+      harness.netmon.register_heartbeat(addr, hb)
+
+    older, newest = harness.netmon.get_box_heartbeats(addr)
+
+    self.assertLessEqual(set(older), set(HISTORY_HB_KEYS))
+    for key in (ct.HB.STOP_LOG, ct.HB.LOOPS_TIMINGS, ct.HB.GPU_INFO, ct.HB.UPTIME, ct.HB.TOTAL_DISK, "EE_SIGN"):
+      self.assertNotIn(key, older)
+      self.assertIn(key, newest)
+    self.assertEqual(older[ct.HB.AVAILABLE_DISK], 850.0)
+    self.assertEqual(older[ct.HB.TEMPERATURE_INFO]["max_temp"], 44)
+    self.assertNotIn("message", older[ct.HB.TEMPERATURE_INFO])
+    self.assertIn("message", newest[ct.HB.TEMPERATURE_INFO])
+
+  def test_load_compacts_history_and_trims_nodes_offline_over_a_day(self):
+    harness = _NetmonHarness()
+    dt_now = datetime.now()
+
+    def full_history(addr, offline_seconds):
+      heartbeats = []
+      for hb_idx in range(3):
+        hb = harness.make_heartbeat_body(addr, 0, hb_idx, payload_scale=4)
+        received = dt_now - timedelta(seconds=offline_seconds + 10 * (2 - hb_idx))
+        hb[ct.HB.RECEIVED_TIME] = received.strftime(ct.HB.TIMESTAMP_FORMAT)
+        heartbeats.append(hb)
+      return deque(heartbeats)
+
+    harness.netmon._set_network_heartbeats({
+      "0xNODE_ONLINE": full_history("0xNODE_ONLINE", 0),
+      "0xNODE_OFFLINE_3H": full_history("0xNODE_OFFLINE_3H", 3 * 3600),
+      "0xNODE_OFFLINE_40D": full_history("0xNODE_OFFLINE_40D", 40 * 86400),
+    })
+
+    online = harness.netmon.get_box_heartbeats("0xNODE_ONLINE")
+    self.assertEqual(len(online), 3)
+    for hb in list(online)[:-1]:
+      self.assertLessEqual(set(hb), set(HISTORY_HB_KEYS))
+    self.assertIn(ct.HB.GPU_INFO, online[-1])
+    self.assertEqual(len(harness.netmon.get_box_heartbeats("0xNODE_OFFLINE_3H")), 3)
+    offline = harness.netmon.get_box_heartbeats("0xNODE_OFFLINE_40D")
+    self.assertEqual(len(offline), 1)
+    self.assertIn(ct.HB.GPU_INFO, offline[0])
+
+  def test_save_trims_history_of_nodes_offline_over_a_day(self):
+    harness = _NetmonHarness()
+    for addr in ("0xNODE_LIVE", "0xNODE_GONE"):
+      for hb_idx in range(3):
+        harness.netmon.register_heartbeat(addr, harness.make_heartbeat(addr, 0, hb_idx, payload_scale=4))
+    gone_at = datetime.now() - timedelta(days=2)
+    stored = harness.netmon._NetworkMonitor__network_heartbeats
+    stored["0xNODE_GONE"][-1][ct.HB.RECEIVED_TIME] = gone_at.strftime(ct.HB.TIMESTAMP_FORMAT)
+
+    with mock.patch.object(harness.log, "save_pickle_to_data") as save_pickle, \
+         mock.patch.object(harness.netmon, "_NetworkMonitor__epoch_manager", mock.Mock()), \
+         mock.patch.object(harness.netmon, "end_timer", return_value=0.0):
+      harness.netmon.network_save_status()
+
+    saved = save_pickle.call_args.kwargs["data"]
+    self.assertEqual(len(saved["0xNODE_LIVE"]), 3)
+    self.assertEqual(len(saved["0xNODE_GONE"]), 1)
+    self.assertEqual(len(harness.netmon.get_box_heartbeats("0xNODE_GONE")), 1)
 
 
 if __name__ == "__main__":

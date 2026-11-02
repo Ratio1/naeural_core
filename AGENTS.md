@@ -1,415 +1,99 @@
-# Repository Guidelines
-This file is "alive." `AGENTS.md` is the authoritative source for repository purpose, runtime constraints, module/file ownership, safe-edit boundaries, required verification commands, and agent handoff/escalation rules. Update it in the same change whenever any of those change. When you discover horizontal insights during prompts, append a brief note at the end so future agents can reuse it. Keep entries short, dated, and specific.
+# naeural_core agent guide
 
-## Authority & Update Policy
-- Follow `AGENTS.md` when other repo docs drift, then fix the stale doc.
-- For ChainStore/CStore work, use `docs/CSTORE.md` as the quick-state review
-  after reading `AGENTS.md`. It is a subsystem contract note, not a replacement
-  for the repo rules here.
-- Keep write scopes narrow; if a task spans more than one owner area, assign an `integrator-test-executor`.
-- Prefer one responsible agent first. Split work only when there is a clear ownership boundary, hardware/tool boundary, or real parallel slack.
-- Keep append-only sections append-only. Do not rewrite prior lessons to make a new task look cleaner.
+This is the root contract for coding agents in `naeural_core`. It holds only stable,
+repository-specific rules. Read the linked references when your task touches their area:
 
-## Repository Purpose & Runtime Constraints
-- `naeural_core` is the runtime backbone of the Ratio1 Edge Protocol and is typically embedded into Edge Node deployments rather than used as a standalone end-user app.
-- Supported Python is `3.10` to `3.11`.
-- Standard launcher is `python start_nen.py`; treat `start_nen.py` as a frozen launcher boundary unless the operator explicitly asks to change it.
-- Startup config resolves from `config_startup.json`, `EE_CONFIG`, and `EE_ID`; secrets belong in `.env` and are loaded through `ratio1.utils.load_dotenv`.
-- Runtime artifacts, logs, downloaded models, and transient config copies land under `_local_cache/`; they are disposable and must stay untracked.
-- Serving and some heavy ops require CUDA-capable hardware and may also require MinIO credentials or other external services.
-- When `WORK_OFFLINE=false`, repeated comm failures can eventually stop the orchestrator after retry exhaustion; offline continuity depends on `WORK_OFFLINE=true`.
-- Plugin lookup, config-handler reflection, and some long-horizon stats paths are cached or scale with runtime history; validate restart requirements and latency effects before claiming hot-reload or performance fixes.
-- `xperimental/` is for experiments and proofs. It is not release verification and must not quietly become production runtime code.
+- [Runtime notes](docs/runtime-notes.md): non-obvious behavior and contracts, by subsystem.
+- [Agent workflows](docs/agent-workflows.md): roles, the single-agent loop and actor-critic review.
+- Subsystem contracts: [CStore](docs/CSTORE.md), [Deeploy node lifecycle](docs/DEEPLOY_NODE_LIFECYCLE.md),
+  [serving SHM lifecycle](docs/20261014_serving_shm_lifecycle.md) and
+  [SHM diagnostics](docs/20261014_shm_diagnostics.md).
 
-## Project Structure & Ownership
-| Area | Default owner role | Write scope | Notes |
-| --- | --- | --- | --- |
-| `naeural_core/main/`, `naeural_core/config/`, `start_nen.py` | `runtime-owner` | orchestrator, entrypoint, startup config | `start_nen.py` is read-only unless explicitly requested; startup semantics affect deployment safety |
-| `naeural_core/comm/`, `naeural_core/remote_file_system/`, `naeural_core/ipfs/`, `_todo/COMMS.md` | `comm-owner` | transports, queues, ingress/egress, protocol notes | protocol or queue semantic changes require explicit verification notes |
-| `naeural_core/business/`, `naeural_core/data/`, `extensions/` | `pipeline-owner` | plugins, data capture, business logic, plugin tests | watch queue pressure, plugin cache, and startup latency effects |
-| `naeural_core/serving/`, `naeural_core/heavy_ops/`, `naeural_core/local_libraries/model_server*`, `naeural_core/utils/tracing/` | `serving-owner` | inference backends, serving harnesses, model tooling | GPU and external artifact services may be required to verify |
-| `naeural_core/constants.py`, `naeural_core/core_logging/`, `naeural_core/utils/`, `pyproject.toml`, `requirements.txt` | `platform-owner` | shared constants, logging, utilities, packaging | cross-cutting changes require broader review and usually more than one verification row |
-| `docs/`, `_todo/`, `_todo_archive/`, `README.md`, `AGENTS.md` | `docs-owner` | repo docs, runbooks, guidance | active planning docs live under `_todo/`; finalized or obsolete repo notes may move to `_todo_archive/`; docs must move with code, commands, and operator behavior |
-| `xperimental/` | `platform-owner` | isolated experiments only | do not cite as production proof unless the task explicitly targets experiments |
+## Core context
 
-## Safe-Edit Boundaries
-- Do not modify `start_nen.py` unless the task is explicitly about launcher behavior and the operator accepts launcher-risk.
-- Do not edit external site-packages or system paths such as `/usr/local/lib/python...`; treat them as read-only references.
-- Do not treat `_local_cache/`, downloaded models, or generated logs as source of truth.
-- Avoid casual edits to `naeural_core/constants.py`, shared logging, or startup/config plumbing; those are cross-cutting and require broader verification and `AGENTS.md` review if operator semantics change.
-- Keep new production code out of `xperimental/`. Promote it intentionally into `naeural_core/` or `extensions/` with proper verification.
+`naeural_core` is the runtime engine of the Ratio1 Edge Node: orchestrator, comms, data capture,
+business plugins, serving, NetMon, epochs and CStore. It runs embedded in `edge_node` deployments,
+not as a standalone app. `ratio1_sdk` provides the `ratio1` package (blockchain engine, logger,
+MQTT wrapper); `edge_node` provides extensions and the operational APIs. Sibling directories with
+those names are independent checkouts: change upstream behavior there and commit separately.
 
-## Build, Test, and Development Commands
-- Commands below assume an activated virtualenv where `python` resolves to the project interpreter; use `python3` to create the venv or when no `python` shim exists.
-- `python3 -m venv .venv && source .venv/bin/activate`: provision a Python `3.10`-`3.11` virtual environment.
-- `pip install -e . && pip install -r requirements.txt`: install the package in editable mode plus heavyweight plugin dependencies.
-- `python start_nen.py`: boot the orchestrator; requires startup config plus `.env` secrets.
-- `python -m unittest discover naeural_core/business/test_framework -p 'test_*.py'`: run the repo's unit-style test entry point.
-- `python naeural_core/serving/model_testing/test_all/test_all_servings.py`: run the GPU-backed serving smoke tests; requires CUDA plus `EE_MINIO_*`.
-- `python xperimental/minio/test_minio.py`: example targeted experiment command; document prerequisites beside the script.
+- Python 3.10 to 3.11.
+- `python start_nen.py` boots the node. It is a frozen launcher (sets the `spawn` start method and
+  exits through `os._exit`); put startup changes in `naeural_core/main/entrypoint.py` or deeper.
+- Startup config comes from `config_startup.json`, `EE_CONFIG` and `EE_ID`; secrets come from `.env`
+  through `ratio1.utils.load_dotenv`.
+- `_local_cache/` holds runtime state (logs, models, pickles, config copies). It is disposable and
+  never source.
 
-## Required Verification Commands
-| Change scope | Minimum verification | Notes |
-| --- | --- | --- |
-| Docs-only (`README.md`, `AGENTS.md`, `docs/`, `_todo/`, runbooks) | manual diff review and link/path sanity check | no code command required unless the doc changes executable commands or config semantics |
-| Any Python file change | `python -m compileall <touched_paths>` | substitute the real touched files or directories |
-| `naeural_core/business/`, `naeural_core/data/`, `extensions/` | `python -m compileall <touched_paths>` and `python -m unittest discover naeural_core/business/test_framework -p 'test_*.py'` when relevant | if discovery is not relevant, state why |
-| `naeural_core/main/`, `naeural_core/config/`, `naeural_core/comm/` | `python -m compileall <touched_paths>` and a targeted reproducer or sanitized startup check | if `python start_nen.py` is blocked by secrets, brokers, or unsafe side effects, record the blocker explicitly |
-| `naeural_core/serving/`, `naeural_core/heavy_ops/`, serving backends | `python -m compileall <touched_paths>` and `python naeural_core/serving/model_testing/test_all/test_all_servings.py` when hardware/services are available | mark `blocked` if CUDA, MinIO, or datasets are unavailable |
-| Shared cross-cutting files | run every affected row above | do not claim broad safety from a compile-only check |
-- Every handoff, PR description, and final task report must state each verification command as `pass`, `fail`, or `blocked`, with one-line evidence.
-- Do not use `xperimental/` scripts as the only verification for production runtime changes unless the task is explicitly experimental.
+## Repository map
 
-## Coding Style & Naming Conventions
-- Match the repository's two-space indentation, `snake_case` functions, `PascalCase` classes, and all-caps constants imported as `naeural_core.constants as ct`.
-- Treat production-grade Python quality as a hard requirement: touched Python code must keep clear control flow, extensive NumPy-style docstrings on modified classes and functions, and descriptive inline comments for non-trivial or contract-sensitive logic.
-- Prefer double quotes for user-facing strings.
-- Reuse the shared `Logger` for structured logs.
-- Reference config keys through `ct` instead of raw string literals.
-- When exposing HTTP endpoints, wrap plugin methods with `@BasePlugin.endpoint` and keep companion templates in the same package.
+- `naeural_core/main/`: orchestrator, entrypoint, NetMon (`net_mon.py`), epochs, app monitor.
+- `naeural_core/comm/`: MQTT communicators, heartbeat ingress, command/control.
+- `naeural_core/business/`: plugin base classes and default/admin plugins (NetMon, CStore,
+  Deeploy lifecycle); tests live in `business/test_framework/`.
+- `naeural_core/data/`: capture managers and data plugins.
+- `naeural_core/serving/`, `heavy_ops/`, `local_libraries/`: inference backends and model tooling.
+- `naeural_core/constants.py`, `core_logging/`, `utils/`: shared constants, logging and utilities.
+- `docs/`: durable references. `_todo/`: active plans; finished ones move to `_todo_archive/`.
+- `xperimental/`: experiments. It is never production code or release proof.
 
-## Commit & Pull Request Guidelines
-- Follow Conventional Commit prefixes such as `feat:`, `fix:`, and `chore:`.
-- Reference issues with `(#123)` when applicable and keep subjects under 72 characters.
-- Describe behavioral impact, verification commands, and any blocked verification in the PR body.
-- Attach logs or screenshots for inference-facing changes.
-- Call out new ports, env keys, deployment paths, or migrations.
-- Keep `.env`, `_local_cache/`, model artifacts, and other generated files untracked.
+## Verification
 
-## Configuration & Security Notes
-- Runtime configuration resolves from `config_startup.json`, `EE_CONFIG`, and `EE_ID`.
-- Keep secrets outside the repo and inject them through `.env`.
-- Validate external payloads using the filters defined in `naeural_core.constants` when extending comms modules.
-- Do not embed credential defaults in plugin code or docs.
-- Treat new operator commands, deployment paths, auth flows, and incident semantics as `AGENTS.md` update triggers.
-- `ADMIN_PIPELINE_ASYNC_DISPATCH` is default-on unless explicitly disabled; when enabled, `admin_pipeline` capture/dispatch runs on isolated collection/dispatch lanes, is primed before serving warmup during startup, and uses `ADMIN_PIPELINE_DISPATCH_POLL_SECONDS`, `ADMIN_PIPELINE_QUEUE_MAXLEN`, and `ADMIN_PIPELINE_STALL_WARNING_SECONDS` as the operator-facing controls.
-- Structured training uses additive pipeline config keys `INPUT_FIELDS`, `OUTPUT_FIELDS`, `TASK_MATRIX`, `EXPORT_FORMATS`, `ALLOW_NESTED_INPUTS`, `ALLOW_NESTED_OUTPUTS`, and `TRACE_INPUT_MODE`; for the `structured` signature TorchScript export is required, while GGUF must be attempted and may finish `blocked` with an explicit capability reason.
-- Standalone structured inference currently uses AI engine `th_structured` with local startup config keys `MODEL_PATH` plus either inline `INPUT_FIELDS` / `OUTPUT_FIELDS` / `TASK_MATRIX` or a local `MODEL_CONFIG_PATH`; this is the temporary same-node deployment path before object-storage-backed bootstrap.
-- Heavy-op startup keeps `send_mail` and `send_sms` default-enabled even when `HEAVY_OPS_CONFIG.ACTIVE_COMM_ASYNC` is overridden; operators must set `DISABLE_DEFAULT_SEND_MAIL` or `DISABLE_DEFAULT_SEND_SMS` to opt out of default notification dispatch.
-- `EE_DISABLE_ADDRESSED_PAYLOAD_SUBS=true` disables addressed payload-topic subscriptions and forces broadcast-only payload receive during rollout/rollback of targeted payload routing; `EE_DISABLE_ADDRESSED_PAYLOAD_SENDS=true` separately disables targeted payload fanout on send and downgrades addressed payloads to one broadcast publish without warning spam.
-- `EE_HEARTBEAT_TARGETED_MIRROR_ENABLED=true` opt-in mirrors each node's already-signed heartbeat to its own configured `CTRL_CHANNEL.TARGETED_TOPIC` while retaining the global publish; the default is global-only and a missing targeted topic fails back to one global publish with a once-per-process warning.
-- 2026-07-16: Pipeline dictionaries in ConfigManager, `_current_dct_config_streams`, persistence, and `get_pipelines_view` are canonical redacted state. BusinessManager alone receives `_runtime_dct_config_streams`, where `$EE_*` references and structurally matched dAuth placeholders are resolved in memory; CaptureManager receives only runtime-eligible pipelines with canonical redacted `PLUGINS`. Unresolved dAuth pipelines are withheld and retried asynchronously through one tracked request worker. dAuth cache identity is pipeline name, job ID, `DEEPLOY_SPECS.date_updated`, and the canonical `PLUGINS` hash. Persistence barriers restore canonical references and reject unsafe protected-list structural changes. CmdAPI exposes `cmdapi_build_pipeline_config()` so callers can stage exact command metadata before dispatch.
-- 2026-07-28: Runtime-secret persistence barriers cover direct saves and command deltas, including dotted instance keys and batch updates. Config-merge diagnostics report keys and change state without values. A dAuth fetch publishes or records retry state only when the complete canonical pipeline snapshot is unchanged.
+Run checks with the project interpreter and the sibling `ratio1_sdk` checkout importable (for
+example `PYTHONPATH=../ratio1_sdk:.`); an older installed `ratio1` breaks `constants.py` imports.
 
-## Agent Cards
-These are repo-local role cards inspired by current A2A agent-card practice. They are lightweight operating contracts for collaboration inside this repository.
-
-### `platform-owner`
-- Objective: maintain shared platform behavior, packaging, logging, and cross-cutting utilities without destabilizing downstream subsystems.
-- Owned files / write scope: `naeural_core/constants.py`, `naeural_core/core_logging/`, `naeural_core/utils/`, `pyproject.toml`, `requirements.txt`.
-- Required inputs and context: impacted subsystems, config keys, dependency/runtime assumptions, affected verification rows.
-- Expected outputs / artifacts: narrow patch, compatibility notes, verification summary, any required `AGENTS.md` update.
-- Allowed tools: repo search, targeted edits, compile/test commands, local docs review, web review for external protocol or dependency changes.
-- Escalation triggers: more than one owner area affected, new env keys, logging/metric semantic changes, dependency upgrades with runtime risk.
-
-### `runtime-owner`
-- Objective: maintain startup, orchestration, and runtime control flow without breaking deployment boot or shutdown behavior.
-- Owned files / write scope: `naeural_core/main/`, `naeural_core/config/`; `start_nen.py` is read-only unless explicitly assigned.
-- Required inputs and context: startup config source, env assumptions, repro steps, offline/online behavior expectations.
-- Expected outputs / artifacts: bounded runtime patch, startup notes, verification logs or explicit blockers.
-- Allowed tools: repo search, targeted edits, compile checks, sanitized startup checks, targeted runtime reproducers.
-- Escalation triggers: any need to touch `start_nen.py`, exit behavior changes, multiprocessing changes, broker/secret dependency blocks, deployment-path changes.
-
-### `comm-owner`
-- Objective: maintain transport correctness, queue behavior, ingress/egress semantics, and comm observability.
-- Owned files / write scope: `naeural_core/comm/`, `naeural_core/remote_file_system/`, `naeural_core/ipfs/`, `_todo/COMMS.md`.
-- Required inputs and context: payload examples, queue/retry semantics, broker assumptions, backward-compatibility constraints.
-- Expected outputs / artifacts: transport patch, protocol notes, verification evidence, open risk note if live infra is unavailable.
-- Allowed tools: repo search, targeted edits, compile checks, local repro scripts, protocol/source review.
-- Escalation triggers: wire or topic semantic change, incompatible message shape, blocked live-broker verification, queue-loss or shutdown-risk changes.
-
-### `pipeline-owner`
-- Objective: maintain data capture, pipeline plugins, and business logic while preserving queue safety and plugin loading expectations.
-- Owned files / write scope: `naeural_core/business/`, `naeural_core/data/`, `extensions/`.
-- Required inputs and context: plugin signature/config, pipeline topology, queue/backpressure expectations, operator-visible behavior.
-- Expected outputs / artifacts: plugin or capture patch, relevant unit tests or blockers, config/docs updates when behavior changes.
-- Allowed tools: repo search, targeted edits, compile checks, `unittest` discovery, documented experiment scripts when explicitly needed.
-- Escalation triggers: plugin cache or discovery changes, queue overflow behavior changes, cross-subsystem config changes, no safe reproduction path.
-
-### `serving-owner`
-- Objective: maintain inference backends, model-serving flows, and serving test harnesses with explicit hardware/runtime assumptions.
-- Owned files / write scope: `naeural_core/serving/`, `naeural_core/heavy_ops/`, `naeural_core/local_libraries/model_server*`, `naeural_core/utils/tracing/`.
-- Required inputs and context: model/backend target, CUDA availability, MinIO credentials, artifact locations, latency/correctness expectations.
-- Expected outputs / artifacts: serving patch, smoke-test output or blocker, performance or compatibility note if relevant.
-- Allowed tools: repo search, targeted edits, compile checks, serving smoke tests, GPU-specific repro commands when available.
-- Escalation triggers: missing CUDA/MinIO/datasets, model artifact migration, unexplained latency regression, rollback uncertainty for backend changes.
-
-### `docs-owner`
-- Objective: keep repository docs, runbooks, and guidance synchronized with actual code and operator workflows.
-- Owned files / write scope: `docs/`, `_todo/`, `_todo_archive/`, `README.md`, `AGENTS.md`.
-- Required inputs and context: implemented behavior, exact commands, changed boundaries, operator impact, source references when policy changes.
-- Expected outputs / artifacts: doc patch, worked examples, updated commands, reference list.
-- Allowed tools: repo search, targeted edits, diff review, link/path sanity checks, web review for external guidance.
-- Escalation triggers: command drift from code, unclear owner boundary, policy ambiguity, missing executable evidence from implementing agents.
-
-### `critic`
-- Objective: independently test and review an actor's result for correctness, safety, alert-noise risk, rollback risk, and missing tests.
-- Owned files / write scope: none by default; may add review notes or a failing regression test only if explicitly assigned.
-- Required inputs and context: diff, write scope, rubric, executed tests, logs, and any claimed assumptions.
-- Expected outputs / artifacts: concrete defects with evidence or a clear pass.
-- Allowed tools: read-only repo search, diff inspection, targeted test runs, spec/doc review.
-- Escalation triggers: insufficient evidence, out-of-scope changes, unverifiable safety claims, repeated disagreement without executable repro.
-
-### `integrator-test-executor`
-- Objective: resolve cross-owner or actor-critic disagreements using executable evidence, then produce the final integrated result.
-- Owned files / write scope: only the already-touched integration surface unless explicitly expanded.
-- Required inputs and context: actor artifact, critic findings, branch state, test plan, blockers, and handoff envelopes.
-- Expected outputs / artifacts: merged patch, final verification table, acceptance or escalation decision.
-- Allowed tools: targeted repo edits, compile/test commands, diff review, log capture, source review.
-- Escalation triggers: conflicting owner claims, repeated failed loops, unsafe rollback story, or unresolved blocker after evidence-driven retest.
-
-## Single-Agent Loop
-- Required loop: `plan -> implement -> test -> critique -> revise -> verify`.
-- Keep each loop focused on one primary concern. If a second concern appears, record it and finish or stop the current loop first.
-- Evaluate environment feedback before stylistic feedback: syntax errors, runtime failures, bad logs, failed tests, broken configs, and latency regressions outrank naming or formatting opinions.
-- `plan`: state the concern, intended write scope, and minimum verification command before editing.
-- `implement`: change only the files owned by the acting role unless an integrator expands scope.
-- `test`: run the minimum verification row for the touched area before asking whether the change is "good enough."
-- `critique`: check correctness, safety, operator impact, rollback path, and whether the tests actually exercise the claim.
-- `revise`: change only what the critique or environment evidence proves is wrong; preserve already-good parts.
-- `verify`: rerun the relevant verification after the last revision and record pass/fail/blocked.
-- Stop and escalate after `2` revise cycles on the same concern without new executable evidence, or after `3` environment attempts that leave the system in materially the same failing state.
-
-## Actor-Critic Workflow
-- Use actor-critic only for higher-risk changes, low-confidence results, or work that crosses a meaningful review boundary.
-- The actor owns implementation and tests inside a bounded write scope and must ship a patch plus a verification record.
-- The critic is independent and focuses on correctness, safety, alert-noise risk, rollback safety, observability gaps, and missing tests.
-- Critic requests must be evidence-backed: failing command, incompatible diff behavior, spec mismatch, missing telemetry, or unsupported assumption.
-- The actor revises only the cited defects, keeps already-good behavior intact, and records what changed between cycles.
-- The `integrator-test-executor` resolves disagreements using executable evidence, not preference. If the evidence cannot be produced safely, escalate instead of looping.
-- Prefer one actor and one critic. Do not create review swarms.
-- Stop when checks pass, critiques stop being materially new, or the iteration budget is exhausted.
-
-## A2A-Style Task Contract
-- Every delegated task must use a structured payload, not free-form prose alone.
-- Preferred status values align with current A2A task states: `submitted`, `working`, `input-required`, `auth-required`, `completed`, `canceled`, `failed`, `rejected`.
-- Long-running tasks, meaning more than `15` minutes or more than `3` tool/test cycles, require checkpoints at each phase boundary and at least every `15` minutes.
-- Retries should be idempotent where possible: reuse the same `task_id`, add or increment `attempt`, and avoid duplicate external side effects if a prior attempt may have partially succeeded.
-- Cancellations must be explicit and safe: set status to `canceled`, list partial artifacts, stop background work, and never revert unrelated user changes.
-
-```yaml
-task_id: COMM-20260317-001
-attempt: 1
-owner_role: comm-owner
-goal: Separate command ingress metrics from heartbeat ingress metrics.
-write_scope:
-  - naeural_core/comm/communication_manager.py
-constraints:
-  - Preserve public payload shape.
-  - Do not rename broker topics in this task.
-required_inputs:
-  - reproducer or failing log
-  - relevant config or env assumptions
-expected_artifacts:
-  - patch
-  - verification notes
-  - handoff envelope
-success_criteria:
-  - behavior matches goal
-  - required verification is pass or explicitly blocked
-checkpoints:
-  - reproducer confirmed
-  - patch ready
-terminal_state: submitted|working|input-required|auth-required|completed|canceled|failed|rejected
+```bash
+python -m compileall <touched_paths>
+python -m unittest naeural_core.business.test_framework.<test_module>
+python -m unittest discover -s naeural_core/business/test_framework -p 'test_*.py'
 ```
 
-## Required Handoff Envelope
-- Every handoff or escalation must include the following fields at minimum: `task_id`, `current_status`, `changed_files`, `tests_run`, `evidence_reviewed`, `open_risks`, `next_recommended_action`.
-- Include `goal`, `owner_role`, and `attempt` whenever possible.
+| Change | Minimum proof |
+| --- | --- |
+| Any Python file | `compileall` on the touched paths |
+| `business/`, `data/`, `main/`, `comm/` | the focused test modules for the changed contract; a targeted reproducer when no test covers it |
+| Startup, config or comm wiring | add a sanitized startup check; `python start_nen.py` needs secrets and a broker, so record it as blocked when they are unavailable |
+| `serving/`, `heavy_ops/` | `python naeural_core/serving/model_testing/test_all/test_all_servings.py`; needs CUDA and `EE_MINIO_*` |
+| Docs only | check links, paths and any command you changed |
 
-```yaml
-task_id: COMM-20260317-001
-attempt: 1
-owner_role: comm-owner
-goal: Separate command ingress metrics from heartbeat ingress metrics.
-current_status: working
-changed_files:
-  - naeural_core/comm/communication_manager.py
-tests_run:
-  - command: python -m compileall naeural_core/comm
-    result: pass
-  - command: python start_nen.py
-    result: blocked
-    evidence: missing safe broker and startup secrets
-evidence_reviewed:
-  - broker log sample from 2026-03-17
-  - current comm note in AGENTS.md
-open_risks:
-  - no live broker verification in this environment
-next_recommended_action: run targeted MQTT integration in staging and confirm ingress counters
-```
+- Report each check as pass, fail or blocked, with one line of evidence, in handoffs and PR bodies.
+- Add a regression test for a bug fix when practical. Never weaken a test or production behavior
+  to get a pass.
+- If a broad suite was already failing, report the exact failure and prove the change narrowly.
+- On macOS, `test_netmon_summary_status` needs `PATH` passed through its `extra_env`, because the
+  SDK logger reads it on Darwin.
 
-## Handoff & Escalation Rules
-- Prefer supervisor-worker or router-specialist topologies over free-form peer swarms.
-- Handoff only when the receiving role owns the remaining write scope, has the required hardware/credentials, or can run in parallel without blocking the next local step.
-- Share only the minimum context needed: task contract, current evidence, blockers, and expected artifact shape.
-- Treat agents as opaque execution units. Do not assume shared hidden memory, tools, or reasoning state.
-- Keep A2A handoffs separate from MCP/tool/resource access; delegation is control-plane, tools are data-plane.
-- Fail closed on blockers: return the partial artifact, exact blocker, and the missing input or authority needed to proceed.
-- Escalate immediately for boundary changes, new operator commands, deployment-path changes, irreversible actions, auth/secret handling, or repeated failed loops.
+## Conventions
 
-## Worked Examples
-### Single-Agent Task
-1. `runtime-owner` takes `RUNTIME-20260317-001` to fix a race in `naeural_core/main/net_mon.py`.
-2. `plan`: narrow scope to `net_mon.py`, choose `python -m compileall naeural_core/main/net_mon.py`, and prepare a targeted reproducer.
-3. `implement`: add the smallest lock/snapshot fix inside the affected method only.
-4. `test`: run compile plus the reproducer.
-5. `critique`: check first that the race is gone and logs stay clean; only then consider style.
-6. `revise`: if the reproducer still fails, adjust the lock scope once; escalate after two evidence-free loops.
-7. `verify`: rerun compile and reproducer, then record the result in the final report.
+- Two-space indentation, `snake_case` functions, `PascalCase` classes.
+- Use constants through `import naeural_core.constants as ct` instead of string literals.
+- NumPy-style docstrings on new or modified functions and classes; comment non-obvious contracts.
+- Log through the shared `Logger` (`self.P(...)` in plugins).
+- HTTP endpoints are plugin methods decorated with `@BasePlugin.endpoint`.
+- Conventional Commit subjects (`feat:`, `fix:`, `perf:`, `docs:`, `chore:`) under 72 characters.
 
-### Actor-Critic Task
-1. `comm-owner` is the actor for `COMM-20260317-002` and may edit only `naeural_core/comm/communication_manager.py`.
-2. The actor ships a patch plus `tests_run` and a short rollback note.
-3. `critic` reviews for incorrect ingress attribution, alert-noise risk, missed rollback hazards, and missing tests.
-4. If the critic claims a defect, it must cite executable evidence such as a failed reproducer or a spec mismatch.
-5. `integrator-test-executor` reruns the reproducer and decides based on the evidence, not preference.
-6. The actor revises only the cited defect set and resubmits a new envelope.
+## Safety boundaries
 
-### A2A-Style Cross-Agent Handoff
-```yaml
-task_id: SERV-20260317-003
-attempt: 1
-owner_role: serving-owner
-goal: Add a serving-backend fallback required by a pipeline change.
-write_scope:
-  - naeural_core/serving/default_inference/
-  - naeural_core/serving/model_testing/
-constraints:
-  - Keep existing config keys stable.
-  - Do not change CUDA-primary behavior.
-expected_artifacts:
-  - bounded patch
-  - smoke-test output or blocker
-terminal_state: working
-```
+- Do not edit `start_nen.py`, installed site-packages or `_local_cache/` as part of other work.
+- `constants.py`, logging and startup/config plumbing affect every subsystem: change them only with
+  verification for each affected area.
+- Keep secrets in `.env` or deployment config. Never log or commit keys, tokens, wallets or
+  populated `.env` files, and never add credential defaults to code or docs.
+- Promote code out of `xperimental/` deliberately, with tests, instead of importing it.
 
-```yaml
-task_id: SERV-20260317-003
-current_status: completed
-changed_files:
-  - naeural_core/serving/default_inference/example_backend.py
-  - naeural_core/serving/model_testing/test_all/test_all_servings.py
-tests_run:
-  - command: python -m compileall naeural_core/serving
-    result: pass
-  - command: python naeural_core/serving/model_testing/test_all/test_all_servings.py
-    result: blocked
-    evidence: CUDA unavailable on runner
-evidence_reviewed:
-  - backend load trace
-  - fallback path diff
-open_risks:
-  - smoke path still needs GPU validation
-next_recommended_action: run serving smoke in a CUDA-enabled environment with EE_MINIO credentials
-```
+## Git
 
-## AGENTS.md Review Triggers
-- Review and update `AGENTS.md` whenever module boundaries change.
-- Review and update `AGENTS.md` whenever verification commands change.
-- Review and update `AGENTS.md` whenever new incident semantics are introduced.
-- Review and update `AGENTS.md` whenever new operator commands or deployment paths are added.
-- Also update `AGENTS.md` when new owner roles, new auth flows, or new required environment keys are introduced.
+- Branch from an up-to-date `main`; PRs target `main`. Do not push to `main` directly.
+- Stage exact paths; never commit runtime data, models, caches or unrelated changes.
+- Do not force-push shared branches or rewrite pushed history without approval.
+- PR bodies state behavior impact, new env keys, ports or migrations, rollout order and verification.
 
-## Online References
-Reviewed on `2026-03-17` against these current public sources for agent interoperability, agent loops, and actor-critic/eval guidance:
-- A2A Protocol Specification `v0.3.0`: `https://a2a-protocol.org/v0.3.0/specification/`
-- OpenAI, "A practical guide to building agents": `https://openai.com/business/guides-and-resources/a-practical-guide-to-building-ai-agents/`
-- OpenAI, "Agents SDK": `https://developers.openai.com/api/docs/guides/agents-sdk`
-- OpenAI Agents SDK, "Handoffs": `https://openai.github.io/openai-agents-python/handoffs/`
-- OpenAI, "Trace grading": `https://platform.openai.com/docs/guides/trace-grading`
-- OpenAI, "Graders": `https://platform.openai.com/docs/guides/graders/`
-- OpenAI, "Unrolling the Codex agent loop": `https://openai.com/index/unrolling-the-codex-agent-loop/`
-- OpenAI, "Harness engineering: leveraging Codex in an agent-first world": `https://openai.com/index/harness-engineering/`
-- Anthropic, "Building effective agents": `https://www.anthropic.com/engineering/building-effective-agents`
-- Anthropic, "How we built our multi-agent research system": `https://www.anthropic.com/engineering/built-multi-agent-research-system`
-- Anthropic, "Building agents with the Claude Agent SDK": `https://www.anthropic.com/engineering/building-agents-with-the-claude-agent-sdk/`
-- Anthropic, "Demystifying evals for AI agents": `https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents`
-- Self-Refine: `https://arxiv.org/abs/2303.17651`
-- Reflexion: `https://arxiv.org/abs/2303.11366`
-- ReVISE: `https://arxiv.org/abs/2502.14565`
-- ProActive Self-Refinement (PASR): `https://arxiv.org/abs/2508.12903`
+## Keeping this guidance useful
 
-## Lessons Learned Template
-Record reusable failures, false positives, rollback hazards, and validated fixes using this format:
+This file and the references are loaded into agents' context, so every line has a cost.
 
-- `YYYY-MM-DD` `[failure|false-positive|rollback-hazard|validated-fix]`: `scope=<path or subsystem>`; `trigger=<what happened>`; `evidence=<command/log/spec>`; `guidance=<what later agents should repeat or avoid>`.
-
-Promote broad operational facts to `Living Notes` below; use the lessons format when the entry should prevent repeated mistakes.
-
-## Living Notes (append-only)
-Format:
-- `YYYY-MM-DD`: one-sentence insight (include file/path or subsystem if relevant).
-
-Latest:
-- `2026-02-02`: Initialized living notes; append new cross-cutting insights here.
-- `2026-02-02`: Comms send/recv queues are bounded deques (1000); when MQTT is down, one message is popped and retried while queues fill/drop, and the main loop will shut down once retries exceed `CONN_MAX_RETRY_ITERS` unless bypassed (see `naeural_core/comm` + `naeural_core/main/orchestrator.py`).
-- `2026-02-02`: Correction: comm send loops pop from `_send_buff` even when disconnected, so messages may be dropped while offline; buffering is best-effort (see `naeural_core/comm/mixins`).
-- `2026-02-04`: Business plugin instantiation runs inside the main loop (`naeural_core/business/business_manager.py` `_check_instances`), so `_get_module_name_and_class` plus plugin config/validation/inspect checks can stall the loop; heavy imports or safety checks show up as startup latency.
-- `2026-02-04`: Plugin discovery in `ratio1._PluginsManagerMixin._get_plugin_by_name` walks the filesystem (`Logger.get_all_subfolders`) and safety checks call `inspect.getsource` + code scanning; first load per signature can be expensive if many distinct plugins.
-- `2026-02-05`: Comm failure triggers main-loop shutdown only when `WORK_OFFLINE` is false; failure is `comm._nr_conn_retry_iters > CONN_MAX_RETRY_ITERS` (incremented on server connect failures, reset on success) and comm threads sleep `CONNECTION_FAIL_SLEEP_TIME` between retries, so shutdown is delayed until retries exceed the threshold (see `naeural_core/comm/default/mqtt.py`, `naeural_core/comm/base/base_comm_thread.py`, `naeural_core/main/orchestrator.py`).
-- `2026-02-06`: DCT->plugin delivery is independent of comm health in each main-loop pass (collect/update/append/run at stages 4-8), and comm failures are enforced only at stage 10 (`has_failed_comms`) so offline processing continuity requires `WORK_OFFLINE=true` (see `naeural_core/main/orchestrator.py`, `naeural_core/main/main_loop_data_handler.py`, `naeural_core/business/business_manager.py`).
-- `2026-02-09`: `Manager.plugin_locations_cache` stores plugin lookup results by lowercased signature for the manager lifetime (including failed lookups), so hot-added plugins or on-disk code changes for an already-cached signature are not picked up until process/manager restart (`naeural_core/manager.py`).
-- `2026-02-09`: `BM_CACHE_CONFIG_HANDLERS` and `BM_CACHE_VALIDATORS` are implemented in shared `_ConfigHandlerMixin`, so enabling them affects config handler/validator reflection across biz, comm, capture, and serving plugins, not only BusinessManager (`naeural_core/local_libraries/config_handler_mixin.py`).
-- `2026-02-18`: NetMon reads last heartbeat without a read lock; `get_network_node_tags` deep-copies the shared heartbeat dict and can raise "dictionary changed size during iteration" if `register_heartbeat` mutates it concurrently (see `naeural_core/main/net_mon.py`).
-- `2026-02-19`: `EpochsManager.get_node_epochs` autocompletes missing epochs up to current, mutating cached epoch maps and scaling O(nodes * epochs) inside stats paths; repeated calls can be expensive for long-lived nodes (`naeural_core/main/epochs_manager.py`).
-- `2026-03-04`: `EpochsManager` now tracks local per-epoch availability in `LOCAL_EPOCHS` to avoid re-sorting heartbeats in stats; debug local vs consensus can use stored values (`naeural_core/main/epochs_manager.py`).
-- `2026-02-28`: CaptureManager stops data acquisition for all DCTs when any biz plugin queue overflows; for IoT listeners this can stall DCT deque drain and let the network receive deque (maxlen=1000) drop messages (see `naeural_core/data/capture_manager.py`, `naeural_core/data/base/base_iot_queue_listener.py`, `naeural_core/business/base/base_plugin_biz.py`).
-- `2026-03-04`: BusinessManager handler routing (`NETWORK_ROUTE_BY_HANDLER`) filters inputs for any plugin instance; loopback-captured payloads lacking `EE_PAYLOAD_PATH` get dropped when enabled (see `naeural_core/business/business_manager.py`, `naeural_core/data/default/loopback.py`).
-- `2026-03-10`: Node-oracle refresh now uses a background refresh thread for blockchain reads and applies append-only whitelist additions at main-loop stage 9, avoiding cross-thread whitelist writes; the fast `get_oracles(wait_interval=0)` path usually resolves from `NetworkMonitor`/`EpochsManager` cached node history, while brand-new nodes with empty netmon state may need later passes after heartbeats arrive (`naeural_core/main/orchestrator.py`, `naeural_core/main/net_mon.py`, `naeural_core/main/epochs_manager.py`).
-- `2026-03-10`: Correction: comm failure enforcement in the main loop now occurs at stage 11, not stage 10, because stage 9 is node-oracle refresh and logs/timers shifted to stage 10 (`naeural_core/main/orchestrator.py`).
-- `2026-03-17`: `CommunicationManager.maybe_process_incoming` drains incoming commands from the `HEARTBEATS` communicator, so logical command ingress and heartbeat ingress currently share the same transport path unless the receive flow is refactored (`naeural_core/comm/communication_manager.py`).
-- `2026-03-17`: Current comm `IN_KB` stats are measured when `_recv_buff` is drained in `get_message()`, not when MQTT traffic first arrives, so broker-side ingress pressure and app-side consumption pressure are currently conflated (`naeural_core/comm/base/base_comm_thread.py`).
-- `2026-03-17`: Correction: command/heartbeat ingress attribution is split and naming is misleading; `maybe_process_incoming()` drains the `HEARTBEATS` communicator, but the `COMMANDCONTROL` thread also consumes its own recv path and even registers heartbeats, while the SDK `MqttSession` “heartbeats” communicator is wired to config send + control recv channels (`naeural_core/comm/communication_manager.py`, `naeural_core/comm/mixins/commandcontrol_comm_mixin.py`, `/usr/local/lib/python3.10/dist-packages/ratio1/default/session/mqtt_session.py`).
-- `2026-03-17`: `start_nen.py` is an intentionally frozen launcher boundary, sets multiprocessing start method to `spawn`, and exits via `os._exit`, so startup-path fixes should usually land in `naeural_core/main/entrypoint.py` or deeper runtime modules instead of the launcher.
-- `2026-03-17`: Periodic heartbeats with `HEARTBEAT_TIMERS=false` still include broad summary sections such as `ACTIVE_PLUGINS`, `CONFIG_STREAMS`, `DCT_STATS`, `COMM_STATS`, and whitelist data; the regular/non-full heartbeat path omits timers and logs, not most diagnostic summaries (`naeural_core/main/app_monitor.py`, `naeural_core/main/orchestrator.py`).
-- `2026-03-17`: `GeneralPayload` copies most capture metadata into `_C_*` fields for every payload and also adds tags plus multiple `_P_*` runtime fields, so capture-metadata growth directly increases wire payload size (`naeural_core/data_structures.py`).
-- `2026-03-17`: Correction: the prior heartbeat-size note overstated `ACTIVE_PLUGINS` and `CONFIG_STREAMS`; those sections are gated by `EE_HB_CONTAINS_ACTIVE_PLUGINS` and `EE_HB_CONTAINS_PIPELINES` (default true if unset), usually travel inside compressed `ENCODED_DATA`, and `NetworkMonitor` pipeline cache is now refreshed directly through `NET_CONFIG_MONITOR` payloads rather than depending only on heartbeat parsing (`naeural_core/main/app_monitor.py`, `naeural_core/main/orchestrator.py`, `naeural_core/business/default/admin/net_config_monitor.py`, `naeural_core/main/net_mon.py`).
-- `2026-03-18`: SDK mainnet capture (`1957` msgs / `65.7s`) was dominated by `heartbeat` (`58.1%`) and `NET_MON_01` snapshots, with `CURRENT_NETWORK` alone accounting for `8.6MB` (`27.0%`) across only `15` messages; admin/control-plane payloads can outweigh business payloads in real traffic (`PAYLOADS_SDK_RESULTS.md`, `naeural_core/business/default/admin/net_mon_01.py`).
-- `2026-03-18`: SDK callback views can expose both decoded heartbeat fields and `ENCODED_DATA`; treat `ENCODED_DATA` there as analysis and archival overhead, not proof of raw-wire duplication without lower-level transport evidence (`PAYLOADS_SDK_RESULTS.md`, `naeural_core/main/app_monitor.py`).
-- `2026-03-18`: Ratio1 SDK `Session` decompresses heartbeat `ENCODED_DATA` before `on_heartbeat`, and the default session may auto-request peer net-config after `NET_MON_01`; 10-minute bandwidth tests should therefore measure raw MQTT payload bytes at the communicator callback and disable auto net-config requests to stay passive (`/usr/local/lib/python3.10/dist-packages/ratio1/base/generic_session.py`, `/usr/local/lib/python3.10/dist-packages/ratio1/comm/mqtt_wrapper.py`).
-- `2026-03-18`: Mainnet SDK traffic drivers in the sampled window were distributed across many `r1s-*` senders with similar totals and concentrated in `admin_pipeline` control-plane flows (`NET_MON_01`, `NET_CONFIG_MONITOR`, `CHAIN_STORE_BASE`) plus heartbeats, which suggests fleet-wide periodic admin chatter rather than one runaway business stream (`PAYLOADS_SDK_RESULTS.md`).
-- `2026-03-18`: Root planning and analysis markdown files now live under `_todo/`; keep only `README.md` and `AGENTS.md` at repo root and update path references there when moving or adding planning docs.
-- `2026-03-18`: Correction: the raw 10-minute mainnet SDK capture measured `NET_MON_01` at `49.0%` of raw MQTT payload bytes and heartbeats at `46.7%`; callback-level heartbeat expansion can overstate heartbeat dominance, so use `xperimental/payloads_tests/evidence/raw_bandwidth/*_mainnet_bandwidth_summary.json` or `_todo/PAYLOADS_SDK_RESULTS.md` for raw-basis claims (`xperimental/payloads_tests/sdk_bandwidth_capture.py`, `_todo/PAYLOADS_SDK_RESULTS.md`).
-- `2026-03-18`: Measured `NET_MON_01` payloads compress extremely well with the heartbeat codec: across `30` mainnet samples, compressing `CURRENT_NETWORK` alone cut payload bytes by `80.2%`, while hb-style compression of all non-`EE_*` NET_MON fields cut them by `81.8%`, projecting about `50.4MB` saved or `40.1%` off the full 10-minute raw sample (`xperimental/payloads_tests/netmon_compression_probe.py`, `xperimental/payloads_tests/evidence/netmon_compression/20260318T200033+0000_netmon_compression_results.md`).
-- `2026-03-19`: Additional packages installed by `naeural_core/main/entrypoint.py` now use interpreter-scoped caches under `_bin/<cache_tag>` and intentionally ignore the legacy flat `_bin` cache so Python upgrades do not reuse stale package artifacts.
-- `2026-03-19`: Additional package caches in `naeural_core/main/entrypoint.py` now persist an `install_manifest.json` per `_bin/<cache_tag>` and rebuild that interpreter cache when the runtime identity or requested package list changes.
-- `2026-03-19`: Additional package manifest matching now normalizes package-list order, and `naeural_core/main/entrypoint.py` initializes `lock` before startup so exception cleanup cannot reference it before assignment.
-- `2026-03-19`: NET_MON sender-side compression cannot move routing/meta fields such as `STREAM_NAME`, `SIGNATURE`, `INSTANCE_ID`, `SESSION_ID`, or initiator/modifier addresses into `ENCODED_DATA`, because the comm layer still reads those top-level keys to build `EE_PAYLOAD_PATH`, session metadata, and destination routing before transport packaging (`naeural_core/comm/base/base_comm_thread.py`, `naeural_core/business/default/admin/net_mon_01.py`, `ratio1_sdk/ratio1/const/payload.py`).
-- `2026-03-19`: Passive rollout scripts under `xperimental/payloads_tests/` still require a valid Ratio1 SDK network user in env or config; without that, `sdk_bandwidth_capture.py` and `netmon_compression_probe.py` fail during `GenericSession.__fill_config` before any baseline capture begins.
-- `2026-03-30`: `EpochsManager.maybe_update_cached_data` should stay a compact dirty-epoch-history refresh (`EPCT.EPOCHS` + optional `EPCT.NAME`) rather than a full `__data` deepcopy, and callers needing full debug state should use `get_full_node_state()` so heartbeat registration does not contend on long cache copies (`naeural_core/main/epochs_manager.py`, `naeural_core/business/default/admin/net_mon_01.py`).
-- `2026-03-30`: `EpochsManager.save_status` now keeps detached per-epoch caches for `SYNC_SIGNATURES`, `SYNC_AGREEMENT_CID`, and `SYNC_SIGNATURES_CID` and refreshes only dirty epochs before persistence, so unbounded signature retention no longer implies full signature-history deepcopy on every save (`naeural_core/main/epochs_manager.py`).
-- `2026-03-31`: `Dockerfile_core` now expects the docker build context to be the parent directory containing both `naeural_core/` and `ratio1/`, installs both packages from those local trees, and starts the container with `python3 start_nen.py`.
-
-- `2026-03-31`: Targeted payload fanout now requires an addressed topic template on the active payload channel (`TARGETED_TOPIC` or a templated `TOPIC`); otherwise both `naeural_core` and `ratio1` intentionally downgrade addressed payloads to one broadcast publish to avoid sending the same payload once per destination onto the broadcast topic.
-- `2026-04-14`: The `structured` training signature now derives shared vocab/schema metadata from the train split and reuses it for dev/test plus export, so categorical/text compatibility across splits follows the train schema selected at startup (`naeural_core/local_libraries/nn/th/training/data/structured.py`, `naeural_core/local_libraries/nn/th/training/pipelines/structured.py`).
-- `2026-04-14`: Structured training now emits `METADATA.SERVING_MODEL_CONFIG`, and same-node standalone inference can load the exported TorchScript through AI engine `th_structured` using local startup config rather than MinIO-backed bootstrap (`naeural_core/local_libraries/nn/th/training/pipelines/structured.py`, `naeural_core/serving/default_inference/th_structured.py`).
-- `2026-04-23`: Serving routing now preserves `MODEL_INSTANCE_ID` in serving handles, and `MainLoopDataHandler` no longer overwrites aggregated inputs for repeated use of the same serving class; same-node deployments can therefore target distinct model instances of one serving process (for example multiple `text_classifier` models) as separate servers (`naeural_core/serving/ai_engines/utils.py`, `naeural_core/main/main_loop_data_handler.py`).
-- `2026-07-20`: `register_local_heartbeat` receives the orchestrator heartbeat before `BaseCommThread` adds transport `EE_TIMESTAMP`/`EE_TIMEZONE`; local epoch paths must canonicalize `CURRENT_TIME` with the logger UTC offset before registration (`naeural_core/main/orchestrator.py`, `naeural_core/main/net_mon.py`).
-- `2026-08-05`: `BasePluginExecutor` materializes `PER_NODE_CONFIG` from an unmaterialized snapshot before config validation, so node-specific `AI_ENGINE` and serving startup parameters are effective before `BusinessManager` starts serving and do not become stale across reconfiguration (`naeural_core/business/base/base_plugin_biz.py`, `naeural_core/utils/per_node_config.py`).
-- `2026-08-17`: Remote CTRL heartbeats can use one bounded reject-newest ingress queue, bounded parallel raw-envelope authentication, and one dedicated ordered state owner. Only raw JSON parsing and signature verification run concurrently; formatter decode, identity checks, dedup, NetMon, and Epoch commits stay FIFO and serial. `HEARTBEAT_AUTH_MODE` supports staged `off`/`shadow`/`enforce`; `HEARTBEAT_INGRESS_WORKER_ENABLED=false` restores the legacy loop. The queue is process-local, survives broker disconnect while the process lives, and is not a WAL (`naeural_core/comm/heartbeat_ingress.py`, `naeural_core/comm/base/base_comm_thread.py`).
-- `2026-08-17`: Heartbeat signature-verification canonicalization counters stay in memory on the hot path and are flushed after the heartbeat worker drains. Shutdown uses a bounded join: a timed-out worker is reported in status and logs, and its final counter snapshot or remaining in-memory messages are best effort rather than a durability guarantee (`naeural_core/comm/base/base_comm_thread.py`, `ratio1/bc/base.py`).
-- `2026-08-17`: CommandControl snapshots caller-owned commands at bounded queue admission and again before preparation, preserving the exact retry source after formatter/signing work. Queue admission rejects newest explicitly, transport handoff and MQTT callback state remain separate from unknown edge application execution, and no new application retry, TTL, dead-letter, or idempotency claim is implied (`naeural_core/comm/base/base_comm_thread.py`, `naeural_core/comm/mixins/commandcontrol_comm_mixin.py`).
-- `2026-09-11`: Heartbeat identity validation must inspect compressed data newly exposed or replaced by formatter decoding (including Aixp1 `DATA.ENCODED_DATA`) before NetMon/Epoch commit; unchanged raw compressed bodies need not be expanded again by the processor (`naeural_core/comm/heartbeat_ingress.py`).
-- `2026-09-14`: Legacy crossed receive layouts may retain DEFAULT's passive CONFIG copy; resolve the command consumer before receive policy and drain only HEARTBEATS/L_HEARTBEATS, without rewriting configured paths or adding subscriptions. DEFAULT retains deque newest-message semantics. Existing manager policy flags use Logger.str_to_bool and QoS retains int-plus-range coercion; new heartbeat worker/auth settings keep their strict guards. Run test_comm_legacy_compatibility.py alongside comm policy/ingress tests when changing these contracts.
-- `2026-09-14`: Preserve legacy policy-boolean results while warning once per logical key for unrecognized nonempty strings; do not trim or replace the Logger conversion. MQTT initialization installs the passive post-message hook only for DEFAULT, not L_DEFAULT; buffer tests must use that real wiring without adding a runtime callback.
-- `2026-10-09`: Plugin memory diagnostics match stored `__dict__` keys, including `_BasePluginExecutor__global_shmem`; exclude every base-owned shared-engine reference and the `plugins_shared_mem` facade to keep queue-overflow scans out of node-wide manager/module caches. Run `python -m unittest discover -s naeural_core/business/test_framework -p 'test_plugin_memory_scan.py'` and use `naeural_core/business/test_framework/plugin_memory_testbed/README.md` for the interface-free full Edge regression. The metric estimates plugin state, with input queues measured separately, and does not impose a generic traversal budget.
-- `2026-10-09`: GiB-scale memory validation is opt-in via `plugin_memory_testbed/run_load.py` (3 GiB) and `run_e2e.py --scenario memory-growth` (4 GiB, both no swap). Kernel/RSS checks verify resident growth, 32K nested records and release; full overflow-handler timing includes queue scans and lock waits. Native RAM alerts measure host memory, not the container limit. Preserve timing failures even when repeats pass; the exclusion fix does not guarantee bounded scan latency.
-- `2026-10-13`: `EE_SHM_DIAGNOSTICS` is opt-in JSON with at most two actual serving worker targets and an absolute expiry within 600 seconds. Diagnostic identities resolve covered aliases; routing/envelopes stay unchanged. Output is capped at one MiB per interpreter, with twelve event-state keys, fixed suppressed-failure summaries, 64 scalar pending PREDICT requests per target and up to 64 image-count entries per request. Independently sampled timeout snapshots precede cleanup and retain bounded suppressed context; collection cannot prove slot ownership or pixel integrity. See `docs/20261012_shm_diagnostics.md` and run both `naeural_core/utils/test_shm_diagnostic_evidence.py` and `naeural_core/utils/test_shm_diagnostic_transport.py` alongside existing diagnostics tests.
-- `2026-10-13`: Covered aliases copy `COMM`, `SERVER` and `PID`, not `SHM`; their payloads can use pipe serialization while direct requests use the physical worker's segment. Configuration diagnostics must resolve the physical registry entry to avoid relogging on each alias switch. `business/test_framework/shm_testbed/run_e2e.py` exercises this behavior with a real isolated Edge node, generated frames and a deterministic CPU Torch model; broker traffic stays in a loopback-only namespace and cleanup checks preserve pre-existing service identities.
-
-- `2026-10-19`: Plugins receive `BCWrapper`, not the raw SDK engine. New plugin-facing blockchain methods and verification options must be forwarded explicitly in `naeural_core/utils/plugins_base/bc_wrapper.py`; dAuth reconciliation requires SDK 3.5.58 and must be verified through this wrapper. Run `python -m unittest naeural_core.utils.plugins_base.test_bc_wrapper_dauth` for these contracts.
-- `2026-10-14`: Deeploy node lifecycle is registered by ConfigManager before plugin construction and published independently by `business/deployment_lifecycle.py`. Authenticated scoped stop/retire commands persist abort tombstones; external runners require verified cleanup or `cleanup_deployment_instance` before reporting stopped. CStore deployment namespaces verify signed sequence/field ownership, keep eight recent slots, and protect dAuth secret namespaces/irreversible revocation across repair. See `docs/DEEPLOY_NODE_LIFECYCLE.md`, `docs/CSTORE.md`; run lifecycle, HSync, plugin-loop, runtime-secret and response tests for changes. This is local attempt protection, not distributed coordinator consensus or failover.
-- `2026-10-15`: Deeploy journals the resolved runner class's workload ownership and interpreter identity before construction. Known native workloads can finish an aborted stop after the owning process exits; unknown, external, and same-process cleanup failures remain unresolved without cleanup evidence. External workload ownership must be declared on the class, including constructor side effects. Retirement preserves this private journal evidence.
-- `2026-10-15`: Existing unversioned pipelines retain dAuth secret resolution after restart. Core rejects missing secret revisions on tracked/nonzero-revision pipelines; SDK omission is only for existing unversioned metadata, and dAuth enforces current CID/runner authorization. The first update captures immutable target and restoration secret revisions. Cross-stack restart coverage lives in Edge's `test_unversioned_secret_resolution.py`.
-
-- `2026-10-20`: Lifecycle reconciliation through SDK 3.5.59 leaves bundles on dAuth. CStore accepts registered dAuth signatures on current job-secret bundles for a registered coordinator, preserves coordinator-only public pointer signatures, and ignores node/EVM signature metadata only for identical-generation semantic retries. Run protected CStore lifecycle tests and Edge cross-stack custody tests.
-
-- `2026-10-21`: SDK signing metadata uses `BCct.SIGN_CANON_V` (`SIGN_CANON_V`); exclude that constant, not `EE_SIGN_CANON_V`, when comparing authenticated CStore publication retries.
-- `2026-10-22`: `BasePluginExecutor.add_inputs` uses counter-only overflow diagnostics, throttled to once per minute; never run recursive queue/plugin memory scans on the delivery thread. Explicit memory diagnostic methods retain their existing accounting boundaries. Run `test_plugin_queue_overflow.py` alongside `test_plugin_memory_scan.py` for this path.
-- `2026-10-28`: `CommunicationManager` forwards dAuth's `EE_MQTT_HOSTS` JSON array into runtime `HOSTS` only when `HOST` matches `EE_MQTT_HOST`; explicit `HOSTS` (including `[]`) and unrelated local/custom brokers retain their configuration. Failover belongs to the paired SDK `MQTTWrapper`, which visits all candidates before Core's existing failed-burst sleep and retry-exhaustion policy. Deploy the SDK failover update before Core; use runtime/persisted `HOSTS: []` plus restart to disable alternatives. Verify `test_comm_heartbeat_policy.py` with the updated SDK and the SDK MQTT lifecycle/failover tests. Members must share port/auth/TLS and the same messaging network.
-- `2026-10-28`: CStore revocation-marker lookups must preserve the HSET writer's URL-safe Base64 padding; stripping `=` misses populated markers and can admit stale secret payloads. Keep test key encoders aligned with the production writer and verify direct writes, snapshot repair, and exact redacted tombstones in `test_chain_store_hsync.py` and `test_deployment_lifecycle.py`.
-- `2026-10-29`: CStore no longer deep-copies the store or holds `__persistence_lock` during disk I/O. `__save_chain_storage` must be called after that lock is released: it takes a per-record shallow snapshot under the lock, writes it with the strict cache path (fsync + atomic replace) outside it, and on failure marks the store dirty for `process()` to retry; save errors never fail writes or block acknowledgments. Each accepted write still fsyncs the full store. Same-value remote writes ACK without saving. Do not reintroduce per-write fsync-before-ACK without the owner's approval; a periodic dirty-flag flush is the planned follow-up.
-- `2026-10-29`: Node deployment reports (`DEEPLOY_NODE_OPERATIONS`) are published only on observable state change, with a 15 s confirmation wait (`PUBLISH_TIMEOUT`) and retry-until-confirmed; there is no periodic refresh. Each pass writes stop and failure snapshots first and skips a snapshot's second field once its first is unconfirmed, so unreachable peers cannot hold stop reports behind repeated 15 s waits. A confirmed ready snapshot ends reporting for that attempt (journal `ready_reported`, survives restart) until the coordinator stops or retires it. Post-deployment liveness belongs to NetMon. Coordinators must not require report freshness (paired edge_node change); deploy that coordinator change before or with this one.
-- `2026-11-02`: CStore writes (including HSync merges) only mark the store dirty; `process()` saves the full store at most every `CS_SAVE_INTERVAL` (5 s) and `on_close()` saves pending changes, so a crash can lose the last few seconds of writes. Per-write full-store fsync was 65% of the plugin loop on mainnet oracles and kept the input queue full; do not reintroduce it. Run `test_deployment_lifecycle.py` and `test_chain_store_hsync.py` for this path (`naeural_core/business/default/admin/chain_store_base.py`).
-- `2026-11-02`: NetMon history keeps the newest heartbeat per node complete and reduces older ones to `HISTORY_HB_KEYS` (time-series fields plus resource numbers); any field not listed there, including `STOP_LOG`, `LOOPS_TIMINGS` and signatures, exists only in the newest heartbeat. Nodes silent for over 24 hours keep one heartbeat, trimmed on load and before each save. Stored signatures were never verifiable: they cover the raw envelope with `ENCODED_DATA`, which NetMon decodes and discards (`naeural_core/main/net_mon.py`).
+- Add a fact only when it is durable, not obvious from the code, and likely to prevent a mistake.
+- Put it in the matching section of [runtime notes](docs/runtime-notes.md) or the subsystem doc,
+  not here. Edit or delete the entry it replaces; do not append corrections or dated logs.
+- Keep task progress, measurements and investigations in the PR, `_todo/` or the issue tracker.
+- Update this file when commands, boundaries or the repository layout change.

@@ -1,3 +1,4 @@
+import os
 import traceback
 
 from naeural_core import constants as ct
@@ -13,6 +14,27 @@ from naeural_core.remote_file_system import FileSystemManager
 from naeural_core.bc import DefaultBlockEngine
 
 from naeural_core.ipfs import R1FSEngine
+from ratio1.bc import EE_VPN_IMPL
+
+
+def node_keeps_authorized_addrs():
+  """
+  Returns whether `authorized_addrs` survives a node restart.
+
+  Only VPN deployments (`EE_VPN_IMPL`) and seed nodes keep the file. Seeds serve
+  dAuth instead of calling it, so their `EE_DAUTH_URL` is a non-http marker
+  (mainnet uses `seed_node`), the same rule as the dAuth `is_seed_node`.
+
+  Returns
+  -------
+  bool
+    False when the node must rebuild the list from dAuth and the on-chain oracles.
+  """
+  if EE_VPN_IMPL:
+    return True
+  dauth_url = os.environ.get(ct.BASE_CT.dAuth.EvmNetData.DAUTH_URL_KEY)
+  return isinstance(dauth_url, str) and not dauth_url.startswith("http")
+
 
 class _ManagersInitMixin(object):
   def __init__(self):
@@ -176,6 +198,30 @@ class _ManagersInitMixin(object):
       raise ValueError("Failure in private blockchain setup:\n{}".format(traceback.format_exc()))
 
     self._app_shmem[ct.BLOCKCHAIN_MANAGER] = self._blockchain_manager
+    return
+
+
+  def _maybe_reset_authorized_addrs(self):
+    """
+    Empties `authorized_addrs` before dAuth runs, so senders added on a previous
+    run (for example with `add_allowed`) do not survive a restart. dAuth and the
+    oracle refresh then repopulate it. The previous file is kept as `.bak`.
+    """
+    if node_keeps_authorized_addrs():
+      return
+    path = self._blockchain_manager._get_allowed_file()
+    if not os.path.isfile(path):
+      return
+    try:
+      with open(path, 'rt') as fh:
+        dropped = [line.strip() for line in fh if line.strip() and not line.lstrip().startswith('#')]
+      os.replace(path, path + '.bak')
+      with open(path, 'wt') as fh:
+        fh.write('\n')
+    except Exception as exc:
+      self.P("Failed to reset {}: {}".format(path, exc), color='r')
+      return
+    self.P("Reset {} on startup, dropped {} entries: {}".format(path, len(dropped), dropped), color='y')
     return
   
   

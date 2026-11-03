@@ -368,6 +368,8 @@ class Orchestrator(DecentrAIObject,
     self._app_monitor = ApplicationMonitor(log=self.log, owner=self)
 
     self._initialize_private_blockchain()
+    # must run before dAuth, which repopulates the allowed senders
+    self._maybe_reset_authorized_addrs()
     if self.e2_address is None:
       raise ValueError("Node address is `None`. Check your node configuration and network settings.")
 

@@ -44,8 +44,8 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
   startup value is honored only on VPN deployments (`EE_VPN_IMPL`). See
   `test_command_sender_authorization.py`.
 - `authorized_addrs` is emptied on every startup, before dAuth, except on VPN deployments and
-  seed nodes (`node_keeps_authorized_addrs`); dAuth and the oracle refresh repopulate it and the
-  previous file stays as `authorized_addrs.bak`. See `test_authorized_addrs_reset.py`.
+  seed nodes (`node_keeps_authorized_addrs`); dAuth and the oracle refresh repopulate it, and the
+  startup log lists the dropped entries. See `test_authorized_addrs_reset.py`.
 - `IN_KB` is measured when `_recv_buff` is drained in `get_message()`, not on MQTT arrival, so broker
   ingress and app consumption pressure look the same.
 - Broker failover: `CommunicationManager` copies dAuth's `EE_MQTT_HOSTS` into runtime `HOSTS` only

@@ -205,14 +205,14 @@ class _ManagersInitMixin(object):
     """
     Empties `authorized_addrs` before dAuth runs, so senders added on a previous
     run (for example with `add_allowed`) do not survive a restart. dAuth and the
-    oracle refresh then repopulate it. The previous file is kept as `.bak`, and
-    the engine recreates an empty one on its next read.
+    oracle refresh then repopulate it. The file is removed and the engine
+    recreates an empty one on its next read.
     """
     if node_keeps_authorized_addrs():
       return
     dropped = self._blockchain_manager.whitelist_with_prefixes
     path = self._blockchain_manager._get_allowed_file()
-    os.replace(path, path + '.bak')
+    os.remove(path)
     self.P("Reset {} on startup, dropped {} entries: {}".format(path, len(dropped), dropped), color='y')
     return
   

@@ -33,6 +33,7 @@ from naeural_core.config.runtime_secret_resolution import (
 from naeural_core.business import BusinessManager
 from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY
 from naeural_core.comm import CommunicationManager
+from naeural_core.comm.communication_manager import node_is_secured
 from naeural_core.serving import ServingManager
 from naeural_core.io_formatters import IOFormatterManager
 from naeural_core.heavy_ops import HeavyOpsManager
@@ -687,7 +688,7 @@ class Orchestrator(DecentrAIObject,
   
   @property
   def is_secured(self):
-    return self.config_data.get(ct.CONFIG_STARTUP_v2.SECURED, False) 
+    return node_is_secured(self.config_data)
   
   @property
   def check_ram_on_shutdown(self):

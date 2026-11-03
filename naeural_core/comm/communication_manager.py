@@ -16,6 +16,29 @@ from naeural_core.bc import DefaultBlockEngine, VerifyMessage
 from naeural_core.local_libraries import _ConfigHandlerMixin
 from naeural_core.manager import Manager
 from naeural_core.comm.communication_roles import resolve_receive_roles
+from ratio1.bc import EE_VPN_IMPL
+
+
+def node_is_secured(config_data):
+  """
+  Returns whether the node runs in secured mode.
+
+  Ratio1 network nodes are always secured and ignore the `SECURED` startup
+  value. Only VPN deployments (`EE_VPN_IMPL`) may turn it off through config.
+
+  Parameters
+  ----------
+  config_data : dict
+    The startup configuration.
+
+  Returns
+  -------
+  bool
+    True when the node must drop commands with invalid signatures.
+  """
+  if not EE_VPN_IMPL:
+    return True
+  return config_data.get(ct.CONFIG_STARTUP_v2.K_SECURED, False)
 
 
 class CommunicationManager(Manager, _ConfigHandlerMixin):
@@ -71,7 +94,7 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
   
   @property
   def is_secured(self):
-    return self.log.config_data.get(ct.CONFIG_STARTUP_v2.K_SECURED, False)
+    return node_is_secured(self.log.config_data)
 
   def __runtime_value(self, *keys, default=None):
     env = self._environment_variables or {}

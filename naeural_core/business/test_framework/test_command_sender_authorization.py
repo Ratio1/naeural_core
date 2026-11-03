@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from naeural_core import Logger, constants as ct
-from naeural_core.comm.communication_manager import CommunicationManager
+from naeural_core.comm import communication_manager
+from naeural_core.comm.communication_manager import CommunicationManager, node_is_secured
 from ratio1.bc import DefaultBlockEngine
 
 
@@ -118,22 +119,41 @@ class TestCommandSenderAuthorization(unittest.TestCase):
         self.assertEqual(msg[RECV.K_SENDER_ADDR], self.attacker.address)
         self.assertEqual(msg[RECV.K_EE_ID], "node")
 
-  def test_unsecured_node_does_not_authorize_invalid_signature(self):
-    msg = self.command(self.attacker, self.deploy_body(), encrypted=False)
-    msg[RECV.K_SENDER_ADDR] = self.owner.address
-    manager = self.manager(secured=False)
-    manager.process_command_message(msg)
-    manager.process_decrypted_command.assert_not_called()
+  def test_secured_is_forced_outside_vpn(self):
+    with mock.patch.object(communication_manager, "EE_VPN_IMPL", False):
+      self.assertTrue(node_is_secured({ct.CONFIG_STARTUP_v2.K_SECURED: False}))
+      self.assertTrue(node_is_secured({}))
+    with mock.patch.object(communication_manager, "EE_VPN_IMPL", True):
+      self.assertFalse(node_is_secured({ct.CONFIG_STARTUP_v2.K_SECURED: False}))
+      self.assertFalse(node_is_secured({}))
+      self.assertTrue(node_is_secured({ct.CONFIG_STARTUP_v2.K_SECURED: True}))
 
-  def test_unsecured_node_keeps_whitelisted_commands_without_valid_signature(self):
+  def test_non_vpn_node_drops_invalid_signature_despite_unsecured_config(self):
     body = {RECV.K_ACTION: ct.COMMANDS.FULL_HEARTBEAT, RECV.K_PAYLOAD: {}}
     msg = self.command(self.attacker, body, encrypted=False)
     msg[RECV.K_SENDER_ADDR] = self.owner.address
     manager = self.manager(secured=False)
-    manager.process_command_message(msg)
+    with mock.patch.object(communication_manager, "EE_VPN_IMPL", False):
+      manager.process_command_message(msg)
+    manager.process_decrypted_command.assert_not_called()
+
+  def test_unsecured_vpn_node_does_not_authorize_invalid_signature(self):
+    msg = self.command(self.attacker, self.deploy_body(), encrypted=False)
+    msg[RECV.K_SENDER_ADDR] = self.owner.address
+    manager = self.manager(secured=False)
+    with mock.patch.object(communication_manager, "EE_VPN_IMPL", True):
+      manager.process_command_message(msg)
+    manager.process_decrypted_command.assert_not_called()
+
+  def test_unsecured_vpn_node_keeps_whitelisted_commands_without_valid_signature(self):
+    body = {RECV.K_ACTION: ct.COMMANDS.FULL_HEARTBEAT, RECV.K_PAYLOAD: {}}
+    msg = self.command(self.attacker, body, encrypted=False)
+    msg[RECV.K_SENDER_ADDR] = self.owner.address
+    manager = self.manager(secured=False)
+    with mock.patch.object(communication_manager, "EE_VPN_IMPL", True):
+      manager.process_command_message(msg)
     manager.process_decrypted_command.assert_called_once()
     self.assertFalse(manager.process_decrypted_command.call_args.kwargs["validated_command"])
-
 
 if __name__ == "__main__":
   unittest.main()

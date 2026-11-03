@@ -38,6 +38,10 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 - Existing policy booleans go through `Logger.str_to_bool` and warn once per key on unrecognized
   strings; QoS keeps int-plus-range coercion. New heartbeat worker/auth settings use strict guards.
   Run `test_comm_legacy_compatibility.py` with the comm policy/ingress tests when touching these.
+- Command authorization uses only the envelope `EE_SENDER` whose key verified the signature. The
+  encrypted body contributes only `ACTION` and `PAYLOAD`, and unsigned or invalid commands pass only
+  through `whitelist_commands.json`, even on unsecured nodes. See
+  `test_command_sender_authorization.py`.
 - `IN_KB` is measured when `_recv_buff` is drained in `get_message()`, not on MQTT arrival, so broker
   ingress and app consumption pressure look the same.
 - Broker failover: `CommunicationManager` copies dAuth's `EE_MQTT_HOSTS` into runtime `HOSTS` only

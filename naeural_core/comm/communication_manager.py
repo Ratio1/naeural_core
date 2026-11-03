@@ -341,8 +341,26 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     template_whitelist_command: list[dict] = self._load_whitelist_commands()
     return any([self.log.match_template(cmd, template) for template in template_whitelist_command])
 
-  def _verify_command_allowed(self, cmd):
-    is_authorized = self.blockchain_manager.is_allowed(cmd.get(ct.COMMS.COMM_RECV_MESSAGE.K_SENDER_ADDR, None))
+  def _verify_command_allowed(self, cmd, signed_sender):
+    """
+    Checks whether a received command may run on this node.
+
+    Parameters
+    ----------
+    cmd : dict
+      The command message, matched against the command whitelist templates.
+
+    signed_sender : str or None
+      The address whose key produced the command signature, or None when the
+      signature did not verify. Only this address is checked against the
+      allowed list: an `EE_SENDER` inside the message is never trusted.
+
+    Returns
+    -------
+    tuple(bool, str)
+      Whether the command is allowed and the reason.
+    """
+    is_authorized = signed_sender is not None and self.blockchain_manager.is_allowed(signed_sender)
     is_whitelisted = self._verify_whitelist_command(cmd)
 
     result = is_authorized or is_whitelisted
@@ -352,6 +370,8 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
       result_message = "Sender is authorized."
     elif is_whitelisted:
       result_message = "Sender is not authorized but command is allowed due to WHITELIST."
+    elif signed_sender is None:
+      result_message = "Sender is not authorized: command signature is not valid."
     else:
       result_message = "Sender is not authorized."
 
@@ -952,7 +972,19 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
             dict_data = json.loads(str_data)
             action = dict_data.get(ct.COMMS.COMM_RECV_MESSAGE.K_ACTION, None)
             payload = dict_data.get(ct.COMMS.COMM_RECV_MESSAGE.K_PAYLOAD, None)
-            json_msg.update(dict_data)
+            # Senders encrypt only ACTION and PAYLOAD. The signed envelope keeps
+            # EE_SENDER, EE_ID and the other routing fields: the encrypted body
+            # must never override them.
+            ignored_keys = sorted(
+              k for k in dict_data
+              if k not in (ct.COMMS.COMM_RECV_MESSAGE.K_ACTION, ct.COMMS.COMM_RECV_MESSAGE.K_PAYLOAD)
+            )
+            if len(ignored_keys) > 0:
+              self.P("INCOMING:   Ignoring envelope keys inside the encrypted body from <{}>: {}".format(
+                sender_addr, ignored_keys), color='r'
+              )
+            json_msg[ct.COMMS.COMM_RECV_MESSAGE.K_ACTION] = action
+            json_msg[ct.COMMS.COMM_RECV_MESSAGE.K_PAYLOAD] = payload
           except Exception as e:
             self.P("INCOMING: Error while decrypting message: {}\n{}".format(str_data, e), color='r')
       # endif is_encrypted
@@ -966,7 +998,10 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         self.P("INCOMING: Message pre-processed (is_encrypted: {}), verifying allow list...".format(
           is_encrypted
         ))
-        allowed, allowed_msg = self._verify_command_allowed(json_msg)
+        # verify() checks the signature with the key of the envelope EE_SENDER,
+        # so a valid signature proves the command comes from sender_addr.
+        signed_sender = sender_addr if validated_command else None
+        allowed, allowed_msg = self._verify_command_allowed(json_msg, signed_sender=signed_sender)
         self.P("INCOMING:   Command allowed check: {}. Reason: {}".format(allowed, allowed_msg), color=None if allowed else 'r')
         if allowed:
           self.process_decrypted_command(

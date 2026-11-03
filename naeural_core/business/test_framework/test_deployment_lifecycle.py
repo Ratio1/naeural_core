@@ -935,6 +935,31 @@ class ConstructionBarrierTest(unittest.TestCase):
       self.assertEqual(lifecycle.records["operation|deploy"]["status"], "stopping")
       self.assertIs(lifecycle.plugins[("operation|deploy", "WORKER", "worker")], runtime)
 
+  def test_blocked_code_execution_plugins_are_never_constructed(self):
+    from naeural_core import constants as ct
+    for signature in ct.PLUGIN_SEARCH.BLOCKED_BIZ_PLUGINS + ["custom_exec_01"]:
+      with self.subTest(signature=signature), tempfile.TemporaryDirectory() as folder:
+        pipeline = config()
+        pipeline["PLUGINS"][0]["SIGNATURE"] = signature
+        lifecycle = DeploymentLifecycle(os.path.join(folder, "journal.json"), "node")
+        lifecycle.admit(pipeline, "oracle", True)
+        lookups, notifications = [], []
+        manager = self.manager(lifecycle, lambda **kwargs: self.fail("blocked plugin constructed"))
+        manager._dct_config_streams = {"app": pipeline}
+        manager.get_current_jobs = lambda **kwargs: [(None, None, None, None, None, "app", signature, "worker", {})]
+        manager._get_module_name_and_class = lambda **kwargs: lookups.append(kwargs)
+        manager._create_notification = lambda **kwargs: notifications.append(kwargs)
+        manager._check_instances()
+        self.assertEqual(lookups, [])
+        self.assertEqual(manager._dct_current_instances, {"instance": None})
+        self.assertEqual(len(notifications), 1)
+        record = lifecycle.records["operation|deploy"]
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(
+          [instance["error"]["code"] for instance in record["instances"]],
+          ["CONFIGURATION_REJECTED"],
+        )
+
   def test_stale_filtered_job_cannot_construct_after_abort(self):
     with tempfile.TemporaryDirectory() as folder:
       lifecycle = DeploymentLifecycle(os.path.join(folder, "journal.json"), "node")

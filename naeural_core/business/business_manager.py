@@ -813,6 +813,20 @@ class BusinessManager(Manager):
             ),
             color='b'
           )
+          if signature.upper() in ct.PLUGIN_SEARCH.BLOCKED_BIZ_PLUGINS:
+            # Code-execution plugins are disabled; saved configs must not revive them.
+            self._dct_current_instances[instance_hash] = None
+            if operation:
+              lifecycle.fail(pipeline, signature, instance_id, "CONFIGURATION_REJECTED")
+            msg = "Business plugin <{}:{}> is disabled on this node and was not started.".format(signature, instance_id)
+            self.P(msg + " on stream {}".format(stream_name), color='r')
+            self._create_notification(
+              notif=ct.STATUS_TYPE.STATUS_EXCEPTION,
+              msg=msg,
+              stream_name=stream_name,
+            )
+            continue
+          #endif blocked plugin
           self.set_loop_stage('2.bm.refresh.get_class.{}:{}'.format(signature,instance_id))
           if 'update_monitor' in signature.lower():
             print('debug')

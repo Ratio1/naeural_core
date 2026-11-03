@@ -361,6 +361,10 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     return
 
   def _verify_whitelist_command(self, cmd):
+    # Outside VPN deployments every command needs an authorized sender,
+    # whatever the whitelist file on disk says.
+    if not EE_VPN_IMPL:
+      return False
     template_whitelist_command: list[dict] = self._load_whitelist_commands()
     return any([self.log.match_template(cmd, template) for template in template_whitelist_command])
 

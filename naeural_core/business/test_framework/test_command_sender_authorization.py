@@ -145,6 +145,25 @@ class TestCommandSenderAuthorization(unittest.TestCase):
       manager.process_command_message(msg)
     manager.process_decrypted_command.assert_not_called()
 
+  def test_non_vpn_whitelisted_commands_require_authorized_sender(self):
+    for action in (ct.COMMANDS.FULL_HEARTBEAT, ct.COMMANDS.TIMERS_ONLY_HEARTBEAT):
+      with self.subTest(action=action), mock.patch.object(communication_manager, "EE_VPN_IMPL", False):
+        body = {RECV.K_ACTION: action, RECV.K_PAYLOAD: {}}
+        manager = self.manager()
+        manager.process_command_message(self.command(self.attacker, body))
+        manager.process_decrypted_command.assert_not_called()
+
+        manager = self.manager()
+        manager.process_command_message(self.command(self.owner, body))
+        manager.process_decrypted_command.assert_called_once()
+
+  def test_vpn_full_heartbeat_stays_whitelisted(self):
+    body = {RECV.K_ACTION: ct.COMMANDS.FULL_HEARTBEAT, RECV.K_PAYLOAD: {}}
+    manager = self.manager()
+    with mock.patch.object(communication_manager, "EE_VPN_IMPL", True):
+      manager.process_command_message(self.command(self.attacker, body))
+    manager.process_decrypted_command.assert_called_once()
+
   def test_unsecured_vpn_node_keeps_whitelisted_commands_without_valid_signature(self):
     body = {RECV.K_ACTION: ct.COMMANDS.FULL_HEARTBEAT, RECV.K_PAYLOAD: {}}
     msg = self.command(self.attacker, body, encrypted=False)

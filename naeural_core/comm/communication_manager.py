@@ -361,6 +361,10 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     return
 
   def _verify_whitelist_command(self, cmd):
+    # FULL_HEARTBEAT returns the node logs, so outside VPN deployments only
+    # authorized senders may request it, whatever the whitelist file on disk says.
+    if not EE_VPN_IMPL and cmd.get(ct.COMMS.COMM_RECV_MESSAGE.K_ACTION) == ct.COMMANDS.FULL_HEARTBEAT:
+      return False
     template_whitelist_command: list[dict] = self._load_whitelist_commands()
     return any([self.log.match_template(cmd, template) for template in template_whitelist_command])
 

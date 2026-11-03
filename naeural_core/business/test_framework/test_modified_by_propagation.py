@@ -49,6 +49,7 @@ class _Constants(ModuleType):
       SUFFIX_BIZ_PLUGINS=".py",
       SAFE_BIZ_PLUGINS=[],
       SAFE_BIZ_IMPORTS=[],
+      BLOCKED_BIZ_PLUGINS=[],
     )
     self.STATUS_TYPE = SimpleNamespace(
       STATUS_EXCEPTION="STATUS_EXCEPTION",

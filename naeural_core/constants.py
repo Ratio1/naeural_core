@@ -336,6 +336,9 @@ class PLUGIN_SEARCH:
   SAFE_BIZ_PLUGINS = ['naeural_core.business.default', 'naeural_core.business.training', 'extensions.business']  # this is were the safe plugins are stored
   SAFE_BIZ_IMPORTS = ['naeural_core.business', 'extensions.business']  # be aware that someone may drop some .py there and "validate" attacker code
   SUFFIX_BIZ_PLUGINS = 'Plugin'
+  # Plugins that execute code received in their config or commands. They are never
+  # instantiated, including from saved pipeline configs.
+  BLOCKED_BIZ_PLUGINS = ['CUSTOM_EXEC_01', 'REST_CUSTOM_EXEC_01', 'CODE_EXECUTOR', 'NAEURAL_CODE_SANDBOX']
 
   # Heavy Ops
   SAFE_LOC_HEAVY_OPS_PLUGINS = 'naeural_core.heavy_ops.default'

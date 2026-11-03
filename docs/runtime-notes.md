@@ -38,6 +38,11 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 - Existing policy booleans go through `Logger.str_to_bool` and warn once per key on unrecognized
   strings; QoS keeps int-plus-range coercion. New heartbeat worker/auth settings use strict guards.
   Run `test_comm_legacy_compatibility.py` with the comm policy/ingress tests when touching these.
+- Command authorization uses only the envelope `EE_SENDER` whose key verified the signature. The
+  encrypted body contributes only `ACTION` and `PAYLOAD`, and unsigned or invalid commands pass only
+  through `whitelist_commands.json`. Nodes are always secured (`node_is_secured`); the `SECURED`
+  startup value is honored only on VPN deployments (`EE_VPN_IMPL`). See
+  `test_command_sender_authorization.py`.
 - `IN_KB` is measured when `_recv_buff` is drained in `get_message()`, not on MQTT arrival, so broker
   ingress and app consumption pressure look the same.
 - Broker failover: `CommunicationManager` copies dAuth's `EE_MQTT_HOSTS` into runtime `HOSTS` only
@@ -90,6 +95,9 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## Plugins and business manager
 
+- `ct.PLUGIN_SEARCH.BLOCKED_BIZ_PLUGINS` (remote code execution plugins) are never instantiated, on
+  any network, even from saved pipeline configs. Deeploy operations that include them fail with
+  `CONFIGURATION_REJECTED`.
 - Plugin lookup walks the filesystem and runs code safety checks on first use per signature
   (SDK `_PluginsManagerMixin._get_plugin_by_name`). `Manager.plugin_locations_cache` keeps results,
   including failures, for the process lifetime, so new or changed plugin files need a restart.

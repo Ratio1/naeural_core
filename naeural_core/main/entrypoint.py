@@ -473,13 +473,6 @@ def main(additional_packages: list = None):
   packs = l.get_packages(as_text=True, indent=4, mandatory=MANDATORY_PACKAGES)
   l.P("Current build installed packages:\n{}".format(packs))
 
-  # DEBUG log environment
-  l.P("Environment:")
-  for k in os.environ:
-    if k.startswith('EE_') or k.startswith('AIXP'):
-      l.P("  {}={}".format(k, os.environ[k]))
-  # DEBUG end log environment
-
   if is_docker:
     # post config setup
     docker_env = os.environ.get('AINODE_ENV')

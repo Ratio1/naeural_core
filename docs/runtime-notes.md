@@ -101,9 +101,6 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 - `ct.PLUGIN_SEARCH.BLOCKED_BIZ_PLUGINS` (remote code execution plugins) are never instantiated, on
   any network, even from saved pipeline configs. Deeploy operations that include them fail with
   `CONFIGURATION_REJECTED`.
-- `VI_CUSTOM_EXEC` (`business/default/vi_custom_exec.py`) is a subclass of `CUSTOM_EXEC_01` under an
-  unblocked signature, kept for operator debugging. It executes config-supplied code; do not
-  deploy it to nodes you do not control.
 - Plugin lookup walks the filesystem and runs code safety checks on first use per signature
   (SDK `_PluginsManagerMixin._get_plugin_by_name`). `Manager.plugin_locations_cache` keeps results,
   including failures, for the process lifetime, so new or changed plugin files need a restart.

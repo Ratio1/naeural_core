@@ -947,6 +947,35 @@ class BCWrapper:
     """
     return self.__bc.web3_get_all_active_jobs()
 
+  def get_block_number(self):
+    """
+    Return the latest block number of the current network.
+
+    Returns
+    -------
+    int
+        The latest block number.
+    """
+    return self.__bc.web3_get_block_number()
+
+  def get_nd_link_events(self, from_block: int, to_block: int):
+    """
+    Return the ND `LinkNode` and `UnlinkNode` events in a block range, in chain order.
+
+    Parameters
+    ----------
+    from_block : int
+        First block of the range (inclusive).
+    to_block : int
+        Last block of the range (inclusive). The range must fit the RPC block-range limit.
+
+    Returns
+    -------
+    list[dict]
+        Events with `event`, `license_id`, `owner`, `node_address`, `block_number` and `log_index`.
+    """
+    return self.__bc.web3_get_nd_link_events(from_block=from_block, to_block=to_block)
+
   def submit_node_update(self, job_id: int, nodes: list):
     """
     Submit nodes update for a given job.

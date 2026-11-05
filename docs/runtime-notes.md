@@ -126,6 +126,10 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 - `ADMIN_PIPELINE_ASYNC_DISPATCH` is on by default: `admin_pipeline` capture and dispatch run on
   their own lanes, primed before serving warmup, controlled by `ADMIN_PIPELINE_DISPATCH_POLL_SECONDS`,
   `ADMIN_PIPELINE_QUEUE_MAXLEN` and `ADMIN_PIPELINE_STALL_WARNING_SECONDS`.
+- FastAPI web apps: `get_request_client_ip()` is uvicorn's `request.client.host`, which follows
+  `X-Forwarded-For` only for connections from `FORWARDED_ALLOW_IPS` (default `127.0.0.1`). Tunnel
+  agents must reach the app on 127.0.0.1, or the value is the agent's address. Never trust `*` on
+  a reachable port: callers could then choose the address that gets logged.
 - Heavy ops keep `send_mail` and `send_sms` enabled even when `HEAVY_OPS_CONFIG.ACTIVE_COMM_ASYNC`
   is overridden; `DISABLE_DEFAULT_SEND_MAIL` / `DISABLE_DEFAULT_SEND_SMS` opt out.
 

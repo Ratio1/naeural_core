@@ -91,7 +91,7 @@ class UvicornPluginComms:
     self._additional_fastapi_data = additional_fastapi_data or {}
     return
 
-  async def call_plugin(self, *request, profile=None):
+  async def call_plugin(self, *request, profile=None, client_ip=None):
     """
     Calls the business plugin with the supplied method and arguments.
 
@@ -100,6 +100,9 @@ class UvicornPluginComms:
     First parameter is the method name of the business plugin that should
     be invoked to process this request. Subsequent parameters are the
     arguments of this method.
+    profile: dict or None, profiling object filled along the request path.
+    client_ip: str or None, address of the HTTP client as resolved by uvicorn.
+      The plugin exposes it to the endpoint through `get_request_client_ip`.
 
     Returns
     -------
@@ -145,6 +148,7 @@ class UvicornPluginComms:
         'value': request,
         'profile': profile_obj,
         't_put_wall_ns': t_put_wall_ns,
+        'client_ip': client_ip,
       }
     )
     t_put_end_ns = time.perf_counter_ns() if profile_obj is not None else None

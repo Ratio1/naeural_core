@@ -481,6 +481,7 @@ class FastApiWebAppPlugin(BasePlugin):
     self._request_monitor_backoff_s = 0.0
     self._request_monitor_restart_failures = 0
     self._last_incoming_drop_log_ts = 0.0
+    self._current_request_client_ip = None
 
     self._profile_stats = {}
     self._profile_last_log_ts = self.time()
@@ -513,8 +514,24 @@ class FastApiWebAppPlugin(BasePlugin):
       - value: tuple - Method name and args for the endpoint handler
       - profile: dict or None - Profiling object
       - t_put_wall_ns: int or None - Wall-clock time when the request was enqueued
+      - client_ip: str or None - Address of the HTTP client
     """
     return
+
+  def get_request_client_ip(self):
+    """
+    Address of the HTTP client whose request is being handled.
+
+    Uvicorn resolves it from X-Forwarded-For only for connections from trusted
+    proxies (by default 127.0.0.1, where the tunnel agents connect from), so behind
+    a tunnel it is the caller's public address and otherwise the TCP peer.
+
+    Returns
+    -------
+    str or None
+      The address while an endpoint or its postponed continuation runs, else None.
+    """
+    return self._current_request_client_ip
 
   def on_response(self, method: str, response: dict):
     """
@@ -611,6 +628,7 @@ class FastApiWebAppPlugin(BasePlugin):
       'value': request_value,
       'endpoint_name': endpoint_name,
       'profile': None,
+      'client_ip': None,
     }
 
   def parse_postponed_dict(self, request):
@@ -668,8 +686,10 @@ class FastApiWebAppPlugin(BasePlugin):
 
     method = value.get_solver_method()
     kwargs = value.get_method_kwargs()
+    client_ip = request.get('client_ip')
 
     try:
+      self._current_request_client_ip = client_ip
       if isinstance(profile, dict):
         self._profile_slice_start(profile, endpoint_name, t_put_wall_ns=None)
       value = method(**kwargs)
@@ -688,6 +708,8 @@ class FastApiWebAppPlugin(BasePlugin):
       }
       if isinstance(profile, dict):
         self._profile_slice_end(profile)
+    finally:
+      self._current_request_client_ip = None
 
     if isinstance(value, PostponedRequest):
       postponed = self.get_postponed_dict(
@@ -696,6 +718,7 @@ class FastApiWebAppPlugin(BasePlugin):
         endpoint_name=endpoint_name
       )
       postponed['profile'] = profile
+      postponed['client_ip'] = client_ip
       return postponed
 
     self.__fastapi_handle_response(
@@ -711,6 +734,7 @@ class FastApiWebAppPlugin(BasePlugin):
     value = request.get('value')
     profile = request.get('profile')
     t_put_wall_ns = request.get('t_put_wall_ns')
+    client_ip = request.get('client_ip')
 
     if isinstance(value, (list, tuple)) and len(value) > 0 and value[0] == "__profile__":
       try:
@@ -739,6 +763,7 @@ class FastApiWebAppPlugin(BasePlugin):
         kwargs = {}
       if isinstance(profile, dict):
         self._profile_slice_start(profile, method, t_put_wall_ns=t_put_wall_ns)
+      self._current_request_client_ip = client_ip
       value = endpoint(*args, **kwargs)
       if isinstance(profile, dict):
         self._profile_slice_end(profile)
@@ -756,6 +781,8 @@ class FastApiWebAppPlugin(BasePlugin):
       }
       if isinstance(profile, dict):
         self._profile_slice_end(profile)
+    finally:
+      self._current_request_client_ip = None
 
     if isinstance(value, PostponedRequest):
       self.P(f"Postponing request {id} for {method}.")
@@ -765,6 +792,7 @@ class FastApiWebAppPlugin(BasePlugin):
         endpoint_name=method
       )
       postponed['profile'] = profile
+      postponed['client_ip'] = client_ip
       return postponed
 
     self.__fastapi_handle_response(

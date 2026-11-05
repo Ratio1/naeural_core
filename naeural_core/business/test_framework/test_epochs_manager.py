@@ -283,6 +283,24 @@ class TestEpochsManager(unittest.TestCase):
       data[node_addr] = node_hb
     return data
 
+  def test_eth_lookup_miss_converts_only_unmapped_nodes(self):
+    for node_addr in ("0xNODE2", "0xNODE3"):
+      self.manager._EpochsManager__initialize_new_node(node_addr)
+    converted = []
+    convert = self.owner.node_address_to_eth_address
+    self.owner.node_address_to_eth_address = lambda addr: converted.append(addr) or convert(addr)
+
+    self.assertEqual(self.manager.eth_to_internal("eth_0xNODE2"), "0xNODE2")
+    for _ in range(3):
+      self.assertIsNone(self.manager.eth_to_internal("eth_0xOFFLINE"))
+    self.assertEqual(converted, [])
+
+    # A node that reached the data without being mapped is converted once, on the next miss.
+    self.manager._EpochsManager__data["0xNODE4"] = {}
+    self.assertEqual(self.manager.eth_to_internal("eth_0xNODE4"), "0xNODE4")
+    self.assertIsNone(self.manager.eth_to_internal("eth_0xOFFLINE"))
+    self.assertEqual(converted, ["0xNODE4"])
+
   def test_epochs_range_matches_slice(self):
     node_addr = self.owner.node_addr
     for epoch in range(1, 6):

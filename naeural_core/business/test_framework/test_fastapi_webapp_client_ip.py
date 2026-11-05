@@ -34,7 +34,10 @@ def _build_harness_cls():
     textwrap.indent(methods[name], "  ") for name in HARNESS_METHODS
   )
   # The response is the end of the dispatch path, so the test records it directly.
+  # Queue-wait expiry has its own tests; here every request is fresh.
   class_source += (
+    "\n\n  def _reject_expired_request(self, request, method):\n"
+    "    return False\n"
     "\n\n  def __fastapi_handle_response(self, id, value, profile, method):\n"
     "    self.responses.append((id, value))\n"
   )

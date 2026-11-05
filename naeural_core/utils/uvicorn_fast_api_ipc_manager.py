@@ -139,7 +139,8 @@ class UvicornPluginComms:
       self._loop = asyncio.get_running_loop()
       self._start_reader_thread()
 
-    t_put_wall_ns = time.time_ns() if profile_obj is not None else None
+    # Always sent: the plugin answers requests that waited too long without running them.
+    t_put_wall_ns = time.time_ns()
     t_put_start_ns = time.perf_counter_ns() if profile_obj is not None else None
     await asyncio.to_thread(
       self._server_queue.put,

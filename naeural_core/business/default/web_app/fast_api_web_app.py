@@ -55,6 +55,10 @@ _CONFIG = {
   "LOG_REQUESTS": False,
 
   "REQUEST_TIMEOUT": DEFAULT_REQUEST_TIMEOUT,
+  # Longest wait in the incoming queue, in seconds. A request that waited longer is
+  # answered with a 503 instead of running its endpoint. None or 0 means
+  # REQUEST_TIMEOUT, after which the HTTP side has already stopped waiting.
+  "MAX_QUEUE_WAIT": None,
   "MAX_INCOMING_REQUESTS": DEFAULT_MAX_INCOMING_REQUESTS,
   "MAX_REQUEST_MONITOR_RESTART_RETRIES": DEFAULT_MAX_REQUEST_MONITOR_RESTART_RETRIES,
 
@@ -117,6 +121,15 @@ class FastApiWebAppPlugin(BasePlugin):
       return None
     return numeric_timeout
   
+  def get_max_queue_wait(self):
+    request_timeout = self.get_request_timeout()
+    configured_value = self.cfg_max_queue_wait
+    if not isinstance(configured_value, (int, float)) or configured_value <= 0:
+      return request_timeout
+    if request_timeout is None:
+      return float(configured_value)
+    return min(float(configured_value), request_timeout)
+
   def get_max_incoming_requests(self):
     configured_value = self.cfg_max_incoming_requests
     if not isinstance(configured_value, int):
@@ -481,6 +494,8 @@ class FastApiWebAppPlugin(BasePlugin):
     self._request_monitor_backoff_s = 0.0
     self._request_monitor_restart_failures = 0
     self._last_incoming_drop_log_ts = 0.0
+    self._expired_requests_since_log = 0
+    self._last_expired_log_ts = 0.0
     self._current_request_client_ip = None
 
     self._profile_stats = {}
@@ -581,16 +596,19 @@ class FastApiWebAppPlugin(BasePlugin):
           except Exception:
             self.P(f"Exception in on_request:\n{self.get_exception()}", color='r')
           with self._incoming_lock:
-            if len(self._incoming_requests) >= self.get_max_incoming_requests():
-              now = time.time()
-              if now - self._last_incoming_drop_log_ts >= INCOMING_DROP_LOG_INTERVAL_S:
-                self._last_incoming_drop_log_ts = now
-                self.P(
-                  "Dropping incoming request: incoming queue is full.",
-                  color='y'
-                )
-            else:
+            queue_full = len(self._incoming_requests) >= self.get_max_incoming_requests()
+            if not queue_full:
               self._incoming_requests.append(request)
+          if queue_full:
+            now = time.time()
+            if now - self._last_incoming_drop_log_ts >= INCOMING_DROP_LOG_INTERVAL_S:
+              self._last_incoming_drop_log_ts = now
+              self.P(
+                "Dropping incoming request: incoming queue is full.",
+                color='y'
+              )
+            # Answer at once instead of leaving the HTTP side waiting for REQUEST_TIMEOUT.
+            self._reply_unhandled_request(request, 503, "Server busy: request queue is full.")
       except Exception:
         self.P(f"Request monitor crashed:\n{self.get_exception()}", color='r')
         return
@@ -666,6 +684,54 @@ class FastApiWebAppPlugin(BasePlugin):
       if status_code is not None:
         envelope['status_code'] = status_code
     return envelope
+
+  def _reply_unhandled_request(self, request, status_code, error):
+    """Answer a request without running its endpoint."""
+    response = {
+      'id': request.get('id'),
+      'value': self.__fastapi_process_response({
+        'error': error,
+        'status_code': status_code,
+        'logged': True,
+      }),
+    }
+    if isinstance(request.get('profile'), dict):
+      response['profile'] = request['profile']
+    self._client_queue.put(response)
+    return
+
+  def _reject_expired_request(self, request, method):
+    """
+    Answer with a 503, without running the endpoint, a request that waited in the
+    incoming queue longer than `MAX_QUEUE_WAIT`. Under overload this keeps the
+    plugin loop on requests whose callers are still waiting.
+
+    Returns
+    -------
+    bool
+      True if the request expired and was answered.
+    """
+    max_wait = self.get_max_queue_wait()
+    t_put_wall_ns = request.get('t_put_wall_ns')
+    if max_wait is None or not isinstance(t_put_wall_ns, int):
+      return False
+    waited = (time.time_ns() - t_put_wall_ns) / 1e9
+    if waited <= max_wait:
+      return False
+    self._expired_requests_since_log += 1
+    now = time.time()
+    if now - self._last_expired_log_ts >= INCOMING_DROP_LOG_INTERVAL_S:
+      self.P(
+        f"Dropped {self._expired_requests_since_log} request(s) that waited more than "
+        f"{max_wait:.0f}s in the queue (last: {method} after {waited:.0f}s).[{self.get_deques_stats_str()}]",
+        color='y'
+      )
+      self._last_expired_log_ts = now
+      self._expired_requests_since_log = 0
+    self._reply_unhandled_request(
+      request, 503, f"Server busy: request waited {waited:.0f}s in the queue."
+    )
+    return True
 
   def __fastapi_handle_response(self, id, value, profile, method):
     # TODO: add here message signing
@@ -745,6 +811,9 @@ class FastApiWebAppPlugin(BasePlugin):
 
     method = value[0]
     args = value[1:]
+
+    if self._reject_expired_request(request, method):
+      return None
 
     try:
       if self.cfg_log_requests:

@@ -165,7 +165,17 @@ def _start_profile(endpoint_name: str) -> dict | None:
         "t_http_start_ns": time.perf_counter_ns(),
     }
 
-async def _profiled_call_plugin(endpoint_name: str, call_plugin_args: List, profile: dict | None):
+def _client_ip(http_request: Request) -> str | None:
+    """
+    Address of the HTTP client. Uvicorn takes it from X-Forwarded-For only when the
+    connection comes from a trusted proxy (by default 127.0.0.1, where the tunnel
+    agents connect from); otherwise it is the TCP peer.
+    """
+    return http_request.client.host if http_request.client else None
+
+async def _profiled_call_plugin(
+    endpoint_name: str, call_plugin_args: List, profile: dict | None, client_ip: str | None
+):
     if isinstance(profile, dict):
         profile["t_before_call_plugin_ns"] = time.perf_counter_ns()
     result = None
@@ -177,6 +187,7 @@ async def _profiled_call_plugin(endpoint_name: str, call_plugin_args: List, prof
             endpoint_name,
             *call_plugin_args,
             profile=profile,
+            client_ip=client_ip,
         )
         if isinstance(result, dict):
             exception_metadata = result.get("exception_metadata")
@@ -253,6 +264,7 @@ def _handle_plugin_result(endpoint_name: str, result: Any, profile: dict | None)
 # Streaming upload endpoint
 @app.post("/{{ item['name'] }}")
 async def {{ item['name'] }}_upload(
+    _http_request: Request,
     file: UploadFile = File(...),
     body: str = Form(None),
     {% if item['has_kwargs'] %}extras: str | None = Form(None),{% endif %}
@@ -313,7 +325,7 @@ async def {{ item['name'] }}_upload(
 {#        {% if item['has_kwargs'] %}call_plugin_kwargs.update(extras_dict){% endif %}#}
         {% if item['has_kwargs'] %}call_plugin_args.append(extras_dict){% endif %}
 
-        result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile)
+        result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile, _client_ip(_http_request))
 
         _finalize_profile(profile, result)
         _handle_plugin_result("{{ item['name'] }}", result, profile)
@@ -342,6 +354,7 @@ async def {{ item['name'] }}_upload(
 # Streaming download endpoint
 @app.get("/{{ item['name'] }}")
 async def {{ item['name'] }}_download(
+    _http_request: Request,
 {#    {% for arg in item['args'] %}{{ arg }}, {% endfor %}#}
     {% if item['has_kwargs'] %}extras: str | None = Query(None),{% endif %}
     {% for arg in item['args'] %}{{ arg }}, {% endfor %}
@@ -366,7 +379,7 @@ async def {{ item['name'] }}_download(
     {% endfor %}
     {% if item['has_kwargs'] %}call_plugin_args.append(kwargs_dict){% endif %}
 
-    response = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile)
+    response = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile, _client_ip(_http_request))
     _finalize_profile(profile, response)
     _handle_plugin_result("{{ item['name'] }}", response, profile)
 
@@ -415,6 +428,7 @@ class {{ item['name'] }}Model(BaseModel):
 
 @app.post("/{{ item['name'] }}")
 async def {{ item['name'] }}(
+    _http_request: Request,
     request_model: {{ item['name'] }}Model
     {% if item['require_token'] %}, token: str = Depends(get_bearer_token){% endif %}
 ):
@@ -436,7 +450,7 @@ async def {{ item['name'] }}(
 {#    {% if item['has_kwargs'] %}call_plugin_kwargs.update(kwargs_dict){% endif %}#}
     {% if item['has_kwargs'] %}call_plugin_args.append(kwargs_dict){% endif %}
 
-    result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile)
+    result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile, _client_ip(_http_request))
 
     _finalize_profile(profile, result)
     _handle_plugin_result("{{ item['name'] }}", result, profile)
@@ -448,6 +462,7 @@ async def {{ item['name'] }}(
 {% else %}
 {% if item['method'] is not none %}@app.{{ item['method'] }}("/{{ item['name'] }}"){% endif %}
 async def {{ item['name'] }}(
+    _http_request: Request,
     {% if item['has_kwargs'] %}extras: str | None = Query(None), {% endif %}
     {% for arg in item['args'] %}
     {{ arg }}, {% if not loop.last %} {% endif %}
@@ -476,7 +491,7 @@ async def {{ item['name'] }}(
 {#    {% if item['has_kwargs'] %}call_plugin_kwargs.update(kwargs_dict){% endif %}#}
     {% if item['has_kwargs'] %}call_plugin_args.append(kwargs_dict){% endif %}
 
-    result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile)
+    result = await _profiled_call_plugin("{{ item['name'] }}", call_plugin_args, profile, _client_ip(_http_request))
 
     _finalize_profile(profile, result)
     _handle_plugin_result("{{ item['name'] }}", result, profile)

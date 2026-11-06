@@ -207,6 +207,8 @@ class EpochsManager(Singleton):
     self.__data = {}
     self.__full_data = {}
     self.__eth_to_node = {}
+    # Internal addresses already in `__eth_to_node`, so a lookup miss converts only new nodes.
+    self.__eth_mapped_nodes = set()
     
     self.__current_stats = None
     self.__current_stats_timestamp = 0
@@ -328,19 +330,31 @@ class EpochsManager(Singleton):
     self.log.stop_timer(name, section='epoch')
     return
   
+  def __map_eth_to_internal(self, node_addr):
+    eth_node_addr = self.owner.node_address_to_eth_address(node_addr)
+    self.__eth_to_node[eth_node_addr] = node_addr
+    self.__eth_mapped_nodes.add(node_addr)
+    return eth_node_addr
+
   def __compute_eth_to_internal(self):
+    """
+    Map the ETH address of every known node that is not mapped yet.
+
+    Each conversion hashes the node key, so already mapped nodes are skipped: a
+    lookup of an address that no known node has (an offline oracle, for example)
+    must not convert the whole network again on every call.
+    """
     if not hasattr(self.owner, "node_address_to_eth_address"):
       return
-    node_addresses = list(self.__data.keys())
-    for node_addr in node_addresses:
-      eth_node_addr = self.owner.node_address_to_eth_address(node_addr)
-      self.__eth_to_node[eth_node_addr] = node_addr
+    for node_addr in list(self.__data.keys()):
+      if node_addr not in self.__eth_mapped_nodes:
+        self.__map_eth_to_internal(node_addr)
     return
   
   def eth_to_internal(self, eth_node_addr):
     result = self.__eth_to_node.get(eth_node_addr, None)
     if result is None:
-      # attempt to recompute
+      # map nodes added since the last lookup
       self.__compute_eth_to_internal()
       result = self.__eth_to_node.get(eth_node_addr, None)
     return result
@@ -1399,8 +1413,7 @@ class EpochsManager(Singleton):
     self.__data[node_addr] = _get_node_template(node_name)
     self.__reset_timestamps(node_addr)
     self.__mark_cached_data_dirty(node_addr)
-    eth_node_addr = self.owner.node_address_to_eth_address(node_addr)
-    self.__eth_to_node[eth_node_addr] = node_addr
+    eth_node_addr = self.__map_eth_to_internal(node_addr)
     self.P("New node {:<8} <{}> / <{}> added to db".format(name, node_addr, eth_node_addr))
     return
 

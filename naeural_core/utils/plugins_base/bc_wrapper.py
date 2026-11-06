@@ -972,7 +972,9 @@ class BCWrapper:
     Returns
     -------
     list[dict]
-        Events with `event`, `license_id`, `owner`, `node_address`, `block_number` and `log_index`.
+        Events with `event`, `license_id`, `owner` (the transaction sender), `node_address`,
+        `block_number` and `log_index`. They are not paired: a license transfer or burn emits
+        an `UnlinkNode` with no `LinkNode`, and a relink can span two transactions.
     """
     return self.__bc.web3_get_nd_link_events(from_block=from_block, to_block=to_block)
 

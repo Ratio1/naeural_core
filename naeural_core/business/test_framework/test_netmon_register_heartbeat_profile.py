@@ -891,6 +891,26 @@ class TestNetmonRegisterHeartbeatProfile(unittest.TestCase):
     self.assertEqual(len(saved["0xNODE_GONE"]), 1)
     self.assertEqual(len(harness.netmon.get_box_heartbeats("0xNODE_GONE")), 1)
 
+  def test_save_snapshot_copies_deques_and_shares_heartbeats(self):
+    # The snapshot is built under NETMON_MUTEX: only the deques are copied, not every stored dict.
+    harness = _NetmonHarness()
+    addr = "0xNODE_SNAP"
+    for hb_idx in range(3):
+      harness.netmon.register_heartbeat(addr, harness.make_heartbeat(addr, 0, hb_idx, payload_scale=4))
+    stored = harness.netmon._NetworkMonitor__network_heartbeats[addr]
+
+    snapshot = harness.netmon._snapshot_network_heartbeats_for_save()
+    pickled = pickle.dumps(snapshot)
+    self.assertIsNot(snapshot[addr], stored)
+    self.assertEqual(snapshot[addr].maxlen, stored.maxlen)
+    self.assertTrue(all(saved is live for saved, live in zip(snapshot[addr], stored)))
+
+    # A later heartbeat appends and compacts by swapping dicts, so the snapshot does not change.
+    harness.netmon.register_heartbeat(addr, harness.make_heartbeat(addr, 0, 3, payload_scale=4))
+    self.assertEqual(len(snapshot[addr]), 3)
+    self.assertIn(ct.HB.GPU_INFO, snapshot[addr][-1])
+    self.assertEqual(pickle.dumps(snapshot), pickled)
+
 
 if __name__ == "__main__":
   unittest.main()

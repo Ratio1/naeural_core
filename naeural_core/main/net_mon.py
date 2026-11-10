@@ -2357,7 +2357,9 @@ class NetworkMonitor(DecentrAIObject):
       """
       with self.log.managed_lock_resource(NETMON_MUTEX):
         return {
-          addr_no_prefix: deque((dict(hb) for hb in hb_deque), maxlen=self.HB_HISTORY)
+          # Stored heartbeat dicts are never changed after append (compaction swaps in a new
+          # dict), so copying references keeps the hold short; dict(hb) was shallow anyway.
+          addr_no_prefix: deque(hb_deque, maxlen=self.HB_HISTORY)
           for addr_no_prefix, hb_deque in self.__network_heartbeats.items()
         }
 

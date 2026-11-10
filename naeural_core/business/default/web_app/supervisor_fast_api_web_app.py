@@ -6,6 +6,7 @@ _CONFIG = {
   **BasePlugin.CONFIG,
   
   "RUNS_ONLY_ON_SUPERVISOR_NODE" : True,
+  "IDLE_LOOP_WAIT" : 0.25,  # request-driven APIs: wait for requests instead of polling ~30 times a second
 
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES'],
@@ -96,3 +97,10 @@ class SupervisorFastApiWebApp(BasePlugin):
     if self.cfg_runs_only_on_supervisor_node and not self.__is_enabled:
       return None
     return super(SupervisorFastApiWebApp, self)._process()
+
+  def _idle_loop_wait(self):
+    if self.__supervisor_fastapi_plugin_running is False:
+      # Disabled here (not an oracle, or no tunnel token): uvicorn never starts and _process returns
+      # at once, so wait like any idle plugin; the enable state is re-checked on every lap.
+      return super(BasePlugin, self)._idle_loop_wait()
+    return super(SupervisorFastApiWebApp, self)._idle_loop_wait()

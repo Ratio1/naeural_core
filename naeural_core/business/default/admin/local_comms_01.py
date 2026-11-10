@@ -14,6 +14,7 @@ _CONFIG = {
 
   'LOCAL_COMMS_ENABLED_ON_STARTUP': False,
   'ALLOW_EMPTY_INPUTS': True,
+  'IDLE_LOOP_WAIT': 0.25,  # its work arrives as commands, which wake the loop
 
   'VALIDATION_RULES': {
     **BasePluginExecutor.CONFIG['VALIDATION_RULES'],

@@ -9,7 +9,7 @@ from time import time, sleep, perf_counter
 from copy import deepcopy
 from collections import deque, OrderedDict
 from functools import partial
-from threading import RLock, Thread
+from threading import Event, RLock, Thread
 
 # local dependencies
 from naeural_core import constants as ct
@@ -105,6 +105,7 @@ _CONFIG = {
 
   'PLUGIN_LOOP_RESOLUTION': 20,   # proposed loop res
   'FORCED_LOOP_SLEEP': None,  # use predefined sleep time
+  'IDLE_LOOP_WAIT': 0,  # >0: a lap with no queued input waits up to this many seconds for work
 
   'CLOSE_PIPELINE_WHEN_DONE': False,
 
@@ -476,6 +477,7 @@ class BasePluginExecutor(
 
     # execution vars
     self.done_loop = False
+    self._loop_wakeup = Event()  # ends an IDLE_LOOP_WAIT: inputs, requests, commands, config changes, stop
 
     self._was_stopped_last_iter = False  # for `FORCED_PAUSE`
     self._pause_transition_in_progress = False
@@ -1166,6 +1168,7 @@ class BasePluginExecutor(
 
   def add_to_inputs_deque(self, data):
     self.upstream_inputs_deque.append(data)
+    self._loop_wakeup.set()
     return
 
   def copy_simple_data(self, dct_data):
@@ -1437,6 +1440,7 @@ class BasePluginExecutor(
     self.P(ct.BM_PLUGIN_END_PREFIX +
            "[main-thr] Received STOP {} thread command...".format(self.instance_hash), color='b')
     self.done_loop = True
+    self._loop_wakeup.set()  # end an idle wait at once
     self.thread.join(timeout=timeout)
     is_alive = self.thread.is_alive()
     self.plugins_shared_mem.clean_instance()
@@ -1554,6 +1558,7 @@ class BasePluginExecutor(
       # reset the command for the upstream config
       self._upstream_config['INSTANCE_COMMAND'] = {}  
       upstream_config['INSTANCE_COMMAND'] = {}
+      self._loop_wakeup.set()  # run it on the next lap, before a later command can overwrite it
       return
     # endif is just a command
 
@@ -1631,6 +1636,7 @@ class BasePluginExecutor(
     finally:
       self.loop_paused = False
       self._plugin_lifecycle_lock.release()
+      self._loop_wakeup.set()  # let an idle loop run with the new config now
     return
 
   def _create_notification(self, msg, info=None, notif=ct.PAYLOAD_CT.STATUS_TYPE.STATUS_NORMAL, use_local_comms_only=False, **kwargs):

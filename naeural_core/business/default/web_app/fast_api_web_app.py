@@ -170,6 +170,13 @@ class FastApiWebAppPlugin(BasePlugin):
       return None
     return configured_value
 
+  def _idle_loop_wait(self):
+    # Start-up and queued or postponed requests keep the normal loop rate.
+    wait = super(FastApiWebAppPlugin, self)._idle_loop_wait()
+    if wait and (not self.uvicorn_server_started or self._incoming_requests or self.postponed_requests):
+      return 0
+    return wait
+
   def get_debug_timings_steps(self):
     configured_value = self.cfg_debug_timings_steps
     if not isinstance(configured_value, int):
@@ -599,6 +606,7 @@ class FastApiWebAppPlugin(BasePlugin):
             queue_full = len(self._incoming_requests) >= self.get_max_incoming_requests()
             if not queue_full:
               self._incoming_requests.append(request)
+              self._loop_wakeup.set()  # wake the plugin loop if it is waiting idle
           if queue_full:
             now = time.time()
             if now - self._last_incoming_drop_log_ts >= INCOMING_DROP_LOG_INTERVAL_S:

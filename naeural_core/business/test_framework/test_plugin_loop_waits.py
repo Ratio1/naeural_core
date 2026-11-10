@@ -240,6 +240,21 @@ class TestPluginLoopWaits(unittest.TestCase):
     self.assertEqual(self._run(plugin), [0.020])
     self.assertEqual(plugin.events, ["init", "sleep", "close", "drain"])
 
+  def test_idle_wait_blocks_on_the_wakeup_event_only_with_an_empty_queue(self):
+    for queued, expected_waits, expected_sleeps in ((0, [0.25], []), (1, [], [0.020])):
+      with self.subTest(queued=queued):
+        plugin = _Plugin()
+        plugin.cfg_idle_loop_wait = 0.25
+        plugin.input_queue_size = queued
+        waits = []
+        def fake_wait(timeout):
+          waits.append(timeout)
+          plugin._stop_requested = True
+        plugin._loop_wakeup = mock.Mock(wait=fake_wait)
+        self.assertEqual(self._run(plugin), expected_sleeps)
+        self.assertEqual(waits, expected_waits)
+        self.assertIn("execute", plugin.events)
+
   def test_postponed_wait_clamps_actual_remaining_delay(self):
     """The real postponement property, not positive config alone, gates work."""
     for remaining, expected in ((0.001, 0.020), (0.125, 0.125), (0.250, 0.250), (2, 0.250)):

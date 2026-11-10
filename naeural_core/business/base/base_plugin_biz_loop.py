@@ -205,6 +205,14 @@ class _BasePluginLoopMixin(object):
       return
     self.high_level_execution_chain()
     return  
+
+  def _idle_loop_wait(self):
+    """Seconds a lap with no queued input may block on `_loop_wakeup` (0: fixed-rate polling).
+
+    Inputs, requests, instance commands, config changes and stop set the event.
+    """
+    wait = getattr(self, 'cfg_idle_loop_wait', 0)
+    return wait if isinstance(wait, (int, float)) and wait > 0 else 0
   
   
   
@@ -523,7 +531,13 @@ class _BasePluginLoopMixin(object):
           # configured slower loops or exception backoff.
           sleep_time = max(0.020, sleep_time)
           self.start_timer('loop_sleep')
-          if sleep_time > 0:
+          idle_wait = self._idle_loop_wait()
+          if idle_wait > sleep_time and self.input_queue_size == 0:
+            # Nothing queued: block until a producer sets the event (after queueing its
+            # work) or idle_wait passes. The lap that follows sees what woke it.
+            self._loop_wakeup.wait(idle_wait)
+            self._loop_wakeup.clear()
+          elif sleep_time > 0:
             sleep(sleep_time)
           self.end_timer('loop_sleep')
         except:

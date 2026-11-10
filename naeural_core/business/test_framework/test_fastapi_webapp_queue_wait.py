@@ -75,6 +75,7 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     plugin._client_queue = queue.Queue()
     plugin._incoming_requests = []
     plugin._incoming_lock = threading.Lock()
+    plugin._loop_wakeup = threading.Event()  # the request monitor now wakes the plugin loop
     plugin.postponed_requests = []
     plugin._server_queue = queue.Queue()
     plugin._last_incoming_drop_log_ts = 0.0
@@ -140,6 +141,7 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     self.plugin._stop_request_monitor.set()
     self.plugin._request_monitor_thread.join(timeout=2)
     self.assertEqual([request["id"] for request in self.plugin._incoming_requests], ["kept"])
+    self.assertTrue(self.plugin._loop_wakeup.is_set())  # the queued request woke the plugin loop
     [reply] = self._replies()
     self.assertEqual(reply["id"], "dropped")
     self.assertEqual(reply["value"]["result"]["status_code"], 503)

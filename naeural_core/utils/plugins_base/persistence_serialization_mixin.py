@@ -107,7 +107,9 @@ class _PersistenceSerializationMixin(object):
         if as_json:
           stream.write(json.dumps(data).encode("utf-8"))
         else:
-          pickle.dump(data, stream, protocol=pickle.HIGHEST_PROTOCOL)
+          # One write, not one per 64 KB pickle frame: each write gives up the interpreter
+          # lock, and on a saturated interpreter taking it back costs tens of milliseconds.
+          stream.write(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
         stream.flush()
         os.fsync(stream.fileno())
       os.replace(temporary, path)

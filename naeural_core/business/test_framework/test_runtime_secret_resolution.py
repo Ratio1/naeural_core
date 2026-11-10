@@ -333,6 +333,30 @@ class OrchestratorRuntimeSecretTests(unittest.TestCase):
     self.assertEqual(canonical_token, DAUTH_SECRET_PLACEHOLDER)
     self.assertEqual(len(orchestrator._runtime_secret_cache), 1)
 
+  def test_unchanged_streams_with_nothing_pending_skip_the_pass(self):
+    orchestrator = self._make_orchestrator([RuntimeError("temporarily unavailable"), _bundle()])
+    self._set_canonical(orchestrator, {"secret_pipeline": _pipeline()})
+    reconciles = []
+    original_reconcile = orchestrator._reconcile_runtime_streams
+    orchestrator._reconcile_runtime_streams = lambda streams: (
+      reconciles.append(True), original_reconcile(streams),
+    )[-1]
+    # failure, then retry wait: both pending, so every pass runs in full
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=10), 0)
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=10.5), 0)
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=11), 1)
+    self.assertEqual(len(reconciles), 3)
+    # settled: the same dict object needs no further pass
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=12), 0)
+    self.assertEqual(len(reconciles), 3)
+    # a replaced dict (what choose_current_running_streams does on a change) runs one full pass
+    with orchestrator._runtime_config_lock:
+      orchestrator._current_dct_config_streams = deepcopy(orchestrator._current_dct_config_streams)
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=13), 0)
+    self.assertEqual(orchestrator._resolve_runtime_streams_once(now=14), 0)
+    self.assertEqual(len(reconciles), 4)
+    self.assertIn("secret_pipeline", orchestrator._get_runtime_streams_snapshot())
+
   def test_mismatch_withholds_whole_pipeline(self):
     orchestrator = self._make_orchestrator([{
       "job_id": "7",

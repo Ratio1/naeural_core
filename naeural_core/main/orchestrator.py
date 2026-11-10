@@ -1031,10 +1031,16 @@ class Orchestrator(DecentrAIObject,
     fixed_now = now is not None
     now = time() if now is None else now
     with self._runtime_config_lock:
-      canonical_streams = deepcopy(self._current_dct_config_streams)
+      current_streams = self._current_dct_config_streams
+      # choose_current_running_streams replaces this dict only when a pipeline changes, so an
+      # unchanged dict with nothing pending needs no copy, reconcile or placeholder walk.
+      if current_streams is vars(self).get("_runtime_secret_settled_streams"):
+        return 0
+      canonical_streams = deepcopy(current_streams)
     self._reconcile_runtime_streams(canonical_streams)
 
     resolved_count = 0
+    pending = False
     for pipeline_name, pipeline_config in canonical_streams.items():
       if not contains_dauth_secret_placeholder(pipeline_config):
         continue
@@ -1051,6 +1057,7 @@ class Orchestrator(DecentrAIObject,
           continue
         retry_state = self._runtime_secret_retry_state.get(cache_key, {})
         if now < retry_state.get("next_retry", 0):
+          pending = True
           continue
 
       job_id = cache_key[1]
@@ -1074,6 +1081,7 @@ class Orchestrator(DecentrAIObject,
       except Exception as exc:
         if vars(self).get("_Orchestrator__done", False):
           return resolved_count
+        pending = True
         with self._runtime_config_lock:
           current_pipeline = self._current_dct_config_streams.get(pipeline_name)
           if current_pipeline != pipeline_config:
@@ -1116,6 +1124,7 @@ class Orchestrator(DecentrAIObject,
         self._runtime_secret_retry_state.pop(cache_key, None)
         self._runtime_dct_config_streams[pipeline_name] = runtime_pipeline
       resolved_count += 1
+    self._runtime_secret_settled_streams = None if pending else current_streams
     return resolved_count
 
   def _fetch_dauth_job_secret_bundle(self, job_id, revision=None):

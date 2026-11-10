@@ -1199,6 +1199,19 @@ class TestNetConfigMonitorSummaryAuth(unittest.TestCase):
     self.assertEqual(plugin.send_encrypted_payload_calls[0]["node_addr"], ["0xai_REMOTE", "0xai_OTHER"])
     self.assertEqual(plugin._NetConfigMonitorPlugin__last_sent_to_allowed, 2000)
 
+  def test_process_checks_config_distribution_once_a_second(self):
+    plugin = _plugin()
+    now = 0
+    checks = []
+    plugin.time = lambda: now
+    plugin._NetConfigMonitorPlugin__last_distribution_check = 0
+    plugin._NetConfigMonitorPlugin__maybe_send_requests = lambda: None
+    plugin._NetConfigMonitorPlugin__maybe_review_known = lambda: None
+    plugin._NetConfigMonitorPlugin__maybe_send_configuration_to_allowed = lambda: checks.append(now)
+    for now in (2000.0, 2000.5, 2000.99, 2001.0, 2001.5, 2002.1):
+      plugin.process()
+    self.assertEqual(checks, [2000.0, 2001.0, 2002.1])
+
 
 if __name__ == "__main__":
   unittest.main()

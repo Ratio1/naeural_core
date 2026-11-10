@@ -118,6 +118,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self.__last_pipeline_distribution_projection = None
     self.__allowed_nodes = {} # contains addresses with no prefixes
     self.__last_sent_to_allowed = 0
+    self.__last_distribution_check = 0
     self.__semantic_distribution_pending_nodes = set()
     self.__semantic_distribution_retry_until = 0
     self.__debug_netmon_count = self.cfg_debug_netmon_count
@@ -916,7 +917,11 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   def process(self):
     payload = None
     self.__maybe_send_requests()
-    self.__maybe_send_configuration_to_allowed()
+    # The check re-reads the whitelist file (one EC point decode per entry) and serialises every
+    # pipeline; on each ~40 Hz lap it was this plugin's main cost. Once a second is enough.
+    if self.time() - self.__last_distribution_check >= 1:
+      self.__last_distribution_check = self.time()
+      self.__maybe_send_configuration_to_allowed()
     self.__maybe_review_known()  
     return payload
   

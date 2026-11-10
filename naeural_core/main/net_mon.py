@@ -136,6 +136,36 @@ def _safe_str_list(value):
   return [item for item in value if isinstance(item, str)]
 
 
+def parse_heartbeat_time(text):
+  """
+  Parse a heartbeat timestamp written in ``ct.HB.TIMESTAMP_FORMAT``.
+
+  ``datetime.strptime`` consults the locale on every call and is slow; node
+  status is computed from thousands of stored heartbeats, so this parse was a
+  large share of the interpreter time of an oracle. ``fromisoformat`` reads
+  the same 26-character text far faster. Anything else is left to
+  ``strptime``, including its errors.
+
+  Parameters
+  ----------
+  text : str
+    Timestamp such as ``2026-01-31 23:59:59.123456``.
+
+  Returns
+  -------
+  datetime
+    Naive datetime, exactly as ``strptime`` returns it.
+  """
+  if isinstance(text, str) and len(text) == 26:
+    try:
+      parsed = dt.fromisoformat(text)
+      if parsed.tzinfo is None:
+        return parsed
+    except ValueError:
+      pass
+  return dt.strptime(text, ct.HB.TIMESTAMP_FORMAT)
+
+
 NETMON_MUTEX = 'NETMON_MUTEX'
 
 NETMON_DB = 'db.pkl'
@@ -767,7 +797,7 @@ class NetworkMonitor(DecentrAIObject):
           remote_tz = heartbeat.get(ct.PAYLOAD_DATA.EE_TIMEZONE)
           ts = self.log.utc_to_local(remote_time, remote_utc=remote_tz, fmt=ct.HB.TIMESTAMP_FORMAT)
         else:
-          ts = dt.strptime(ts, ct.HB.TIMESTAMP_FORMAT)
+          ts = parse_heartbeat_time(ts)
         passed_minutes = (dt_now - ts).total_seconds() / 60.0
         if passed_minutes < 0 or passed_minutes > minutes:
           break

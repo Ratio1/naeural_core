@@ -309,6 +309,38 @@ class OrchestratorRuntimeSecretTests(unittest.TestCase):
         self.assertEqual(orchestrator._blockchain_manager.calls, [])
         self.assertEqual(orchestrator._get_runtime_streams_snapshot(), {})
 
+  def _retry_delays(self, failure, attempts):
+    orchestrator = self._make_orchestrator([failure] * attempts)
+    self._set_canonical(orchestrator, {"secret_pipeline": _pipeline()})
+    now, delays = 100.0, []
+    for _ in range(attempts):
+      self.assertEqual(orchestrator._resolve_runtime_streams_once(now=now), 0)
+      retry = next(iter(orchestrator._runtime_secret_retry_state.values()))
+      delays.append(retry["next_retry"] - now)
+      now = retry["next_retry"]
+    return delays, len(orchestrator._blockchain_manager.calls)
+
+  def test_rejected_request_backs_off_further_than_a_transient_failure(self):
+    rejected, calls = self._retry_delays(ValueError("dAuth secret request was rejected."), 12)
+    self.assertEqual(rejected, [1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300])
+    self.assertEqual(calls, 12)
+    transient, _ = self._retry_delays(RuntimeError("dAuth secret request is temporarily unavailable."), 8)
+    self.assertEqual(transient, [1, 2, 4, 8, 16, 30, 30, 30])
+
+  def test_rejected_node_asks_ten_times_less_often(self):
+    def requests_per_hour(failure):
+      orchestrator = self._make_orchestrator([failure] * 500)
+      self._set_canonical(orchestrator, {"secret_pipeline": _pipeline()})
+      now = 0.0
+      while now < 7200:                                    # resolver polls every 0.25 s; step to the next retry instead
+        orchestrator._resolve_runtime_streams_once(now=now)
+        now = next(iter(orchestrator._runtime_secret_retry_state.values()))["next_retry"]
+      return len(orchestrator._blockchain_manager.calls) / 2.0
+    before_like = requests_per_hour(RuntimeError("timeout"))      # the 30 s ceiling every failure had before
+    rejected = requests_per_hour(ValueError("dAuth secret request was rejected."))
+    self.assertGreater(before_like, 115)
+    self.assertLess(rejected, 20)
+
   def test_retry_success_runtime_separation_and_redacted_view(self):
     orchestrator = self._make_orchestrator([
       RuntimeError("temporarily unavailable"),

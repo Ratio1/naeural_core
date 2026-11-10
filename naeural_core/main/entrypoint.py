@@ -2,6 +2,7 @@
 import json
 import multiprocessing as mp
 import os
+import signal
 import subprocess
 import tempfile
 import shutil
@@ -419,9 +420,32 @@ def maybe_install_additional_packages(
   return
 
 
+def stop_on_sigterm():
+  """
+  Make SIGTERM stop the node the way SIGINT does.
+
+  The node runs as PID 1 of its container, where a signal without a handler
+  is ignored: ``docker stop`` and ``systemctl stop`` then wait for their
+  timeout and kill the process, and nothing is flushed. With this handler
+  SIGTERM raises ``KeyboardInterrupt`` in the main thread, which the main
+  loop already turns into an orderly shutdown.
+
+  Returns
+  -------
+  bool
+    False when called outside the main thread, where handlers cannot be set.
+  """
+  try:
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+  except ValueError:
+    return False
+  return True
+
+
 def main(additional_packages: list = None):
   app_base_folder = os.getcwd()
   print("Core Edge Node v{} starting in {}".format(__VER__, app_base_folder), flush=True)
+  stop_on_sigterm()
   
   CONFIG_FILE = 'config_startup'
   is_docker = str(os.environ.get('AINODE_DOCKER')).lower() in ["yes", "true"]

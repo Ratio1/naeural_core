@@ -73,6 +73,8 @@ CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle ch
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
 RUNTIME_SECRET_RESOLVER_POLL_SECONDS = 0.25
 RUNTIME_SECRET_RETRY_MAX_SECONDS = 30
+# dAuth refused the request, or its answer cannot be used: asking again soon cannot help.
+RUNTIME_SECRET_REJECTED_RETRY_MAX_SECONDS = 300
 RUNTIME_SECRET_REQUEST_TIMEOUT = (5, 20)
 RUNTIME_SECRET_REQUEST_DEADLINE_SECONDS = 25
 RUNTIME_SECRET_SHUTDOWN_JOIN_SECONDS = 2
@@ -399,12 +401,12 @@ class Orchestrator(DecentrAIObject,
     ###   distributions of jobs
     
     
-    self._network_monitor = NetworkMonitor(
-      node_name=self.cfg_eeid, node_addr=self.e2_address,
     # One helper process persists snapshots (chain store, network monitor, epochs)
     # off the plugin threads. It is stopped, after a final flush, in close_main_loop.
     self._app_shmem['serialization_manager'] = serialization_manager.start_global(log=self.log)
 
+    self._network_monitor = NetworkMonitor(
+      node_name=self.cfg_eeid, node_addr=self.e2_address,
       log=self.log, DEBUG=self.DEBUG,
       blockchain_manager=self._blockchain_manager,
       environment_variables={
@@ -1084,8 +1086,15 @@ class Orchestrator(DecentrAIObject,
           if current_pipeline != pipeline_config:
             continue
           attempt = retry_state.get("attempt", 0) + 1
-          exponent = min(attempt - 1, 5)
-          delay = min(2 ** exponent, RUNTIME_SECRET_RETRY_MAX_SECONDS)
+          # A rejection (ValueError) keeps backing off to a higher ceiling than a
+          # transient failure, so a refused node does not ask every 30 s for ever.
+          # A changed pipeline has a new cache key and starts again at 1 s.
+          rejected = isinstance(exc, ValueError)
+          exponent = min(attempt - 1, 9 if rejected else 5)
+          delay = min(
+            2 ** exponent,
+            RUNTIME_SECRET_REJECTED_RETRY_MAX_SECONDS if rejected else RUNTIME_SECRET_RETRY_MAX_SECONDS,
+          )
           failure_time = now if fixed_now else time()
           self._runtime_secret_retry_state[cache_key] = {
             "attempt": attempt,
@@ -1763,6 +1772,8 @@ class Orchestrator(DecentrAIObject,
       self._serving_manager.stop_all_servers()
     if self._capture_manager is not None:
       self._capture_manager.close()
+    # Plugins and managers queued their last snapshots above: write them, then stop the worker.
+    serialization_manager.stop_global()
     return
 
   def refresh_business_plugins(self):
@@ -1772,8 +1783,6 @@ class Orchestrator(DecentrAIObject,
     """
     self.__loop_stage = '2.bm.refresh.call_bm.update_streams'
     in_use_ai_engines = self._business_manager.update_streams(
-    # Plugins and managers queued their last snapshots above: write them, then stop the worker.
-    serialization_manager.stop_global()
       self._get_runtime_streams_snapshot()
     )
     return in_use_ai_engines

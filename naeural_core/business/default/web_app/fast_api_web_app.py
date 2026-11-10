@@ -503,6 +503,9 @@ class FastApiWebAppPlugin(BasePlugin):
     self._last_incoming_drop_log_ts = 0.0
     self._expired_requests_since_log = 0
     self._last_expired_log_ts = 0.0
+    # Queue entries taken off per second, measured by the plugin thread on each timed request;
+    # the request monitor uses it to refuse at once what would wait past MAX_QUEUE_WAIT / 2.
+    self._drain_rate = None
     self._current_request_client_ip = None
 
     self._profile_stats = {}
@@ -584,6 +587,7 @@ class FastApiWebAppPlugin(BasePlugin):
           except Exception as exc:
             self.P(f"Request monitor error: {exc}", color='r')
             continue
+          is_profile_event = False
           try:
             value = request.get('value')
             is_profile_event = (
@@ -602,17 +606,27 @@ class FastApiWebAppPlugin(BasePlugin):
                   )
           except Exception:
             self.P(f"Exception in on_request:\n{self.get_exception()}", color='r')
+          max_wait = self.get_max_queue_wait()
+          drain_rate = self._drain_rate
           with self._incoming_lock:
-            queue_full = len(self._incoming_requests) >= self.get_max_incoming_requests()
+            queued = len(self._incoming_requests)
+            # Expected wait of a request queued now: the entries ahead over the measured drain
+            # rate. Refuse now what would wait more than half of MAX_QUEUE_WAIT, instead of
+            # answering it 503 only after it expired.
+            expected_wait = queued / drain_rate if drain_rate else 0.0
+            queue_full = queued >= self.get_max_incoming_requests() or (
+              max_wait is not None and expected_wait > max_wait / 2
+            )
             if not queue_full:
+              request['queued_ahead'] = queued
               self._incoming_requests.append(request)
               self._loop_wakeup.set()  # wake the plugin loop if it is waiting idle
-          if queue_full:
+          if queue_full and not is_profile_event:  # nobody waits for an answer to a timing report
             now = time.time()
             if now - self._last_incoming_drop_log_ts >= INCOMING_DROP_LOG_INTERVAL_S:
               self._last_incoming_drop_log_ts = now
               self.P(
-                "Dropping incoming request: incoming queue is full.",
+                f"Refusing incoming requests: {queued} queued, about {expected_wait:.0f}s to wait.",
                 color='y'
               )
             # Answer at once instead of leaving the HTTP side waiting for REQUEST_TIMEOUT.
@@ -724,6 +738,11 @@ class FastApiWebAppPlugin(BasePlugin):
     if max_wait is None or not isinstance(t_put_wall_ns, int):
       return False
     waited = (time.time_ns() - t_put_wall_ns) / 1e9
+    queued_ahead = request.get('queued_ahead')
+    if isinstance(queued_ahead, int):
+      # This request and the entries ahead of it left the queue in `waited` seconds. Counting
+      # the request itself keeps every sample positive, so the estimate recovers by itself.
+      self._drain_rate = (queued_ahead + 1) / max(waited, 1e-3)
     if waited <= max_wait:
       return False
     self._expired_requests_since_log += 1

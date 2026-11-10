@@ -81,6 +81,7 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     plugin._last_incoming_drop_log_ts = 0.0
     plugin._expired_requests_since_log = 0
     plugin._last_expired_log_ts = 0.0
+    plugin._drain_rate = None
     plugin._current_request_client_ip = None
     plugin.logged = []
     plugin.P = lambda msg, *args, **kwargs: plugin.logged.append(msg)
@@ -145,6 +146,30 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     [reply] = self._replies()
     self.assertEqual(reply["id"], "dropped")
     self.assertEqual(reply["value"]["result"]["status_code"], 503)
+
+  def test_monitor_refuses_at_once_what_would_wait_past_half_the_limit(self):
+    self.plugin._drain_rate = 0.5  # 50 entries ahead: about 100 s, over 90 / 2
+    self.plugin._incoming_requests.extend({"id": f"q{i}"} for i in range(50))
+    self.plugin._stop_request_monitor = threading.Event()
+    self.plugin._request_monitor_thread = None
+    self.plugin._server_queue.put({"id": None, "value": ("__profile__", {})})
+    self.plugin._server_queue.put(self._request(waited_s=0, request_id="late"))
+    self.plugin._start_request_monitor_thread()
+    deadline = time.time() + 5
+    while self.plugin._client_queue.empty() and time.time() < deadline:
+      time.sleep(0.01)
+    self.plugin._stop_request_monitor.set()
+    self.plugin._request_monitor_thread.join(timeout=2)
+    [reply] = self._replies()  # the refused timing report gets no answer
+    self.assertEqual((reply["id"], reply["value"]["result"]["status_code"]), ("late", 503))
+    self.assertEqual(len(self.plugin._incoming_requests), 50)
+
+  def test_drain_rate_counts_the_request_and_the_entries_ahead(self):
+    for ahead, waited_s in ((19, 10), (0, 0.5)):
+      request = self._request(waited_s=waited_s)
+      request["queued_ahead"] = ahead
+      self.plugin._process_incoming_request(request)
+      self.assertAlmostEqual(self.plugin._drain_rate, 2.0, delta=0.1)
 
 
 if __name__ == "__main__":

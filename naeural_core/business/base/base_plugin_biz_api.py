@@ -740,9 +740,14 @@ class _BasePluginAPIMixin:
     include_default_peers=True,
     include_configured_peers=True,
     timeout=None,
+    all_peers=False,
   ):
     """
     Refresh one hash namespace from a live peer snapshot.
+
+    With ``all_peers=True`` every valid peer response that arrives before the
+    timeout is merged (instead of only the first), and the result also carries
+    ``responses`` and ``source_peers``.
 
     The runtime implementation exports one peer snapshot for ``hkey`` and then
     merges it into the local replica. The merge is additive: remote fields
@@ -799,6 +804,7 @@ class _BasePluginAPIMixin:
         include_default_peers=include_default_peers,
         timeout=timeout,
         debug=debug,
+        **({"all_peers": True} if all_peers else {}),
       )
       elapsed = self.end_timer("chainstore_hsync")
       if debug:

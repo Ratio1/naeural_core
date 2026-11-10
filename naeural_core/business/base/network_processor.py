@@ -14,6 +14,11 @@ _CONFIG = {
   'MAX_INPUTS_QUEUE_SIZE' : 1024,
 
   "PROCESS_DELAY" : 0,  # seconds, how often to process the network
+  # Queued inputs handled per loop iteration. 1 keeps one input per iteration.
+  # A larger value lets a plugin that fell behind catch up without paying the
+  # loop overhead and sleep for every single input.
+  "MAX_INPUTS_PER_ITERATION": 1,
+  "INPUTS_BATCH_SECONDS": 1.0,  # stop taking more inputs after this long in one iteration
   "LOG_STATS_PERIOD": 5 * 60,  # seconds, how often to log how many messages were processed from each signature
 
   "NETWORK_ROUTE_BY_HANDLER": True,

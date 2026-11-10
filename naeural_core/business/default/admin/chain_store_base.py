@@ -25,10 +25,13 @@ TODO:
 """
 
 
+import hashlib
+import json
 from threading import Lock, RLock
 from ratio1.const.base import BCct
 
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
+from naeural_core.main.serialization_manager import get_serialization_manager
 
 _CONFIG = {
   **NetworkProcessorPlugin.CONFIG,
@@ -36,6 +39,11 @@ _CONFIG = {
   'PROCESS_DELAY' : 0,
 
   'MAX_INPUTS_QUEUE_SIZE' : 1024,
+  # Queued inputs taken per loop iteration (1 = one input per iteration, as before).
+  # Above 1, received operations are run as a batch: acknowledgments first,
+  # then stores and snapshot requests for at most CS_STORE_SECONDS per iteration,
+  # with repeated stores of one key by one sender collapsed into the newest.
+  'MAX_INPUTS_PER_ITERATION' : 64,
 
   'ALLOW_EMPTY_INPUTS' : True,
   "ACCEPT_SELF" : False,
@@ -87,7 +95,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SNAPSHOT = "snapshot"
   CS_RESPONSE = "response"
   CS_SENDER = "sender"
-  CS_SAVE_INTERVAL = 5  # seconds between process() flushes of a dirty chain storage
+  CS_HAVE = "have"
+  CS_SAVE_INTERVAL = 10  # seconds between process() flushes of a dirty chain storage
+  CS_REPUBLISH_INTERVAL = 10  # a confirmed local write of the same value is re-broadcast at most this often (0 = always)
+  CS_STORE_SECONDS = 0.25  # time per loop iteration for applying received stores and answering snapshot requests
+  CS_STATS_INTERVAL = 60  # seconds between two "CSTORE STATS" log lines
+  CS_BACKLOG_MAX = 1024  # received stores allowed to wait for a later iteration before the oldest are dropped
+
+  # Defaults for state created in on_init, so partially built instances stay usable.
+  __batching = False
+  __inbox = ()
+  __stats = None
+  __last_stats = 0
   
   
   
@@ -104,6 +123,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__save_lock = Lock()
     self.__chain_storage_dirty = False
     self.__last_chain_storage_save = 0
+    self.__inbox = []
+    self.__batching = (getattr(self, 'cfg_max_inputs_per_iteration', 1) or 1) > 1
+    self.__stats = {}
+    self.__last_stats = self.time()
     
     try:
       self.__chain_storage = self.cacheapi_load_pickle(default={}, verbose=True)
@@ -129,6 +152,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__chain_peers = []
     self.__pending_hsync = {}
     self.__maybe_refresh_chain_peers()
+    try:
+      # A replica loaded from disk may still hold secrets revoked while it was written.
+      if self.__erase_revoked_secrets():
+        self.__chain_storage_dirty = True
+    except Exception as exc:
+      self.P(f" === Revoked secret cleanup failed at start: {exc}", color='r')
     return
   
 
@@ -308,12 +337,93 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         }
         self.__chain_storage_dirty = False
       self.__last_chain_storage_save = self.time()
+      self.__count("saves")
       try:
-        self.cacheapi_save_pickle(snapshot, verbose=False, strict=True)
+        # The detached snapshot is pickled and fsynced by the node's
+        # serialization manager, off this thread, when one is running.
+        return self.cacheapi_save_pickle(
+          snapshot, verbose=False, strict=True, background=True, on_error=self.__on_save_error,
+        )
       except Exception as exc:
-        self.__chain_storage_dirty = True
-        self.P(f" === Chain storage save failed, will retry: {exc}", color='r')
+        self.__on_save_error(exc)
+    return None
+
+
+  def __on_save_error(self, error):
+    """Mark the store dirty again so the next flush retries a failed save."""
+    self.__chain_storage_dirty = True
+    self.P(f" === Chain storage save failed, will retry: {error}", color='r')
     return
+
+
+  def __count(self, name, value=1):
+    if self.__stats is None:
+      self.__stats = {}
+    self.__stats[name] = self.__stats.get(name, 0) + value
+    return
+
+
+  def __maybe_log_stats(self):
+    """Log one line of receiver, writer and persistence counters per interval."""
+    elapsed = self.time() - self.__last_stats
+    if elapsed < self.CS_STATS_INTERVAL:
+      return
+    stats, self.__stats = self.__stats or {}, {}
+    self.__last_stats = self.time()
+    self.P(
+      " === CSTORE STATS {:.0f}s: loop={}Hz queue={}/{} lost={} keys={} store={} confirm={} hsync_req={} hsync_resp={} "
+      "superseded={} same_value_skipped={} failed={} backlog={} backlog_dropped={} saves={}".format(
+        elapsed, round(getattr(self, 'actual_plugin_resolution', 0) or 0, 1),
+        getattr(self, 'input_queue_size', 0), getattr(self, 'cfg_max_inputs_queue_size', 0),
+        getattr(self, 'lost_inputs_count', 0), len(self.__chain_storage),
+        stats.get(self.CS_STORE, 0), stats.get(self.CS_CONFIRM, 0),
+        stats.get(self.CS_HSYNC_REQ, 0), stats.get(self.CS_HSYNC_RESP, 0),
+        stats.get("superseded", 0), stats.get("same_value_skipped", 0), stats.get("failed", 0),
+        len(self.__inbox), stats.get("backlog_dropped", 0), stats.get("saves", 0),
+      )
+    )
+    return
+
+
+  def __record_digest(self, record):
+    """Short digest of the record fields that a snapshot merge compares, or None if it cannot be computed."""
+    try:
+      payload = [record.get(self.CS_VALUE), record.get(self.CS_OWNER), bool(record.get(self.CS_READONLY, False))]
+      text = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)
+      return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+      return None
+
+
+  def __erase_revoked_secrets(self):
+    """
+    Drop every stored secret revision whose revocation marker is present.
+
+    A revocation writes a marker and then overwrites the revision with a
+    redacted tombstone. A node that missed the second write keeps the full
+    revision next to its marker; this removes it.
+
+    Returns
+    -------
+    int
+      Number of revisions removed.
+    """
+    prefix = self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")
+    erased = 0
+    with self.__persistence_lock:
+      for key in [key for key in self.__chain_storage if isinstance(key, str) and key.startswith(prefix)]:
+        try:
+          if self.base64_to_str(key[len(prefix):], url_safe=True).endswith("|revoked"):
+            continue
+          value = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
+          if self.__revoked_secret(key) and not self.__erased_secret(key, value):
+            self.__chain_storage.pop(key, None)
+            erased += 1
+        except Exception:
+          continue
+    if erased:
+      self.P(f" === Erased {erased} revoked secret revision(s) still stored in full", color='y')
+    return erased
 
 
   def __maybe_flush_chain_storage(self):
@@ -511,7 +621,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return f"hs:{hkey_hash}:"
 
 
-  def __export_hset_snapshot(self, hkey):
+  def __export_hset_snapshot(self, hkey, have=None):
     """
     Export a stable snapshot for one hash namespace.
 
@@ -519,6 +629,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ----------
     hkey : str
       Logical hash namespace to export from the local replica.
+
+    have : dict, optional
+      Requester's ``{storage key: record digest}``. Records the requester
+      already holds unchanged are left out of the export.
 
     Returns
     -------
@@ -545,6 +659,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # HSync carries no token capability. Never disclose token values or
       # protected records merely because the caller knows a namespace name.
       if record.get(self.CS_TOKEN) is not None:
+        continue
+      if isinstance(have, dict) and have.get(key) is not None and have.get(key) == self.__record_digest(record):
         continue
       snapshot[key] = self.deepcopy(record)
       snapshot[key].pop(self.CS_TOKEN, None)
@@ -646,6 +762,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         merged_fields += 1
         changed = True
 
+    if hkey == "DAUTH_JOB_SECRET_REVISIONS" and self.__erase_revoked_secrets():
+      changed = True
     if changed:
       # Saved by the next periodic flush in process().
       self.__chain_storage_dirty = True
@@ -799,6 +917,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if local_sync_storage_op:
       # set the confirmations to -1 to indicate that the key is remote synced on this node
       self.__set_confirmations(key, -1) # set to -1 to indicate that the key is remote synced on this node
+    else:
+      self.__chain_storage[key]["published"] = self.time()
     return
 
 
@@ -859,6 +979,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     bool
       True if the desired state was stored successfully or was already present.
       False if the write was rejected or timed out after the allowed retries.
+      A local write of a value that this node published to the same peers and
+      saw confirmed within the last ``CS_REPUBLISH_INTERVAL`` seconds returns
+      True from that confirmation, without another broadcast.
 
     Raises
     ------
@@ -954,6 +1077,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               self.P(f" === Key {key} stored by {existing_owner} has the same value")
             if local_sync_storage_op:
               return True
+            record = self.__chain_storage[key]
+            if (
+              existing_owner == owner and
+              0 < record.get(self.CS_MIN_CONFIRMATIONS, 0) <= record.get(self.CS_CONFIRMATIONS, 0) and
+              self.CS_REPUBLISH_INTERVAL > 0 and
+              self.time() - record.get("published", 0) < self.CS_REPUBLISH_INTERVAL and
+              set(target_peers) <= set(record.get("target_peers", []))
+            ):
+              # This node published the same value to these peers moments ago
+              # and enough of them confirmed it: answer without another broadcast.
+              self.__count("same_value_skipped")
+              return True
             # A previous timeout may have left only the local copy. Re-publish
             # and collect distinct peer confirmations instead of claiming success.
           elif is_readonly and existing_owner != owner:
@@ -977,6 +1112,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             peers=peers,
             include_default_peers=include_default_peers,
           )
+          if secret_namespace == "DAUTH_JOB_SECRET_REVISIONS" and value is not None and field.endswith("|revoked"):
+            # The marker is in: do not keep the revoked revision in full while
+            # waiting for its tombstone.
+            self.__erase_revoked_secrets()
       if need_store:
         # Saved by the next periodic flush in process(). The flag is set after
         # the change is in the store, so a concurrent snapshot that clears it
@@ -1061,6 +1200,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     include_default_peers=True,
     timeout=None,
     debug=False,
+    all_peers=False,
   ):
     """
     Request one live snapshot for a hash namespace and merge it locally.
@@ -1079,12 +1219,27 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       the built-in default. Default is None.
     debug : bool, optional
       If True, print detailed routing and timing logs. Default is False.
+    all_peers : bool, optional
+      If True, merge every valid peer response that arrives until all
+      targeted peers answered or the timeout expires, instead of only the
+      first one. The result then does not depend on which single peer
+      answers first, which matters when catching up after a restart: records
+      protected by versions or revocation markers end at their newest state
+      even if one peer is stale. Unprotected records still take the value of
+      the last answer merged. Default is False.
 
     Returns
     -------
     dict
-      Result envelope with ``hkey``, the accepted ``source_peer``, and the
-      number of ``merged_fields`` applied locally.
+      Result envelope with ``hkey``, the first accepted ``source_peer`` and
+      the number of ``merged_fields`` applied locally. With ``all_peers`` it
+      also carries all ``source_peers`` and the number of ``responses``.
+
+    Notes
+    -----
+    The request carries a digest of each local record of the namespace, so a
+    peer running this version answers only with the records that differ.
+    Older peers ignore the digest and answer with the full namespace.
 
     Raises
     ------
@@ -1123,11 +1278,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       if any(not self.__registry_member(peer, dauth_only=True) for peer in allowed_peers):
         raise ValueError("Protected namespace repair requires dAuth registry peers")
 
+    index = self.__hset_index(hkey)
+    have = {
+      key: self.__record_digest(record)
+      for key, record in list(self.__chain_storage.items())
+      if isinstance(key, str) and key.startswith(index) and isinstance(record, dict)
+      and record.get(self.CS_TOKEN) is None
+    }
+    have = {key: digest for key, digest in have.items() if digest is not None}
     request_id = self.uuid()
     self.__pending_hsync[request_id] = {
       self.CS_HKEY: hkey,
       self.CS_PEERS: allowed_peers,
       self.CS_RESPONSE: None,
+      "responses": [] if all_peers else None,
     }
 
     try:
@@ -1143,6 +1307,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             self.CS_OP: self.CS_HSYNC_REQ,
             self.CS_REQUEST_ID: request_id,
             self.CS_HKEY: hkey,
+            self.CS_HAVE: have,
           }
         },
         peers=explicit_peers or None,
@@ -1150,23 +1315,34 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       )
 
       deadline = self.time() + timeout
+      source_peers, merged_fields = [], 0
       while self.time() <= deadline:
         pending = self.__pending_hsync.get(request_id, {})
+        responses = pending.get("responses") or []
         response = pending.get(self.CS_RESPONSE, None)
         if response is not None:
-          sender = response.get(self.CS_SENDER, None)
-          snapshot = response.get(self.CS_SNAPSHOT, {})
+          responses = [response]
+        while len(responses) > 0:
+          response = responses.pop(0)
           # Empty snapshots still prove that a valid peer answered, so they are
           # treated as successful cold-state syncs with zero merged fields.
-          merged_fields = self.__merge_hset_snapshot(hkey, snapshot)
-          return {
-            self.CS_HKEY: hkey,
-            "source_peer": sender,
-            "merged_fields": merged_fields,
-          }
+          merged_fields += self.__merge_hset_snapshot(hkey, response.get(self.CS_SNAPSHOT, {}))
+          source_peers.append(response.get(self.CS_SENDER, None))
+        if len(source_peers) > 0 and (not all_peers or len(source_peers) >= len(allowed_peers)):
+          break
         self.sleep(0.100)
 
-      raise ValueError(f"hsync for '{hkey}' timed out after {timeout}s.")
+      if len(source_peers) == 0:
+        raise ValueError(f"hsync for '{hkey}' timed out after {timeout}s.")
+      result = {
+        self.CS_HKEY: hkey,
+        "source_peer": source_peers[0],
+        "merged_fields": merged_fields,
+      }
+      if all_peers:
+        result["source_peers"] = source_peers
+        result["responses"] = len(source_peers)
+      return result
     finally:
       self.__pending_hsync.pop(request_id, None)
 
@@ -1249,7 +1425,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Returns
     -------
-    None
+    bool
+      True if the store was accepted (applied or already present) and confirmed.
     """
     key = data.get(self.CS_KEY, None)
     value = data.get(self.CS_VALUE , None)
@@ -1258,7 +1435,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     token = data.get(self.CS_TOKEN, None)
     if self.__secret_namespace(key):
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
-        return
+        return False
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
     result = self._set_value(
@@ -1284,7 +1461,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     else:
       if self.cfg_chain_store_debug:
         self.P(f" === REMOTE: Store for {key}={value} of {owner} failed", color='r')
-    return
+    return bool(result)
 
 
   def __exec_received_confirm(self, data, sender=None):
@@ -1357,7 +1534,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
       if not self.__registry_member(peers, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
-    snapshot = self.__export_hset_snapshot(hkey)
+    snapshot = self.__export_hset_snapshot(hkey, have=data.get(self.CS_HAVE, None))
     if self.cfg_chain_store_debug:
       self.P(
         f" === REMOTE: HSYNC request {request_id} for {hkey} back to {peers}",
@@ -1405,6 +1582,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       return
     if not isinstance(sender, str) or len(sender) == 0:
       return
+    collected = pending.get("responses")
+    if collected is not None and sender in pending.setdefault("answered", []):
+      return
 
     allowed_peers = pending.get(self.CS_PEERS, [])
     if sender not in allowed_peers:
@@ -1421,12 +1601,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if not isinstance(snapshot, dict):
       return
 
-    # Accept only one response from the precomputed peer set so an unrelated
-    # or late peer cannot replace the snapshot chosen for this sync request.
-    pending[self.CS_RESPONSE] = {
+    response = {
       self.CS_SENDER: sender,
       self.CS_SNAPSHOT: self.deepcopy(snapshot),
     }
+    if collected is not None:
+      # The caller asked for every peer: keep one response per targeted peer.
+      pending["answered"].append(sender)
+      collected.append(response)
+      return
+    # Accept only one response from the precomputed peer set so an unrelated
+    # or late peer cannot replace the snapshot chosen for this sync request.
+    pending[self.CS_RESPONSE] = response
     return
 
   @NetworkProcessorPlugin.payload_handler()
@@ -1456,7 +1642,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         self.P(f" === PAYLOAD_CSTORE: decrypted payload OK")
     # END DEBUG AREA    
     # get the data and call the appropriate operation method
-    data = decrypted_data.get(self.CS_DATA, {})
+    data = decrypted_data.get(self.CS_DATA, {}) if isinstance(decrypted_data, dict) else None
+    if not isinstance(data, dict):
+      return
     operation = data.get(self.CS_OP, None)
     owner = data.get(self.CS_OWNER, None)
     if self.cfg_chain_store_debug:
@@ -1464,8 +1652,23 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         self.P(f" === PAYLOAD_CSTORE: NO OPERATION from data: {data}", color='r')
       else:
         self.P(f" === PAYLOAD_CSTORE: {operation=} from {alias=} {owner=}")
+    if not isinstance(operation, str) or operation not in (
+      self.CS_STORE, self.CS_CONFIRM, self.CS_HSYNC_REQ, self.CS_HSYNC_RESP,
+    ):
+      # Unknown or malformed operations are ignored before they can disturb a batch.
+      return
+    if self.__batching:
+      # Run later in process(), together with the other inputs of this iteration.
+      self.__inbox.append((operation, data, sender))
+    else:
+      self.__exec_operation(operation, data, sender)
+    return
+
+
+  def __exec_operation(self, operation, data, sender):
+    self.__count(operation)
     if operation == self.CS_STORE:
-      self.__exec_store(data, peers=sender) # make sure you send also to the sender
+      return self.__exec_store(data, peers=sender) # make sure you send also to the sender
     elif operation == self.CS_CONFIRM:
       self.__exec_received_confirm(data, sender=sender)
     elif operation == self.CS_HSYNC_REQ:
@@ -1473,13 +1676,150 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     elif operation == self.CS_HSYNC_RESP:
       self.__exec_hsync_response(data, sender=sender)
     return
-  
 
-  
+
+  def __collapsible(self, older, newer):
+    """
+    Whether applying only ``newer`` gives the same result as applying ``older`` and then ``newer``.
+
+    True for two writes (no delete) of one key by one sender with the same
+    owner, token and read-only flag: the first would be overwritten at once.
+    Anything else (a delete, a change of owner, token or protection) can make
+    the second store depend on the first, so both are applied in order.
+    """
+    if older.get(self.CS_VALUE, None) is None or newer.get(self.CS_VALUE, None) is None:
+      return False
+    return all(
+      older.get(field, default) == newer.get(field, default)
+      for field, default in ((self.CS_OWNER, None), (self.CS_TOKEN, None), (self.CS_READONLY, False))
+    )
+
+
+  def __newest_of(self, run):
+    """The store that stands for a run: the last one, or the highest sequence if they arrived out of order."""
+    values = [item[1].get(self.CS_VALUE, None) for item in run]
+    sequences = [value.get("sequence") if isinstance(value, dict) else None for value in values]
+    if len(run) > 1 and all(type(sequence) is int for sequence in sequences):
+      return run[max(range(len(run)), key=lambda idx: (sequences[idx], idx))]
+    return run[-1]
+
+
+  def __process_inbox(self, drain=False):
+    """
+    Run the operations received so far.
+
+    Acknowledgments and snapshot responses run first and always, because local
+    callers are blocked waiting for them. Stores and snapshot requests follow
+    in arrival order for at most ``CS_STORE_SECONDS``; what does not fit waits
+    for the next iteration, so local writes are still broadcast and saved on
+    time while this node catches up.
+
+    Consecutive stores of one key by one sender are collapsed when the result
+    is the same (see ``__collapsible``): only the newest is applied and
+    confirmed, since an older one would be overwritten at once and its
+    acknowledgment ignored by the sender. If the newest is rejected, the older
+    ones are applied in order, exactly as without collapsing. The more this
+    node is behind, the more stores collapse. One failing operation does not
+    affect the others.
+
+    Parameters
+    ----------
+    drain : bool, optional
+      Run everything regardless of the time budget (used when closing).
+
+    Returns
+    -------
+    None
+    """
+    if len(self.__inbox) == 0:
+      return
+    inbox, self.__inbox = self.__inbox, []
+    first, runs, open_run = [], {}, {}
+    for position, item in enumerate(inbox):
+      operation, data, sender = item
+      if operation in (self.CS_CONFIRM, self.CS_HSYNC_RESP):
+        first.append(item)
+        continue
+      key = data.get(self.CS_KEY, None)
+      is_store = operation == self.CS_STORE and isinstance(key, str)
+      previous = open_run.get(key) if is_store else None
+      if previous is not None and runs[previous][-1][2] == sender and self.__collapsible(runs[previous][-1][1], data):
+        # Same sender, same key, nothing else written to the key in between: the run
+        # moves to the position of its newest store (it only passes stores of other keys).
+        run = runs.pop(previous)
+        run.append(item)
+      else:
+        run = [item]
+      runs[position] = run
+      if is_store:
+        open_run[key] = position
+    for operation, data, sender in first:
+      try:
+        self.__exec_operation(operation, data, sender)
+      except Exception as exc:
+        self.__count("failed")
+        self.P(f" === Chain store operation {operation} from {sender} failed: {exc}", color='r')
+    deadline = self.time() + self.CS_STORE_SECONDS
+    waiting = []
+    for run in runs.values():
+      if not drain and self.time() > deadline:
+        waiting.append(run)
+        continue
+      best = self.__newest_of(run)
+      one_by_one = len(run) == 1
+      if not one_by_one:
+        current = self.__chain_storage.get(best[1].get(self.CS_KEY, None), {}).get(self.CS_VALUE, None)
+        newest_value = best[1].get(self.CS_VALUE, None)
+        # If the replica already holds the newest value, storing it alone changes nothing, while an
+        # older store of the run with another value would rewrite the record first: apply them all.
+        one_by_one = current == newest_value and any(item[1].get(self.CS_VALUE, None) != newest_value for item in run)
+      accepted = False
+      for item in (run if one_by_one else [best]):
+        try:
+          accepted = bool(self.__exec_operation(*item))
+        except Exception as exc:
+          accepted = False
+          self.__count("failed")
+          self.P(f" === Chain store operation {item[0]} from {item[2]} failed: {exc}", color='r')
+      if one_by_one:
+        continue
+      if accepted:
+        self.__count("superseded", len(run) - 1)
+        continue
+      for item in run:
+        # The newest was rejected: fall back to what one-by-one processing would have done.
+        if item is best:
+          continue
+        try:
+          self.__exec_operation(*item)
+        except Exception as exc:
+          self.__count("failed")
+          self.P(f" === Chain store operation {item[0]} from {item[2]} failed: {exc}", color='r')
+    overflow = sum(len(run) for run in waiting) - self.CS_BACKLOG_MAX
+    if overflow > 0:
+      # Too much is waiting. First let go of stores that a newer one stands for,
+      # then, as the bounded input queue does, of the oldest stores.
+      for run in waiting:
+        if overflow > 0 and len(run) > 1:
+          overflow -= len(run) - 1
+          self.__count("backlog_dropped", len(run) - 1)
+          run[:] = [self.__newest_of(run)]
+      for run in waiting:
+        if overflow > 0 and run[0][0] == self.CS_STORE:
+          overflow -= 1
+          self.__count("backlog_dropped")
+          run[:] = []
+    if len(waiting) > 0:
+      self.__inbox = [item for run in waiting for item in run] + self.__inbox
+    return
+
+
   def process(self):
+    self.__process_inbox()
     self.__maybe_refresh_chain_peers()
     self.__maybe_broadcast()
     self.__maybe_flush_chain_storage()
+    self.__maybe_log_stats()
     return
 
 
@@ -1491,7 +1831,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -------
     None
     """
+    self.__process_inbox(drain=True)
     if self.__chain_storage_dirty:
-      self.__save_chain_storage()
+      path = self.__save_chain_storage()
+      manager = get_serialization_manager()
+      if path is not None and manager is not None:
+        # Wait for the last snapshot to reach the disk before the plugin goes away.
+        manager.flush(timeout=30, name=path)
     super().on_close()
     return

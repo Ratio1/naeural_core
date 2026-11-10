@@ -285,7 +285,7 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
   def uuid(length=8):  # pylint: disable=unused-argument
     return "req-" + "1" * length
 
-  def cacheapi_save_pickle(self, value, verbose=True, strict=False):  # pylint: disable=unused-argument
+  def cacheapi_save_pickle(self, value, verbose=True, strict=False, **kwargs):  # pylint: disable=unused-argument
     self.saved_storage.append(copy.deepcopy(value))
 
   def cacheapi_load_pickle(self, default=None, verbose=True):  # pylint: disable=unused-argument

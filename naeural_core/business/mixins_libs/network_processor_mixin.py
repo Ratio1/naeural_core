@@ -91,7 +91,38 @@ class _NetworkProcessorMixin:
   
   
   def __network_processor_maybe_process_received(self):
-    datas = self.dataapi_struct_datas(full=False, as_list=True)    
+    """
+    Handle the payloads of the current input and, when configured, of further queued inputs.
+
+    Notes
+    -----
+    With ``MAX_INPUTS_PER_ITERATION`` above 1 the loop keeps taking queued
+    inputs until that count or ``INPUTS_BATCH_SECONDS`` is reached, so a plugin
+    that fell behind catches up without paying the loop overhead and sleep for
+    every input, while its own ``process`` still runs regularly. In that mode
+    a payload whose handling raises is logged and skipped, so it cannot take
+    the other inputs of the iteration with it. With the default of 1 the
+    behaviour is unchanged: one input per iteration and errors propagate.
+    """
+    limit = getattr(self, 'cfg_max_inputs_per_iteration', 1) or 1
+    deadline = self.time() + (getattr(self, 'cfg_inputs_batch_seconds', None) or 1.0)
+    taken = 0
+    while True:
+      datas = self.dataapi_struct_datas(full=False, as_list=True)
+      try:
+        self.__network_processor_process_datas(datas)
+      except Exception as exc:
+        if limit <= 1:
+          raise
+        self.P(f"Network input skipped after an error: {exc}", color="red")
+      taken += 1
+      if taken >= limit or self.input_queue_size == 0 or self.time() >= deadline:
+        break
+      self.inputs = self.get_next_avail_input()
+    return
+
+
+  def __network_processor_process_datas(self, datas):
     assert isinstance(datas, list), f"Expected list but got {type(datas)}"
     if len(datas) > 0:
       for data in datas:

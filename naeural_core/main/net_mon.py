@@ -74,14 +74,13 @@ def exponential_score(left, right, val, right_is_better=False, normed=False):
   scores = np.linspace(100, 1, num=num) # TODO try with np.geomspace
   if right_is_better:
     rng = range(len(interval)-1, -1, -1)
-    sgn = '>='
   else:
     rng = range(len(interval))
-    sgn = '<='
 
   for s,i in enumerate(rng):
-    str_eval = '{}{}{}'.format(val, sgn, interval[i])
-    res = eval(str_eval)
+    # Compare the numbers: eval() of the printed values gave the same result for finite
+    # values, cost a compile per step and raised on NaN/inf, aborting the status pass.
+    res = (val >= interval[i]) if right_is_better else (val <= interval[i])
     if res:
       if normed:
         return scores[s] / 100.1

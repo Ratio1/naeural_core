@@ -1296,6 +1296,18 @@ class Orchestrator(DecentrAIObject,
         self.P("Node oracle refresh thread joined.", color='y')
     return
 
+  def request_stop(self):
+    """
+    Ask the main loop to end in an orderly way.
+
+    The loop leaves at its next check and closes as after a STOP command:
+    SHUTDOWN-status heartbeat, managers closed, plugins saved on close. The
+    method only sets a value, so a signal handler may call it.
+    """
+    if self._return_code is None:
+      self._return_code = ct.CODE_SHUTDOWN
+    return
+
   def _maybe_gracefull_stop(self):
     if self._in_shutdown:
       return

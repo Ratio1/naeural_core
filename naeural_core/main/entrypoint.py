@@ -2,6 +2,7 @@
 import json
 import multiprocessing as mp
 import os
+import signal
 import subprocess
 import tempfile
 import shutil
@@ -419,9 +420,53 @@ def maybe_install_additional_packages(
   return
 
 
+def stop_on_sigterm(running=None):
+  """
+  Make SIGTERM stop the node in an orderly way.
+
+  The node runs as PID 1 of its container, where a signal without a handler
+  is ignored: ``docker stop`` and ``systemctl stop`` then wait for their
+  timeout and kill the process, and nothing is flushed. With this handler
+  SIGTERM ends the main loop the way a STOP command does: the node sends a
+  SHUTDOWN-status heartbeat and closes its managers, and the plugins save
+  their pending state as they close. The stop timeout of the container must
+  leave room for that.
+
+  SIGTERM must not take the path of an error. A node that leaves with an
+  EXCEPTION-status heartbeat is treated as offline by the other nodes for the
+  next hour, even after it is back: it gets no chain-store records and is
+  not accepted as a deployment target.
+
+  Parameters
+  ----------
+  running : dict, optional
+    ``main`` stores the Orchestrator under ``'eng'`` once it exists. Until
+    then SIGTERM raises ``KeyboardInterrupt``, which ends the start-up.
+
+  Returns
+  -------
+  bool
+    False when called outside the main thread, where handlers cannot be set.
+  """
+  def handler(signum, frame):
+    eng = (running or {}).get('eng')
+    if eng is None:
+      raise KeyboardInterrupt
+    eng.request_stop()
+    return
+
+  try:
+    signal.signal(signal.SIGTERM, handler)
+  except ValueError:
+    return False
+  return True
+
+
 def main(additional_packages: list = None):
   app_base_folder = os.getcwd()
   print("Core Edge Node v{} starting in {}".format(__VER__, app_base_folder), flush=True)
+  running = {}
+  stop_on_sigterm(running)
   
   CONFIG_FILE = 'config_startup'
   is_docker = str(os.environ.get('AINODE_DOCKER')).lower() in ["yes", "true"]
@@ -489,6 +534,7 @@ def main(additional_packages: list = None):
 
     l.P("Starting Execution Engine Main Loop...\n\n\n.", color=ct.COLORS.MAIN)
     eng = Orchestrator(log=l)
+    running['eng'] = eng
         
     if lock is None:
       msg = "Shutdown forced due to already started local processing node with id '{}'!".format(eng.cfg_eeid)

@@ -255,6 +255,15 @@ class TestPluginLoopWaits(unittest.TestCase):
         self.assertEqual(waits, expected_waits)
         self.assertIn("execute", plugin.events)
 
+  def test_plugin_resolution_is_the_mean_lap_rate_without_numpy(self):
+    # numpy is stubbed in this harness, so this also proves the lap no longer uses it.
+    plugin = _Plugin()
+    with mock.patch.dict(_SCHEDULING_GLOBALS, {"time": lambda: plugin.now}):
+      for lap in (0.1, 0.3):
+        plugin._BasePluginExecutor__last_process_time = plugin.now - lap
+        plugin._recalc_plugin_resolution()
+    self.assertEqual(plugin.actual_plugin_resolution, 5.0)  # 2 laps in 0.4 s
+
   def test_postponed_wait_clamps_actual_remaining_delay(self):
     """The real postponement property, not positive config alone, gates work."""
     for remaining, expected in ((0.001, 0.020), (0.125, 0.125), (0.250, 0.250), (2, 0.250)):

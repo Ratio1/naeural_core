@@ -1371,9 +1371,15 @@ class Orchestrator(DecentrAIObject,
 
 
   def _get_mean_loop_freq(self):
+    # Every plugin calls this on every lap; it is a mean over the last main-loop laps,
+    # so recomputing it (numpy over a deque) more than once a second buys nothing.
+    cached = vars(self).get("_mean_loop_freq_cache")
+    if cached is not None and monotonic() - cached[0] < 1:
+      return cached[1]
     main_loop_time = self.log.get_timer_mean(self._main_loop_timer_name)
     ml_time = 1e-3 if main_loop_time == 0 else main_loop_time
     result = min(self.cfg_main_loop_resolution, 1 / ml_time)
+    self._mean_loop_freq_cache = (monotonic(), result)
     return result
 
   def _get_last_timing(self):

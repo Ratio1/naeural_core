@@ -106,7 +106,8 @@ class _BasePluginLoopMixin(object):
     if self.last_process_time is not None:
       this_lap = self.time_from_last_process
       self.__lap_times.append(this_lap)
-      self.__plugin_resolution = round(1 / np.mean(self.__lap_times), 1)
+      # sum() over <=100 floats; np.mean converted the deque to an array on every lap.
+      self.__plugin_resolution = round(len(self.__lap_times) / (sum(self.__lap_times) or 1e-9), 1)
     return  
   
 

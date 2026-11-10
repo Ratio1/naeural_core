@@ -142,6 +142,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     deployments; applied to replication it cuts a restarted oracle off for an
     hour, and nothing sends it the records written meanwhile. So the hour of
     memory is not used here: a peer counts when its latest status is ONLINE.
+    A status that comes from an oracle's network summary keeps the reporter's
+    hour of memory, so PAST-EXCEPTION is accepted too; a peer that stops after
+    an exception is then dropped when its summary goes stale (LOST STATUS
+    after 60 s), the same bound as a peer that dies silently.
     """
     status = getattr(self.netmon, "network_node_simple_status", None)
     if callable(status):

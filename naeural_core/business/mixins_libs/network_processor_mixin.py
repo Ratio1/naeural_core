@@ -163,5 +163,12 @@ class _NetworkProcessorMixin:
     """
     self.__network_processor_maybe_check_initialized()
     self.__network_processor_maybe_process_received()
+    # MAX_INPUTS_PER_ITERATION > 1: drain more queued inputs (at most 0.5 s) instead of one loop lap each.
+    extra = (getattr(self, 'cfg_max_inputs_per_iteration', 1) or 1) - 1
+    deadline = self.time() + 0.5
+    while extra > 0 and self.input_queue_size > 0 and self.time() < deadline:
+      extra -= 1
+      self.inputs = self.get_next_avail_input()
+      self.__network_processor_maybe_process_received()
     self.network_processor_maybe_log_stats()
     return

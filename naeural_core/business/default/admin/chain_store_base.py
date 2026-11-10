@@ -36,6 +36,7 @@ _CONFIG = {
   'PROCESS_DELAY' : 0,
 
   'MAX_INPUTS_QUEUE_SIZE' : 1024,
+  'MAX_INPUTS_PER_ITERATION' : 32,  # inputs taken per loop lap; other network processors keep 1
 
   'ALLOW_EMPTY_INPUTS' : True,
   "ACCEPT_SELF" : False,

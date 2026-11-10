@@ -134,6 +134,22 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
 
   def __netmon_node_is_online_for_control(self, peer):
+    """
+    Tell whether ``peer`` is running and should receive records.
+
+    NetMon reports a node that left through an error as PAST-EXCEPTION for
+    the next hour, also when it is back and heartbeating. That rule guards
+    deployments; applied to replication it cuts a restarted oracle off for an
+    hour, and nothing sends it the records written meanwhile. So the hour of
+    memory is not used here: a peer counts when its latest status is ONLINE.
+    """
+    status = getattr(self.netmon, "network_node_simple_status", None)
+    if callable(status):
+      try:
+        # PAST-EXCEPTION can still come from an oracle's network summary, which a normal node relies on.
+        return status(peer, last_exception_check_time_minutes=0) in ("ONLINE", "PAST-EXCEPTION")
+      except TypeError:
+        pass
     checker = getattr(self.netmon, "network_node_is_online_for_control", None)
     if callable(checker):
       return checker(peer)

@@ -205,6 +205,20 @@ class _SummaryControlNetmon:
     return peer in self.online_for_control
 
 
+class _StatusNetmon:
+  """NetMon that remembers an error for an hour unless asked for the latest status only."""
+
+  def __init__(self, with_memory, latest):
+    self.with_memory, self.latest, self.asked = dict(with_memory), dict(latest), []
+
+  def network_node_simple_status(self, peer, dt_now=None, last_exception_check_time_minutes=60):  # pylint: disable=unused-argument
+    self.asked.append(last_exception_check_time_minutes)
+    return (self.with_memory if last_exception_check_time_minutes > 0 else self.latest)[peer]
+
+  def network_node_is_online_for_control(self, peer):
+    return self.with_memory[peer] == "ONLINE"
+
+
 class _OldNetmonStub:
   def __init__(self, online):
     self.online = set(online)
@@ -379,6 +393,25 @@ class TestChainStoreHsync(unittest.TestCase):
 
     self.assertEqual(requester._ChainStoreBasePlugin__get_target_peers(), ["peer-2"])
     self.assertEqual(requester.netmon.calls, ["peer-1", "peer-2"])
+
+  def test_default_peer_refresh_uses_latest_status_not_the_hour_of_exception_memory(self):
+    # A peer back after an error stays PAST-EXCEPTION for an hour; replication must still reach it.
+    latest = {
+      "peer-back": "ONLINE", "peer-summary": "PAST-EXCEPTION", "peer-lost": "LOST STATUS",
+      "peer-exception": "EXCEPTION", "peer-shutdown": "SHUTDOWN", "peer-stop": "STOP",
+    }
+    with_memory = dict(latest, **{"peer-back": "PAST-EXCEPTION"})
+    requester = _ChainStoreRuntimeHarness("peer-requester")
+    requester.bc = _WhitelistBlockEngine(list(latest))
+    requester.netmon = _StatusNetmon(with_memory=with_memory, latest=latest)
+    requester._now = 61
+
+    requester._ChainStoreBasePlugin__maybe_refresh_chain_peers()
+
+    self.assertFalse(requester.netmon.network_node_is_online_for_control("peer-back"))  # what cut it off
+    # An oracle's network summary still carries the hour of memory, so PAST-EXCEPTION from it counts.
+    self.assertEqual(requester._ChainStoreBasePlugin__get_target_peers(), ["peer-back", "peer-summary"])
+    self.assertEqual(set(requester.netmon.asked), {0})
 
   def test_chainstore_set_and_hsync_share_peer_selection(self):
     harness = _PeerSelectionHarness()

@@ -32,6 +32,7 @@ from time import time, sleep
 from naeural_core import constants as ct
 from naeural_core.utils import Singleton
 
+from naeural_core.main import serialization_manager
 from naeural_core.main.ver import __VER__ as CORE_VERSION
 from ratio1 import version as SDK_VERSION
 
@@ -557,7 +558,8 @@ class EpochsManager(Singleton):
       Detached payload previously produced by
       ``__snapshot_full_data_for_save``.
     """
-    self.log.save_pickle_to_data(
+    serialization_manager.save_pickle_to_data(
+      self.log,
       data=snapshot,
       fn=FN_NAME,
       subfolder_path=FN_SUBFOLDER,

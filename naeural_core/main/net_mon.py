@@ -17,6 +17,7 @@ from naeural_core import constants as ct
 from naeural_core.bc import DefaultBlockEngine, BCct
 
 from .epochs_manager import EpochsManager
+from . import serialization_manager
 
 UNUSEFULL_HB_KEYS = [
   ct.HB.DEVICE_LOG,
@@ -2354,7 +2355,10 @@ class NetworkMonitor(DecentrAIObject):
       heartbeats_snapshot = self._snapshot_network_heartbeats_for_save()
       netmon_lock_elapsed = time() - netmon_lock_start
       epoch_save_start = time()
-      self.log.save_pickle_to_data(
+      # The detached snapshot is pickled and written by the serialization
+      # manager when one is running; otherwise it is saved here as before.
+      serialization_manager.save_pickle_to_data(
+        self.log,
         data=heartbeats_snapshot,
         fn=NETMON_DB,
         subfolder_path='network_monitor'

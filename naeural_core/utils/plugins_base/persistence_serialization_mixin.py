@@ -56,13 +56,33 @@ class _PersistenceSerializationMixin(object):
     return self.__persistence_fld
 
 
-  def _helper_persistence_serialization_save(self, obj, subfolder_path=None, verbose=True, strict=False):
+  def _helper_persistence_serialization_save(
+    self, obj, subfolder_path=None, verbose=True, strict=False, background=False, on_error=None,
+  ):
     self._maybe_setup_persistence_fld()
     if subfolder_path is None:
       subfolder_path = self._persistence_fld
 
     if strict:
       folder = os.path.join(self.log.get_data_folder(), subfolder_path.lstrip("/"))
+      manager = None
+      if background:
+        # Imported on use so this mixin does not depend on the main package at load time.
+        from naeural_core.main.serialization_manager import get_serialization_manager
+        manager = get_serialization_manager()
+      if manager is not None:
+        # The signature file never changes: write it once, then let the
+        # serialization manager pickle and fsync the snapshot off this thread.
+        if not vars(self).get('_persistence_metadata_saved'):
+          self._save_cache_file_strict(
+            os.path.join(folder, "metadata.json"),
+            {"SERIALIZATION_SIGNATURE": self.cfg_serialization_signature},
+            as_json=True,
+          )
+          self._persistence_metadata_saved = True
+        path = os.path.join(folder, "object.pickle")
+        if manager.submit(path, path, obj, on_error=on_error):
+          return path
       self._save_cache_file_strict(os.path.join(folder, "object.pickle"), obj)
       self._save_cache_file_strict(
         os.path.join(folder, "metadata.json"),
@@ -241,7 +261,7 @@ class _PersistenceSerializationMixin(object):
     return
   
   
-  def cacheapi_save_pickle(self, obj, verbose=True, strict=False):
+  def cacheapi_save_pickle(self, obj, verbose=True, strict=False, background=False, on_error=None):
     """
     Save object to the current plugin instance cache folder
 
@@ -254,9 +274,22 @@ class _PersistenceSerializationMixin(object):
     strict : bool, optional
         Propagate disk write/fsync failures and atomically replace the cache.
         Required when returning a network acknowledgment of persistence.
+    background : bool, optional
+        With ``strict``: hand a detached snapshot to the node's serialization
+        manager, which writes it off the calling thread. The caller must not
+        change ``obj`` afterwards. Falls back to an inline save when no
+        manager is running.
+    on_error : callable, optional
+        Called with the error text if a background save fails.
+
+    Returns
+    -------
+    str or None
+        The queued file path for a background save, otherwise None.
     """
-    self._helper_persistence_serialization_save(obj, verbose=verbose, strict=strict)
-    return
+    return self._helper_persistence_serialization_save(
+      obj, verbose=verbose, strict=strict, background=background, on_error=on_error,
+    )
   
   
   def cacheapi_load_pickle(self, default=None, verbose=True):

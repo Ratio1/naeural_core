@@ -14,6 +14,7 @@ from naeural_core import constants as ct
 
 from naeural_core.main.app_monitor import ApplicationMonitor
 from naeural_core.main.net_mon import NetworkMonitor
+from naeural_core.main import serialization_manager
 from naeural_core.main.command_handlers import ExecutionEngineCommandHandlers
 from naeural_core.main.orchestrator_mixins import (
   _ValidateConfigStartupMixin,
@@ -400,6 +401,10 @@ class Orchestrator(DecentrAIObject,
     
     self._network_monitor = NetworkMonitor(
       node_name=self.cfg_eeid, node_addr=self.e2_address,
+    # One helper process persists snapshots (chain store, network monitor, epochs)
+    # off the plugin threads. It is stopped, after a final flush, in close_main_loop.
+    self._app_shmem['serialization_manager'] = serialization_manager.start_global(log=self.log)
+
       log=self.log, DEBUG=self.DEBUG,
       blockchain_manager=self._blockchain_manager,
       environment_variables={
@@ -1767,6 +1772,8 @@ class Orchestrator(DecentrAIObject,
     """
     self.__loop_stage = '2.bm.refresh.call_bm.update_streams'
     in_use_ai_engines = self._business_manager.update_streams(
+    # Plugins and managers queued their last snapshots above: write them, then stop the worker.
+    serialization_manager.stop_global()
       self._get_runtime_streams_snapshot()
     )
     return in_use_ai_engines

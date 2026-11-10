@@ -596,6 +596,28 @@ class TestNetmonSummaryStatus(unittest.TestCase):
     self.assertFalse(netmon.network_node_has_did("0xai_REMOTE"))
     self.assertEqual(sorted(netmon.get_network_node_tags("0xai_REMOTE")), ["DC:DIRECT", "IS_KYB"])
 
+  def test_direct_tags_are_read_without_copying_the_heartbeat(self):
+    # Runs for every known node on every status pass: the tags are new strings, so no copy is needed.
+    netmon, patcher = _make_netmon(summary_enabled=False)
+    self.addCleanup(patcher.stop)
+    netmon.register_heartbeat("0xai_REMOTE", {
+      ct.EE_ID: "remote",
+      ct.HB.EE_ADDR: "0xai_REMOTE",
+      ct.PAYLOAD_DATA.EE_TIMESTAMP: "2026-05-28 10:00:00",
+      ct.HB.DEVICE_STATUS: ct.DEVICE_STATUS_ONLINE,
+      ct.HB.CURRENT_TIME: "2026-05-28 09:59:00",
+      f"{ct.HB.PREFIX_EE_NODETAG}{ct.HB.TAG_DC}": "DIRECT",
+      f"{ct.HB.PREFIX_EE_NODETAG}{ct.HB.TAG_IS_KYB}": True,
+    })
+    stored = netmon.get_box_heartbeats("0xai_REMOTE", return_copy=False)[-1]
+    before = dict(stored)
+
+    with mock.patch("naeural_core.main.net_mon.deepcopy", side_effect=AssertionError("heartbeat copied")):
+      tags = netmon.get_network_node_tags("0xai_REMOTE")
+
+    self.assertEqual(sorted(tags), ["DC:DIRECT", "IS_KYB"])
+    self.assertEqual(stored, before)
+
   def test_malformed_summary_tags_do_not_fall_back_to_stale_direct_tags(self):
     netmon, patcher = _make_netmon(summary_enabled=True, ttl_seconds=300)
     self.addCleanup(patcher.stop)

@@ -3434,7 +3434,7 @@ class NetworkMonitor(DecentrAIObject):
         return []
 
       result = []
-      hb = self.__network_node_last_heartbeat(node_address, return_copy=True)
+      hb = self.__network_node_last_heartbeat(node_address)  # read-only: only new strings leave this method
       # get tags from HB.
       if isinstance(hb, dict):
         tags = {k: v for k, v in hb.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}

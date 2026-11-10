@@ -1651,10 +1651,10 @@ class Orchestrator(DecentrAIObject,
       # increase wait time if need be
       wait_time = avg_comm_loop_timings 
 
-    sleep(0.001) # no matter what go ahead and yield
-    while current_cycle_time < wait_time:
-      sleep(0.001)
-      current_cycle_time = perf_counter() - self._last_main_loop_pass_time # recalc cycle time 
+    # Sleep once for the rest of the cycle (at least 1 ms, to yield) instead of in 1 ms
+    # steps, each of which woke this thread and asked for the GIL.
+    sleep(max(0.001, wait_time - current_cycle_time))
+    current_cycle_time = perf_counter() - self._last_main_loop_pass_time # recalc cycle time
 
     self.loop_timings.append(current_cycle_time) # done after time extension if needed
     self._last_main_loop_pass_time = perf_counter() # reset

@@ -9,11 +9,11 @@ from naeural_core.business.default.web_app.supervisor_fast_api_web_app import Su
 RUNNING = "_SupervisorFastApiWebApp__supervisor_fastapi_plugin_running"
 
 
-def _app(running, started, queued=()):
+def _app(running, started, queued=(), commands_done=True):
   app = object.__new__(SupervisorFastApiWebApp)
   vars(app).update({
     RUNNING: running, "cfg_idle_loop_wait": 0.25, "_FastApiWebAppPlugin__uvicorn_server_started": started,
-    "_incoming_requests": list(queued), "postponed_requests": [],
+    "_incoming_requests": list(queued), "postponed_requests": [], "start_commands_finished": [commands_done],
   })
   return app
 
@@ -31,6 +31,8 @@ class TestIdleWaitOptIns(unittest.TestCase):
     self.assertEqual(_app(running=None, started=False)._idle_loop_wait(), 0)
     self.assertEqual(_app(running=True, started=True, queued=[{"id": 1}])._idle_loop_wait(), 0)
     self.assertEqual(_app(running=True, started=True)._idle_loop_wait(), 0.25)
+    # A reload or a pause/resume restarts the server: normal rate again until its commands finished.
+    self.assertEqual(_app(running=True, started=True, commands_done=False)._idle_loop_wait(), 0)
 
   def test_a_disabled_api_waits_although_its_server_never_starts(self):
     # Non-oracle nodes: six such apps lapped ~27 times a second re-checking the enable state.

@@ -81,7 +81,6 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     plugin._last_incoming_drop_log_ts = 0.0
     plugin._expired_requests_since_log = 0
     plugin._last_expired_log_ts = 0.0
-    plugin._drain_rate = None
     plugin._current_request_client_ip = None
     plugin.logged = []
     plugin.P = lambda msg, *args, **kwargs: plugin.logged.append(msg)
@@ -147,29 +146,34 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     self.assertEqual(reply["id"], "dropped")
     self.assertEqual(reply["value"]["result"]["status_code"], 503)
 
-  def test_monitor_refuses_at_once_what_would_wait_past_half_the_limit(self):
-    self.plugin._drain_rate = 0.5  # 50 entries ahead: about 100 s, over 90 / 2
-    self.plugin._incoming_requests.extend({"id": f"q{i}"} for i in range(50))
+  def _run_monitor_on(self, request):
     self.plugin._stop_request_monitor = threading.Event()
     self.plugin._request_monitor_thread = None
     self.plugin._server_queue.put({"id": None, "value": ("__profile__", {})})
-    self.plugin._server_queue.put(self._request(waited_s=0, request_id="late"))
+    self.plugin._server_queue.put(request)
     self.plugin._start_request_monitor_thread()
     deadline = time.time() + 5
-    while self.plugin._client_queue.empty() and time.time() < deadline:
+    while self.plugin._server_queue.qsize() and time.time() < deadline:
       time.sleep(0.01)
+    time.sleep(0.05)
     self.plugin._stop_request_monitor.set()
     self.plugin._request_monitor_thread.join(timeout=2)
+
+  def test_monitor_refuses_at_once_while_the_oldest_queued_request_has_expired(self):
+    self.plugin._incoming_requests.extend([self._request(waited_s=100, request_id="old"), {"id": "q1"}])
+    self._run_monitor_on(self._request(waited_s=0, request_id="late"))
     [reply] = self._replies()  # the refused timing report gets no answer
     self.assertEqual((reply["id"], reply["value"]["result"]["status_code"]), ("late", 503))
-    self.assertEqual(len(self.plugin._incoming_requests), 50)
+    self.assertEqual([item["id"] for item in self.plugin._incoming_requests], ["old", "q1"])
+    self.assertIn("the oldest for 100s", self.plugin.logged[-1])
 
-  def test_drain_rate_counts_the_request_and_the_entries_ahead(self):
-    for ahead, waited_s in ((19, 10), (0, 0.5)):
-      request = self._request(waited_s=waited_s)
-      request["queued_ahead"] = ahead
-      self.plugin._process_incoming_request(request)
-      self.assertAlmostEqual(self.plugin._drain_rate, 2.0, delta=0.1)
+  def test_monitor_queues_behind_a_long_but_fresh_queue(self):
+    # A burst or a short stall: nothing has expired yet, so nothing is refused (as before).
+    self.plugin._incoming_requests.extend(self._request(waited_s=40, request_id=f"q{i}") for i in range(200))
+    self._run_monitor_on(self._request(waited_s=0, request_id="late"))
+    self.assertEqual(self._replies(), [])
+    self.assertEqual(self.plugin._incoming_requests[-1]["id"], "late")
+    self.assertNotIn("queued_ahead", self.plugin._incoming_requests[-1])
 
 
 if __name__ == "__main__":

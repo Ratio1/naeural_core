@@ -306,7 +306,7 @@ class Orchestrator(DecentrAIObject,
         dauth_endp=None,  # get automatically
         add_env=True,
         debug=False,
-        max_tries=5,
+        max_tries=5 if tries == 1 else 1,  # later rounds: one request each, so the time limit below holds
         sender_alias=self.cfg_eeid,
       )
       # Will be None in case of bad URL. In that case there is no need to reattempt it.

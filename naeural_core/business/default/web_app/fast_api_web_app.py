@@ -173,7 +173,9 @@ class FastApiWebAppPlugin(BasePlugin):
   def _idle_loop_wait(self):
     # Start-up and queued or postponed requests keep the normal loop rate.
     wait = super(FastApiWebAppPlugin, self)._idle_loop_wait()
-    if wait and (not self.uvicorn_server_started or self._incoming_requests or self.postponed_requests):
+    # start_commands_finished is reset by every server restart (reload, pause/resume).
+    if wait and (not self.uvicorn_server_started or not all(self.start_commands_finished)
+                 or self._incoming_requests or self.postponed_requests):
       return 0
     return wait
 
@@ -503,9 +505,6 @@ class FastApiWebAppPlugin(BasePlugin):
     self._last_incoming_drop_log_ts = 0.0
     self._expired_requests_since_log = 0
     self._last_expired_log_ts = 0.0
-    # Queue entries taken off per second, measured by the plugin thread on each timed request;
-    # the request monitor uses it to refuse at once what would wait past MAX_QUEUE_WAIT / 2.
-    self._drain_rate = None
     self._current_request_client_ip = None
 
     self._profile_stats = {}
@@ -607,18 +606,16 @@ class FastApiWebAppPlugin(BasePlugin):
           except Exception:
             self.P(f"Exception in on_request:\n{self.get_exception()}", color='r')
           max_wait = self.get_max_queue_wait()
-          drain_rate = self._drain_rate
           with self._incoming_lock:
             queued = len(self._incoming_requests)
-            # Expected wait of a request queued now: the entries ahead over the measured drain
-            # rate. Refuse now what would wait more than half of MAX_QUEUE_WAIT, instead of
-            # answering it 503 only after it expired.
-            expected_wait = queued / drain_rate if drain_rate else 0.0
+            # The oldest queued request has already waited past MAX_QUEUE_WAIT, so one queued
+            # behind it would expire too: answer it now, not after it has waited as long.
+            head_put = self._incoming_requests[0].get('t_put_wall_ns') if queued else None
+            head_wait = (time.time_ns() - head_put) / 1e9 if isinstance(head_put, int) else 0.0
             queue_full = queued >= self.get_max_incoming_requests() or (
-              max_wait is not None and expected_wait > max_wait / 2
+              max_wait is not None and head_wait > max_wait
             )
             if not queue_full:
-              request['queued_ahead'] = queued
               self._incoming_requests.append(request)
               self._loop_wakeup.set()  # wake the plugin loop if it is waiting idle
           if queue_full and not is_profile_event:  # nobody waits for an answer to a timing report
@@ -626,7 +623,7 @@ class FastApiWebAppPlugin(BasePlugin):
             if now - self._last_incoming_drop_log_ts >= INCOMING_DROP_LOG_INTERVAL_S:
               self._last_incoming_drop_log_ts = now
               self.P(
-                f"Refusing incoming requests: {queued} queued, about {expected_wait:.0f}s to wait.",
+                f"Refusing incoming requests: {queued} queued, the oldest for {head_wait:.0f}s.",
                 color='y'
               )
             # Answer at once instead of leaving the HTTP side waiting for REQUEST_TIMEOUT.
@@ -738,11 +735,6 @@ class FastApiWebAppPlugin(BasePlugin):
     if max_wait is None or not isinstance(t_put_wall_ns, int):
       return False
     waited = (time.time_ns() - t_put_wall_ns) / 1e9
-    queued_ahead = request.get('queued_ahead')
-    if isinstance(queued_ahead, int):
-      # This request and the entries ahead of it left the queue in `waited` seconds. Counting
-      # the request itself keeps every sample positive, so the estimate recovers by itself.
-      self._drain_rate = (queued_ahead + 1) / max(waited, 1e-3)
     if waited <= max_wait:
       return False
     self._expired_requests_since_log += 1

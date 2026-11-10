@@ -7,10 +7,12 @@ from threading import Event, Lock
 from types import SimpleNamespace
 from queue import Queue
 from time import time
+from unittest import mock
 
 from naeural_core import constants as ct
 from naeural_core.business.business_manager import BusinessManager
 from naeural_core.data.capture_manager import CaptureManager
+from naeural_core.main import orchestrator as orchestrator_module
 from naeural_core.main.orchestrator import Orchestrator
 
 
@@ -635,6 +637,29 @@ class TestAdminPipelineCollectionLane(unittest.TestCase):
       orchestrator._capture_manager.get_all_calls,
       [],
     )
+
+  def test_admin_snapshot_builds_only_the_admin_pipeline(self):
+    orchestrator = self._make_orchestrator()
+    orchestrator._current_dct_config_streams = deepcopy(
+      orchestrator._config_manager.dct_config_streams
+    )
+    orchestrator._runtime_dct_config_streams = deepcopy(
+      orchestrator._current_dct_config_streams
+    )
+    expected = {"admin_pipeline": orchestrator._get_capture_streams_snapshot()["admin_pipeline"]}
+    built = []
+    real_build = orchestrator_module.build_capture_pipeline_config
+    with mock.patch.object(
+      orchestrator_module, "build_capture_pipeline_config",
+      lambda config: built.append(config["NAME"]) or real_build(config),
+    ):
+      snapshot = orchestrator._get_admin_pipeline_running_streams_snapshot()
+    self.assertEqual(snapshot, expected)
+    self.assertEqual(built, ["admin_pipeline"])
+    snapshot["admin_pipeline"]["TYPE"] = "changed"  # a detached copy
+    self.assertEqual(orchestrator._current_dct_config_streams["admin_pipeline"]["TYPE"], "NetworkListener")
+    del orchestrator._runtime_dct_config_streams["admin_pipeline"]  # not runtime-eligible
+    self.assertEqual(orchestrator._get_admin_pipeline_running_streams_snapshot(), {})
 
   def test_running_streams_snapshot_respects_sequential_mode(self):
     orchestrator = self._make_orchestrator(sequential=True)

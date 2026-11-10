@@ -1848,12 +1848,15 @@ class Orchestrator(DecentrAIObject,
     dict
         Single-entry admin-pipeline snapshot, or an empty dict when absent.
     """
-    running_streams = self._get_capture_streams_snapshot()
-    if ct.CONST_ADMIN_PIPELINE_NAME not in running_streams:
-      return {}
-    return {
-      ct.CONST_ADMIN_PIPELINE_NAME: running_streams[ct.CONST_ADMIN_PIPELINE_NAME]
-    }
+    # The admin collector calls this 20 times a second: build only the admin capture config
+    # instead of copying and resolving every pipeline and dropping all but one.
+    self._ensure_runtime_secret_resolution_state()
+    with self._runtime_config_lock:
+      admin_config = self._current_dct_config_streams.get(ct.CONST_ADMIN_PIPELINE_NAME)
+      if admin_config is None or ct.CONST_ADMIN_PIPELINE_NAME not in self._runtime_dct_config_streams:
+        return {}
+      # build_capture_pipeline_config returns a detached copy.
+      return {ct.CONST_ADMIN_PIPELINE_NAME: build_capture_pipeline_config(admin_config)}
 
   def collect_data(self):
     """

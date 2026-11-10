@@ -206,7 +206,9 @@ class LogReader():
     return chunk
 
   def _do_select_read(self):
-    ready, _, _ = select.select([self.buff_reader], [], [], 0.1)  # Wait up to 0.1s
+    # select returns at once when output or EOF is ready; the timeout only bounds how soon
+    # `done` is seen. 0.5 s stays inside stop()'s 1 s join and cuts idle wake-ups 5x.
+    ready, _, _ = select.select([self.buff_reader], [], [], 0.5)
     text = None
     if ready:
       text = self.buff_reader.read(self.buf_reader_size)
@@ -229,8 +231,8 @@ class LogReader():
         text = self._do_select_read()
         if text:  # Check if any data is read
           self.on_text(text)
-        else:
-          pass # break can lead to early exit so nothing to do
+        elif text is not None:
+          break # b'' after select = EOF: the child closed the pipe; looping on it spins a core
         # endif any data ready
       # self.exited needs to be set to True as soon as the loop is exited
       # in order to avoid any forced exception during the finally block.

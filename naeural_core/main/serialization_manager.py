@@ -462,8 +462,10 @@ class SerializationManager:
     return
 
   def _read_ack(self):
-    ready, _, _ = select.select([self._proc.stdout], [], [], self.ack_timeout)
-    if not ready:
+    # poll, not select: a node holds far more than 1024 file descriptors, which select cannot watch.
+    poller = select.poll()
+    poller.register(self._proc.stdout, select.POLLIN)
+    if not poller.poll(self.ack_timeout * 1000):
       raise TimeoutError("worker did not acknowledge in {}s".format(self.ack_timeout))
     line = self._proc.stdout.readline()
     if not line:

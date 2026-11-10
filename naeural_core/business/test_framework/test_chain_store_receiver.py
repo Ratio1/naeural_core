@@ -468,12 +468,31 @@ class TestSnapshotSync(unittest.TestCase):
     requester._hsync("players")
     self.assertNotIn(_hset_key("players", "b"), requester.storage)
 
-  def test_all_peers_returns_what_arrived_at_the_timeout(self):
+  def test_all_peers_does_not_wait_out_the_timeout_for_a_silent_peer(self):
     requester, peers = self._pair({}, {"a": 1}, {"b": 2})
     requester.network.nodes.pop(peers[1].ee_addr)  # p1 is unreachable
-    result = requester._hsync("players", all_peers=True, timeout=3)
+    result = requester._hsync("players", all_peers=True, timeout=30)
     self.assertEqual(result["responses"], 1)
-    self.assertGreaterEqual(requester._now, 3)
+    self.assertGreaterEqual(requester._now, CS.CS_HSYNC_GRACE)
+    self.assertLess(requester._now, CS.CS_HSYNC_GRACE + 1)
+
+  def test_all_peers_never_waits_longer_than_the_timeout(self):
+    requester, peers = self._pair({}, {"a": 1}, {"b": 2})
+    requester.network.nodes.pop(peers[1].ee_addr)
+    result = requester._hsync("players", all_peers=True, timeout=1)
+    self.assertEqual(result["responses"], 1)
+    self.assertLess(requester._now, 1.3)
+
+  def test_plugin_api_passes_all_peers_only_when_asked(self):
+    from naeural_core.business.test_framework.test_chain_store_hsync import _PeerSelectionHarness
+    plugin, calls = _PeerSelectionHarness(), []
+    plugin.plugins_shmem["__chain_storage_hsync"] = lambda hkey, **kwargs: calls.append(kwargs) or {"hkey": hkey}
+    plugin.plugins_shmem["__chain_storage_get"] = lambda *args, **kwargs: None
+    plugin.chainstore_hsync("players", timeout=7, all_peers=True)
+    plugin.chainstore_hsync("players", timeout=7)
+    self.assertEqual(calls[0].get("all_peers"), True)
+    self.assertEqual(calls[0]["timeout"], 7)
+    self.assertNotIn("all_peers", calls[1])          # an older chain store never sees the new keyword
 
   def test_all_peers_times_out_when_nobody_answers(self):
     requester, peers = self._pair({}, {"a": 1})

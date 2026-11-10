@@ -99,6 +99,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SAVE_INTERVAL = 10  # seconds between process() flushes of a dirty chain storage
   CS_REPUBLISH_INTERVAL = 10  # a confirmed local write of the same value is re-broadcast at most this often (0 = always)
   CS_STORE_SECONDS = 0.25  # time per loop iteration for applying received stores and answering snapshot requests
+  CS_HSYNC_GRACE = 2.0  # hsync(all_peers=True): seconds to wait for the remaining peers after the latest answer
   CS_STATS_INTERVAL = 60  # seconds between two "CSTORE STATS" log lines
   CS_BACKLOG_MAX = 1024  # received stores allowed to wait for a later iteration before the oldest are dropped
 
@@ -1221,8 +1222,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       If True, print detailed routing and timing logs. Default is False.
     all_peers : bool, optional
       If True, merge every valid peer response that arrives until all
-      targeted peers answered or the timeout expires, instead of only the
-      first one. The result then does not depend on which single peer
+      targeted peers answered, no further answer came for ``CS_HSYNC_GRACE``
+      seconds, or the timeout expires, instead of only the first one. The result then does not depend on which single peer
       answers first, which matters when catching up after a restart: records
       protected by versions or revocation markers end at their newest state
       even if one peer is stale. Unprotected records still take the value of
@@ -1315,7 +1316,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       )
 
       deadline = self.time() + timeout
-      source_peers, merged_fields = [], 0
+      source_peers, merged_fields, last_answer = [], 0, 0
       while self.time() <= deadline:
         pending = self.__pending_hsync.get(request_id, {})
         responses = pending.get("responses") or []
@@ -1328,7 +1329,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           # treated as successful cold-state syncs with zero merged fields.
           merged_fields += self.__merge_hset_snapshot(hkey, response.get(self.CS_SNAPSHOT, {}))
           source_peers.append(response.get(self.CS_SENDER, None))
-        if len(source_peers) > 0 and (not all_peers or len(source_peers) >= len(allowed_peers)):
+          last_answer = self.time()
+        if len(source_peers) > 0 and (
+          not all_peers or len(source_peers) >= len(allowed_peers) or
+          # A silent peer (stopped, cut off, far behind) must not cost every sync its whole timeout.
+          self.time() - last_answer >= self.CS_HSYNC_GRACE
+        ):
           break
         self.sleep(0.100)
 

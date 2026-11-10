@@ -22,20 +22,23 @@ communication thread.
 
 ## Calibration
 
-The profiles in `driver.py` are set so the **old** code reproduces what was measured in production:
+The profiles in `driver.py` are fitted so that the **old** code shows the symptoms measured in
+production. They are a model, not a measurement of what loads a real oracle:
 
-| Profile | Setting | Production measurement it reproduces |
-|---|---|---|
-| `HEALTHY` | one other busy thread at 60 % | a full save of the 5.5 MB, 3,657-key replica takes 0.3-1.9 s |
-| `STARVED` | eight busy threads, 25 ms added per fsync | the plugin loops about once every few seconds and a save takes 5-11 s |
-| `STOLEN` | five busy threads and the process frozen 40 % of the time | 40 % of CPU time withheld by the host without being reported as steal |
+| Profile | Setting | Old code in the simulator | Production measurement |
+|---|---|---|---|
+| `HEALTHY` | one other busy thread at 60 % | full save 0.17-0.28 s | 0.3-1.9 s (the profile is lighter than a real healthy oracle) |
+| `STARVED` | eight busy threads, 25 ms added per fsync | save 5-6 s on average, 8-11 s worst; loop every 3-5 s; queue grows; no local write confirmed | save 5.7-11.2 s; loop 0.1-0.7 per second; queue refilled; about one local write in seven confirmed |
+| `STOLEN` | five busy threads and the process frozen 40 % of the time | save 3.6 s on average, 5.2 s worst | 5.7-11.2 s on the host that withholds 40 % of CPU time (the profile is lighter) |
 
-The stuck Deeploy operation is replayed at its measured rate: a new signed 20 KB snapshot every 6.2 s
-and a re-send of the unchanged snapshot every 2 s.
+The stuck Deeploy operation is replayed at its measured lifetime rate: a new signed 20 KB snapshot
+every 6.2 s and a re-send of the unchanged snapshot every 2 s. Both code variants receive that same
+stream, so the results isolate the chain store; they do not include the gain of a fixed Deeploy engine.
 
-Which threads saturate the interpreter on a degraded oracle has not been measured yet. `STARVED`
+Which threads saturate the interpreter on a degraded oracle has not been established. `STARVED`
 models the cause as time lost per loop iteration; `blocking_store` models the alternative, time lost
-per message. Read the results with that in mind.
+per message. Use the results to compare old and new code under the same conditions. Do not read
+the absolute latencies or capacity margins as predictions for a real oracle.
 
 ## Running
 
@@ -64,8 +67,15 @@ five minutes); add `EE_CSTORE_SIM_BASE_SRC=/path/to/older/checkout` for the mixe
 
 ## Limits
 
-- The plugin base class, the capture and dispatch threads and the communication layer are
-  simulated. A run inside a real node (devnet) is still needed before production.
+- The plugin base class, the capture and dispatch threads, the communication layer, the broker
+  and the oracle registry are simulated; only the chain store, its two mixins and the
+  SerializationManager run. Nothing from edge_node (Deeploy, dAuth, the local API) is loaded.
+  A run inside real nodes is still needed before production.
+- The `crash` and `restart_sync` scenarios recover what an oracle missed through namespace
+  refreshes started by the scenario. In production only dAuth refreshes its namespaces; Deeploy
+  records lost in a hard kill are not repaired.
+- Give `--workdir` a folder on a real disk: on tmpfs an fsync costs nothing.
+- Each result records the hash of the source files it ran (`sources`), so a table can be tied to a commit.
 - A saturated interpreter is modelled with busy threads. Above a few messages per second such a
   node cannot keep up with either code: every signature check and decryption gives up the
   interpreter lock and waits to get it back.

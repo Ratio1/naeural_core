@@ -182,6 +182,29 @@ class TestWorkerProcess(_Base):
     self.save({"v": 0})
     return self.manager._proc.pid
 
+  def test_worker_is_used_when_the_node_holds_more_than_1024_file_descriptors(self):
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 1300:
+      self.skipTest("cannot open enough file descriptors here")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (1300 if hard == resource.RLIM_INFINITY else min(hard, 4096), hard))
+    held = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
+    try:
+      manager = smod.SerializationManager(interval=0)
+      manager.P = lambda msg, color=None: None
+      manager.start()
+      path = os.path.join(self.folder, "many_fds.pkl")
+      manager.submit("x", path, {"v": 1})
+      self.assertTrue(manager.flush(timeout=20))
+      self.assertGreater(manager._proc.stdout.fileno(), 1024)
+      stats = manager.get_stats()
+      self.assertEqual((stats["saves"], stats["inline"], stats["errors"], _load(path)), (1, 0, 0, {"v": 1}))
+      manager.stop(10)
+    finally:
+      for fd in held:
+        os.close(fd)
+      resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
   def test_unwritable_path_reports(self):
     self.save({"v": 1}, name="bad", path="/proc/does-not-exist/x.pkl")
     self.assertEqual(len(self.errors), 1)

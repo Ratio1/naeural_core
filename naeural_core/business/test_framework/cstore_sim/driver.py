@@ -14,6 +14,7 @@ Run by path so the heavy node package is not imported:
 serialization worker process (or without the manager).
 """
 import argparse
+import hashlib
 import heapq
 import json
 import os
@@ -142,6 +143,22 @@ class Hub:
             return
         _, _, node, body = heapq.heappop(self.heap)
       node.send({"t": "msg"}, body)
+
+
+SOURCE_FILES = (
+  "naeural_core/business/default/admin/chain_store_base.py", "naeural_core/business/mixins_libs/network_processor_mixin.py",
+  "naeural_core/utils/plugins_base/persistence_serialization_mixin.py", "naeural_core/main/serialization_manager.py",
+)
+
+
+def _source_hash(root):
+  """Short hash of the source files a node loads from ``root``, to tie a result to the code it ran."""
+  digest = hashlib.sha256()
+  for name in SOURCE_FILES:
+    path = Path(root) / name
+    digest.update(name.encode())
+    digest.update(path.read_bytes() if path.exists() else b"-")
+  return digest.hexdigest()[:16]
 
 
 def _pct(values, pct):
@@ -280,7 +297,8 @@ def run(spec, base_src=None, new_src=None, variant="new", workdir=None, keep=Fal
     if node.alive:
       asked.append(node)
       node.send({"t": "stop"})
-  result = {"scenario": spec["name"], "variant": variant, "duration": round(duration, 1), "nodes": {}, "raw": {}}
+  result = {"scenario": spec["name"], "variant": variant, "duration": round(duration, 1), "nodes": {}, "raw": {},
+            "sources": {name: _source_hash(src) for name, src in (("base", base_src), ("new", new_src)) if src}}
   for node in nodes:
     if node in asked and node.ready.wait(90) and node.report is not None:
       result["nodes"][node.name] = dict(summarize(node.report, duration, spec.get("warmup", 0)), variant=node.cfg["variant"])

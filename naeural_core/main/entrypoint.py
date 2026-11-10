@@ -427,8 +427,11 @@ def stop_on_sigterm():
   The node runs as PID 1 of its container, where a signal without a handler
   is ignored: ``docker stop`` and ``systemctl stop`` then wait for their
   timeout and kill the process, and nothing is flushed. With this handler
-  SIGTERM raises ``KeyboardInterrupt`` in the main thread, which the main
-  loop already turns into an orderly shutdown.
+  SIGTERM raises ``KeyboardInterrupt`` in the main thread and takes the path
+  SIGINT already takes: the main loop treats it as an exception stop (it
+  sends an exception-status heartbeat and waits 5 s), then closes its
+  managers, which flushes the plugins and the pending snapshots. The stop
+  timeout of the container must leave room for that.
 
   Returns
   -------

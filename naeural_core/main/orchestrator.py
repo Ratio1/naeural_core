@@ -93,12 +93,28 @@ class Orchestrator(DecentrAIObject,
   def __init__(self, log : Logger, **kwargs):
     """Initialize orchestrator runtime state and manager placeholders.
 
+    Sets every manager to None and creates the main-loop, runtime-secret and shutdown state before the base
+    object constructor runs, because that constructor calls ``startup()``. Two fields serve CPU savings in
+    the runtime-secret resolver and the plugin loop, and are created here so they are read as plain attributes:
+    ``_runtime_secret_settled_streams`` (the pipelines dict a resolver pass left with nothing pending,
+    so later passes on the same dict return at once) and ``_mean_loop_freq_cache`` (the last main-loop rate
+    handed to plugins, reused for up to one second).
+
     Parameters
     ----------
     log : Logger
       Runtime logger.
     **kwargs
       Additional object initialization arguments.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> eng = Orchestrator(log=l)
+    >>> return_code = eng.main_loop()
     """
     if __APP_VER__ is None:
       self.__version__ = __CORE_VER__
@@ -154,11 +170,11 @@ class Orchestrator(DecentrAIObject,
     self._runtime_config_lock = Lock()
     self._runtime_secret_cache = {}
     self._runtime_secret_retry_state = {}
-    # The pipelines dict whose runtime secrets are all resolved. While it is still the current dict the
-    # resolver pass (4 times a second) returns at once instead of copying and walking every pipeline.
+    # The pipelines dict on which the last resolver pass left nothing pending. While it is still the current
+    # dict the resolver pass (every 0.25 s) returns at once instead of copying and walking every pipeline.
     self._runtime_secret_settled_streams = None
-    # (time, value) of the last mean main-loop rate. Every plugin asks for it on every lap; it is
-    # recomputed at most once a second.
+    # (monotonic time, value) of the last mean main-loop rate. Plugins ask for it on every lap they run; it
+    # is recomputed only once the cached value is a second old.
     self._mean_loop_freq_cache = None
     self._should_send_initial_log = False
     self._initial_log_sent = False
@@ -219,7 +235,9 @@ class Orchestrator(DecentrAIObject,
 
     Runs once, from the constructor (the base object calls it at the end of its own ``__init__``). It
     starts the SerializationManager, the one background thread that runs the periodic state saves of the
-    chain store and the network monitor, so that neither saves on its own thread.
+    chain store and the network monitor, so that neither saves on its own thread. It then logs the start
+    banner, applies an ``EE_DEVICE`` override, loads the admin pipeline config, starts the application
+    timer and validates the startup config.
 
     Returns
     -------
@@ -231,9 +249,9 @@ class Orchestrator(DecentrAIObject,
     reach ``close_main_loop``: the main loop's ``finally`` and a forced shutdown before the main loop starts.
     """
     super().startup()    
-    # Start the state saver before any manager or plugin exists, so each can register its save and never
-    # write its state on its own thread. startup() runs from the constructor, so it also exists on every
-    # path that reaches close_main_loop().
+    # Start the state saver before any manager or plugin exists, so the plugins that keep state can register
+    # their saves instead of writing on their own threads. startup() runs from the constructor, so the saver
+    # also exists on every path that reaches close_main_loop().
     SerializationManager.start(self.log)
     self.P(
       "Starting Execution Engine '{}' v.{}, core {}, (WORK_OFFLINE={})".format(
@@ -323,6 +341,26 @@ class Orchestrator(DecentrAIObject,
     return
   
   def _check_and_complete_environment_variables(self):
+    """
+    Complete the node's environment variables from dAuth at start-up, retrying within a time limit.
+
+    Calls ``blockchain_manager.dauth_autocomplete`` in rounds until it returns either None or a non-empty
+    dict of variables, sleeping a random 16-29 s after each round that returns an empty dict. No new round
+    starts once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed; the node then continues with
+    its local environment. When dAuth returned variables, the logger config is reloaded so they take effect.
+
+    The first round allows up to five tries; every later round sends a single request. Before, every round
+    could make five tries, so a round started just before the limit could overrun it by a whole round.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    An empty dict means no variables yet (for example a busy oracle), so another round is made; None means
+    ``dauth_autocomplete`` gave up on the request (for example a bad URL), so no further round is made.
+    """
     
     self.P(f"Node <{self.eth_address}> completing setup for network <{self.evm_network}>...")
     start_ts = time()
@@ -334,7 +372,9 @@ class Orchestrator(DecentrAIObject,
         dauth_endp=None,  # get automatically
         add_env=True,
         debug=False,
-        max_tries=5 if tries == 1 else 1,  # later rounds: one request each, so the time limit below holds
+        # Five tries only in the first round; each later round sends one request, so a round that starts
+        # near the end cannot overrun CHECK_AND_COMPLETE_TIMEOUT by a whole five-try round.
+        max_tries=5 if tries == 1 else 1,
         sender_alias=self.cfg_eeid,
       )
       # Will be None in case of bad URL. In that case there is no need to reattempt it.
@@ -1045,6 +1085,18 @@ class Orchestrator(DecentrAIObject,
   def _resolve_runtime_streams_once(self, now=None):
     """Attempt due dAuth resolutions once without blocking the main loop.
 
+    Copies the current pipelines under ``_runtime_config_lock``, reconciles the runtime view with them and,
+    for every pipeline with a dAuth secret placeholder that is neither cached nor waiting for its retry
+    time, fetches the secret bundle and stores the runtime pipeline if that pipeline is still unchanged. A
+    failed resolution withholds the pipeline and, while it is unchanged, schedules a retry with exponential
+    back-off.
+
+    The resolver thread calls this in a loop, sleeping ``RUNTIME_SECRET_RESOLVER_POLL_SECONDS`` (0.25 s)
+    between calls. When the last full pass finished on the same pipelines dict object and left nothing
+    pending (no retry wait, no failed resolution), the pass returns 0 at once. Otherwise every pass
+    deep-copies and reconciles all pipelines, mostly while holding the lock that the main-loop and
+    admin-collector snapshots also need.
+
     Parameters
     ----------
     now : float or None, optional
@@ -1053,21 +1105,43 @@ class Orchestrator(DecentrAIObject,
     Returns
     -------
     int
-      Number of pipeline versions resolved during this pass.
+      Number of pipeline versions resolved during this pass (0 when the pass was skipped).
+
+    Notes
+    -----
+    Object identity is a safe "nothing changed" test because ``choose_current_running_streams``, the only
+    code that replaces the dict after ``__init__``, assigns a new dict whenever any pipeline differs. A side
+    effect: ``$EE_*`` references are no longer re-expanded every 0.25 s while the config is unchanged, so an
+    ``EE_*`` variable changed at runtime is picked up by the next full pass (a pipeline change or pending
+    work), not within 0.25 s.
+
+    Examples
+    --------
+    >>> eng._resolve_runtime_streams_once()   # new dict holding one pipeline whose secrets resolve
+    1
+    >>> eng._resolve_runtime_streams_once()   # same dict, nothing pending: the pass is skipped
+    0
     """
     self._ensure_runtime_secret_resolution_state()
     fixed_now = now is not None
     now = time() if now is None else now
     with self._runtime_config_lock:
+      # Keep a reference to the dict itself (not a copy): its identity is what marks it as settled at the
+      # end of this pass.
       current_streams = self._current_dct_config_streams
       # choose_current_running_streams replaces this dict only when a pipeline changes, so an
       # unchanged dict with nothing pending needs no copy, reconcile or placeholder walk.
       if current_streams is self._runtime_secret_settled_streams:
+        # Skip the whole pass: 0 pipelines resolved, and the lock is released at once.
         return 0
+      # Reached only for a new dict or one with work pending: copy it as before; the loop below then works
+      # on the copy and makes its dAuth requests without holding the lock.
       canonical_streams = deepcopy(current_streams)
     self._reconcile_runtime_streams(canonical_streams)
 
     resolved_count = 0
+    # Becomes True when any pipeline still needs a later pass (retry wait or failed resolution); only a pass
+    # that ends with it False may mark this dict as settled.
     pending = False
     for pipeline_name, pipeline_config in canonical_streams.items():
       if not contains_dauth_secret_placeholder(pipeline_config):
@@ -1085,6 +1159,7 @@ class Orchestrator(DecentrAIObject,
           continue
         retry_state = self._runtime_secret_retry_state.get(cache_key, {})
         if now < retry_state.get("next_retry", 0):
+          # Still waiting for its retry time: a later pass must run even if the dict does not change.
           pending = True
           continue
 
@@ -1109,6 +1184,8 @@ class Orchestrator(DecentrAIObject,
       except Exception as exc:
         if vars(self).get("_Orchestrator__done", False):
           return resolved_count
+        # Resolving this pipeline failed (fetch, revision check or build): a later pass must retry it, so
+        # this dict must not be marked as settled.
         pending = True
         with self._runtime_config_lock:
           current_pipeline = self._current_dct_config_streams.get(pipeline_name)
@@ -1152,6 +1229,8 @@ class Orchestrator(DecentrAIObject,
         self._runtime_secret_retry_state.pop(cache_key, None)
         self._runtime_dct_config_streams[pipeline_name] = runtime_pipeline
       resolved_count += 1
+    # Remember the dict only when nothing is left to do, so the next passes on it return at once; with work
+    # pending, clear the mark so the next pass runs in full.
     self._runtime_secret_settled_streams = None if pending else current_streams
     return resolved_count
 
@@ -1340,8 +1419,33 @@ class Orchestrator(DecentrAIObject,
     The loop leaves at its next check and closes as after a STOP command:
     SHUTDOWN-status heartbeat, managers closed, plugins saved on close. The
     method only sets a value, so a signal handler may call it.
+
+    It is the target of the SIGTERM handler installed by the entrypoint. A
+    container runtime stops the node with SIGTERM; with this method the node
+    leaves through the normal shutdown path instead of being killed after the
+    stop timeout, or of leaving through the error path, whose EXCEPTION-status
+    heartbeat makes the other nodes' network monitors report it as
+    PAST-EXCEPTION for the next hour.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A return code that is already set (for example by a command received
+    earlier) is kept, so a SIGTERM never overrides an earlier decision.
+
+    Examples
+    --------
+    >>> eng.request_stop()                       # no return code set yet
+    >>> eng._return_code == ct.CODE_SHUTDOWN
+    True
     """
     if self._return_code is None:
+      # Only a plain assignment, safe inside a signal handler. The main loop reads _return_code near the end
+      # of each lap (after the stage it is in finishes), breaks, and its finally runs close_main_loop(),
+      # which sends the SHUTDOWN heartbeat.
       self._return_code = ct.CODE_SHUTDOWN
     return
 
@@ -1399,14 +1503,41 @@ class Orchestrator(DecentrAIObject,
 
 
   def _get_mean_loop_freq(self):
-    # Every plugin calls this on every lap; it is a mean over the last main-loop laps,
+    """
+    Return the mean main-loop rate in Hz, capped at the configured MAIN_LOOP_RESOLUTION.
+
+    This is the MAIN_LOOP_RESOLUTION_CALLBACK that plugins read on every lap they run: a plugin's target
+    lap rate is at least three times this value. The value comes from a numpy mean over the main-loop timer
+    laps, and a plugin thread typically asks for it 20-40 times a second, so the result is recomputed only
+    once the cached value is a second old (monotonic clock) and the cached value is returned in between.
+
+    Returns
+    -------
+    float or int
+      ``min(cfg_main_loop_resolution, 1 / mean main-loop time)``; a mean of 0 is treated as 1 ms. Before
+      the first timed main-loop lap the timer mean is -1, so the result is -1.0.
+
+    Notes
+    -----
+    The main-loop mean moves slowly, so a lag of up to one second in the plugins' minimum lap rate is
+    harmless. The monotonic clock keeps the cache correct when the wall clock is changed.
+
+    Examples
+    --------
+    >>> rate = eng._get_mean_loop_freq()          # computed and cached
+    >>> rate == eng._get_mean_loop_freq()         # within 1 s: the cached value
+    True
+    """
+    # Plugins call this on every lap they run; it is a mean over the last main-loop laps,
     # so recomputing it (numpy over a deque) more than once a second buys nothing.
     cached = self._mean_loop_freq_cache
     if cached is not None and monotonic() - cached[0] < 1:
+      # Less than a second old: hand back the cached rate without the numpy timer mean.
       return cached[1]
     main_loop_time = self.log.get_timer_mean(self._main_loop_timer_name)
     ml_time = 1e-3 if main_loop_time == 0 else main_loop_time
     result = min(self.cfg_main_loop_resolution, 1 / ml_time)
+    # Store the new rate with its time so the calls of the next second reuse it.
     self._mean_loop_freq_cache = (monotonic(), result)
     return result
 
@@ -1671,6 +1802,30 @@ class Orchestrator(DecentrAIObject,
 
 
   def _maybe_delay_main_loop(self):
+    """
+    Pad the main-loop lap so that it lasts at least one cycle, then record the cycle time.
+
+    The cycle is ``1 / MAIN_LOOP_RESOLUTION`` seconds, lengthened to the communication manager's mean
+    loop time when that is longer and the node is not working offline. The thread sleeps once for the rest
+    of the cycle, and at least 1 ms so it always yields. Before, it yielded 1 ms and then slept in 1 ms
+    steps until the cycle ended; each step woke the main thread and asked for the GIL, about 600-900 times
+    a second, for no work.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    ``time.sleep`` and ``perf_counter`` both use the monotonic clock, so the cycle still ends at or after
+    the wait time. On a lap that already overran its cycle the 1 ms yield is now included in
+    ``loop_timings`` (about 1 ms more in the average loop timing).
+
+    Examples
+    --------
+    With a 50 ms cycle and 10 ms already spent in the lap, the thread makes one 40 ms sleep; on a lap that
+    took 60 ms it sleeps 1 ms.
+    """
     self.log.start_timer('delay')
     wait_time = 1 / self.cfg_main_loop_resolution # max wait time
     current_cycle_time = perf_counter() - self._last_main_loop_pass_time # cycle time since last pass
@@ -1682,7 +1837,8 @@ class Orchestrator(DecentrAIObject,
     # Sleep once for the rest of the cycle (at least 1 ms, to yield) instead of in 1 ms
     # steps, each of which woke this thread and asked for the GIL.
     sleep(max(0.001, wait_time - current_cycle_time))
-    current_cycle_time = perf_counter() - self._last_main_loop_pass_time # recalc cycle time
+    # Measure the cycle again after the single sleep, so loop_timings records the real lap length.
+    current_cycle_time = perf_counter() - self._last_main_loop_pass_time
 
     self.loop_timings.append(current_cycle_time) # done after time extension if needed
     self._last_main_loop_pass_time = perf_counter() # reset
@@ -1806,9 +1962,10 @@ class Orchestrator(DecentrAIObject,
     """
     Close the node: stop communication, plugins, serving and capture, then the state saver.
 
-    The order matters. Plugins close before the SerializationManager stops, so each plugin makes its own
-    final save while closing (the chain store does); the manager is stopped last and only waits, for at
-    most 60 seconds, for a periodic save that is being written at that moment.
+    First sends the SHUTDOWN-status heartbeat, unless a shutdown or exception stop already ran. The order
+    matters. Plugins close before the SerializationManager stops, so a plugin that saves on close (the
+    chain store does) still makes that final save; the manager is stopped last, makes no extra save and
+    only waits, for at most 60 seconds, for a periodic save that is being written at that moment.
 
     Returns
     -------
@@ -1825,7 +1982,7 @@ class Orchestrator(DecentrAIObject,
     if self._capture_manager is not None:
       self._capture_manager.close()
     # Last step: let a state save that is being written finish (at most 60 s), so the node does not exit
-    # in the middle of it. Plugins made their own final saves when they closed above.
+    # in the middle of it. Plugins that save on close made their final saves when they closed above.
     SerializationManager.instance.stop(timeout=60)
     return
 
@@ -1891,17 +2048,39 @@ class Orchestrator(DecentrAIObject,
   def _get_admin_pipeline_running_streams_snapshot(self):
     """Return a running-stream snapshot limited to `admin_pipeline`.
 
+    Builds the capture config of ``admin_pipeline`` alone, with the same eligibility test and builder as
+    ``_get_capture_streams_snapshot``: the pipeline must be in the current streams and runtime-eligible
+    (present in the runtime streams), and the result has no dAuth plugin plaintext. The admin collector
+    calls this in a loop that sleeps ``ADMIN_PIPELINE_DISPATCH_POLL_SECONDS`` (50 ms by default) between
+    calls; before, each call deep-copied and resolved every pipeline and kept one, so its cost grew with
+    the number of job pipelines.
+
     Returns
     -------
     dict
         Single-entry admin-pipeline snapshot, or an empty dict when absent.
+
+    Notes
+    -----
+    The result is the same as the full capture snapshot filtered to ``admin_pipeline``. It is a detached
+    copy, so the caller may change it without touching the stored configuration.
+
+    Examples
+    --------
+    >>> eng._get_admin_pipeline_running_streams_snapshot()
+    {'admin_pipeline': {...}}
     """
-    # The admin collector calls this 20 times a second: build only the admin capture config
-    # instead of copying and resolving every pipeline and dropping all but one.
+    # The admin collector calls this up to 20 times a second (50 ms poll by default): build only the admin
+    # capture config instead of copying and resolving every pipeline and dropping all but one.
     self._ensure_runtime_secret_resolution_state()
+    # Hold the same lock as the resolver and choose_current_running_streams, so the current and the runtime
+    # views are read consistently.
     with self._runtime_config_lock:
+      # Read only the admin entry; the other pipelines are neither copied nor resolved.
       admin_config = self._current_dct_config_streams.get(ct.CONST_ADMIN_PIPELINE_NAME)
       if admin_config is None or ct.CONST_ADMIN_PIPELINE_NAME not in self._runtime_dct_config_streams:
+        # Absent or not runtime-eligible (for example secrets not resolved yet): same empty result as the
+        # full snapshot gave.
         return {}
       # build_capture_pipeline_config returns a detached copy.
       return {ct.CONST_ADMIN_PIPELINE_NAME: build_capture_pipeline_config(admin_config)}

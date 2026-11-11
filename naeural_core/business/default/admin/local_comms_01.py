@@ -14,7 +14,9 @@ _CONFIG = {
 
   'LOCAL_COMMS_ENABLED_ON_STARTUP': False,
   'ALLOW_EMPTY_INPUTS': True,
-  'IDLE_LOOP_WAIT': 0.25,  # its work arrives as commands, which wake the loop
+  # Its work arrives as ENABLE/DISABLE instance commands, and a stored command wakes the loop, so an idle
+  # lap waits up to 0.25 s for one instead of polling at the fixed loop rate with nothing to do.
+  'IDLE_LOOP_WAIT': 0.25,
 
   'VALIDATION_RULES': {
     **BasePluginExecutor.CONFIG['VALIDATION_RULES'],

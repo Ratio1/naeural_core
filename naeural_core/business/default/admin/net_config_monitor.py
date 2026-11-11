@@ -41,7 +41,9 @@ _CONFIG = {
   'ALLOW_EMPTY_INPUTS' : True,
   
   'PLUGIN_LOOP_RESOLUTION' : 50, # we force this to be 50 Hz from the standard 20 Hz  
-  'IDLE_LOOP_WAIT' : 0.25, # empty queue: wait for the next input instead of looping at ~40 Hz
+  # Empty input queue: wait up to 0.25 s for the next input (which wakes the loop) instead of looping
+  # at ~40 Hz with nothing to do; the timed work in process() runs on cadences of a second or longer.
+  'IDLE_LOOP_WAIT' : 0.25,
   'MAX_INPUTS_QUEUE_SIZE' : 1024, # increase the queue size to 128 from std 1
   
 
@@ -107,7 +109,26 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
       return checker(node_addr)
     return self.netmon.network_node_is_online(node_addr)
 
-  def on_init(self):   
+  def on_init(self):
+    """
+    Initialise the peer configuration monitor state.
+
+    Resets the timers and caches the monitor works from: the last config-request, show and send times,
+    the peers that allow this node to read their pipelines, the last distributed pipelines with their
+    distribution signature, and the pending set and deadline of a semantic (initial or config-change)
+    distribution retry. It also fetches the shared ``get_active_plugins_instances`` accessor (logging an
+    error when it is missing) and logs the configured cadences. The distribution-check timestamp set
+    here lets ``process`` run the costly config-distribution check at most once a second.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    ``__last_distribution_check`` starts at 0, so the first lap runs the check at once and the
+    once-a-second limit does not delay the initial configuration send.
+    """
     self.P("Network fleet peer configuration monitor initializing...")
     self.__last_data_time = 0
     self.__new_nodes_this_iter = 0
@@ -119,6 +140,7 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
     self.__last_pipeline_distribution_projection = None
     self.__allowed_nodes = {} # contains addresses with no prefixes
     self.__last_sent_to_allowed = 0
+    # Time of the last config-distribution check in process(); 0 makes the first lap run it at once.
     self.__last_distribution_check = 0
     self.__semantic_distribution_pending_nodes = set()
     self.__semantic_distribution_retry_until = 0
@@ -916,12 +938,37 @@ class NetConfigMonitorPlugin(NetworkProcessorPlugin):
   
 
   def process(self):
+    """
+    Run one lap of the peer configuration monitor.
+
+    Each lap gives three timed tasks a chance to run: requesting pipeline configurations from the peers
+    that allow this node to read them (``SEND_GET_CONFIG_EACH`` cadence, ``NODE_REQUEST_CONFIGS_EACH``
+    per peer), checking whether this node's pipelines must be sent to the nodes in its whitelist
+    (initial send, a change, a pending retry or the ``SEND_TO_ALLOWED_EACH`` resend), and logging the
+    known nodes every ``SHOW_EACH`` seconds. The distribution check re-reads the whitelist file (one EC
+    point decode per entry), deep copies and serialises every pipeline; run on every lap of a plugin
+    looping at about 40 Hz it was this plugin's main cost, so it runs at most once a second.
+
+    Returns
+    -------
+    None
+      The monitor sends its messages directly and produces no payload.
+
+    Notes
+    -----
+    The check's own cadences (10 s retries, the 600 s default resend) only need second resolution, and
+    the whitelist is still read fresh on every check that runs.
+    """
     payload = None
     self.__maybe_send_requests()
     # The check re-reads the whitelist file (one EC point decode per entry) and serialises every
     # pipeline; on each ~40 Hz lap it was this plugin's main cost. Once a second is enough.
     if self.time() - self.__last_distribution_check >= 1:
+      # Stamped before the check runs: a check that raises still counts, so a failing check is retried at
+      # most once a second instead of on every lap.
       self.__last_distribution_check = self.time()
+      # The costly check itself: it still reads the whitelist fresh each time, and its 10 s retries and
+      # 600 s default resend need no finer than second resolution.
       self.__maybe_send_configuration_to_allowed()
     self.__maybe_review_known()  
     return payload

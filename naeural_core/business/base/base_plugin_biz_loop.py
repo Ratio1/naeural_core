@@ -103,6 +103,27 @@ class _BasePluginLoopMixin(object):
   
   
   def _recalc_plugin_resolution(self):
+    """
+    Record the time since the previous process call and refresh the measured plugin loop rate.
+
+    ``process_wrapper`` calls this on every process call of every plugin thread. It appends the elapsed time to
+    a deque of the last 100 lap times and sets ``actual_plugin_resolution`` to laps per second over that window,
+    rounded to 0.1. The rate is computed as ``len / sum`` in plain Python: the same value as ``1 / mean``, without
+    the deque-to-array conversion ``np.mean`` did on every lap, a cost every plugin thread paid in GIL time.
+
+    Returns
+    -------
+    None
+      Updates ``actual_plugin_resolution`` in place; does nothing while ``last_process_time`` is not set yet.
+
+    Notes
+    -----
+    The ``or 1e-9`` guard keeps a window whose laps all measured 0 s from raising ZeroDivisionError.
+
+    Examples
+    --------
+    Two recorded laps of 0.05 s each give ``2 / 0.1``, so ``actual_plugin_resolution`` becomes 20.0.
+    """
     if self.last_process_time is not None:
       this_lap = self.time_from_last_process
       self.__lap_times.append(this_lap)
@@ -218,7 +239,7 @@ class _BasePluginLoopMixin(object):
 
     Returns
     -------
-    float
+    int or float
       `IDLE_LOOP_WAIT` of this plugin in seconds; 0 (the default) keeps the fixed-rate loop.
 
     Examples
@@ -456,6 +477,14 @@ class _BasePluginLoopMixin(object):
 
     Instance commands remain ahead of the process-delay, force-pause and
     working-hours gates, in that order, but do not run during config updates.
+
+    When ``_idle_loop_wait()`` (``IDLE_LOOP_WAIT``) is longer than the lap
+    sleep and the input queue is empty, the lap blocks on ``_loop_wakeup``
+    for up to that many seconds instead of sleeping. Inputs, requests,
+    instance commands, config updates and stop set the event, so the loop
+    acts on them at once instead of after the timeout, while an idle plugin
+    stops polling at a fixed rate. A set event ends the wait at once, so the
+    20 ms floor above does not apply to a lap that follows a wake-up.
     """
     try: 
       plugin_loop_initialized = False
@@ -545,11 +574,16 @@ class _BasePluginLoopMixin(object):
           # configured slower loops or exception backoff.
           sleep_time = max(0.020, sleep_time)
           self.start_timer('loop_sleep')
+          # Opt-in IDLE_LOOP_WAIT (0 by default keeps the fixed-rate sleep below); a subclass returns 0 while it
+          # has work of its own, e.g. a web app that is starting or has queued requests.
           idle_wait = self._idle_loop_wait()
           if idle_wait > sleep_time and self.input_queue_size == 0:
             # Nothing queued: block until a producer sets the event (after queueing its
             # work) or idle_wait passes. The lap that follows sees what woke it.
             self._loop_wakeup.wait(idle_wait)
+            # Re-arm for the next idle lap. A set() landing between wait() and clear() loses no work: producers
+            # store their work before set(), and the loop re-checks commands, the input queue and
+            # _idle_loop_wait() before it can block again.
             self._loop_wakeup.clear()
           elif sleep_time > 0:
             sleep(sleep_time)

@@ -6,7 +6,9 @@ _CONFIG = {
   **BasePlugin.CONFIG,
   
   "RUNS_ONLY_ON_SUPERVISOR_NODE" : True,
-  "IDLE_LOOP_WAIT" : 0.25,  # request-driven APIs: wait for requests instead of polling ~30 times a second
+  # Request-driven APIs: a queued request wakes the loop, so an idle lap waits up to 0.25 s for one
+  # instead of lapping 27-40 times a second with nothing to do.
+  "IDLE_LOOP_WAIT" : 0.25,
 
   'VALIDATION_RULES': {
     **BasePlugin.CONFIG['VALIDATION_RULES'],
@@ -99,8 +101,43 @@ class SupervisorFastApiWebApp(BasePlugin):
     return super(SupervisorFastApiWebApp, self)._process()
 
   def _idle_loop_wait(self):
+    """
+    Idle wait for a supervisor API, also where the API is disabled on this node.
+
+    An enabled API follows the web-app rule: no wait while uvicorn starts or requests are pending. A
+    disabled API (disabled by config, not a supervisor (oracle) node, or an invalid tunnel configuration
+    such as a missing token) skips the web-app ``_process``, so while it stays disabled no start-up is
+    polled and no request is served. Where it was never enabled its server never comes up, and the
+    web-app rule would keep it at the fixed loop rate forever, lapping only to re-check that it is
+    disabled. A disabled API therefore waits like any idle plugin.
+
+    Returns
+    -------
+    float or int
+      Seconds the next lap may wait for a wake-up: the configured ``IDLE_LOOP_WAIT``, or 0 to keep the
+      normal loop rate.
+
+    Notes
+    -----
+    The enable state is ``None`` until ``_process`` has checked it (it checks it only while
+    ``RUNS_ONLY_ON_SUPERVISOR_NODE`` is set); that case takes the web-app rule, so the API does not wait
+    before it has been seen disabled. While that flag is set, ``_process`` re-checks the state on each
+    lap before this hook is called, so an API that becomes enabled waits at most one more
+    ``IDLE_LOOP_WAIT`` before the web-app rule takes over. If the flag is turned off after the API was
+    seen disabled, the state stays ``False`` and the API keeps the plain idle wait.
+
+    Examples
+    --------
+    >>> api._idle_loop_wait()   # disabled on this node, IDLE_LOOP_WAIT=0.25
+    0.25
+    >>> api._idle_loop_wait()   # enabled, uvicorn still starting
+    0
+    """
     if self.__supervisor_fastapi_plugin_running is False:
-      # Disabled here (not an oracle, or no tunnel token): uvicorn never starts and _process returns
-      # at once, so wait like any idle plugin; the enable state is re-checked on every lap.
+      # Disabled here (by config, not an oracle, or an invalid tunnel config): _process returns at once
+      # without serving anything, so wait like any idle plugin; _process re-checks the state on each lap.
+      # super(BasePlugin, ...) skips the web-app override, which returns 0 while the server is not up.
       return super(BasePlugin, self)._idle_loop_wait()
+    # Enabled, or not checked yet (None): the web-app rule keeps the normal rate during start-up and
+    # while requests are queued or postponed.
     return super(SupervisorFastApiWebApp, self)._idle_loop_wait()

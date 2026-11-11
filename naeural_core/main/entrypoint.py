@@ -2,6 +2,7 @@
 import json
 import multiprocessing as mp
 import os
+# Needed to install the SIGTERM handler that stops the node in an orderly way (see stop_on_sigterm).
 import signal
 import subprocess
 import tempfile
@@ -433,9 +434,9 @@ def stop_on_sigterm(running):
   leave room for that.
 
   SIGTERM must not take the path of an error. A node that leaves with an
-  EXCEPTION-status heartbeat is treated as offline by the other nodes for the
-  next hour, even after it is back: it gets no chain-store records and is
-  not accepted as a deployment target.
+  EXCEPTION-status heartbeat is reported as PAST-EXCEPTION by the other
+  nodes' network monitors for the next hour, even after it is back, and in
+  that hour it is not accepted as a deployment target.
 
   Parameters
   ----------
@@ -446,26 +447,103 @@ def stop_on_sigterm(running):
   Returns
   -------
   bool
-    False when called outside the main thread, where handlers cannot be set.
+    True when the handler was installed; False when called outside the main
+    thread, where handlers cannot be set.
+
+  Examples
+  --------
+  >>> running = {}
+  >>> stop_on_sigterm(running)
+  True
+  >>> running['eng'] = Orchestrator(log=l)   # from here SIGTERM calls eng.request_stop()
   """
   def handler(signum, frame):
+    """
+    Turn a SIGTERM into an orderly stop of the node, or end the start-up when no node exists yet.
+
+    Python runs this on the main thread between bytecodes. Once the Orchestrator exists it only asks the
+    main loop to stop, so the node leaves through the normal SHUTDOWN path, not the error path. Before
+    that there is no loop to stop, so it raises ``KeyboardInterrupt`` and the start-up ends as on SIGINT.
+
+    Parameters
+    ----------
+    signum : int
+      The signal number (SIGTERM); not used.
+    frame : frame or None
+      The interrupted stack frame; not used.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    KeyboardInterrupt
+      When SIGTERM arrives before ``main`` has stored the Orchestrator in ``running``.
+    """
+    # Read the Orchestrator at signal time: main stores it only after the constructor has run.
     eng = running.get('eng')
     if eng is None:
+      # No node yet: raise KeyboardInterrupt, exactly as SIGINT (Ctrl+C) does, to interrupt the start-up.
       raise KeyboardInterrupt
+    # A running node only gets its return code set; the main loop then closes as after a STOP command.
     eng.request_stop()
     return
 
   try:
+    # Without a handler, SIGTERM to PID 1 of a container is ignored and the node is killed after the
+    # stop timeout, losing the state it had not saved yet.
     signal.signal(signal.SIGTERM, handler)
   except ValueError:
+    # signal.signal raises ValueError outside the main thread: report it instead of failing the caller.
     return False
+  # Installed: from now on SIGTERM ends the node through the orderly path above, not by a kill.
   return True
 
 
 def main(additional_packages: list = None):
+  """
+  Start the edge node: set up logging and config, create the Orchestrator and run its main loop.
+
+  Installs the SIGTERM handler first, then loads the startup config (and ``.env`` outside Docker), creates
+  the Logger, installs the optional additional packages, takes the process lock and creates the
+  Orchestrator. With the lock held it runs the main loop; without it (another local node with the same id
+  is running) it forces a shutdown. The Orchestrator is published to the SIGTERM handler as soon as it
+  exists, so a SIGTERM from then on asks the main loop to stop (the normal SHUTDOWN path) instead of
+  interrupting the start-up.
+
+  Parameters
+  ----------
+  additional_packages : list, optional
+    Extra pip packages to make available in a cached target folder before the node starts.
+
+  Returns
+  -------
+  tuple
+    ``(exit_code, eng)``: the return code of the main loop (None after a flag-file shutdown-reset) or of
+    the forced shutdown (``ct.CODE_EXCEPTION`` when an exception escaped), and the Orchestrator, or None
+    when it was not created.
+
+  Raises
+  ------
+  SystemExit
+    With ``ct.CODE_CONFIG_ERROR`` when the local cache or the startup config is not usable.
+  KeyboardInterrupt
+    When SIGINT, or SIGTERM before the Orchestrator exists, interrupts the start-up: the ``try`` around
+    the Orchestrator catches only ``Exception``. A bare ``except:`` in the code it interrupts can still
+    swallow it, as it would a Ctrl+C.
+
+  Examples
+  --------
+  >>> exit_code, eng = main(additional_packages=['some-package'])
+  >>> os._exit(exit_code)
+  """
   app_base_folder = os.getcwd()
   print("Core Edge Node v{} starting in {}".format(__VER__, app_base_folder), flush=True)
+  # Holder shared with the SIGTERM handler; the Orchestrator is stored under 'eng' once it exists.
   running = {}
+  # Install the handler before anything slow (config, package installs, managers), so a SIGTERM during
+  # start-up already ends the start-up instead of being ignored, as it is for PID 1 of a container.
   stop_on_sigterm(running)
   
   CONFIG_FILE = 'config_startup'
@@ -534,6 +612,8 @@ def main(additional_packages: list = None):
 
     l.P("Starting Execution Engine Main Loop...\n\n\n.", color=ct.COLORS.MAIN)
     eng = Orchestrator(log=l)
+    # From here a SIGTERM calls eng.request_stop(), which the main loop turns into an orderly SHUTDOWN,
+    # instead of raising KeyboardInterrupt.
     running['eng'] = eng
         
     if lock is None:

@@ -420,7 +420,7 @@ def maybe_install_additional_packages(
   return
 
 
-def stop_on_sigterm(running=None):
+def stop_on_sigterm(running):
   """
   Make SIGTERM stop the node in an orderly way.
 
@@ -439,7 +439,7 @@ def stop_on_sigterm(running=None):
 
   Parameters
   ----------
-  running : dict, optional
+  running : dict
     ``main`` stores the Orchestrator under ``'eng'`` once it exists. Until
     then SIGTERM raises ``KeyboardInterrupt``, which ends the start-up.
 
@@ -449,7 +449,7 @@ def stop_on_sigterm(running=None):
     False when called outside the main thread, where handlers cannot be set.
   """
   def handler(signum, frame):
-    eng = (running or {}).get('eng')
+    eng = running.get('eng')
     if eng is None:
       raise KeyboardInterrupt
     eng.request_stop()

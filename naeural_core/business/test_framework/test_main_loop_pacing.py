@@ -11,6 +11,7 @@ class TestMainLoopPacing(unittest.TestCase):
   def test_mean_loop_freq_is_recomputed_at_most_once_a_second(self):
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator.config_data = {"MAIN_LOOP_RESOLUTION": 20}
+    orchestrator._mean_loop_freq_cache = None  # as Orchestrator.__init__ leaves it
     timer_means = iter([0.2, 0.5])
     orchestrator.log = SimpleNamespace(get_timer_mean=lambda _name: next(timer_means))
     clock = [100.0]

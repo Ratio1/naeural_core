@@ -14,7 +14,7 @@ ENTRYPOINT = Path(__file__).resolve().parents[2] / "main" / "entrypoint.py"
 def _stop_on_sigterm_source():
   """The helper alone: importing the entrypoint module would import the whole node."""
   text = ENTRYPOINT.read_text()
-  start = text.index("def stop_on_sigterm(running=None):")
+  start = text.index("def stop_on_sigterm(running):")
   return "import signal\n" + text[start:text.index("def main(", start)]
 
 
@@ -23,7 +23,7 @@ class TestSigterm(unittest.TestCase):
   def test_before_the_node_exists_sigterm_raises_keyboard_interrupt(self):
     script = _stop_on_sigterm_source() + textwrap.dedent("""
       import os, sys, time
-      assert stop_on_sigterm()
+      assert stop_on_sigterm({})
       try:
         # inside the try: the signal can land before print() returns
         print("ready", flush=True)
@@ -78,7 +78,7 @@ class TestSigterm(unittest.TestCase):
   def test_outside_the_main_thread_it_reports_instead_of_raising(self):
     space, result = {}, []
     exec(_stop_on_sigterm_source(), space)  # noqa: S102
-    thread = threading.Thread(target=lambda: result.append(space["stop_on_sigterm"]()))
+    thread = threading.Thread(target=lambda: result.append(space["stop_on_sigterm"]({})))
     thread.start()
     thread.join()
     self.assertEqual(result, [False])

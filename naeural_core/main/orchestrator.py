@@ -154,6 +154,12 @@ class Orchestrator(DecentrAIObject,
     self._runtime_config_lock = Lock()
     self._runtime_secret_cache = {}
     self._runtime_secret_retry_state = {}
+    # The pipelines dict whose runtime secrets are all resolved. While it is still the current dict the
+    # resolver pass (4 times a second) returns at once instead of copying and walking every pipeline.
+    self._runtime_secret_settled_streams = None
+    # (time, value) of the last mean main-loop rate. Every plugin asks for it on every lap; it is
+    # recomputed at most once a second.
+    self._mean_loop_freq_cache = None
     self._should_send_initial_log = False
     self._initial_log_sent = False
     self._last_offline_log = 0
@@ -1056,7 +1062,7 @@ class Orchestrator(DecentrAIObject,
       current_streams = self._current_dct_config_streams
       # choose_current_running_streams replaces this dict only when a pipeline changes, so an
       # unchanged dict with nothing pending needs no copy, reconcile or placeholder walk.
-      if current_streams is vars(self).get("_runtime_secret_settled_streams"):
+      if current_streams is self._runtime_secret_settled_streams:
         return 0
       canonical_streams = deepcopy(current_streams)
     self._reconcile_runtime_streams(canonical_streams)
@@ -1395,7 +1401,7 @@ class Orchestrator(DecentrAIObject,
   def _get_mean_loop_freq(self):
     # Every plugin calls this on every lap; it is a mean over the last main-loop laps,
     # so recomputing it (numpy over a deque) more than once a second buys nothing.
-    cached = vars(self).get("_mean_loop_freq_cache")
+    cached = self._mean_loop_freq_cache
     if cached is not None and monotonic() - cached[0] < 1:
       return cached[1]
     main_loop_time = self.log.get_timer_mean(self._main_loop_timer_name)

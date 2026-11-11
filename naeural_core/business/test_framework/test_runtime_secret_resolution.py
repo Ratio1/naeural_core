@@ -259,6 +259,7 @@ class OrchestratorRuntimeSecretTests(unittest.TestCase):
   def _make_orchestrator(self, results):
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator._current_dct_config_streams = {}
+    orchestrator._runtime_secret_settled_streams = None  # as Orchestrator.__init__ leaves it
     orchestrator._blockchain_manager = _FakeBlockchainManager(results)
     orchestrator._messages = []
     orchestrator.P = lambda message, **kwargs: orchestrator._messages.append(message)

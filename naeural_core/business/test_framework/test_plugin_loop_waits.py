@@ -89,6 +89,7 @@ class _Plugin(_LOOP._BasePluginLoopMixin, _Scheduling):
     self.cfg_process_delay = 0
     self.cfg_max_process_delay = None
     self.cfg_forced_loop_sleep = None
+    self.cfg_idle_loop_wait = 0  # the base plugin config default: fixed-rate loop
     self.cfg_instance_command = "PING"
     self.cfg_instance_command_log = False
     self.cfg_simulate_crash_loop = False

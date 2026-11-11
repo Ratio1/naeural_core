@@ -208,12 +208,25 @@ class _BasePluginLoopMixin(object):
     return  
 
   def _idle_loop_wait(self):
-    """Seconds a lap with no queued input may block on `_loop_wakeup` (0: fixed-rate polling).
-
-    Inputs, requests, instance commands, config changes and stop set the event.
     """
-    wait = getattr(self, 'cfg_idle_loop_wait', 0)
-    return wait if isinstance(wait, (int, float)) and wait > 0 else 0
+    Seconds a lap with no queued input may wait for work instead of polling.
+
+    A plugin that sets `IDLE_LOOP_WAIT` above its loop period stops looping at a fixed rate while it
+    has nothing to do: the lap blocks on ``_loop_wakeup``, which inputs, requests, instance commands,
+    config changes and stop set. Subclasses override this to return 0 while they have work of their
+    own (a web app that is starting or has queued requests).
+
+    Returns
+    -------
+    float
+      `IDLE_LOOP_WAIT` of this plugin in seconds; 0 (the default) keeps the fixed-rate loop.
+
+    Examples
+    --------
+    >>> _CONFIG = {**BasePluginExecutor.CONFIG, 'IDLE_LOOP_WAIT': 0.25}   # wake at most 4 times a second when idle
+    """
+    # `IDLE_LOOP_WAIT` is in the base plugin config, so every plugin has it; 0 keeps the fixed-rate loop.
+    return self.cfg_idle_loop_wait
   
   
   

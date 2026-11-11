@@ -991,6 +991,44 @@ class StrictPersistenceTest(unittest.TestCase):
       with open(path, "rb") as stream:
         self.assertEqual(pickle.load(stream), {"sequence": 3})
 
+  def test_pickle_is_written_in_one_write(self):
+    # Each write gives up the interpreter lock; pickle.dump would issue one per 64 KB frame.
+    import pickle
+    from test_chain_store_hsync import _load_class_from_source
+    source = Path(__file__).resolve().parents[2] / "utils" / "plugins_base" / "persistence_serialization_mixin.py"
+    persistence = _load_class_from_source(
+      source, "_PersistenceSerializationMixin",
+      strip_text=("from naeural_core import constants as ct\n",),
+    )
+    data = {f"key-{idx}": "x" * 100 for idx in range(10000)}  # about 1.2 MB: many pickle frames
+    writes, real_fdopen = [], os.fdopen
+
+    class _CountingStream:
+      def __init__(self, stream):
+        self.stream = stream
+
+      def write(self, chunk):
+        writes.append(len(chunk))
+        return self.stream.write(chunk)
+
+      def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *exc):
+        return self.stream.__exit__(*exc)
+
+    with tempfile.TemporaryDirectory() as directory:
+      path = os.path.join(directory, "cache.pickle")
+      with patch("os.fdopen", side_effect=lambda *a, **k: _CountingStream(real_fdopen(*a, **k))):
+        persistence._save_cache_file_strict(path, data)
+      with open(path, "rb") as stream:
+        written = stream.read()
+    self.assertEqual(len(writes), 1)
+    self.assertEqual(written, pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+
 
 if __name__ == "__main__":
   unittest.main()

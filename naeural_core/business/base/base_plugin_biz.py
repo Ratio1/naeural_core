@@ -85,6 +85,9 @@ _CONFIG = {
   # 'REQUIRES_INPUTS_LOCAL_COPY' TODO: implement safe plugins only - default True for user plugins
 
   'MAX_INPUTS_QUEUE_SIZE': 1,
+  # Network processors: queued inputs handled per loop lap (1 keeps one input per lap; the chain store sets 32).
+  # Declared here so every plugin that runs the network-processor loop, whatever its base class, reads it directly.
+  'MAX_INPUTS_PER_ITERATION': 1,
   'QUEUE_OVERFLOW_SLEEP_TIME': 0.01,
 
   'LOG_ON_BLOB': False,

@@ -36,6 +36,9 @@ _CONFIG = {
   'PROCESS_DELAY' : 0,
 
   'MAX_INPUTS_QUEUE_SIZE' : 1024,
+  # Take up to 32 queued inputs per loop lap (other network processors keep the base default of 1): one input
+  # per lap paid process(), a save check and a >= 20 ms sleep each, so confirmations queued and hsync timed out.
+  'MAX_INPUTS_PER_ITERATION' : 32,
 
   'ALLOW_EMPTY_INPUTS' : True,
   "ACCEPT_SELF" : False,
@@ -133,10 +136,59 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
 
   def __netmon_node_is_online_for_control(self, peer):
-    checker = getattr(self.netmon, "network_node_is_online_for_control", None)
-    if callable(checker):
-      return checker(peer)
-    return self.netmon.network_node_is_online(peer)
+    """
+    Tell whether ``peer`` is running and should receive records.
+
+    NetMon reports a node that left through an error as PAST-EXCEPTION for
+    the next hour, also when it is back and heartbeating. That rule guards
+    deployments; applied to replication it cuts a restarted oracle off for an
+    hour, and nothing sends it the records written meanwhile. So the hour of
+    memory is not used here: a peer counts when its latest status is ONLINE.
+    A status that comes from an oracle's network summary keeps the reporter's
+    hour of memory, so PAST-EXCEPTION is accepted too; a peer that stops after
+    an exception is then dropped when its summary goes stale (LOST STATUS
+    after 60 s), the same bound as a peer that dies silently.
+
+    Parameters
+    ----------
+    peer : str
+      Address of the node to check, as listed by
+      ``self.bc.get_whitelist(with_prefix=True)`` (for example ``"0xai_..."``).
+
+    Returns
+    -------
+    bool
+      True when NetMon's latest status for ``peer`` is ONLINE or
+      PAST-EXCEPTION; False for any other status (LOST STATUS, EXCEPTION,
+      SHUTDOWN, STOP and so on).
+
+    Raises
+    ------
+    AttributeError
+      When NetMon has no ``network_node_simple_status``; no older predicate is
+      tried instead.
+
+    Notes
+    -----
+    NetMon is called directly, with no fallback to the older predicates
+    (``network_node_is_online_for_control`` or ``network_node_is_online``).
+    NetMon ships in the same package as the chain store, so a NetMon without
+    ``network_node_simple_status`` makes the peer refresh fail instead of
+    silently bringing back the hour of exception memory.
+
+    Examples
+    --------
+    >>> self.__netmon_node_is_online_for_control("0xai_peer_back_after_error")
+    True
+    >>> self.__netmon_node_is_online_for_control("0xai_peer_not_seen_for_2_min")  # LOST STATUS
+    False
+    """
+    # Latest status only (0 minutes of exception memory): the default 60-minute window keeps a restarted peer
+    # at PAST-EXCEPTION for an hour and cuts it off from the records written meanwhile.
+    status = self.netmon.network_node_simple_status(peer, last_exception_check_time_minutes=0)
+    # PAST-EXCEPTION can still come from an oracle's network summary, which a normal node relies on; such a
+    # peer is dropped once that summary goes stale (LOST STATUS after 60 s), like a peer that dies silently.
+    return status in ("ONLINE", "PAST-EXCEPTION")
 
   
   def __debug_dump_chain_storage(self):

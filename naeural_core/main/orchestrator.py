@@ -67,6 +67,8 @@ SHUTDOWN_DELAY = 5
 
 CHECK_AND_COMPLETE_ITERATIONS = 30 # how many iterations to wait for the dAuth completion
 CHECK_AND_COMPLETE_SLEEP_PERIOD = 30 # how many seconds to wait between iterations
+# announcement of the new node key after dAuth reported the old one as revoked
+NODE_KEY_ROTATION_FILE = 'node_key_rotation.json'
 CHECK_AND_COMPLETE_TIMEOUT = CHECK_AND_COMPLETE_ITERATIONS * CHECK_AND_COMPLETE_SLEEP_PERIOD
 CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle checks
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
@@ -302,6 +304,7 @@ class Orchestrator(DecentrAIObject,
     tries = 0
     while not done and (time() - start_ts) < CHECK_AND_COMPLETE_TIMEOUT:
       tries += 1
+      self._maybe_announce_node_key()
       dct_env_output = self.blockchain_manager.dauth_autocomplete(
         dauth_endp=None,  # get automatically
         add_env=True,
@@ -309,6 +312,8 @@ class Orchestrator(DecentrAIObject,
         max_tries=5,
         sender_alias=self.cfg_eeid,
       )
+      if self.blockchain_manager.dauth_revoked_by is not None:
+        self._rotate_revoked_node_key()
       # Will be None in case of bad URL. In that case there is no need to reattempt it.
       done = (dct_env_output is None) or (isinstance(dct_env_output, dict) and len(dct_env_output) > 0)
 
@@ -330,7 +335,57 @@ class Orchestrator(DecentrAIObject,
       self.log.reload_config()
       self.P("Config reloaded.")
     return
-  
+
+  def _rotate_revoked_node_key(self):
+    """
+    A dAuth oracle reported this node's key as revoked: switch to a new key (the old
+    key file is archived), keep the announcement and send it right away.
+    """
+    old_address = self.e2_address
+    announcement = self.blockchain_manager.rotate_private_key()
+    self.log.save_data_json({'announcement': announcement, 'done': False}, NODE_KEY_ROTATION_FILE)
+    self.save_local_address()
+    self.P(
+      f"Node key {old_address} was revoked. New node key:\n"
+      f"  {self.e2_address}\n  ETH: {self.eth_address}\n"
+      f"The license owner must link this ETH address to the license in the dApp.",
+      color='r', boxed=True,
+    )
+    self._maybe_announce_node_key()
+    return
+
+  def _maybe_announce_node_key(self):
+    """
+    Send the saved new-key announcement to dAuth until dAuth confirms it stored this
+    node's address for the revoked key. dAuth keeps only the first announcement, so a
+    different stored address is final and only logged.
+    """
+    data = self.log.load_data_json(NODE_KEY_ROTATION_FILE, numeric_keys=False, verbose=False)
+    if not isinstance(data, dict) or data.get('done'):
+      return
+    announcement = data.get('announcement') or {}
+    if announcement.get('new_node') != self.e2_address:
+      return
+    try:
+      result = self.blockchain_manager.dauth_announce_node_key(announcement)
+    except Exception as exc:
+      self.P(f"Node key announcement failed, will retry: {exc}", color='r')
+      return
+    stored = result.get('new_node')
+    if stored == self.e2_address and result.get('confirmed'):
+      self.P(f"dAuth confirmed the new node key for {announcement.get('EE_SENDER')}.", color='g')
+    elif stored not in (None, self.e2_address):
+      self.P(
+        f"dAuth already holds another new key ({stored}) for {announcement.get('EE_SENDER')}. "
+        f"The license owner must link this node's ETH address {self.eth_address} by hand.",
+        color='r', boxed=True,
+      )
+    else:
+      return  # not stored or not confirmed yet: retry on the next dAuth attempt
+    data['done'] = True
+    self.log.save_data_json(data, NODE_KEY_ROTATION_FILE)
+    return
+
   ####### end pre-init area
 
   def logger_debugger(self):

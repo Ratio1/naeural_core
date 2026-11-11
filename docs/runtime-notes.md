@@ -139,6 +139,11 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
   are canonical and redacted. Only BusinessManager receives `_runtime_dct_config_streams`, where
   `$EE_*` references and dAuth placeholders are resolved in memory. CaptureManager gets only
   runtime-eligible pipelines with redacted `PLUGINS`.
+- The recurring admin capture snapshot selects and copies only the eligible canonical
+  `admin_pipeline` under the runtime configuration lock, then applies the usual capture-safe
+  builder outside the lock. Do not route this lane through the all-stream snapshot or cache
+  its result: unrelated pipelines must not be traversed, and configuration/environment
+  changes must remain visible on the next call.
 - Pipelines with unresolved dAuth secrets are withheld and retried by one tracked worker. The cache
   key is pipeline name, job ID, `DEEPLOY_SPECS.date_updated` and the canonical `PLUGINS` hash; a
   fetch result applies only if the canonical snapshot is unchanged.

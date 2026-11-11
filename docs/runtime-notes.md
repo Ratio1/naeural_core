@@ -149,6 +149,10 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## Serving and training
 
+- GPU telemetry (`Logger.gpu_info`) does not force Python garbage collection or
+  clear CUDA allocator caches. Reported GPU memory includes existing cached
+  allocations; use explicit model/lifecycle cleanup when reclamation is intended.
+  Run `python naeural_core/core_logging/logger_mixins/test_gpu_mixin.py` for this contract.
 - Serving handles keep `MODEL_INSTANCE_ID`, so one serving class can run several model instances
   as separate servers on the same node.
 - The `structured` training signature takes `INPUT_FIELDS`, `OUTPUT_FIELDS`, `TASK_MATRIX`,

@@ -1,4 +1,3 @@
-import gc
 import traceback
 import platform
 import subprocess
@@ -203,6 +202,12 @@ class _GPUMixin(object):
     lst_inf : list of dicts
       all GPUs info from CUDA:0 to CUDA:n.
 
+    Notes
+    -----
+    Telemetry does not force Python garbage collection or clear CUDA allocator
+    caches. Memory readings describe the existing allocations, including cached
+    memory; deliberate cleanup remains the responsibility of lifecycle callers.
+
     """
 
     def _main_func():
@@ -239,9 +244,6 @@ class _GPUMixin(object):
       lst_inf = []
       # now we iterate all devices
       n_gpus = th.cuda.device_count()
-      if n_gpus > 0:
-        gc.collect()
-        th.cuda.empty_cache()
       current_pid_has_usage = False
       current_pid_gpus = []
 

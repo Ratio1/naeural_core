@@ -200,9 +200,9 @@ class _SummaryControlNetmon:
     self.direct_calls.append(peer)
     return False
 
-  def network_node_is_online_for_control(self, peer):
+  def network_node_simple_status(self, peer, dt_now=None, last_exception_check_time_minutes=60):  # pylint: disable=unused-argument
     self.control_calls.append(peer)
-    return peer in self.online_for_control
+    return "ONLINE" if peer in self.online_for_control else "LOST STATUS"
 
 
 class _StatusNetmon:
@@ -383,16 +383,16 @@ class TestChainStoreHsync(unittest.TestCase):
     self.assertEqual(requester.netmon.direct_calls, [])
     self.assertEqual(requester.netmon.control_calls, ["peer-1", "peer-2"])
 
-  def test_default_peer_refresh_falls_back_for_old_netmon_stubs(self):
+  def test_default_peer_refresh_fails_on_a_netmon_without_the_status_call(self):
+    # No silent fallback to the direct-heartbeat predicate: that would bring the hour of exception memory back.
     requester = _ChainStoreRuntimeHarness("peer-requester")
     requester.bc = _WhitelistBlockEngine(["peer-1", "peer-2"])
     requester.netmon = _OldNetmonStub(online={"peer-2"})
     requester._now = 61
 
-    requester._ChainStoreBasePlugin__maybe_refresh_chain_peers()
-
-    self.assertEqual(requester._ChainStoreBasePlugin__get_target_peers(), ["peer-2"])
-    self.assertEqual(requester.netmon.calls, ["peer-1", "peer-2"])
+    with self.assertRaises(AttributeError):
+      requester._ChainStoreBasePlugin__maybe_refresh_chain_peers()
+    self.assertEqual(requester.netmon.calls, [])
 
   def test_default_peer_refresh_uses_latest_status_not_the_hour_of_exception_memory(self):
     # A peer back after an error stays PAST-EXCEPTION for an hour; replication must still reach it.

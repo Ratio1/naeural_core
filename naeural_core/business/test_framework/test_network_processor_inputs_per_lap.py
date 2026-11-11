@@ -33,6 +33,7 @@ class _Plugin(_NetworkProcessorMixin):
     self.const, self.defaultdict = _CONST, defaultdict
     self.ee_addr, self._stream_id, self._signature, self.cfg_instance_id = "0xai_self", "admin", "TEST_NP", "inst"
     self.cfg_skip_message_verify, self.cfg_accept_self, self.cfg_full_debug_payloads = True, False, False
+    self.cfg_max_inputs_per_iteration = 1  # the base plugin config's default
     for key, value in cfg.items():
       setattr(self, key, value)
     self.network_processor_init()
@@ -71,10 +72,14 @@ class _Plugin(_NetworkProcessorMixin):
 class TestInputsPerLap(unittest.TestCase):
 
   def test_default_is_one_input_per_lap(self):
-    for cfg in ({}, {"cfg_max_inputs_per_iteration": None}, {"cfg_max_inputs_per_iteration": 1}):
-      plugin = _Plugin(5, **cfg)
-      plugin.lap()
-      self.assertEqual((plugin.handled, plugin.input_queue_size), ([0], 4), cfg)
+    plugin = _Plugin(5)
+    plugin.lap()
+    self.assertEqual((plugin.handled, plugin.input_queue_size), ([0], 4))
+
+  def test_every_plugin_gets_the_default_of_one(self):
+    # The loop reads the key directly, and plugins that use the mixin with another base class run it too.
+    source = (_ROOT / "business" / "base" / "base_plugin_biz.py").read_text(encoding="utf-8")
+    self.assertIn("'MAX_INPUTS_PER_ITERATION': 1,", source)
 
   def test_opted_in_plugin_drains_the_queue_in_order(self):
     plugin = _Plugin(5, cfg_max_inputs_per_iteration=32)

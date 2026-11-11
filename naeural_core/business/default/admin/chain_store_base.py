@@ -147,17 +147,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     an exception is then dropped when its summary goes stale (LOST STATUS
     after 60 s), the same bound as a peer that dies silently.
     """
-    status = getattr(self.netmon, "network_node_simple_status", None)
-    if callable(status):
-      try:
-        # PAST-EXCEPTION can still come from an oracle's network summary, which a normal node relies on.
-        return status(peer, last_exception_check_time_minutes=0) in ("ONLINE", "PAST-EXCEPTION")
-      except TypeError:
-        pass
-    checker = getattr(self.netmon, "network_node_is_online_for_control", None)
-    if callable(checker):
-      return checker(peer)
-    return self.netmon.network_node_is_online(peer)
+    status = self.netmon.network_node_simple_status(peer, last_exception_check_time_minutes=0)
+    return status in ("ONLINE", "PAST-EXCEPTION")
 
   
   def __debug_dump_chain_storage(self):

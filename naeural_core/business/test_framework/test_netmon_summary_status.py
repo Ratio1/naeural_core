@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import unittest
@@ -6,7 +7,7 @@ from unittest import mock
 
 from naeural_core import constants as ct
 from naeural_core.core_logging import Logger
-from naeural_core.main.net_mon import NetworkMonitor, NetMonCt, MISSING_ID
+from naeural_core.main.net_mon import NetworkMonitor, NetMonCt, MISSING_ID, NETMON_MUTEX
 
 
 class _StubBlockEngine:
@@ -617,6 +618,49 @@ class TestNetmonSummaryStatus(unittest.TestCase):
 
     self.assertEqual(sorted(tags), ["DC:DIRECT", "IS_KYB"])
     self.assertEqual(stored, before)
+
+  def test_direct_tags_use_a_locked_snapshot(self):
+    netmon, patcher = _make_netmon(summary_enabled=False)
+    self.addCleanup(patcher.stop)
+    lock_depth = 0
+    original_managed_lock = netmon.log.managed_lock_resource
+    original_tag_reader = netmon._NetworkMonitor__get_tag_from_heartbeat
+    tag_key = f"{ct.HB.PREFIX_EE_NODETAG}CUSTOM"
+
+    @contextlib.contextmanager
+    def tracked_managed_lock(name):
+      nonlocal lock_depth
+      self.assertEqual(name, NETMON_MUTEX)
+      with original_managed_lock(name):
+        lock_depth += 1
+        try:
+          yield
+        finally:
+          lock_depth -= 1
+
+    class _CheckedHeartbeat(dict):
+      def items(self):
+        for key, value in super().items():
+          if lock_depth != 1:
+            raise AssertionError("Heartbeat tag iteration must hold NETMON_MUTEX")
+          yield key, value
+
+    heartbeat = _CheckedHeartbeat({tag_key: "BEFORE"})
+
+    def mutate_before_tag_read(hb, tag_suffix, only_value=False):
+      self.assertEqual(lock_depth, 0)
+      with original_managed_lock(NETMON_MUTEX):
+        heartbeat[tag_key] = "AFTER"
+        heartbeat["NEW_FIELD"] = True
+      return original_tag_reader(hb, tag_suffix, only_value=only_value)
+
+    with mock.patch.object(netmon.log, "managed_lock_resource", side_effect=tracked_managed_lock), \
+         mock.patch.object(netmon, "_NetworkMonitor__network_node_last_heartbeat", return_value=heartbeat), \
+         mock.patch.object(netmon, "_NetworkMonitor__get_tag_from_heartbeat", side_effect=mutate_before_tag_read):
+      tags = netmon.get_network_node_tags("0xai_REMOTE")
+
+    self.assertEqual(tags, ["CUSTOM:BEFORE"])
+    self.assertEqual(heartbeat[tag_key], "AFTER")
 
   def test_malformed_summary_tags_do_not_fall_back_to_stale_direct_tags(self):
     netmon, patcher = _make_netmon(summary_enabled=True, ttl_seconds=300)

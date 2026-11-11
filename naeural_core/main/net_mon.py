@@ -3666,10 +3666,11 @@ class NetworkMonitor(DecentrAIObject):
       hb = self.__network_node_last_heartbeat(node_address)
       # get tags from HB.
       if isinstance(hb, dict):
-        tags = {k: v for k, v in hb.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}
+        with self.log.managed_lock_resource(NETMON_MUTEX):
+          tags = {key: value for key, value in hb.items() if key.startswith(ct.HB.PREFIX_EE_NODETAG)}
         for tag_key in tags.keys():
           tag_key_clean = tag_key.replace(ct.HB.PREFIX_EE_NODETAG, '')
-          tag = self.__get_tag_from_heartbeat(hb, tag_key_clean, only_value=False)
+          tag = self.__get_tag_from_heartbeat(tags, tag_key_clean, only_value=False)
           if tag:
             result.append(tag)
 

@@ -1,4 +1,5 @@
 import contextlib
+import os
 import pathlib
 import subprocess
 import sys
@@ -187,13 +188,106 @@ class _DummyLogger(gpu_mixin_under_test._GPUMixin):
 
 class TestGpuMixin(unittest.TestCase):
   """
-  Regression tests for GPU telemetry degradation paths.
+  Regression tests for observational GPU telemetry and degradation paths.
 
   Notes
   -----
   These tests keep optional ``nvidia-smi`` failures from breaking the primary
   CUDA/NVML telemetry path that heartbeats and system-health plugins consume.
   """
+
+  def test_repeated_gpu_info_preserves_telemetry_without_forced_cleanup(self):
+    """
+    Keep repeated status reads free of explicit GC and CUDA-cache eviction.
+
+    Notes
+    -----
+    Heartbeat preparation can query GPU information several times. Both memory
+    unit modes must return the same telemetry contract without forcing a full
+    interpreter collection or mutating the CUDA allocator. Mocking the public
+    ``gc.collect`` function does not disable Python's automatic collector.
+    """
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = _FakeCuda
+    fake_pynvml = _FakePynvml()
+
+    with (
+      mock.patch.dict(sys.modules, {"torch": fake_torch, "pynvml": fake_pynvml}),
+      mock.patch("shutil.which", return_value=None),
+      mock.patch("gc.collect") as collect,
+      mock.patch.object(_FakeCuda, "empty_cache") as empty_cache,
+    ):
+      logger = _DummyLogger()
+      for mb, scale, unit in ((False, 1, "GB"), (True, 1024, "MB")):
+        for repeat in range(3):
+          with self.subTest(mb=mb, repeat=repeat):
+            self.assertEqual(logger.gpu_info(mb=mb), [{
+              "NAME": _FakeCudaDeviceProperties.name,
+              "TOTAL_MEM": 12 * scale,
+              "PROCESSES": [],
+              "USED_BY_PROCESS": False,
+              "ALLOCATED_MEM": 3 * scale,
+              "FREE_MEM": 9 * scale,
+              "MEM_UNIT": unit,
+              "GPU_USED": 42,
+              "GPU_TEMP": 55,
+              "GPU_TEMP_MAX": 90,
+              "GPU_FAN_SPEED": 31,
+              "GPU_FAN_SPEED_UNIT": "%",
+            }])
+      collect.assert_not_called()
+      empty_cache.assert_not_called()
+
+  def test_gpu_info_without_devices_does_not_force_cleanup(self):
+    """
+    Preserve the empty-device result without invoking cleanup helpers.
+
+    Notes
+    -----
+    This exercises the same telemetry entry point on CPU-only hosts without
+    importing the real CUDA or NVML packages.
+    """
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = _FakeCuda
+    with (
+      mock.patch.dict(sys.modules, {"torch": fake_torch, "pynvml": _FakePynvml()}),
+      mock.patch("shutil.which", return_value=None),
+      mock.patch.object(_FakeCuda, "device_count", return_value=0),
+      mock.patch("gc.collect") as collect,
+      mock.patch.object(_FakeCuda, "empty_cache") as empty_cache,
+    ):
+      self.assertEqual(_DummyLogger().gpu_info(), [])
+      collect.assert_not_called()
+      empty_cache.assert_not_called()
+
+  def test_gpu_info_preserves_current_process_usage(self):
+    """
+    Preserve process telemetry and the current-process usage marker.
+
+    Notes
+    -----
+    The single-device fixture covers matching and nonmatching process IDs;
+    when the current process has no GPU usage, the existing API returns all
+    devices instead of an empty result.
+    """
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = _FakeCuda
+    with (
+      mock.patch.dict(sys.modules, {"torch": fake_torch, "pynvml": _FakePynvml()}),
+      mock.patch("shutil.which", return_value=None),
+    ):
+      for process_id, used in ((os.getpid(), True), (os.getpid() + 1, False)):
+        with self.subTest(used_by_current_process=used):
+          logger = _DummyLogger()
+          processes = [{"PID": process_id, "ALLOCATED_MEM": 0.5}]
+          with mock.patch.object(
+            logger, "_get_processes_by_uuid_via_nvidia_smi",
+            return_value={"GPU-fake-uuid": processes},
+          ):
+            result = logger.gpu_info(current_pid=True)
+          self.assertEqual(len(result), 1)
+          self.assertEqual(result[0]["PROCESSES"], processes)
+          self.assertEqual(result[0]["USED_BY_PROCESS"], used)
 
   def test_gpu_info_uses_nvml_index_fallback_when_uuid_query_times_out(self):
     """

@@ -189,10 +189,12 @@ Larger follow-ups:
 
 ## Deployment lifecycle persistence and protected namespaces
 
-An accepted write only marks the store dirty. `process()` saves the full store at
-most every `CS_SAVE_INTERVAL` (5 s), so one save covers every write made in that
-window, and `on_close()` saves pending changes at shutdown. A crash can lose
-writes from the last few seconds. Do not reintroduce a full-store fsync per write:
+An accepted write only marks the store dirty. The SerializationManager's thread
+(`naeural_core/main/serialization_manager.py`, started by the Orchestrator) saves a
+changed store every `CS_SAVE_INTERVAL` (5 s), so one save covers every write made in
+that window and the plugin thread does not run the save; `on_close()` saves pending
+changes at shutdown. An accepted write reaches the disk 0 to about 6 s later (the
+cadence plus the save itself), and a crash can lose the writes of that window. Do not reintroduce a full-store fsync per write:
 on mainnet oracles it took 65% of the plugin loop and kept the input queue full.
 Run `test_deployment_lifecycle.py` and `test_chain_store_hsync.py` for this path. For each save, records are copied shallowly under the
 persistence lock, then the copy is pickled, fsynced and atomically replaced

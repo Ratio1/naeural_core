@@ -14,6 +14,8 @@ from naeural_core import constants as ct
 
 from naeural_core.main.app_monitor import ApplicationMonitor
 from naeural_core.main.net_mon import NetworkMonitor
+# The one background thread that runs the periodic state saves (chain store, network monitor).
+from naeural_core.main.serialization_manager import SerializationManager
 from naeural_core.main.command_handlers import ExecutionEngineCommandHandlers
 from naeural_core.main.orchestrator_mixins import (
   _ValidateConfigStartupMixin,
@@ -206,7 +208,27 @@ class Orchestrator(DecentrAIObject,
 
 
   def startup(self):
+    """
+    Start the node-wide helpers that must exist before any manager or plugin, then announce the node.
+
+    Runs once, from the constructor (the base object calls it at the end of its own ``__init__``). It
+    starts the SerializationManager, the one background thread that runs the periodic state saves of the
+    chain store and the network monitor, so that neither saves on its own thread.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Because this runs from the constructor, the SerializationManager exists on both paths that later
+    reach ``close_main_loop``: the main loop's ``finally`` and a forced shutdown before the main loop starts.
+    """
     super().startup()    
+    # Start the state saver before any manager or plugin exists, so each can register its save and never
+    # write its state on its own thread. startup() runs from the constructor, so it also exists on every
+    # path that reaches close_main_loop().
+    SerializationManager.start(self.log)
     self.P(
       "Starting Execution Engine '{}' v.{}, core {}, (WORK_OFFLINE={})".format(
         self.cfg_eeid, self.__version__, self.core_version,
@@ -1775,6 +1797,17 @@ class Orchestrator(DecentrAIObject,
     return
 
   def close_main_loop(self):
+    """
+    Close the node: stop communication, plugins, serving and capture, then the state saver.
+
+    The order matters. Plugins close before the SerializationManager stops, so each plugin makes its own
+    final save while closing (the chain store does); the manager is stopped last and only waits, for at
+    most 60 seconds, for a periodic save that is being written at that moment.
+
+    Returns
+    -------
+    None
+    """
     self.P('Closing connections and stopping threads...', color='m')
     self._maybe_gracefull_stop()
     if self._comm_manager is not None:
@@ -1785,6 +1818,9 @@ class Orchestrator(DecentrAIObject,
       self._serving_manager.stop_all_servers()
     if self._capture_manager is not None:
       self._capture_manager.close()
+    # Last step: let a state save that is being written finish (at most 60 s), so the node does not exit
+    # in the middle of it. Plugins made their own final saves when they closed above.
+    SerializationManager.instance.stop(timeout=60)
     return
 
   def refresh_business_plugins(self):

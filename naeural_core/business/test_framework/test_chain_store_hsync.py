@@ -251,7 +251,6 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__persistence_lock = RLock()
     self._ChainStoreBasePlugin__save_lock = Lock()
     self._ChainStoreBasePlugin__chain_storage_dirty = False
-    self._ChainStoreBasePlugin__last_chain_storage_save = 0
     self._ChainStoreBasePlugin__chain_peers = list(default_peers or [])
     self._ChainStoreBasePlugin__pending_hsync = {}
     self._ChainStoreBasePlugin__last_chain_peers_refresh = self._now

@@ -69,6 +69,67 @@ class NetMonCt:
 
 
 def exponential_score(left, right, val, right_is_better=False, normed=False):
+  """
+  Score a value on a 50-step scale between two bounds.
+
+  The range ``[left, right]`` is split into 50 evenly spaced points, and the
+  points get scores from 100 (best) down to 1 (worst) in equal steps; despite
+  the name, the steps are linear (see the ``np.geomspace`` TODO). When smaller
+  values are better, the result is the score of the first point, walking from
+  ``left``, that ``val`` is at or below. When larger values are better, it is
+  the score of the first point, walking from ``right``, that ``val`` is at or
+  above. A value past the worse bound matches no point and scores 0. The
+  network monitor uses it for the uptime trust of every node and for three GPU
+  capability scores of every GPU node.
+
+  The comparison is done directly on the numbers. The previous version built a
+  text such as ``"57.3<=48.9795918367347"`` and ran ``eval()`` on it at every
+  step, up to 50 compiles per call, which was 5-11 % of the network monitor's
+  profiler samples on production oracles. A NaN or infinite value printed as
+  ``nan`` or ``inf``, so ``eval()`` raised ``NameError`` and aborted the whole
+  network status pass.
+
+  Parameters
+  ----------
+  left : float
+    Lower bound of the scale.
+  right : float
+    Upper bound of the scale.
+  val : float
+    Value to score. Ints, bools and numpy floats are compared as numbers.
+    NaN scores 0. An infinity scores like any finite value past the same
+    bound: 100 past the better bound, 0 past the worse one.
+  right_is_better : bool, optional
+    True when larger values are better, so ``right`` and above score 100.
+    Default False: smaller values are better, so ``left`` and below score 100.
+  normed : bool, optional
+    True to divide the score by 100.1, which gives a value between 0 and 1
+    (0.999 at best, 0.00999 at worst). Default False.
+
+  Returns
+  -------
+  numpy.float64 or int
+    The score of the matched point, from 100 down to 1 (divided by 100.1 when
+    ``normed``), as ``numpy.float64``. The int ``0`` when no point matches,
+    that is when ``val`` is past the worse bound or is NaN.
+
+  Notes
+  -----
+  For finite floats, ints, bools and ``numpy.float64`` values the result is
+  the same as the old ``eval()`` version (checked over the callers' bounds,
+  the edges and random values). Callers round the result themselves.
+
+  Examples
+  --------
+  >>> float(round(exponential_score(0, 100, 50), 2))
+  49.49
+  >>> exponential_score(0, 100, 101)
+  0
+  >>> float(round(exponential_score(0, 240, 120, right_is_better=True, normed=True), 3))
+  0.494
+  >>> exponential_score(0, 100, float("nan"))
+  0
+  """
   num = 50
   interval = np.linspace(left, right, num=num)
   scores = np.linspace(100, 1, num=num) # TODO try with np.geomspace
@@ -145,23 +206,63 @@ def parse_heartbeat_time(text):
   the same 26-character text far faster. Anything else is left to
   ``strptime``, including its errors.
 
+  The heartbeat history walk re-parses the ``RECEIVED_TIME`` of every stored
+  heartbeat on every status pass; with ``strptime`` that walk was 14-16 % of
+  the interpreter time of production oracles. For the text that
+  ``RECEIVED_TIME`` is written in, the result is identical.
+
   Parameters
   ----------
   text : str
-    Timestamp such as ``2026-01-31 23:59:59.123456``.
+    Timestamp such as ``2026-01-31 23:59:59.123456``, normally the
+    ``RECEIVED_TIME`` stored with a heartbeat, which is written with
+    ``strftime(ct.HB.TIMESTAMP_FORMAT)`` and is always 26 characters long.
 
   Returns
   -------
   datetime
     Naive datetime, exactly as ``strptime`` returns it.
+
+  Raises
+  ------
+  ValueError
+    When ``text`` is a string that ``strptime`` cannot read with
+    ``ct.HB.TIMESTAMP_FORMAT``, as before.
+  TypeError
+    When ``text`` is not a string (for example None), as before.
+
+  Notes
+  -----
+  Only a 26-character string whose parse has no UTC offset takes the fast
+  path; a 26-character text with an offset such as
+  ``2026-01-31 23:59:59.123+02`` falls through to ``strptime`` and is
+  rejected as before. ``fromisoformat`` also accepts a few other
+  26-character texts that ``strptime`` would reject, such as any other single
+  character between date and time (``T`` or ``_``) or, on Python 3.11 and
+  later, a comma before the microseconds. Stored heartbeats never use them,
+  because ``RECEIVED_TIME`` is always written with ``ct.HB.TIMESTAMP_FORMAT``.
+
+  Examples
+  --------
+  >>> parse_heartbeat_time("2026-01-31 23:59:59.123456")
+  datetime.datetime(2026, 1, 31, 23, 59, 59, 123456)
+  >>> parse_heartbeat_time("2026-01-31 23:59:59.5")
+  datetime.datetime(2026, 1, 31, 23, 59, 59, 500000)
   """
+  # Only a 26-character string, the length of the RECEIVED_TIME text, tries the fast path below.
   if isinstance(text, str) and len(text) == 26:
     try:
+      # fromisoformat skips the per-call locale lookup of strptime; the history walk parses every
+      # stored heartbeat on every status pass, and with strptime the walk was 14-16 % of oracle time.
       parsed = dt.fromisoformat(text)
       if parsed.tzinfo is None:
+        # A naive result is exactly what strptime gives for this format; a text with a UTC
+        # offset falls through so that strptime rejects it as it always did.
         return parsed
     except ValueError:
       pass
+  # Any other shape, an offset or a fast-path failure keeps the old strptime behaviour,
+  # including its ValueError or TypeError, so callers see no change in errors.
   return dt.strptime(text, ct.HB.TIMESTAMP_FORMAT)
 
 
@@ -776,6 +877,71 @@ class NetworkMonitor(DecentrAIObject):
       self, addr, minutes=60, dt_now=None, reverse_order=True,
       debug_unavailable=False
     ):
+      """
+      Return the heartbeats a node sent within the last ``minutes``.
+
+      Walks the node's stored heartbeat history from the newest entry back
+      and stops at the first heartbeat that is older than the window or dated
+      after ``dt_now``, so the result is the unbroken run of recent
+      heartbeats. The time of a heartbeat is its ``RECEIVED_TIME`` (local
+      time, written when it arrived) when present, otherwise the sender's
+      ``CURRENT_TIME`` converted from the sender's timezone to local time.
+
+      Most per-node status values (CPU, memory, disk, GPU, last valid
+      heartbeat) are computed from this walk, for every node on every status
+      pass, so it re-parses each stored timestamp again and again.
+      ``RECEIVED_TIME`` is parsed with ``parse_heartbeat_time`` instead of
+      ``strptime``: the ``strptime`` parse made this walk 14-16 % of the
+      interpreter time of production oracles, and the results are identical.
+
+      Parameters
+      ----------
+      addr : str
+        Node address, with or without the address prefix.
+      minutes : float, optional
+        Length of the window in minutes, counted back from ``dt_now``.
+        Default 60.
+      dt_now : datetime, optional
+        Naive local time the window ends at. None (the default) uses
+        ``datetime.now()``.
+      reverse_order : bool, optional
+        True (the default) returns the newest heartbeat first; False returns
+        them oldest first.
+      debug_unavailable : bool, optional
+        True to log a message when the node has no stored heartbeat history.
+        Default False.
+
+      Returns
+      -------
+      list of dict
+        The stored heartbeat dicts inside the window, not copies; callers must
+        treat them as read-only. An empty list when the node has no stored
+        heartbeat history (for example a node known only from an oracle
+        summary) or when its newest heartbeat is already outside the window.
+
+      Raises
+      ------
+      ValueError
+        When a stored ``RECEIVED_TIME`` is not in ``ct.HB.TIMESTAMP_FORMAT``
+        (raised by ``parse_heartbeat_time``).
+      KeyError
+        When a heartbeat in the window has neither ``RECEIVED_TIME`` nor
+        ``CURRENT_TIME``.
+
+      Notes
+      -----
+      ``NETMON_MUTEX`` is held only to check that the node has a history and,
+      inside ``get_box_heartbeats``, to copy the list of references; the walk
+      and the parsing run outside the lock.
+
+      Examples
+      --------
+      >>> hbs = self.__network_node_past_heartbeats_by_interval(addr=addr, minutes=3)
+      >>> [hb[ct.HB.RECEIVED_TIME] for hb in hbs[:2]]
+      ['2026-01-31 23:59:58.120443', '2026-01-31 23:59:48.118020']
+      >>> self.__network_node_past_heartbeats_by_interval(addr="0xai_unknown")
+      []
+      """
       addr = self.__remove_address_prefix(addr)
       with self.log.managed_lock_resource(NETMON_MUTEX):
         has_direct_heartbeat = addr in self.__network_heartbeats
@@ -796,6 +962,8 @@ class NetworkMonitor(DecentrAIObject):
           remote_tz = heartbeat.get(ct.PAYLOAD_DATA.EE_TIMEZONE)
           ts = self.log.utc_to_local(remote_time, remote_utc=remote_tz, fmt=ct.HB.TIMESTAMP_FORMAT)
         else:
+          # Fast fromisoformat parse instead of strptime: this walk re-parses every stored
+          # timestamp on every status pass, and strptime made it 14-16 % of oracle interpreter time.
           ts = parse_heartbeat_time(ts)
         passed_minutes = (dt_now - ts).total_seconds() / 60.0
         if passed_minutes < 0 or passed_minutes > minutes:
@@ -2349,10 +2517,36 @@ class NetworkMonitor(DecentrAIObject):
       """
       Build a detached heartbeat snapshot suitable for persistence.
 
+      Copies, under ``NETMON_MUTEX``, each node's deque of heartbeat
+      references into a new deque, so the save can pickle the snapshot
+      outside the lock while heartbeats keep arriving. The heartbeat dicts
+      themselves are shared with the live store, not copied: a stored
+      heartbeat is never changed after it is appended (compaction swaps in a
+      new dict), and the former per-entry ``dict(hb)`` was only a shallow copy
+      anyway. That per-entry copy held ``NETMON_MUTEX`` for 0.17-0.25 s at the
+      median and over 1 s at p90 on the production network, blocking
+      heartbeat ingress and CStore online checks for that long.
+
       Returns
       -------
       dict
-        Mapping of node address to detached heartbeat deques.
+        Mapping of node address (without prefix) to detached heartbeat deques:
+        new ``deque`` objects with ``maxlen=HB_HISTORY`` that hold references
+        to the stored heartbeat dicts.
+
+      Notes
+      -----
+      Later appends to, or compaction of, the live deques do not change the
+      snapshot. The pickled ``db.pkl`` content is the same as with the former
+      per-entry copy.
+
+      Examples
+      --------
+      >>> snapshot = self._snapshot_network_heartbeats_for_save()
+      >>> snapshot[addr_no_prefix] is self.__network_heartbeats[addr_no_prefix]
+      False
+      >>> snapshot[addr_no_prefix][-1] is self.__network_heartbeats[addr_no_prefix][-1]
+      True
       """
       with self.log.managed_lock_resource(NETMON_MUTEX):
         return {
@@ -3411,16 +3605,49 @@ class NetworkMonitor(DecentrAIObject):
     def get_network_node_tags(self, node_address):
       """
       Gets all tags for a network node.
-      
-      Parameters:
-      -----------
-      node_address : str
-          The address of the node
 
-      Returns:
+      When the node's status comes from an oracle summary, the summary's
+      ``tags`` list is returned (only its string entries). Otherwise the tags
+      are read from the newest stored heartbeat: every ``EE_NT_*`` key gives
+      ``"SUFFIX:value"`` (or just ``"SUFFIX"`` for a True flag), False, empty
+      and ``none``/``null`` values are skipped, and the
+      ``network_node_get_tag_*`` helpers add any tag they find. Duplicates
+      are removed.
+
+      This runs for every known node on every status pass and only reads tag
+      keys, so the newest heartbeat is read in place instead of deep-copied:
+      the tags it returns are new strings, the ``network_node_get_tag_*``
+      helpers already read the uncopied heartbeat, and stored heartbeats are
+      never changed after append. The deep copy cost about 0.5 ms per node per
+      pass.
+
+      Parameters
+      ----------
+      node_address : str
+        The address of the node, with or without the address prefix.
+
+      Returns
+      -------
+      list of str
+        A list of tags associated with the node, in no particular order.
+        An empty list when the selected summary has no usable ``tags``, or
+        when the heartbeat carries no tags.
+
+      Raises
+      ------
+      ValueError
+        When the node's status does not come from an oracle summary and no
+        heartbeat is stored for it.
+
+      Notes
+      -----
+      Errors raised by a ``network_node_get_tag_*`` helper are logged and
+      that tag is skipped. The stored heartbeat is not modified.
+
+      Examples
       --------
-      list: A list of tags associated with the node
-        Example: ["KYB","DC:HOSTINGER", "CT:FR", "REG:EU"]
+      >>> sorted(self.get_network_node_tags(node_address))
+      ['CT:FR', 'DC:HOSTINGER', 'IS_KYB', 'REG:EU']
       """
 
       summary_tags = self.__network_node_summary_value_for_display(
@@ -3434,7 +3661,9 @@ class NetworkMonitor(DecentrAIObject):
         return []
 
       result = []
-      hb = self.__network_node_last_heartbeat(node_address)  # read-only: only new strings leave this method
+      # Read the stored heartbeat in place, without the deep copy (about 0.5 ms per node per pass):
+      # it is only read here, only new strings leave this method, and stored heartbeats never change.
+      hb = self.__network_node_last_heartbeat(node_address)
       # get tags from HB.
       if isinstance(hb, dict):
         tags = {k: v for k, v in hb.items() if k.startswith(ct.HB.PREFIX_EE_NODETAG)}

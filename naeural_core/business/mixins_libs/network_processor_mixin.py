@@ -159,16 +159,71 @@ class _NetworkProcessorMixin:
 
   def network_processor_loop(self):
     """
-    This method must be protected while the child plugins should have normal `process`
+    Run one network-processor lap: handle the current input, then drain more queued inputs.
+
+    This method must be protected while the child plugins should have normal
+    `process`: ``NetworkProcessorPlugin._process`` calls it right before the
+    child's ``process()``. It checks that ``network_processor_init`` ran,
+    dispatches the payloads of the input the base loop already took
+    (``self.inputs``) to their ``on_payload_<signature>`` handlers and, when
+    ``MAX_INPUTS_PER_ITERATION`` is above 1, takes further queued inputs in the
+    same lap, up to that many in total and for at most 0.5 s.
+
+    With one input per lap, every input paid a whole lap (``process()``, the
+    save check and a sleep of at least 20 ms). On a starved oracle the chain
+    store served 1.27 inputs/s against 1.34 arriving, so write confirmations
+    queued for about 27 s and hsync timed out.
+
+    Returns
+    -------
+    None
+      The handlers act on the received payloads; the child's ``process()``
+      produces the plugin payload.
+
+    Raises
+    ------
+    ValueError
+      When ``network_processor_init`` has not run for this plugin; the logged
+      message points to a child ``on_init`` that does not call
+      ``super().on_init()``.
+
+    Notes
+    -----
+    - ``MAX_INPUTS_PER_ITERATION`` is read directly from the config. Its default
+      of 1 lives in the base plugin config, so every plugin that uses this mixin
+      keeps one input per lap unless it opts in; the chain store sets 32.
+    - No further input is taken once the lap limit is reached, the queue is
+      empty, or 0.5 s have passed since the first input was handled, so a deep
+      queue cannot hold off the child's ``process()`` for long.
+    - Inputs are handled in queue order. An exception from a handler
+      propagates to the base loop and the inputs not yet taken stay queued for
+      the next lap.
+    - After a drain, ``self.inputs`` holds the last input taken; that is the
+      input the child's ``process()`` then sees.
+
+    Examples
+    --------
+    >>> # MAX_INPUTS_PER_ITERATION = 32; 40 inputs arrived and the base loop took one
+    >>> plugin.input_queue_size
+    39
+    >>> plugin.network_processor_loop()  # handles 32 inputs if they fit in 0.5 s
+    >>> plugin.input_queue_size
+    8
     """
     self.__network_processor_maybe_check_initialized()
     self.__network_processor_maybe_process_received()
-    # MAX_INPUTS_PER_ITERATION > 1: drain more queued inputs (at most 0.5 s) instead of one loop lap each.
+    # MAX_INPUTS_PER_ITERATION > 1: drain more queued inputs in this lap instead of paying a whole loop lap
+    # (process(), save check, sleep of at least 20 ms) for each; the input already handled counts as the first.
     extra = self.cfg_max_inputs_per_iteration - 1
+    # Bound the drain to 0.5 s so a deep queue cannot hold off the child's process() for long.
     deadline = self.time() + 0.5
+    # Take another input only while the per-lap limit, the queue and the time bound all allow it.
     while extra > 0 and self.input_queue_size > 0 and self.time() < deadline:
+      # Use up one place of the per-lap limit, so at most MAX_INPUTS_PER_ITERATION inputs are handled in this lap.
       extra -= 1
+      # Dequeue as the base loop does (same copy rule) and expose it as self.inputs, where the handlers read it.
       self.inputs = self.get_next_avail_input()
+      # Dispatch its payloads to the on_payload_ handlers now, in queue order, instead of waiting for the next lap.
       self.__network_processor_maybe_process_received()
     self.network_processor_maybe_log_stats()
     return

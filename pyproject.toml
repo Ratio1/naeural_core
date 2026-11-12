@@ -26,8 +26,9 @@ dependencies = [
   "pynvml>=11.4",
   "pyyaml>=6.0",
   "pyarrow>=15",
-  # 3.5.71 at least: with the lazy package root an older SDK reports a core version from SDK-only clients,
-  # and oracles refuse their dAuth requests.
+  # 3.5.71 at least: with the lazy package root an older SDK reports a core release from SDK-only clients,
+  # and oracles refuse their dAuth requests. (The publish step, naeural_core/main/ver.py, rewrites every
+  # line of this file that holds the word it looks for, so a comment here must not use that word.)
   "ratio1>=3.5.71",
   "minio",
   "gql",

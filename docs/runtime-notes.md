@@ -98,6 +98,15 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## Plugins and business manager
 
+- Linear centroid tracking computes row priority and nearest-column indices
+  once per assignment update. Its distance matrix does not change inside the
+  greedy loop, so repeated full-matrix argmin reductions add no information.
+  Preserve first-column ties, used-column conflicts, thresholds, recovery and
+  per-call freshness; this is not a different assignment algorithm or cache.
+  In the controlled E2 image, run
+  `python -m unittest naeural_core.utils.test_centroid_object_tracker_assignment`.
+  It uses real runtime imports and includes the existing six recovery cases
+  without executing their standalone stub loader.
 - Tracker metadata matching builds an ordered rectangle index during the first
   detection's original scan and reuses it only within that call. Flat-four
   numeric track rectangles with warning-free int32 casts use the fast path for

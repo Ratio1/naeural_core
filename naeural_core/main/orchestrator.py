@@ -350,6 +350,11 @@ class Orchestrator(DecentrAIObject,
     (``request_stop``, called by the SIGTERM handler); the node then continues with its local environment.
     When dAuth returned variables, the logger config is reloaded so they take effect.
 
+    Each round first sends a new-key announcement that still waits for dAuth's confirmation
+    (``_maybe_announce_node_key``), and after the request switches to a new node key when the answering dAuth
+    oracle reported the current one as revoked (``_rotate_revoked_node_key``); the next round then asks
+    with the new key.
+
     The first round allows up to five tries; every later round at most two, so one failure that is not
     "busy" is retried once instead of ending dAuth. Before, every round could make five tries, so a round
     started just before the limit could overrun it by a whole five-try round.

@@ -16,6 +16,12 @@ class _Dauth:
     self.on_call = on_call
     self.max_tries = []
     self.eth_address = "0xnode"
+    # What the blockchain manager says after a request when the answer did not report the node key as revoked.
+    self.dauth_revoked_by = None
+
+  def pending_node_key_announcement(self):
+    """No new-key announcement waits for dAuth in these tests, so a round sends only the dAuth request."""
+    return None
 
   def dauth_autocomplete(self, max_tries, **kwargs):  # pylint: disable=unused-argument
     self.max_tries.append(max_tries)
@@ -64,6 +70,21 @@ class TestStartupDauth(unittest.TestCase):
     max_tries, warned, reloads = self._run([{}, {}, {"EE_SUPERVISOR": "false"}], on_call=Orchestrator.request_stop)
     self.assertEqual(max_tries, [5])
     self.assertEqual((warned, reloads), (True, 0))
+
+  def test_a_revoked_key_answer_switches_the_key_once_and_the_next_round_asks_again(self):
+    # Round 1: the oracle reports the key as revoked and grants nothing. The node switches key, and round 2,
+    # a later round with two tries, asks with the new key and gets its variables.
+    rounds = []
+
+    def revoked_in_the_first_round(eng):
+      eng._blockchain_manager.dauth_revoked_by = None if rounds else "0xoracle"
+      rounds.append(1)
+
+    with mock.patch.object(Orchestrator, "_rotate_revoked_node_key") as rotate:
+      max_tries, warned, reloads = self._run([{}, {"EE_SUPERVISOR": "false"}], on_call=revoked_in_the_first_round)
+    self.assertEqual(rotate.call_count, 1)
+    self.assertEqual(max_tries, [5, 2])
+    self.assertEqual((warned, reloads), (False, 1))
 
   def test_a_stop_requested_before_the_first_round_sends_no_request(self):
     max_tries, warned, reloads = self._run([{"EE_SUPERVISOR": "false"}], stop_before=True)

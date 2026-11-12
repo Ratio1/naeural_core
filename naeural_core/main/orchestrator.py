@@ -14,7 +14,7 @@ from naeural_core import constants as ct
 
 from naeural_core.main.app_monitor import ApplicationMonitor
 from naeural_core.main.net_mon import NetworkMonitor
-# The one background thread that runs the periodic state saves (chain store, network monitor).
+# Runs the periodic state saves (chain store, network monitor), each on a background thread of its own.
 from naeural_core.main.serialization_manager import SerializationManager
 from naeural_core.main.command_handlers import ExecutionEngineCommandHandlers
 from naeural_core.main.orchestrator_mixins import (
@@ -234,9 +234,9 @@ class Orchestrator(DecentrAIObject,
     Start the node-wide helpers that must exist before any manager or plugin, then announce the node.
 
     Runs once, from the constructor (the base object calls it at the end of its own ``__init__``). It
-    starts the SerializationManager, the one background thread that runs the periodic state saves of the
-    chain store and the network monitor, so that neither saves on its own thread. It then logs the start
-    banner, applies an ``EE_DEVICE`` override, loads the admin pipeline config, starts the application
+    starts the SerializationManager, which runs the periodic state saves of the chain store and the network
+    monitor on background threads, one per save, so that neither saves on its own thread. It then logs the
+    start banner, applies an ``EE_DEVICE`` override, loads the admin pipeline config, starts the application
     timer and validates the startup config.
 
     Returns
@@ -1986,7 +1986,8 @@ class Orchestrator(DecentrAIObject,
     First sends the SHUTDOWN-status heartbeat, unless a shutdown or exception stop already ran. The order
     matters. Plugins close before the SerializationManager stops, so a plugin that saves on close (the
     chain store does) still makes that final save; the manager is stopped last, makes no extra save and
-    only waits, for at most 60 seconds, for a periodic save that is being written at that moment.
+    only waits, for at most 60 seconds in total, for the periodic saves that are being written at that
+    moment (each save has its own thread).
 
     Returns
     -------
@@ -2002,8 +2003,9 @@ class Orchestrator(DecentrAIObject,
       self._serving_manager.stop_all_servers()
     if self._capture_manager is not None:
       self._capture_manager.close()
-    # Last step: let a state save that is being written finish (at most 60 s), so the node does not exit
-    # in the middle of it. Plugins that save on close made their final saves when they closed above.
+    # Last step: let the state saves that are being written finish (at most 60 s for all of them), so the
+    # node does not exit in the middle of one. Plugins that save on close made their final saves when they
+    # closed above.
     SerializationManager.instance.stop(timeout=60)
     return
 

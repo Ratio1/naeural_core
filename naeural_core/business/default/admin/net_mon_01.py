@@ -102,8 +102,8 @@ class NetMon01Plugin(
     The supervisor flag of the configuration is aligned with the node's real role. The options that
     control how the current network is sent (only online nodes, index by address, sending period,
     compression) are read from the environment. Last, the periodic save of the network status is
-    registered with the SerializationManager, which runs it on its own thread, so this plugin's thread
-    no longer runs the save.
+    registered with the SerializationManager, which runs it on a thread kept for this save alone, so this
+    plugin's thread no longer runs the save.
 
     Returns
     -------
@@ -176,9 +176,9 @@ class NetMon01Plugin(
     # 30 iterations on any other node, one iteration being PROCESS_DELAY seconds. It is read here, once: a
     # later change of those two settings applies when the plugin starts again.
     every = (int(min(self.cfg_save_nmon_each, 20)) if self.cfg_supervisor else 30) * self.cfg_process_delay
-    # The SerializationManager runs the save on its own thread. On this thread one save stopped this plugin's
-    # iteration (history, rankings, the current-network payload) for 1.5-1.9 s on an idle node and 6.1-6.3 s
-    # on a busy one (20 MB, 0.7 CPU); now the iteration does not wait for it.
+    # The SerializationManager runs the save on a thread kept for this save alone. On this thread one save
+    # stopped this plugin's iteration (history, rankings, the current-network payload) for 1.5-1.9 s on an
+    # idle node and 6.1-6.3 s on a busy one (20 MB, 0.7 CPU); now the iteration does not wait for it.
     SerializationManager.instance.register(save, every=every)
     return
   
@@ -368,8 +368,8 @@ class NetMon01Plugin(
     Notes
     -----
     The periodic save of the network status is not made here: ``on_init`` registered it with the
-    SerializationManager, which runs it on its own thread at the same cadence. One save used to stop this
-    thread for 1.5-1.9 s on an idle node and 6.1-6.3 s on a busy one (20 MB at 0.7 CPU).
+    SerializationManager, which runs it on a thread kept for this save alone, at the same cadence. One save
+    used to stop this thread for 1.5-1.9 s on an idle node and 6.1-6.3 s on a busy one (20 MB at 0.7 CPU).
     """
     payload = None
     self.netmon.epoch_manager.maybe_update_cached_data()
@@ -391,7 +391,7 @@ class NetMon01Plugin(
     current_ranking = ranking
     current_new = new_nodes
     # The periodic save of the network status is no longer made here: on_init registered it with the
-    # SerializationManager, which runs it on its own thread at the same cadence.
+    # SerializationManager, which runs it on a thread kept for this save alone, at the same cadence.
     if self.cfg_supervisor:
       self.netmon.epoch_manager._maybe_calculate_stats()
 

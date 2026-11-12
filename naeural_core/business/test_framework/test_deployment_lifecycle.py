@@ -508,7 +508,7 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)
 
   def test_close_saves_pending_writes_and_ends_the_periodic_save(self):
-    manager = SerializationManager.instance = SerializationManager(log=None)  # not started: nothing runs by itself
+    manager = SerializationManager.instance = SerializationManager(log=None)  # the save's thread would first run 5 s after on_init; each store is closed before
     self.addCleanup(setattr, SerializationManager, "instance", None)
     saved = []
     for pending in (False, True):

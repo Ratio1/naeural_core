@@ -67,8 +67,6 @@ SHUTDOWN_DELAY = 5
 
 CHECK_AND_COMPLETE_ITERATIONS = 30 # how many iterations to wait for the dAuth completion
 CHECK_AND_COMPLETE_SLEEP_PERIOD = 30 # how many seconds to wait between iterations
-# announcement of the new node key after dAuth reported the old one as revoked
-NODE_KEY_ROTATION_FILE = 'node_key_rotation.json'
 CHECK_AND_COMPLETE_TIMEOUT = CHECK_AND_COMPLETE_ITERATIONS * CHECK_AND_COMPLETE_SLEEP_PERIOD
 CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle checks
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
@@ -339,11 +337,11 @@ class Orchestrator(DecentrAIObject,
   def _rotate_revoked_node_key(self):
     """
     A dAuth oracle reported this node's key as revoked: switch to a new key (the old
-    key file is archived), keep the announcement and send it right away.
+    key file is archived; the blockchain manager keeps the announcement) and send the
+    announcement right away.
     """
     old_address = self.e2_address
-    announcement = self.blockchain_manager.rotate_private_key()
-    self.log.save_data_json({'announcement': announcement, 'done': False}, NODE_KEY_ROTATION_FILE)
+    self.blockchain_manager.rotate_private_key()
     self.save_local_address()
     self.P(
       f"Node key {old_address} was revoked. New node key:\n"
@@ -360,11 +358,8 @@ class Orchestrator(DecentrAIObject,
     node's address for the revoked key. dAuth keeps only the first announcement, so a
     different stored address is final and only logged.
     """
-    data = self.log.load_data_json(NODE_KEY_ROTATION_FILE, numeric_keys=False, verbose=False)
-    if not isinstance(data, dict) or data.get('done'):
-      return
-    announcement = data.get('announcement') or {}
-    if announcement.get('new_node') != self.e2_address:
+    announcement = self.blockchain_manager.pending_node_key_announcement()
+    if announcement is None:
       return
     try:
       result = self.blockchain_manager.dauth_announce_node_key(announcement)
@@ -382,8 +377,7 @@ class Orchestrator(DecentrAIObject,
       )
     else:
       return  # not stored or not confirmed yet: retry on the next dAuth attempt
-    data['done'] = True
-    self.log.save_data_json(data, NODE_KEY_ROTATION_FILE)
+    self.blockchain_manager.node_key_announcement_done()
     return
 
   ####### end pre-init area

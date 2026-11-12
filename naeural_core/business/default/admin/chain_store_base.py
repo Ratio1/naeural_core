@@ -25,6 +25,8 @@ TODO:
 """
 
 
+# Used at start-up to keep a replica file that gave no records under another name.
+import os
 from threading import Lock, RLock
 from ratio1.const.base import BCct
 
@@ -92,16 +94,23 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SNAPSHOT = "snapshot"
   CS_RESPONSE = "response"
   CS_SENDER = "sender"
-  # Seconds between two saves of a changed chain storage. The SerializationManager runs them on its own
-  # thread at this cadence; one full-store save covers every write accepted since the previous one. That
-  # thread checks once a second and runs the saves that are due one after another, so an accepted write
-  # reaches the disk after up to this cadence, plus up to one second until the thread's next check, plus a
-  # save of another owner that is being written at that moment (on an oracle the network-monitor save,
-  # 20 MB, measured at 1.5-1.9 s idle and 6.1-6.3 s busy under a 0.7 CPU limit, longer on a slower host),
-  # plus this store's own save.
+  # Seconds between two saves of a changed chain storage. The SerializationManager runs them at this cadence
+  # on a thread of their own; one full-store save covers every write accepted since the previous one. That
+  # thread checks once a second, so an accepted write reaches the disk after up to this cadence, plus up to
+  # one second until the thread's next check, plus this store's own save. A save of another owner runs on
+  # its own thread and does not delay this one, but the saves compete for the interpreter: on an oracle the
+  # network-monitor save (20 MB, measured at 1.5-1.9 s idle and 6.1-6.3 s busy under a 0.7 CPU limit, longer
+  # on a slower host) slows this save down while both run.
   CS_SAVE_INTERVAL = 5
-  
-  
+  # Seconds between two CSTORE_STATS lines in the node log (written from process()); new, there was no such line.
+  CS_STATS_INTERVAL = 300
+  # One lock for every save of the replica file in this process. Before, each plugin instance created its own:
+  # the last save of an instance that is closing and the first save of the instance that replaces it run on
+  # two threads, and without a common lock the older snapshot could be the one left in the file. With one
+  # lock the snapshots reach the file in the order they were taken.
+  __save_lock = Lock()
+
+
   
   
   def on_init(self):
@@ -109,10 +118,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Load the stored replica, publish the chain-store API to the other plugins and start the periodic save.
 
     The replica is read from this plugin's cache file (an empty store when there is none or it cannot be
-    read). Right after the load, the flush of a changed replica is registered with the
-    SerializationManager, which runs it on its own thread every ``CS_SAVE_INTERVAL`` seconds, so this
-    plugin's thread no longer runs the save. Then the getter, setter and hsync functions are placed in the
-    shared plugin memory, where the plugins' ``chainstore_*`` calls find them.
+    read). Then the counters of the ``CSTORE_STATS`` line start, and the flush of a changed replica is
+    registered with the SerializationManager, which runs it on a thread kept for this save every
+    ``CS_SAVE_INTERVAL`` seconds, so this plugin's thread no longer runs the save. When the store this
+    instance will use is empty although the replica file exists, the file is renamed to
+    ``object.pickle.unreadable-<UTC YYYYmmddHHMMSS>`` and a red line says so, so the first save does not
+    overwrite it. Then the getter, setter and hsync functions are placed in the shared plugin memory, where
+    the plugins' ``chainstore_*`` calls find them.
 
     Returns
     -------
@@ -122,6 +134,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     The registration comes after the load, so a save can never run before the stored replica is in memory,
     and before the steps that can fail, so ``on_close`` always finds the registration it removes.
+
+    The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
+    and the plugin does not start, where it used to start empty and fail at its first save. A file that
+    held a legitimately empty store is renamed too; that loses nothing. A store that is empty because there
+    is no file renames nothing and logs nothing new. A store taken over from a previous instance of this
+    plugin in the same process is used as it is; the file is renamed only when that store is empty too.
     """
     super().on_init() # not mandatory anymore?
     
@@ -131,7 +149,6 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     self.__ops = self.deque()
     self.__persistence_lock = RLock()
-    self.__save_lock = Lock()
     self.__chain_storage_dirty = False
     
     try:
@@ -139,6 +156,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     except Exception as e:
       self.P(f" === Chain storage could not be loaded: {e}")
       self.__chain_storage = {}
+    # Counters of the CSTORE_STATS line (label -> count), taken and reset by process() at each line.
+    self.__cs_stats = {}
+    # Where the next CSTORE_STATS line is measured from: the time of the last line and the largest input queue
+    # seen since then.
+    self.__cs_stats_last, self.__cs_stats_queue_peak = self.time(), 0
+    # The plugin's own count of lost inputs at start, so the first line reports only what was lost after it.
+    self.__cs_stats_lost = self.lost_inputs_count
     # The replica is loaded: from here the SerializationManager saves it every CS_SAVE_INTERVAL seconds when
     # it changed. A full save took this plugin's thread 0.26 s on an idle node and 1.3 s on a busy one
     # (5 MB, 0.7 CPU), during which it confirmed no write; the thread no longer runs the save. Registered
@@ -153,7 +177,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.P(" === Chain storage already exists", color="r")
       self.__chain_storage = memory[self.CS_STORAGE_MEM]
     ## END DEBUG ONLY
-    
+
+    # The file the strict save writes. Before, a replica file that gave no records (it could not be read, or
+    # it held none) was silently overwritten by the first save; now it is kept under another name. Checked on
+    # the store this instance will use, after the branch above: a store taken over from a previous instance
+    # that holds records is saved over the file as before. A file that held a legitimately empty store is
+    # renamed too, which loses nothing.
+    replica_file = os.path.join(self.log.get_data_folder(), self._persistence_fld.lstrip("/"), "object.pickle")
+    if not self.__chain_storage and os.path.exists(replica_file):
+      # Next to the replica, named after the UTC time of this start, where no save writes.
+      kept_file = "{}.unreadable-{}".format(replica_file, self.datetime.now(self.timezone.utc).strftime("%Y%m%d%H%M%S"))
+      # Move it aside before the first save can replace it: no save writes before a write is accepted, and no
+      # write is accepted before the setter is published below.
+      os.rename(replica_file, kept_file)
+      self.P(f" === Chain storage replica file gave no records; kept it as {kept_file}, the store starts empty", color='r')
+
     memory[self.CS_STORAGE_MEM] = self.__chain_storage
     memory[self.CS_GETTER] = self._get_value
     memory[self.CS_SETTER] = self._set_value
@@ -300,9 +338,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Returns
     -------
     list of str
-      Effective peer list used for confirmation math and outbound sends.
+      Effective peer list used for confirmation math and outbound sends. Always a new list, so the caller
+      may extend it without changing the plugin's peers.
+
+    Notes
+    -----
+    The default peers are copied with ``list()``: they are address strings in a list that the refresh
+    replaces and nobody changes in place, so a deep copy bought nothing, and this runs several times per
+    write.
     """
-    send_to = self.deepcopy(self.__chain_peers) if include_default_peers else []
+    # A plain copy: before, a deep copy of this list of address strings, which is rebuilt on refresh and never
+    # changed in place, on a path that runs several times per write.
+    send_to = list(self.__chain_peers) if include_default_peers else []
     for peer in self.__normalize_peer_list(peers):
       if peer not in send_to:
         send_to.append(peer)
@@ -375,6 +422,23 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   
   def __save_chain_storage(self):
+    """
+    Write a snapshot of the whole chain storage to the replica file.
+
+    The records are copied under the persistence lock and the dirty flag is cleared there; the copy is then
+    written outside that lock. The whole save runs under the save lock, which is one for the process, so
+    snapshots reach the file in the order they were taken, also across a restart of this plugin. Each save
+    is counted as ``saves`` for the ``CSTORE_STATS`` line.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A failed write marks the store dirty again, so the next flush retries it. A failed write is counted too:
+    the count is taken where the dirty flag is cleared, before the write.
+    """
     # Callers persist after releasing the persistence lock. Records are copied
     # shallowly under that lock so concurrent writers and confirmations cannot
     # change the store while it is pickled; the disk write runs outside it.
@@ -390,6 +454,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           for key, record in self.__chain_storage.items()
         }
         self.__chain_storage_dirty = False
+        # Count this save for the CSTORE_STATS line, under the lock already held here; before, saves were not counted.
+        self.__cs_stats["saves"] = self.__cs_stats.get("saves", 0) + 1
       try:
         self.cacheapi_save_pickle(snapshot, verbose=False, strict=True)
       except Exception as exc:
@@ -859,8 +925,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     When ``value`` is ``None``, the key is deleted locally. The existing
     delete semantics and related trade-offs described below are preserved.
-    The caller must hold the persistence lock and mark the chain storage
-    dirty after releasing it.
+    The caller must hold the persistence lock and, after releasing it, mark
+    the chain storage dirty when the call changed the replica (``_set_value``
+    does not mark it for a delete of a key not held or for a write of what
+    was already stored).
     """
     # key should be composed of the chainstore app identity and the actual key
     # so if two chainstore apps are running on the same node, they will not overwrite each other
@@ -963,13 +1031,34 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     This method blocks the caller thread while waiting for confirmations on
     local-originated writes.
+
+    A write that leaves the replica as it was does not mark it for a save: a
+    delete of a key this replica does not hold, and a local write whose value
+    equals the stored one (``==``) with the stored owner and readonly. Such a
+    write is still stored (its confirmations are reset), broadcast and
+    confirmed as before. What then differs between memory and the file until
+    the next save are the confirmation fields, which only the wait loop and
+    the confirmation handler of a write in progress use (a hash-sync answer
+    carries them and its receiver ignores them), and the value's type when
+    the new value is equal to the stored one but of another type (``1`` and
+    ``1.0``).
+
+    Every call with a valid key is counted once for the ``CSTORE_STATS``
+    line, by the label ``<bucket>/<origin>/<outcome>``: the bucket is the
+    first 14 characters of an ``hs:`` key (the prefix of its hash namespace)
+    or ``plain``, the origin is ``local`` or ``remote``, and the outcome is
+    ``changed``, ``identical``, ``absent_delete`` or ``refused`` (any other
+    way out). ``changed`` says what happened to this replica: a local write
+    that changed it and then was not confirmed, or raised while waiting, is
+    still counted as ``changed``.
     """
     if not isinstance(key, str) or len(key) == 0:
       raise ValueError("Key must be a non-empty string.")
+    # Outcome counted once by the finally below; every way out that does not set it is a refusal.
+    outcome = "refused"
     try:
       where = "FROM_LOCAL: " if not local_sync_storage_op else "FROM_REMOTE: "
       debug = debug or self.cfg_chain_store_debug
-      debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
       if owner is None:
         owner = self.get_instance_path()
       if timeout is not None and (
@@ -1026,6 +1115,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         need_store = True
         existing_owner = None
         existing_value = None
+        # True when this write leaves the replica as it was, so it does not mark it for a save; before, every
+        # stored write marked it, and a marked replica is saved whole at the next flush. A delete of a key this
+        # replica does not hold (local or remote) changes nothing here; a later version that records deletions
+        # would record its marker at this point. The identical local write is decided below.
+        unchanged = value is None and key not in self.__chain_storage
         if key in self.__chain_storage:
           existing_value = self.__get_key_value(key)
           existing_owner = self.__get_key_owner(key)
@@ -1046,9 +1140,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             if debug:
               self.P(f" === Key {key} stored by {existing_owner} has the same value")
             if local_sync_storage_op:
+              # Counted as identical: the value was already stored. Before, this way out was not counted.
+              outcome = "identical"
               return True
             # A previous timeout may have left only the local copy. Re-publish
             # and collect distinct peer confirmations instead of claiming success.
+            # The replica stays as it was when the final owner and readonly (after the namespace rules above)
+            # match the stored ones too; the token is already known to be equal here. Before, it was marked.
+            unchanged = owner == existing_owner and readonly == is_readonly
           elif is_readonly and existing_owner != owner:
             if debug:
               self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')
@@ -1062,6 +1161,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               action_str = "overwriting"
             else:
               action_str = "setting"
+            # The value shortened for this log line only; before, it was built at the top of every write, also
+            # with debug off.
+            debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
             self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
           self.__set_key_value(
             key=key, value=value, owner=owner,
@@ -1070,11 +1172,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             peers=peers,
             include_default_peers=include_default_peers,
           )
+          # The outcome counted for this call: a delete of a key not held, a write of what was already stored,
+          # or a change of the replica. Before, nothing was counted.
+          outcome = ("absent_delete" if value is None else "identical") if unchanged else "changed"
       if need_store:
-        # Saved by the SerializationManager's next flush (every CS_SAVE_INTERVAL s). The flag is set after
-        # the change is in the store, so a concurrent snapshot that clears it
-        # either contains this write or is followed by another flush.
-        self.__chain_storage_dirty = True
+        # A write that left the replica as it was does not mark it for a save; before, every stored write did.
+        if not unchanged:
+          # Saved by the SerializationManager's next flush (every CS_SAVE_INTERVAL s). The flag is set after
+          # the change is in the store, so a concurrent snapshot that clears it
+          # either contains this write or is followed by another flush.
+          self.__chain_storage_dirty = True
         if not local_sync_storage_op:
           # now send set-value (including confirmation request) to all
           op = {
@@ -1144,6 +1251,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     except Exception as e:
       err_msg = f" === Error in _set_value for key {key}[Q:{self.input_queue_size}/{self.cfg_max_inputs_queue_size}]: {e}\n{self.trace_info()}"
       raise ValueError(err_msg)
+    finally:
+      # Count this call once for the CSTORE_STATS line, by namespace bucket (the "hs:" prefix of one hash
+      # namespace, or "plain"), origin and outcome. Nothing here can raise for the valid key checked above.
+      label = "{}/{}/{}".format(key[:14] if key.startswith("hs:") else "plain", "remote" if local_sync_storage_op else "local", outcome)
+      # Under the persistence lock, as every count of the line.
+      with self.__persistence_lock:
+        # A plain increment of one counter of a small dict; it holds one label per bucket, origin and outcome.
+        self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
     return need_store
 
 
@@ -1343,12 +1458,25 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Returns
     -------
     None
+
+    Notes
+    -----
+    A store from a sender that is not in this node's replication peers is counted as
+    ``<bucket>/remote_non_peer`` for the ``CSTORE_STATS`` line, before any check of the write.
     """
     key = data.get(self.CS_KEY, None)
     value = data.get(self.CS_VALUE , None)
     owner = data.get(self.CS_OWNER, None)
     readonly = data.get(self.CS_READONLY, False) # if the key is readonly local node consumers cannot overwrite it
     token = data.get(self.CS_TOKEN, None)
+    if peers not in self.__chain_peers:
+      # Count stores from nodes outside this node's replication peers, by namespace bucket, without asking the
+      # blockchain engine; before, they were not counted. The key comes from the network and may not be a str.
+      label = (key[:14] if isinstance(key, str) and key.startswith("hs:") else "plain") + "/remote_non_peer"
+      # Under the persistence lock, as every count of the CSTORE_STATS line.
+      with self.__persistence_lock:
+        # A plain increment of one counter; one label per bucket.
+        self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
     if self.__secret_namespace(key):
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
@@ -1579,12 +1707,40 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     and handled no write meanwhile. It can still wait briefly on the persistence lock while the save
     copies the records, and on the interpreter while the save serializes them.
 
+    Every ``CS_STATS_INTERVAL`` seconds the lap also writes one ``CSTORE_STATS`` line: the counters taken
+    (and reset) under the persistence lock, then logged outside it as one JSON object with sorted keys::
+
+      CSTORE_STATS {"counts":{...},"lost_inputs":0,"period_s":300,"queue_peak":0}
+
     Returns
     -------
     None
+
+    Notes
+    -----
+    The line is written also when nothing was counted, so a missing line means this loop is not running
+    (or the wall clock, which times the interval, was set back). ``queue_peak`` is the largest input queue
+    a lap found when it reached this method, after the lap took its inputs, so a full queue shows as
+    ``lost_inputs``: the increase of the plugin's own count of inputs dropped at a full queue.
     """
     self.__maybe_refresh_chain_peers()
     self.__maybe_broadcast()
+    # Keep the largest input queue seen since the last CSTORE_STATS line; before, it was not kept.
+    self.__cs_stats_queue_peak = max(self.__cs_stats_queue_peak, self.input_queue_size)
+    if self.time() - self.__cs_stats_last >= self.CS_STATS_INTERVAL:
+      # Take the counters and start new ones, under the lock the counts are made under.
+      with self.__persistence_lock:
+        # The counts go to the new dict from here; the old one is only read below.
+        counts, self.__cs_stats = self.__cs_stats, {}
+      # The clock and the plugin's count of lost inputs, read once: for this line and as the start of the next one.
+      now, lost = self.time(), self.lost_inputs_count
+      # One JSON object with sorted keys on one line, built and logged outside the lock.
+      self.P("CSTORE_STATS " + self.json_dumps({
+        "period_s": round(now - self.__cs_stats_last), "counts": counts,
+        "queue_peak": self.__cs_stats_queue_peak, "lost_inputs": lost - self.__cs_stats_lost,
+      }, sort_keys=True))
+      # The next line is measured from here.
+      self.__cs_stats_last, self.__cs_stats_queue_peak, self.__cs_stats_lost = now, 0, lost
     return
 
 
@@ -1592,13 +1748,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     End the periodic save of this instance, then save pending chain storage changes before the plugin stops.
 
-    The registration made in ``on_init`` is removed first, so no later pass of the SerializationManager
-    picks this instance and a restarted instance registers its own. A save that the manager already picked
-    can still run once after the removal, even after this method returned: the manager does not wait for
-    it, and the flush checks the dirty flag before it takes the save lock. That late save writes the same
-    shared store (the dict a restarted instance takes over from the shared plugin memory) through an atomic
-    file replace, so nothing is lost. A save the manager is writing at the moment of the removal is waited
-    for; if it failed it left the store marked as changed, and the final save below writes it again.
+    The registration made in ``on_init`` is removed first, so the thread the SerializationManager keeps
+    for this instance's save ends at its next check and a restarted instance registers its own. A save that
+    thread had already picked can still run once after the removal, even after this method returned: the
+    manager does not wait for it, and the flush checks the dirty flag before it takes the save lock. That
+    late save writes the same shared store (the dict a restarted instance takes over from the shared plugin
+    memory) through an atomic file replace. Every save of the replica file in this process takes the one
+    class-level save lock, so a save of the restarted instance cannot be overtaken by that late save: the
+    file always ends with the newest snapshot. A save that is being written at the moment of the removal
+    is waited for; if it failed it left the store marked as changed, and the final save below writes it
+    again.
 
     Returns
     -------
@@ -1607,15 +1766,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Raises
     ------
     KeyError
-      When ``on_init`` did not reach the registration (it failed before the replica was loaded, or never ran).
+      When ``on_init`` did not reach the registration (it failed before it, or never ran).
 
     Notes
     -----
     The final save runs on the closing plugin's own thread, as before.
     """
-    # Stop the periodic save of this instance first: no later pass of the manager picks it, and a restarted
-    # instance registers its own save. A save the manager already picked can still run once after this
-    # method returned; it writes the same shared store through an atomic file replace, so nothing is lost.
+    # Stop the periodic save of this instance first: its thread ends at its next check, and a restarted
+    # instance registers its own save. A save that thread already picked can still run once after this
+    # method returned; it writes the same shared store under the one save lock of the process, so it cannot
+    # land after a newer save of the restarted instance.
     SerializationManager.instance.unregister(self.__maybe_flush_chain_storage)
     # Wait for a save the manager may be writing right now: if that write fails it marks the store dirty
     # again, and the check below must see it, or the changes since the last good save would stay unsaved.

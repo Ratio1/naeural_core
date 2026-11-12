@@ -189,16 +189,17 @@ Larger follow-ups:
 
 ## Deployment lifecycle persistence and protected namespaces
 
-An accepted write only marks the store dirty. The SerializationManager's thread
-(`naeural_core/main/serialization_manager.py`, started by the Orchestrator) saves a
-changed store every `CS_SAVE_INTERVAL` (5 s), so one save covers every write made in
-that window and the plugin thread does not run the save; `on_close()` saves pending
-changes at shutdown. That thread checks once a second and runs the saves that
-are due one after another, so an accepted write reaches the disk after up to the
-cadence, plus up to one second until the thread's next check, plus a save of
-another owner that is being written at that moment (on an oracle the
+An accepted write that changes the replica only marks the store dirty. The
+SerializationManager (`naeural_core/main/serialization_manager.py`, created by the
+Orchestrator) keeps one thread for this save and saves a changed store every
+`CS_SAVE_INTERVAL` (5 s), so one save covers every write made in that window and
+the plugin thread does not run the save; `on_close()` saves pending changes at
+shutdown. That thread checks once a second, so an accepted write reaches the disk
+after up to the cadence, plus up to one second until the thread's next check, plus
+the chain store's own save. A save of another owner (on an oracle the
 network-monitor save, 20 MB, measured at 1.5-1.9 s idle and 6.1-6.3 s busy under a
-0.7 CPU limit, longer on a slower host), plus the chain store's own save. A crash
+0.7 CPU limit, longer on a slower host) runs on its own thread and does not hold
+this one back, but the two compete for the interpreter while both run. A crash
 can lose the writes of that window. Do not reintroduce a full-store fsync per write:
 on mainnet oracles it took 65% of the plugin loop and kept the input queue full.
 Run `test_deployment_lifecycle.py` and `test_chain_store_hsync.py` for this path. For each save, records are copied shallowly under the
@@ -263,3 +264,44 @@ signature-only differences for idempotent retries. Once versioned, a field canno
 be replaced by an unversioned write or deletion. A signed higher generation
 allows explicit reuse after deletion. Both direct writes and HSync enforce the
 same rules, preventing stale cached pipeline discovery from reviving deletion.
+
+## Cost line in the node log (`CSTORE_STATS`)
+
+Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
+the node log, one JSON object with sorted keys:
+
+```text
+CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"lost_inputs":<n>,"period_s":300,"queue_peak":<n>}
+```
+
+The line is written also when nothing was counted, so a missing line means the
+plugin loop is not running (the interval is timed on the wall clock, so a clock
+set back also delays the line). The counters restart at zero after each line.
+
+Fields:
+
+- `period_s`: seconds since the previous line, rounded.
+- `counts`: the counters of that period, by label (below); only labels seen in the period appear.
+- `queue_peak`: the largest number of inputs still waiting in the plugin's input queue when a loop lap reached the chain-store step in the period. The lap has taken its inputs by then, so a queue that filled up shows in `lost_inputs`, not here.
+- `lost_inputs`: how much the plugin's `lost_inputs_count` grew: inputs that arrived while the input queue was full, when the queue drops its oldest input.
+
+Labels in `counts`:
+
+- `<bucket>/<origin>/<outcome>`: one count per write call (`_set_value`) with a valid key.
+  - `<bucket>` is `plain` for a plain key, or the first 14 characters of an `hs:` key, which is the prefix shared by every field of one hash namespace.
+  - `<origin>` is `local` for a write made on this node and `remote` for a write received from a peer.
+  - `changed`: the write was stored and changed this replica, so the replica will be saved. It says what happened here: a local write that changed the replica and then was not confirmed by the peers is still counted as `changed`.
+  - `identical`: the value was already stored (a remote copy of it, or a local write with the same value, owner and readonly); the replica is not saved for it, but a local one is still broadcast and confirmed.
+  - `absent_delete`: a delete of a key this replica does not hold; the replica is not saved for it.
+  - `refused`: any other way out: a token or readonly refusal, a refused version or revision, a protected-namespace refusal, no target peers, or an error before the write was stored.
+- `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
+- `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
+
+To find the hash namespace of a bucket, compute its prefix: `"hs:"` followed by the
+first 10 hex digits of the SHA-256 of the namespace name, followed by `":"`, as
+`__hset_index` does. For example, in Python:
+
+```python
+import hashlib
+bucket = "hs:" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:10] + ":"
+```

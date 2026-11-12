@@ -360,6 +360,21 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.publish()
     self.assertEqual(calls, [])
 
+  def test_a_node_reports_where_a_registry_serves_its_image_and_nothing_else(self):
+    # The image id names an image only inside one Docker store. The registry reference is what lets a
+    # restored revision be pulled again; it passes only as a plain repository and digest.
+    image_id, reference = "sha256:" + "a" * 64, "ghcr.io/acme/shop@sha256:" + "d" * 64
+    def reported(**artifacts):
+      return DeploymentLifecycle._runtime_artifacts(SimpleNamespace(get_deployment_runtime_artifacts=lambda: artifacts))
+    self.assertEqual(reported(image_id=image_id, image_ref=reference), {"image_id": image_id, "image_ref": reference})
+    # A ":" passes only as the port of the registry.
+    with_port = "registry:5000/team/app@sha256:" + "d" * 64
+    self.assertEqual(reported(image_id=image_id, image_ref=with_port), {"image_id": image_id, "image_ref": with_port})
+    for unsafe in ("ghcr.io/acme/shop:stable", "user:secret@ghcr.io/acme/shop@sha256:" + "d" * 64,
+                   "ghcr.io/acme/shop:stable@sha256:" + "d" * 64, "https://ghcr.io/acme/shop@sha256:" + "d" * 64,
+                   "ghcr.io/acme/shop@sha256:short", reference + " --privileged", 7, None):
+      self.assertEqual(reported(image_id=image_id, image_ref=unsafe, environment={"TOKEN": "x"}), {"image_id": image_id})
+
   def test_runtime_artifacts_survive_retirement_restart_and_stopped_report(self):
     previous = config(revision=1)
     previous["DEEPLOY_SPECS"] = {"job_id": 7, "revision": 1}

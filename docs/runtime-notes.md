@@ -98,6 +98,18 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## Plugins and business manager
 
+- Tracker metadata matching builds an ordered rectangle index during the first
+  detection's original scan and reuses it only within that call. Flat-four
+  numeric track rectangles with warning-free int32 casts use the fast path for
+  batches larger than two. Tiny batches and unusual shapes/dtypes retain the
+  legacy scan and broadcasting/cast behavior.
+  Duplicate rectangles preserve all matches in order, lazy metadata reads and
+  partial writes on failure. This does not change track assignment or IDs.
+  In the controlled E2 image, run
+  `python -m unittest naeural_core.business.test_framework.test_tracker_result_matching`
+  against the installed candidate core package with its real runtime imports.
+  Keep `python naeural_core/utils/test_centroid_object_tracker_recovery.py` as
+  supplemental linear-recovery coverage; its import stubs are not image acceptance.
 - `ct.PLUGIN_SEARCH.BLOCKED_BIZ_PLUGINS` (remote code execution plugins) are never instantiated, on
   any network, even from saved pipeline configs. Deeploy operations that include them fail with
   `CONFIGURATION_REJECTED`.

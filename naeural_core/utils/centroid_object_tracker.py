@@ -419,6 +419,13 @@ class CentroidObjectTracker:
         dict
             Updated tracked objects.
 
+        Notes
+        -----
+        Row priorities and nearest-column indices are computed once from the
+        unchanged distance matrix for this update. Reusing those indices keeps
+        first-column ties and the existing greedy conflict policy unchanged;
+        no assignment indices are retained across updates.
+
         """
         self.reset_old_objects()
 
@@ -466,8 +473,13 @@ class CentroidObjectTracker:
 
         usedRows = set()
         usedCols = set()
-        for row in D.min(axis=1).argsort():
-            col = D.argmin(axis=1)[row]
+        rows = D.min(axis=1).argsort()
+        # D is unchanged during assignment: reduce all rows once, avoiding
+        # redundant full-matrix scans and NumPy GIL release/reacquire cycles.
+        # Keep row priority and argmin's first-column tie behavior intact.
+        columns = D.argmin(axis=1)
+        for row in rows:
+            col = columns[row]
             if row in usedRows or col in usedCols:
                 continue
 

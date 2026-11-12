@@ -436,6 +436,14 @@ class BCWrapper:
     return self.__bc.node_address_to_eth_address(node_address)
 
 
+  def verify_node_key_rotation(self, proof: dict):
+    """
+    Check a node key rotation proof; returns `(old_node, new_node)` or raises ValueError.
+    See `DefaultBlockEngine.verify_node_key_rotation`.
+    """
+    return self.__bc.verify_node_key_rotation(proof)
+
+
   def eth_addr_to_internal_addr(self, eth_node_address):
     return self.__owner.netmon.epoch_manager.eth_to_internal(eth_node_address)
   

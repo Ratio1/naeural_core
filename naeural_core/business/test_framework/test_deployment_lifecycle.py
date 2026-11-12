@@ -660,6 +660,34 @@ class ProtectedChainStoreTest(unittest.TestCase):
     )
     return store
 
+  def test_node_key_rotations_keep_the_first_proven_new_key(self):
+    store = self.store()
+    def verify_node_key_rotation(proof):
+      if proof.get("EE_SIGN") != "valid":
+        raise ValueError("invalid")
+      return proof["node_key_rotation"]["EE_SENDER"], proof["node_key_rotation"]["new_node"]
+    store.bc.verify_node_key_rotation = verify_node_key_rotation
+    def proof(new_node, old_node="old", nonce="1", sign="valid"):
+      return {"node_key_rotation": {"EE_SENDER": old_node, "new_node": new_node}, "nonce": nonce, "EE_SIGN": sign}
+    key = _hset_key("NODE_KEY_ROTATIONS", "old")
+
+    for bad in ("new", None, proof("new", sign="forged"), proof("new", old_node="other")):
+      self.assertFalse(store._set_value(key, bad, local_sync_storage_op=True))
+    store._ChainStoreBasePlugin__exec_store({store.CS_KEY: key, store.CS_VALUE: proof("new")}, peers="outsider")
+    self.assertNotIn(key, store.storage)
+
+    self.assertTrue(store._set_value(key, proof("new"), local_sync_storage_op=True))
+    for bad in (None, proof("attacker")):
+      self.assertFalse(store._set_value(key, bad, local_sync_storage_op=True))
+    _, record = _hset_record("NODE_KEY_ROTATIONS", "old", proof("attacker"), "registry-other")
+    store._ChainStoreBasePlugin__merge_hset_snapshot("NODE_KEY_ROTATIONS", {key: record})
+    self.assertEqual(store.storage[key][store.CS_VALUE], proof("new"))
+    self.assertTrue(store._set_value(key, proof("new", nonce="2"), local_sync_storage_op=True))
+
+    outsider = self.store("outsider")
+    outsider.bc.verify_node_key_rotation = verify_node_key_rotation
+    self.assertFalse(outsider._set_value(key, proof("new"), timeout=.1, max_retries=0))
+
   def test_job_generations_prevent_delete_resurrection_and_allow_explicit_reuse(self):
     for namespace, version_key in (("DEEPLOY_DEPLOYED_JOBS", "revision"), ("DAUTH_JOB_SECRETS", "deployment_revision")):
       with self.subTest(namespace=namespace):

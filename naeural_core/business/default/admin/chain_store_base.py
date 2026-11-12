@@ -28,11 +28,14 @@ TODO:
 # Used at start-up to keep a replica file that gave no records under another name.
 import os
 from threading import Lock, RLock
-from ratio1.const.base import BCct
+from ratio1.const.base import BCct, dAuth
 
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
 # Runs this plugin's periodic replica save on its own thread instead of on the plugin thread.
 from naeural_core.main.serialization_manager import SerializationManager
+
+# Node key rotations: written only by dAuth servers, each value a signed rotation proof.
+NODE_KEY_ROTATIONS_HKEY = "NODE_KEY_ROTATIONS"
 
 _CONFIG = {
   **NetworkProcessorPlugin.CONFIG,
@@ -613,8 +616,29 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       return False
     return True
 
+  def __node_key_rotation_record(self, key, value):
+    """Accept only a valid rotation proof for the field's key; the first new key is final.
+
+    The field is the replaced key's lowercase ETH address and the value is the signed
+    proof checked by ``bc.verify_node_key_rotation``. A stored mapping cannot be deleted
+    or pointed at another new key; another proof of the same mapping is accepted.
+    """
+    try:
+      field = self.base64_to_str(key[len(self.__hset_index(NODE_KEY_ROTATIONS_HKEY)):], url_safe=True)
+      old_node, new_node = self.bc.verify_node_key_rotation(value)
+      if self.bc.node_address_to_eth_address(old_node).lower() != field:
+        return False
+      local = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
+      if local is None:
+        return True
+      return local[dAuth.DAUTH_KEY_ROTATION]["new_node"] == new_node
+    except Exception:
+      return False
+
   def __versioned_record(self, key, value):
     """Validate signed operation/node records before accepting sequence order."""
+    if self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,)):
+      return self.__node_key_rotation_record(key, value)
     job_namespace = self.__namespace_for_key(key, ("DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS"))
     if job_namespace:
       return self.__versioned_job_record(key, value, job_namespace)
@@ -1088,6 +1112,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         )
         return False
       secret_namespace = self.__secret_namespace(key)
+      rotation_namespace = self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,))
+      if rotation_namespace and not local_sync_storage_op and not self.__registry_member(self.ee_addr, dauth_only=True):
+        return False
       if secret_namespace and not local_sync_storage_op:
         if not self.__registry_member(self.ee_addr):
           return False
@@ -1480,6 +1507,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if self.__secret_namespace(key):
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
+    if self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,)) and not self.__registry_member(peers, dauth_only=True):
+      return
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
     result = self._set_value(
@@ -1638,6 +1667,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
       if not self.__registry_member(sender, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
+    if hkey == NODE_KEY_ROTATIONS_HKEY and not self.__registry_member(sender, dauth_only=True):
+      return
     snapshot = data.get(self.CS_SNAPSHOT, {})
     if not isinstance(snapshot, dict):
       return

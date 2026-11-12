@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -29,7 +30,7 @@ class _Log:
 
 
 class TestCadence(unittest.TestCase):
-  """The schedule, driven by hand through _run_due(now): no thread, no waiting."""
+  """The schedule, driven by hand through _run_due(now) on the monotonic clock: no thread, no waiting."""
 
   def setUp(self):
     self.log = _Log()
@@ -40,24 +41,24 @@ class TestCadence(unittest.TestCase):
     return lambda: self.runs.append(name)
 
   def test_a_save_runs_when_its_time_has_come_and_then_one_cadence_later(self):
-    registered = time.time()
+    registered = time.monotonic()
     self.manager.register(self.save("store"), every=100)
     self.manager._run_due(registered + 99)  # one second early
     self.assertEqual(self.runs, [])
     self.manager._run_due(registered + 101)
     self.assertEqual(self.runs, ["store"])
-    self.manager._run_due(time.time() + 99)  # the next run is 100 s after the first one started
+    self.manager._run_due(time.monotonic() + 99)  # the next run is 100 s after the first one started
     self.assertEqual(self.runs, ["store"])
-    self.manager._run_due(time.time() + 101)
+    self.manager._run_due(time.monotonic() + 101)
     self.assertEqual(self.runs, ["store", "store"])
 
   def test_each_save_keeps_its_own_cadence(self):
-    registered = time.time()
+    registered = time.monotonic()
     self.manager.register(self.save("store"), every=5)
     self.manager.register(self.save("network"), every=120)
     self.manager._run_due(registered + 6)
     self.assertEqual(self.runs, ["store"])
-    self.manager._run_due(time.time() + 121)
+    self.manager._run_due(time.monotonic() + 121)
     self.assertEqual(self.runs, ["store", "store", "network"])
 
   def test_a_failing_save_is_logged_and_neither_stops_the_others_nor_itself(self):
@@ -70,19 +71,19 @@ class TestCadence(unittest.TestCase):
 
     self.manager.register(flaky, every=5)
     self.manager.register(self.save("network"), every=5)
-    self.manager._run_due(time.time() + 6)
+    self.manager._run_due(time.monotonic() + 6)
     self.assertEqual((len(attempts), self.runs), (1, ["network"]))
     self.assertEqual(len(self.log.lines), 1)
     self.assertIn("failed", self.log.lines[0])
     self.assertIn("OSError: disk full", self.log.lines[0])  # the traceback, not only the fact
-    self.manager._run_due(time.time() + 6)  # tried again at its next cadence
+    self.manager._run_due(time.monotonic() + 6)  # tried again at its next cadence
     self.assertEqual((len(attempts), len(self.log.lines)), (2, 1))
 
   def test_an_unregistered_save_is_not_run_again(self):
     save = self.save("store")
     self.manager.register(save, every=5)
     self.manager.unregister(save)
-    self.manager._run_due(time.time() + 6)
+    self.manager._run_due(time.monotonic() + 6)
     self.assertEqual(self.runs, [])
 
   def test_unregistering_an_unknown_save_fails(self):
@@ -93,9 +94,9 @@ class TestCadence(unittest.TestCase):
     save = self.save("store")
     self.manager.register(save, every=5)
     self.manager.register(save, every=500)
-    self.manager._run_due(time.time() + 6)
+    self.manager._run_due(time.monotonic() + 6)
     self.assertEqual(self.runs, [])
-    self.manager._run_due(time.time() + 501)
+    self.manager._run_due(time.monotonic() + 501)
     self.assertEqual(self.runs, ["store"])  # once, not once per registration
 
   def test_a_save_unregistered_during_an_earlier_save_of_the_same_pass_is_not_run(self):
@@ -103,13 +104,13 @@ class TestCadence(unittest.TestCase):
     closed = self.save("closed store")
     self.manager.register(lambda: self.manager.unregister(closed), every=5)
     self.manager.register(closed, every=5)
-    self.manager._run_due(time.time() + 6)
+    self.manager._run_due(time.monotonic() + 6)
     self.assertEqual(self.runs, [])
 
   def test_no_save_starts_once_stop_was_asked(self):
     self.manager.register(self.manager._stopping.set, every=5)  # stop() arrives during the first save
     self.manager.register(self.save("network"), every=5)
-    self.manager._run_due(time.time() + 6)
+    self.manager._run_due(time.monotonic() + 6)
     self.assertEqual(self.runs, [])
 
   def test_a_bound_method_registers_as_one_save(self):
@@ -124,7 +125,7 @@ class TestCadence(unittest.TestCase):
     owner = Owner(self.runs)
     self.manager.register(owner.save, every=5)
     self.manager.register(owner.save, every=5)
-    self.manager._run_due(time.time() + 6)
+    self.manager._run_due(time.monotonic() + 6)
     self.assertEqual(self.runs, ["owner"])
 
 
@@ -171,6 +172,23 @@ class TestThread(unittest.TestCase):
     manager.stop(timeout=5)
     manager.stop(timeout=5)
     self.assertFalse(manager._thread.is_alive())
+
+
+class TestClock(unittest.TestCase):
+  """The cadence is counted on the monotonic clock: a wall clock stepped back must not hold the saves back."""
+
+  def test_a_wall_clock_stepped_back_by_an_hour_does_not_stop_the_saves(self):
+    wall, saved = [1_000_000.0], threading.Event()
+    with mock.patch("time.time", lambda: wall[0]):
+      # Load the module under the stubbed wall clock, so a module that imports time.time gets this one.
+      manager = _load_manager()(_Log())
+      manager.register(saved.set, every=0.1)
+      wall[0] -= 3600  # an NTP or manual step back of one hour, right after the registration
+      manager._thread.start()
+      try:
+        self.assertTrue(saved.wait(5))  # with the wall clock the save would wait for an hour
+      finally:
+        manager.stop(timeout=5)
 
 
 class TestOwners(unittest.TestCase):

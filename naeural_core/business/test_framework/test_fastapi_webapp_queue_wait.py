@@ -1,14 +1,19 @@
 """FastApiWebAppPlugin answers requests it will not run instead of leaving callers waiting."""
 import ast
+import asyncio
 import inspect
 import pathlib
 import queue
 import textwrap
 import threading
 import time
+import types
 import unittest
+from unittest import mock
 
+from naeural_core.utils import uvicorn_fast_api_ipc_manager as ipc_module
 from naeural_core.utils.fastapi_utils import PostponedRequest
+from naeural_core.utils.uvicorn_fast_api_ipc_manager import UvicornPluginComms
 
 
 FASTAPI_WEBAPP_PATH = pathlib.Path(__file__).resolve().parents[1] / "default" / "web_app" / "fast_api_web_app.py"
@@ -164,8 +169,27 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     self._run_monitor_on(self._request(waited_s=0, request_id="late"))
     [reply] = self._replies()  # the refused timing report gets no answer
     self.assertEqual((reply["id"], reply["value"]["result"]["status_code"]), ("late", 503))
+    # One text for both causes: a refusal by age must not say only that the queue is full.
+    self.assertEqual(
+      reply["value"]["result"]["error"],
+      "Server busy: request queue is full or its oldest entry has waited past the limit.",
+    )
     self.assertEqual([item["id"] for item in self.plugin._incoming_requests], ["old", "q1"])
     self.assertIn("the oldest for 100s", self.plugin.logged[-1])
+
+  def test_monitor_refuses_while_an_expired_timing_report_heads_the_queue(self):
+    # A timing report sent by the uvicorn side 100 s ago is the oldest queued entry.
+    comms = object.__new__(UvicornPluginComms)
+    comms._server_queue = queue.Queue()
+    sent_100s_ago = time.time_ns() - 100 * 10**9
+    with mock.patch.object(ipc_module, "time", types.SimpleNamespace(time_ns=lambda: sent_100s_ago)):
+      asyncio.run(comms.send_profile_event({"req_id": "r0"}))
+    report = comms._server_queue.get_nowait()
+    self.plugin._incoming_requests.extend([report, self._request(waited_s=0, request_id="q1")])
+    self._run_monitor_on(self._request(waited_s=0, request_id="late"))
+    [reply] = self._replies()  # the report carries its queue time, so its age turns the door on
+    self.assertEqual((reply["id"], reply["value"]["result"]["status_code"]), ("late", 503))
+    self.assertEqual([item["id"] for item in self.plugin._incoming_requests], [None, "q1"])
 
   def test_monitor_queues_behind_a_long_but_fresh_queue(self):
     # A burst or a short stall: nothing has expired yet, so nothing is refused (as before).

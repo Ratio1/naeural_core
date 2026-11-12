@@ -6,8 +6,10 @@ _CONFIG = {
   **BasePlugin.CONFIG,
   
   "RUNS_ONLY_ON_SUPERVISOR_NODE" : True,
-  # Request-driven APIs: a queued request wakes the loop, so an idle lap waits up to 0.25 s for one
-  # instead of lapping 27-40 times a second with nothing to do.
+  # Request-driven APIs: a queued request wakes the loop, so a lap with nothing arriving waits up to 0.25 s
+  # for one instead of lapping at the full loop rate with nothing to do. Every input also wakes the loop, and
+  # in the admin pipeline each batch of admin network inputs is one, so on a node with network traffic the
+  # idle lap rate follows that traffic (up to the 50 laps a second of the loop's floor).
   "IDLE_LOOP_WAIT" : 0.25,
 
   'VALIDATION_RULES': {
@@ -104,9 +106,11 @@ class SupervisorFastApiWebApp(BasePlugin):
     """
     Idle wait for a supervisor API, also where the API is disabled on this node.
 
-    An enabled API follows the web-app rule: no wait while uvicorn starts or requests are pending. A
-    disabled API (disabled by config, not a supervisor (oracle) node, or an invalid tunnel configuration
-    such as a missing token) skips the web-app ``_process``, so while it stays disabled no start-up is
+    An enabled API follows the web-app rule: no wait while uvicorn starts or requests are pending. With
+    ``RUNS_ONLY_ON_SUPERVISOR_NODE`` set (the default) the business manager starts the API only on a
+    supervisor node, and a plugin disabled by config does not reach this hook, so the API is seen
+    disabled here only on a supervisor node whose tunnel configuration is invalid (for example a missing
+    tunnel token). It then skips the web-app ``_process``, so while it stays disabled no start-up is
     polled and no request is served. Where it was never enabled its server never comes up, and the
     web-app rule would keep it at the fixed loop rate forever, lapping only to re-check that it is
     disabled. A disabled API therefore waits like any idle plugin.
@@ -134,7 +138,7 @@ class SupervisorFastApiWebApp(BasePlugin):
     0
     """
     if self.__supervisor_fastapi_plugin_running is False:
-      # Disabled here (by config, not an oracle, or an invalid tunnel config): _process returns at once
+      # Disabled here (a supervisor node whose tunnel configuration is invalid): _process returns at once
       # without serving anything, so wait like any idle plugin; _process re-checks the state on each lap.
       # super(BasePlugin, ...) skips the web-app override, which returns 0 while the server is not up.
       return super(BasePlugin, self)._idle_loop_wait()

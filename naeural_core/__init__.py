@@ -1,5 +1,6 @@
-# Loaded on first use (PEP 562): the uvicorn app and the IPC manager process of every FastAPI plugin import
-# only naeural_core.utils.uvicorn_fast_api_ipc_manager and must not pull in the SDK, the Logger and torch.
+# Loaded on first use (PEP 562): the uvicorn app process of every FastAPI plugin imports only
+# naeural_core.utils.uvicorn_fast_api_ipc_manager and must not pull in the SDK, the Logger and torch. The IPC
+# manager process gains nothing: it is spawned and re-runs the node's main script, so it still loads everything.
 def __getattr__(name):
   """
   Import a package-root name on its first use instead of at package import (PEP 562).
@@ -7,9 +8,11 @@ def __getattr__(name):
   Python calls this module-level hook only when ``naeural_core.<name>`` is not already in the module
   globals. The package root used to import ``DecentrAIObject``, ``Logger`` and ``SBLogger`` eagerly, so
   any process importing any ``naeural_core`` submodule also loaded the SDK, the full Logger and torch.
-  That included the uvicorn app and the IPC manager process of every FastAPI plugin, which only need
-  ``naeural_core.utils.uvicorn_fast_api_ipc_manager``. Serving the three names from here keeps those
-  processes light, while every in-tree ``from naeural_core import <name>`` keeps working unchanged.
+  That included the uvicorn app process of every FastAPI plugin, which only needs
+  ``naeural_core.utils.uvicorn_fast_api_ipc_manager``. Serving the three names from here keeps that
+  process light, while every in-tree ``from naeural_core import <name>`` keeps working unchanged. The
+  IPC manager process of each FastAPI plugin does not get lighter: it is spawned and re-runs the node's
+  main script, so it still loads the whole node.
 
   Parameters
   ----------
@@ -31,8 +34,8 @@ def __getattr__(name):
 
   Notes
   -----
-  The eager imports cost about 300 MB RSS in each uvicorn process. A test imports the IPC manager module
-  in a fresh interpreter and checks that torch, numpy, pandas, the SDK and the core Logger stay unloaded.
+  The eager imports loaded torch, numpy, pandas, the SDK and the core Logger into each uvicorn process. A
+  test imports the IPC manager module in a fresh interpreter and checks that they stay unloaded.
 
   Examples
   --------

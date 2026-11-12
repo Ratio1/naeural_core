@@ -35,7 +35,8 @@ class TestIdleWaitOptIns(unittest.TestCase):
     self.assertEqual(_app(running=True, started=True, commands_done=False)._idle_loop_wait(), 0)
 
   def test_a_disabled_api_waits_although_its_server_never_starts(self):
-    # Non-oracle nodes: six such apps lapped ~27 times a second re-checking the enable state.
+    # A supervisor node whose tunnel configuration is invalid: the API lapped at the fixed rate only to
+    # re-check that it is disabled.
     self.assertEqual(_app(running=False, started=False)._idle_loop_wait(), 0.25)
 
 

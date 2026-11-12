@@ -520,7 +520,7 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
         store._set_value("key", "value", owner="node", local_sync_storage_op=True)
       store.on_close()
       self.assertEqual(len(saved), int(pending))
-      self.assertNotIn(flush, manager._saves)  # a closed store is not saved again by the manager
+      self.assertNotIn(flush, manager._saves)  # the closed store is no longer registered with the manager
     self.assertIn("key", saved[0])
     self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)
 

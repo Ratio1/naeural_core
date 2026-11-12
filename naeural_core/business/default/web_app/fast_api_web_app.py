@@ -605,8 +605,10 @@ class FastApiWebAppPlugin(BasePlugin):
 
     The monitor moves requests from the uvicorn side (``_server_queue``) into the plugin's incoming
     queue, where the plugin loop runs their endpoints. It is also the door of that queue: a request
-    is refused at once with a 503 (busy, retryable) when the queue is full or when the request would
-    only expire there, and every request it queues wakes a plugin loop that is waiting idle.
+    is refused at once with a 503 (busy, retryable) when the queue is full or when its oldest entry has
+    already waited past the queue-wait limit, and every request it queues wakes a plugin loop that is
+    waiting idle. The door judges by the age of that oldest entry, not by the expected wait of the new
+    request.
 
     Returns
     -------
@@ -629,9 +631,9 @@ class FastApiWebAppPlugin(BasePlugin):
       flag is re-checked while no request comes) it runs the ``on_request`` hook (not for timing
       reports) and warns when the hook outlasts ``REQUEST_TIMEOUT``. It then queues the request and wakes
       the plugin loop, or refuses it with a 503 when the queue already holds ``MAX_INCOMING_REQUESTS`` or
-      its oldest request has already waited longer than the queue-wait limit (``MAX_QUEUE_WAIT``, capped
-      by ``REQUEST_TIMEOUT``). Refusing at the door answers the caller at once, instead of after the
-      request has waited until it expires, and keeps the plugin loop off callers that have already given up.
+      its oldest entry (a request or a timing report) has already waited longer than the queue-wait limit
+      (``MAX_QUEUE_WAIT``, capped by ``REQUEST_TIMEOUT``). Refusing at the door answers the caller at once
+      instead of after a long wait in a lagging queue.
 
       Returns
       -------
@@ -640,10 +642,13 @@ class FastApiWebAppPlugin(BasePlugin):
       Notes
       -----
       Refusing by the age of the queue head needs no state: it refuses only while the head has already
-      waited past the limit, so the plugin loop will answer it with a 503 without running it, and it stops
-      as soon as the head is within the limit again. A burst or a short stall that has not expired yet is
-      still queued, up to ``MAX_INCOMING_REQUESTS``. A refused timing report gets no answer, as nobody
-      waits for one. An unexpected error outside the per-request handling is logged and ends the thread.
+      waited past the limit, and it stops as soon as the head is within the limit again. It judges by the
+      age of the head, not by the expected wait of the new request: after a stall the plugin loop takes at
+      most ``MAX_INCOMING_PER_LOOP`` queued entries per lap, expired ones included, so while the expired
+      entries drain, new requests that would still have been served in time are refused too. A burst or a
+      short stall that has not expired yet is still queued, up to ``MAX_INCOMING_REQUESTS``. A refused
+      timing report gets no answer, as nobody waits for one. An unexpected error outside the per-request
+      handling is logged and ends the thread.
       """
       try:
         while not self._stop_request_monitor.is_set():
@@ -682,11 +687,13 @@ class FastApiWebAppPlugin(BasePlugin):
           with self._incoming_lock:
             # Queue length under the lock: used by the size check and reported in the refusal log.
             queued = len(self._incoming_requests)
-            # The oldest queued request has already waited past MAX_QUEUE_WAIT, so one queued
-            # behind it would expire too: answer it now, not after it has waited as long.
+            # Enqueue time of the oldest queued entry, a request or a timing report (both carry one). The door
+            # judges by the age of this entry, not by the expected wait of the new request: after a stall the
+            # loop takes at most MAX_INCOMING_PER_LOOP queued entries per lap, expired ones included, so while
+            # the expired ones drain, new requests that would still have been served in time are refused too.
             head_put = self._incoming_requests[0].get('t_put_wall_ns') if queued else None
-            # Age of the queue head in seconds; 0 for an empty queue or a head with no enqueue time
-            # (a timing report), so such a head never triggers the age refusal.
+            # Age of the queue head in seconds; 0 for an empty queue or a head without an integer enqueue time
+            # (the uvicorn side always sends one), so such a head never triggers the age refusal.
             head_wait = (time.time_ns() - head_put) / 1e9 if isinstance(head_put, int) else 0.0
             # Refuse when the queue is at its MAX_INCOMING_REQUESTS cap or its head has expired. The age is
             # read fresh for each request, so the door reopens as soon as the head is within the limit again.
@@ -707,8 +714,11 @@ class FastApiWebAppPlugin(BasePlugin):
                 f"Refusing incoming requests: {queued} queued, the oldest for {head_wait:.0f}s.",
                 color='y'
               )
-            # Answer at once instead of leaving the HTTP side waiting for REQUEST_TIMEOUT.
-            self._reply_unhandled_request(request, 503, "Server busy: request queue is full.")
+            # Answer at once instead of leaving the HTTP side waiting for REQUEST_TIMEOUT. One text names both
+            # causes, so a refusal by age does not claim that the queue is full.
+            self._reply_unhandled_request(
+              request, 503, "Server busy: request queue is full or its oldest entry has waited past the limit."
+            )
       except Exception:
         self.P(f"Request monitor crashed:\n{self.get_exception()}", color='r')
         return

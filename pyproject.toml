@@ -26,7 +26,9 @@ dependencies = [
   "pynvml>=11.4",
   "pyyaml>=6.0",
   "pyarrow>=15",
-  "ratio1>=3.5.67",
+  # 3.5.70 at least: with the lazy package root an older SDK reports a core version from SDK-only clients,
+  # and oracles refuse their dAuth requests.
+  "ratio1>=3.5.70",
   "minio",
   "gql",
   "opencv-python-headless",

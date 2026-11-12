@@ -429,9 +429,13 @@ def stop_on_sigterm(running):
   is ignored: ``docker stop`` and ``systemctl stop`` then wait for their
   timeout and kill the process, and nothing is flushed. With this handler
   SIGTERM ends the main loop the way a STOP command does: the node sends a
-  SHUTDOWN-status heartbeat and closes its managers, and the plugins save
-  their pending state as they close. The stop timeout of the container must
-  leave room for that.
+  SHUTDOWN-status heartbeat and closes its managers and plugins. The chain
+  store saves its pending writes as it closes; the network-monitor and epoch
+  state get no extra save at stop and keep only their periodic save. The
+  stop timeout of the container must leave room for that.
+  A SIGTERM during start-up, once the Orchestrator exists, ends the dAuth
+  wait (no new round starts), lets the managers finish starting and then
+  closes the node without entering the main loop.
 
   SIGTERM must not take the path of an error. A node that leaves with an
   EXCEPTION-status heartbeat is reported as PAST-EXCEPTION by the other
@@ -446,15 +450,19 @@ def stop_on_sigterm(running):
 
   Returns
   -------
-  bool
-    True when the handler was installed; False when called outside the main
-    thread, where handlers cannot be set.
+  None
+
+  Raises
+  ------
+  ValueError
+    When called outside the main thread, where Python cannot install a
+    signal handler. It is not caught: a node must not run with SIGTERM
+    silently unhandled.
 
   Examples
   --------
   >>> running = {}
   >>> stop_on_sigterm(running)
-  True
   >>> running['eng'] = Orchestrator(log=l)   # from here SIGTERM calls eng.request_stop()
   """
   def handler(signum, frame):
@@ -490,15 +498,11 @@ def stop_on_sigterm(running):
     eng.request_stop()
     return
 
-  try:
-    # Without a handler, SIGTERM to PID 1 of a container is ignored and the node is killed after the
-    # stop timeout, losing the state it had not saved yet.
-    signal.signal(signal.SIGTERM, handler)
-  except ValueError:
-    # signal.signal raises ValueError outside the main thread: report it instead of failing the caller.
-    return False
-  # Installed: from now on SIGTERM ends the node through the orderly path above, not by a kill.
-  return True
+  # Without a handler, SIGTERM to PID 1 of a container is ignored and the node is killed after the stop
+  # timeout, losing the state it had not saved yet. Outside the main thread signal.signal raises ValueError,
+  # which is left to fail the caller instead of being swallowed.
+  signal.signal(signal.SIGTERM, handler)
+  return
 
 
 def main(additional_packages: list = None):
@@ -509,8 +513,8 @@ def main(additional_packages: list = None):
   the Logger, installs the optional additional packages, takes the process lock and creates the
   Orchestrator. With the lock held it runs the main loop; without it (another local node with the same id
   is running) it forces a shutdown. The Orchestrator is published to the SIGTERM handler as soon as it
-  exists, so a SIGTERM from then on asks the main loop to stop (the normal SHUTDOWN path) instead of
-  interrupting the start-up.
+  exists, so a SIGTERM from then on asks the node to stop (the normal SHUTDOWN path; during start-up the
+  dAuth wait ends and the main loop is not entered) instead of raising ``KeyboardInterrupt``.
 
   Parameters
   ----------
@@ -532,6 +536,8 @@ def main(additional_packages: list = None):
     When SIGINT, or SIGTERM before the Orchestrator exists, interrupts the start-up: the ``try`` around
     the Orchestrator catches only ``Exception``. A bare ``except:`` in the code it interrupts can still
     swallow it, as it would a Ctrl+C.
+  ValueError
+    When called outside the main thread: ``stop_on_sigterm`` cannot install the SIGTERM handler there.
 
   Examples
   --------
@@ -542,8 +548,11 @@ def main(additional_packages: list = None):
   print("Core Edge Node v{} starting in {}".format(__VER__, app_base_folder), flush=True)
   # Holder shared with the SIGTERM handler; the Orchestrator is stored under 'eng' once it exists.
   running = {}
-  # Install the handler before anything slow (config, package installs, managers), so a SIGTERM during
-  # start-up already ends the start-up instead of being ignored, as it is for PID 1 of a container.
+  # Install the handler before anything slow (config, package installs, managers); without it a SIGTERM is
+  # ignored, as it is for PID 1 of a container. Until the Orchestrator exists a SIGTERM raises
+  # KeyboardInterrupt and ends the start-up. After that it asks the node to stop, through the SHUTDOWN path:
+  # during start-up the dAuth wait ends (no new round starts), the managers still finish starting, and then
+  # the node closes without entering its main loop; a running main loop closes at the end of its lap.
   stop_on_sigterm(running)
   
   CONFIG_FILE = 'config_startup'

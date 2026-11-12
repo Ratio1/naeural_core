@@ -193,8 +193,13 @@ An accepted write only marks the store dirty. The SerializationManager's thread
 (`naeural_core/main/serialization_manager.py`, started by the Orchestrator) saves a
 changed store every `CS_SAVE_INTERVAL` (5 s), so one save covers every write made in
 that window and the plugin thread does not run the save; `on_close()` saves pending
-changes at shutdown. An accepted write reaches the disk 0 to about 6 s later (the
-cadence plus the save itself), and a crash can lose the writes of that window. Do not reintroduce a full-store fsync per write:
+changes at shutdown. That thread checks once a second and runs the saves that
+are due one after another, so an accepted write reaches the disk after up to the
+cadence, plus up to one second until the thread's next check, plus a save of
+another owner that is being written at that moment (on an oracle the
+network-monitor save, 20 MB, measured at 1.5-1.9 s idle and 6.1-6.3 s busy under a
+0.7 CPU limit, longer on a slower host), plus the chain store's own save. A crash
+can lose the writes of that window. Do not reintroduce a full-store fsync per write:
 on mainnet oracles it took 65% of the plugin loop and kept the input queue full.
 Run `test_deployment_lifecycle.py` and `test_chain_store_hsync.py` for this path. For each save, records are copied shallowly under the
 persistence lock, then the copy is pickled, fsynced and atomically replaced

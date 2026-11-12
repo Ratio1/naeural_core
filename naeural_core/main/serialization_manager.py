@@ -15,8 +15,9 @@ interpreter while the save serializes: each save costs the same CPU and disk wor
 import threading
 # A save that raises is logged with its full traceback: the owner is not there to see it.
 import traceback
-# Wall-clock seconds for the cadence of each save.
-from time import time
+# Monotonic seconds for the cadence of each save: with the wall clock, a clock stepped back (NTP or a manual
+# change) would hold every save back for the size of the step.
+from time import monotonic
 
 
 class SerializationManager:
@@ -104,7 +105,8 @@ class SerializationManager:
 
     Notes
     -----
-    All saves share one thread, so a long save delays the others; their owners do not wait for it.
+    All saves share one thread, so a long save delays the others; their owners do not wait for it. The
+    cadence is counted on the monotonic clock, so a change of the wall clock does not move it.
 
     Examples
     --------
@@ -112,8 +114,9 @@ class SerializationManager:
     """
     # Owners register from their own threads while the manager's thread reads the table.
     with self._lock:
-      # The first run is due one cadence from now: the owner has just loaded or created its state.
-      self._saves[save] = [every, time() + every]
+      # The first run is due one cadence from now, on the monotonic clock: the owner has just loaded or
+      # created its state.
+      self._saves[save] = [every, monotonic() + every]
     return
 
   def unregister(self, save):
@@ -134,13 +137,21 @@ class SerializationManager:
     KeyError
       When ``save`` is not registered.
 
+    Notes
+    -----
+    This does not wait for the manager's thread. A save that the thread had already picked (it passed the
+    check under the table lock just before) can still run once after ``unregister`` returned; no later
+    pass picks it again. For the chain store that late save writes the same shared store through an
+    atomic file replace, so nothing is lost.
+
     Examples
     --------
     >>> SerializationManager.instance.unregister(self.__maybe_flush_chain_storage)   # chain store on_close
     """
     # Same lock as register(): the manager's thread may be reading the table right now.
     with self._lock:
-      # Drop the entry so a closed owner is neither saved again nor kept alive by the table.
+      # Drop the entry: no later pass picks this save again and the table no longer keeps the closed owner
+      # alive. A save the thread already picked can still run once after this returns (see Notes).
       del self._saves[save]
     return
 
@@ -175,14 +186,17 @@ class SerializationManager:
     """
     Thread body: once a second, run the saves that are due, until ``stop``.
 
+    The current time is read from the monotonic clock, the clock ``register`` schedules on.
+
     Returns
     -------
     None
     """
     # Wake once a second (one cheap check) and leave as soon as stop() sets the event.
     while not self._stopping.wait(1):
-      # Run what is due now; the owners' threads are not involved.
-      self._run_due(time())
+      # Run what is due now on the monotonic clock, so a wall clock stepped back does not hold the saves back;
+      # the owners' threads are not involved.
+      self._run_due(monotonic())
     return
 
   def _run_due(self, now):
@@ -192,7 +206,8 @@ class SerializationManager:
     Parameters
     ----------
     now : float
-      Current time in seconds; saves whose next run is at or before it are run.
+      Current monotonic time in seconds (``time.monotonic()``); saves whose next run is at or before it
+      are run.
 
     Returns
     -------
@@ -215,8 +230,9 @@ class SerializationManager:
       with self._lock:
         if self._stopping.is_set() or self._saves.get(save) is not entry:
           continue
-        # Schedule the next run from the start of this one, so a slow save does not stretch the cadence.
-        entry[1] = time() + entry[0]
+        # Schedule the next run from the start of this one, so a slow save does not stretch the cadence; on
+        # the monotonic clock, like register() and _run().
+        entry[1] = monotonic() + entry[0]
       try:
         # The owner's own save function: it copies its state under its lock and writes its file as before.
         save()

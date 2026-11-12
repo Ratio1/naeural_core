@@ -244,7 +244,8 @@ class FastApiServerIntegrationTest(unittest.TestCase):
 
 class IpcModuleFootprintTest(unittest.TestCase):
   def test_ipc_module_loads_only_the_standard_library(self):
-    # The uvicorn app and the IPC manager process import only this module; keep the node out of them.
+    # The uvicorn app process imports only this module; keep the node out of it. (The IPC manager process is
+    # spawned and re-runs the node's main script, so this test says nothing about it.)
     code = (
       "import sys, naeural_core.utils.uvicorn_fast_api_ipc_manager\n"
       "heavy = [m for m in ('torch', 'numpy', 'pandas', 'ratio1', 'naeural_core.core_logging') if m in sys.modules]\n"

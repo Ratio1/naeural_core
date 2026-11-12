@@ -93,8 +93,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_RESPONSE = "response"
   CS_SENDER = "sender"
   # Seconds between two saves of a changed chain storage. The SerializationManager runs them on its own
-  # thread at this cadence; one full-store save covers every write accepted since the previous one, so an
-  # accepted write reaches the disk 0 to about 6 s later (the cadence plus the save itself).
+  # thread at this cadence; one full-store save covers every write accepted since the previous one. That
+  # thread checks once a second and runs the saves that are due one after another, so an accepted write
+  # reaches the disk after up to this cadence, plus up to one second until the thread's next check, plus a
+  # save of another owner that is being written at that moment (on an oracle the network-monitor save,
+  # 20 MB, measured at 1.5-1.9 s idle and 6.1-6.3 s busy under a 0.7 CPU limit, longer on a slower host),
+  # plus this store's own save.
   CS_SAVE_INTERVAL = 5
   
   
@@ -1588,10 +1592,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     End the periodic save of this instance, then save pending chain storage changes before the plugin stops.
 
-    The registration made in ``on_init`` is removed first, so the SerializationManager starts no further
-    save of a closed instance and a restarted instance registers its own. A save the manager is writing
-    at that moment is waited for; if it failed it left the store marked as changed, and the final save
-    below writes it again.
+    The registration made in ``on_init`` is removed first, so no later pass of the SerializationManager
+    picks this instance and a restarted instance registers its own. A save that the manager already picked
+    can still run once after the removal, even after this method returned: the manager does not wait for
+    it, and the flush checks the dirty flag before it takes the save lock. That late save writes the same
+    shared store (the dict a restarted instance takes over from the shared plugin memory) through an atomic
+    file replace, so nothing is lost. A save the manager is writing at the moment of the removal is waited
+    for; if it failed it left the store marked as changed, and the final save below writes it again.
 
     Returns
     -------
@@ -1606,8 +1613,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     The final save runs on the closing plugin's own thread, as before.
     """
-    # Stop the periodic save of this instance first: the manager starts no further save of a closed plugin,
-    # and a restarted instance registers its own save.
+    # Stop the periodic save of this instance first: no later pass of the manager picks it, and a restarted
+    # instance registers its own save. A save the manager already picked can still run once after this
+    # method returned; it writes the same shared store through an atomic file replace, so nothing is lost.
     SerializationManager.instance.unregister(self.__maybe_flush_chain_storage)
     # Wait for a save the manager may be writing right now: if that write fails it marks the store dirty
     # again, and the check below must see it, or the changes since the last good save would stay unsaved.

@@ -229,6 +229,28 @@ class UvicornPluginComms:
       return
 
   async def send_profile_event(self, profile):
+    """
+    Send a timing report of an answered request to the plugin.
+
+    The report goes through the same server queue as the requests, as an item with no request id
+    whose value is ``("__profile__", profile)``. The plugin handles it on its loop and answers nothing.
+    The item carries the wall-clock time it was queued, like a request does, because the plugin's
+    request monitor refuses new requests by the age of the oldest queued item: a report at the head
+    of the queue must show its real age, not count as fresh.
+
+    Parameters
+    ----------
+    profile : dict
+      Timings collected for one request; anything that is not a dict is ignored.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> await comms.send_profile_event({"req_id": "ab12", "t_wait_end_ns": 123})   # queues one timing report
+    """
     if not isinstance(profile, dict):
       return
     await asyncio.to_thread(
@@ -236,6 +258,9 @@ class UvicornPluginComms:
       {
         "id": None,
         "value": ("__profile__", profile),
+        # Queue time, read by the plugin's request monitor: with it a report at the head of the queue has
+        # an age, so it no longer switches off the refusal of new requests by the age of that head.
+        "t_put_wall_ns": time.time_ns(),
       }
     )
     return

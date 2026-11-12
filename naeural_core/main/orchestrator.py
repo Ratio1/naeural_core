@@ -346,11 +346,13 @@ class Orchestrator(DecentrAIObject,
 
     Calls ``blockchain_manager.dauth_autocomplete`` in rounds until it returns either None or a non-empty
     dict of variables, sleeping a random 16-29 s after each round that returns an empty dict. No new round
-    starts once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed; the node then continues with
-    its local environment. When dAuth returned variables, the logger config is reloaded so they take effect.
+    starts once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed, or once a stop was requested
+    (``request_stop``, called by the SIGTERM handler); the node then continues with its local environment.
+    When dAuth returned variables, the logger config is reloaded so they take effect.
 
-    The first round allows up to five tries; every later round sends a single request. Before, every round
-    could make five tries, so a round started just before the limit could overrun it by a whole round.
+    The first round allows up to five tries; every later round at most two, so one failure that is not
+    "busy" is retried once instead of ending dAuth. Before, every round could make five tries, so a round
+    started just before the limit could overrun it by a whole five-try round.
 
     Returns
     -------
@@ -358,23 +360,35 @@ class Orchestrator(DecentrAIObject,
 
     Notes
     -----
-    An empty dict means no variables yet (for example a busy oracle), so another round is made; None means
-    ``dauth_autocomplete`` gave up on the request (for example a bad URL), so no further round is made.
+    An empty dict means no variables yet (for example a busy oracle), so another round is made. None means
+    that no further round is useful: ``dauth_autocomplete`` gave up on the request (a bad URL, or on its
+    last try a failure that is not "busy", such as a refused connection, a connect timeout or a status like
+    530), or dAuth is not used on this deployment (with a VPN the SDK returns None without sending a
+    request). A warning is logged when the node continues without dAuth variables at the time limit, after
+    a stop request, or because a later round ended on None. A None in the first round is not warned here,
+    as before: it is the normal answer on a VPN deployment. A stop request does not interrupt the request
+    or the pause in progress.
     """
     
     self.P(f"Node <{self.eth_address}> completing setup for network <{self.evm_network}>...")
     start_ts = time()
     done = False
     tries = 0
-    while not done and (time() - start_ts) < CHECK_AND_COMPLETE_TIMEOUT:
+    # Stays None when a stop was requested before the first round, so the checks after the loop still work.
+    dct_env_output = None
+    # A stop requested during start-up (request_stop, called by the SIGTERM handler) ends the wait: no new
+    # round starts, so a node that is asked to stop does not keep waiting for dAuth up to the time limit.
+    while not done and (time() - start_ts) < CHECK_AND_COMPLETE_TIMEOUT and self._return_code is None:
       tries += 1
       dct_env_output = self.blockchain_manager.dauth_autocomplete(
         dauth_endp=None,  # get automatically
         add_env=True,
         debug=False,
-        # Five tries only in the first round; each later round sends one request, so a round that starts
-        # near the end cannot overrun CHECK_AND_COMPLETE_TIMEOUT by a whole five-try round.
-        max_tries=5 if tries == 1 else 1,
+        # Five tries in the first round; each later round sends at most two requests, so one failure that is
+        # not "busy" (a refused connection, a status like 530) is retried once instead of ending dAuth for
+        # good, and a round that starts near the end cannot overrun CHECK_AND_COMPLETE_TIMEOUT by a whole
+        # five-try round.
+        max_tries=5 if tries == 1 else 2,
         sender_alias=self.cfg_eeid,
       )
       # Will be None in case of bad URL. In that case there is no need to reattempt it.
@@ -389,9 +403,12 @@ class Orchestrator(DecentrAIObject,
         )
     # endwhile not done
 
-    if not done:
-      self.P(f'WARNING: <{self.eth_address}> could not retrieve dAuth in {CHECK_AND_COMPLETE_TIMEOUT}s. '
-             f'Continuing with local environment...')
+    # Warn also when a later round ended on None: dAuth answered "busy" before and then gave up on a failure
+    # that is not "busy", so the node runs on its local environment until it restarts, which the log must
+    # say. Not for a None in the first round: that is also what a VPN deployment gets, without any request.
+    if not done or (dct_env_output is None and tries > 1):
+      self.P(f'WARNING: <{self.eth_address}> could not retrieve dAuth ({tries} rounds in {time() - start_ts:.1f}s, '
+             f'limit {CHECK_AND_COMPLETE_TIMEOUT}s). Continuing with local environment...')
 
     if dct_env_output is not None and len(dct_env_output) > 0:
       self.P(f'Reloading config due to dAuth modification of following env vars: {list(dct_env_output.keys())}')
@@ -1417,8 +1434,12 @@ class Orchestrator(DecentrAIObject,
     Ask the main loop to end in an orderly way.
 
     The loop leaves at its next check and closes as after a STOP command:
-    SHUTDOWN-status heartbeat, managers closed, plugins saved on close. The
-    method only sets a value, so a signal handler may call it.
+    SHUTDOWN-status heartbeat, then the managers and plugins are closed; the
+    chain store saves its pending writes as it closes, while the
+    network-monitor and epoch state get no extra save at stop and keep only
+    their periodic save. During start-up no new dAuth round starts and the
+    main loop is not entered. The method only sets a value, so a signal
+    handler may call it.
 
     It is the target of the SIGTERM handler installed by the entrypoint. A
     container runtime stops the node with SIGTERM; with this method the node
@@ -2862,6 +2883,21 @@ class Orchestrator(DecentrAIObject,
     go back on log to see where that particular stage progress stopped. Multiple layers of loop stage
     debug info have been added for debug purposes.
 
+    A stop requested during start-up (``request_stop``, called by the SIGTERM handler) is acted on before
+    the first lap: when ``_return_code`` is set once ``_init_all_processes`` returns, ``_init_main_loop``
+    and the loop are skipped; when it is set during ``_init_main_loop``, the loop is skipped. In both cases
+    the ``finally`` still runs ``close_main_loop``.
+
+    Returns
+    -------
+    int or None
+      The return code: one set earlier (by a command or by ``request_stop``), ``ct.CODE_SHUTDOWN`` or
+      ``ct.CODE_EXCEPTION`` from the end-of-lap checks, ``ct.CODE_EXCEPTION`` after an exception, or None
+      when the loop ended without a return code (for example after a flag-file shutdown-reset).
+
+    Examples
+    --------
+    >>> return_code = eng.main_loop()   # entrypoint.main()
     """
     captures_data_metadata, dct_servers_inputs, dct_servers_outputs, dct_business_inputs, payloads = None, None, None, None, None
     check_ram_on_shutdown = self.check_ram_on_shutdown
@@ -2869,10 +2905,22 @@ class Orchestrator(DecentrAIObject,
     try:
       return_code = None
       
+      # Complete dAuth and start the managers. A stop requested meanwhile (request_stop, called by the SIGTERM
+      # handler) means no new dAuth round starts, and it is acted on right below.
       self._init_all_processes()      
-      self._init_main_loop()
+      if self._return_code is None:
+        # No stop was requested while dAuth or the managers were starting: send the first heartbeat, prime
+        # the admin pipeline and warm up serving. With a stop requested all three are skipped.
+        self._init_main_loop()
+      # Read the stop request once more, after the warm-up, so the loop below is skipped when it is set.
+      return_code = self._return_code
+      if return_code is not None:
+        self.P("Stop requested during start-up (return code {}): closing without entering the main loop.".format(
+          return_code), color='r')
       
-      while not self.__done:
+      # Enter the loop only without a stop request; otherwise the finally below closes the node at once, and
+      # no first lap starts the business plugins only for them to be closed again.
+      while return_code is None and not self.__done:
         
         shutdown_reset_required = self.check_shutdown_reset_by_file()
         if shutdown_reset_required:

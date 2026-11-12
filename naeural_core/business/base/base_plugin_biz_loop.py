@@ -244,7 +244,7 @@ class _BasePluginLoopMixin(object):
 
     Examples
     --------
-    >>> _CONFIG = {**BasePluginExecutor.CONFIG, 'IDLE_LOOP_WAIT': 0.25}   # wake at most 4 times a second when idle
+    >>> _CONFIG = {**BasePluginExecutor.CONFIG, 'IDLE_LOOP_WAIT': 0.25}   # about 4 laps a second while nothing arrives
     """
     # `IDLE_LOOP_WAIT` is in the base plugin config, so every plugin has it; 0 keeps the fixed-rate loop.
     return self.cfg_idle_loop_wait
@@ -479,12 +479,18 @@ class _BasePluginLoopMixin(object):
     working-hours gates, in that order, but do not run during config updates.
 
     When ``_idle_loop_wait()`` (``IDLE_LOOP_WAIT``) is longer than the lap
-    sleep and the input queue is empty, the lap blocks on ``_loop_wakeup``
-    for up to that many seconds instead of sleeping. Inputs, requests,
-    instance commands, config updates and stop set the event, so the loop
-    acts on them at once instead of after the timeout, while an idle plugin
-    stops polling at a fixed rate. A set event ends the wait at once, so the
-    20 ms floor above does not apply to a lap that follows a wake-up.
+    sleep and the input queue is empty, the lap first sleeps the lap sleep
+    and then blocks on ``_loop_wakeup`` for the rest of ``IDLE_LOOP_WAIT``,
+    so a lap with nothing arriving lasts about ``IDLE_LOOP_WAIT`` seconds.
+    Inputs, requests, instance commands, config updates and stop set the
+    event, so instead of waiting for the timeout, work that arrives during
+    the wait ends it at once and work that arrives during the sleep is acted
+    on as soon as the sleep ends, while an idle plugin stops polling at a
+    fixed rate. Because the sleep comes first, the 20 ms floor above also
+    applies to a lap that follows a wake-up, so the loop stays at most 50 Hz.
+    Every input wakes the loop, so an opted-in plugin that receives inputs it
+    does not use (for example admin network inputs) laps as often as they
+    arrive, up to that 50 Hz.
     """
     try: 
       plugin_loop_initialized = False
@@ -578,9 +584,14 @@ class _BasePluginLoopMixin(object):
           # has work of its own, e.g. a web app that is starting or has queued requests.
           idle_wait = self._idle_loop_wait()
           if idle_wait > sleep_time and self.input_queue_size == 0:
-            # Nothing queued: block until a producer sets the event (after queueing its
-            # work) or idle_wait passes. The lap that follows sees what woke it.
-            self._loop_wakeup.wait(idle_wait)
+            # Sleep the normal lap time first, so the 20 ms floor holds for every lap: a producer that sets the
+            # event on every lap (for example a client sending requests back to back) cannot drive more than
+            # 50 laps a second.
+            sleep(sleep_time)
+            # Nothing queued: block for the rest of idle_wait until a producer sets the event (after queueing
+            # its work). Work that arrived during the sleep has already set it, so the wait returns at once.
+            # The lap that follows sees what woke it.
+            self._loop_wakeup.wait(idle_wait - sleep_time)
             # Re-arm for the next idle lap. A set() landing between wait() and clear() loses no work: producers
             # store their work before set(), and the loop re-checks commands, the input queue and
             # _idle_loop_wait() before it can block again.

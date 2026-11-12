@@ -113,24 +113,49 @@ class SerializationManager:
       The owner's save function, called with no arguments. It must be safe to call from another thread
       (take the owner's lock while it copies the state) and should return quickly when nothing changed.
       Its ``__qualname__`` names the thread and the statistics line, so anything else fails here.
-    every : float
-      Seconds between two runs, counted from the start of a run. The first run comes ``every`` seconds
-      after the registration.
+    every : int or float
+      Seconds between two runs, counted from the start of a run; a positive, finite number (a bool is
+      refused). The first run comes ``every`` seconds after the registration.
 
     Returns
     -------
     None
 
+    Raises
+    ------
+    ValueError
+      When ``every`` is not a positive, finite int or float: 0, a negative number, NaN, infinity, a bool,
+      None or a string.
+    AttributeError
+      When ``save`` has no ``__qualname__``.
+    RuntimeError
+      When the save's thread cannot be started.
+
     Notes
     -----
+    When this raises nothing has changed: no thread was started and an earlier registration of ``save``
+    keeps running.
+
     Each save has its own thread, so a long save does not delay another one; their owners do not wait for
     it either. The saves still compete for the interpreter and the disk. The cadence is counted on the
-    monotonic clock, so a change of the wall clock does not move it.
+    monotonic clock, so a change of the wall clock does not move it. The thread checks once a second, so a
+    cadence below one second runs the save about once a second.
 
     Examples
     --------
     >>> SerializationManager.instance.register(self.netmon.network_save_status, every=120)
+    >>> SerializationManager.instance.register(self.netmon.network_save_status, every=0)
+    Traceback (most recent call last):
+    ValueError: every must be a positive, finite number of seconds, got 0 for <bound method ...>.
     """
+    # New: refuse a cadence that is not a positive, finite number. With 0 or less the save would be due again at
+    # every check of its thread, so a 20 MB save would run back to back; with NaN or infinity no run is ever
+    # due, so the save would silently never run. A bool is refused too, as the chain store refuses one for its
+    # timeout.
+    if isinstance(every, bool) or not isinstance(every, (int, float)) or not 0 < every < float("inf"):
+      # Loudly and before anything changes, like a save without __qualname__: the owner's start fails with
+      # the cadence it computed.
+      raise ValueError("every must be a positive, finite number of seconds, got {!r} for {!r}.".format(every, save))
     # A new entry at every registration, which the save's thread compares with the table: the first run is
     # due one cadence from now, on the monotonic clock (the owner has just loaded or created its state).
     entry = [every, monotonic() + every]

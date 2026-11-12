@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +21,32 @@ def _load_manager():
 
 
 SerializationManager = _load_manager()
+
+
+def _load_network_monitor_plugin(manager):
+  """
+  NetMon01Plugin from its source, with stand-ins for what it imports from the node.
+
+  Parameters
+  ----------
+  manager : object
+    What ``SerializationManager.instance`` is inside the loaded module.
+
+  Returns
+  -------
+  type
+    The plugin class; its base is an empty class with an empty CONFIG.
+  """
+  source = (_ROOT / "business" / "default" / "admin" / "net_mon_01.py").read_text(encoding="utf-8")
+  # Its imports would load the node (as in test_chain_store_hsync, the source is run without them).
+  source = "\n".join(line for line in source.splitlines() if not line.startswith("from naeural_core."))
+  namespace = {
+    "BasePluginExecutor": type("BasePluginExecutor", (), {"CONFIG": {"VALIDATION_RULES": {}}}),
+    "_NetworkMonitorMixin": type("_NetworkMonitorMixin", (), {}), "NMonConst": None,
+    "NET_MON_01_SUPERVISOR_LOG_TIME": None, "SerializationManager": SimpleNamespace(instance=manager),
+  }
+  exec(compile(source, "net_mon_01.py", "exec"), namespace)  # noqa: S102
+  return namespace["NetMon01Plugin"]
 
 
 class _Log:
@@ -168,6 +195,18 @@ class TestCadence(unittest.TestCase):
     self.assertEqual(len(self.manager._saves), 1)
     self.tick(owner.save, time.monotonic() + 101)
     self.assertEqual(self.runs, ["owner"])
+
+  def test_a_cadence_that_is_not_a_positive_number_is_refused_and_nothing_changes(self):
+    # With 0 or less a 20 MB save would run back to back, with NaN or infinity never; a bool, None or a string
+    # is a mistake.
+    save = self.save("store")
+    self.manager.register(save, every=100)
+    entry, threads = self.manager._saves[save], self.manager._threads
+    for every in (0, 0.0, -5, float("nan"), float("inf"), True, None, "120"):
+      with self.subTest(every=every), self.assertRaises(ValueError):
+        self.manager.register(save, every=every)
+    self.assertIs(self.manager._saves[save], entry)  # the earlier registration keeps running
+    self.assertIs(self.manager._threads, threads)  # and no thread was started
 
   def test_only_a_function_or_a_method_can_be_registered(self):
     # The thread and the statistics line are named after the save's __qualname__.
@@ -347,11 +386,59 @@ class TestOwners(unittest.TestCase):
     on_init = source.split("  def on_init(self):", 1)[1].split("\n  def ", 1)[0]
     process = source.split("  def _process(self):", 1)[1].split("\n  def ", 1)[0]
     self.assertIn("SerializationManager.instance.register(save, every=every)", on_init)
-    self.assertIn("* self.cfg_process_delay", on_init)  # the cadence in seconds, not in iterations
+    self.assertIn("* max(self.cfg_process_delay, 1)", on_init)  # the cadence in seconds, not in iterations
     code = "\n".join(line for line in process.splitlines() if not line.strip().startswith("#"))
     code = code.split('"""', 2)[2]  # without the docstring
     self.assertNotIn("network_save_status(", code)
     self.assertNotIn("epoch_manager.save_status(", code)
+
+  def netmon_cadences(self, supervisor, process_delay, save_nmon_each=12, manager=None):
+    """
+    Run NetMon01Plugin.on_init on a stand-in node and return the cadences its save was registered with.
+
+    Parameters
+    ----------
+    supervisor : bool
+      True for an oracle.
+    process_delay, save_nmon_each : int or float
+      The plugin's PROCESS_DELAY and SAVE_NMON_EACH.
+    manager : SerializationManager or None
+      The manager on_init registers with; None records the cadence without one.
+
+    Returns
+    -------
+    list
+      The cadences registered, in seconds. The plugin's log lines are left in ``self.netmon_lines``.
+    """
+    registered, self.netmon_lines = [], []
+    manager = manager or SimpleNamespace(register=lambda save, every: registered.append(every))
+    plugin_class = _load_network_monitor_plugin(manager)
+    plugin = plugin_class.__new__(plugin_class)
+    netmon = SimpleNamespace(network_save_status=lambda: None, epoch_manager=SimpleNamespace(save_status=lambda: None))
+    # Without np the sending period, not set in os_environ, ends as 0 in on_init's own except, as on a node.
+    vars(plugin).update(
+      cfg_supervisor=supervisor, is_supervisor_node=supervisor, cfg_supervisor_log_time=None, os_environ={},
+      cfg_save_nmon_each=save_nmon_each, cfg_process_delay=process_delay, netmon=netmon, const=mock.Mock(),
+      P=lambda msg, **kwargs: self.netmon_lines.append(msg),
+    )
+    plugin.on_init()
+    return registered
+
+  def test_the_network_monitor_saves_every_so_many_iterations_of_at_least_one_second(self):
+    # The shipped PROCESS_DELAY values (3, 5, 10, 20) keep their cadence: 12 iterations on an oracle, 30 elsewhere.
+    for delay in (3, 5, 10, 20):
+      self.assertEqual(self.netmon_cadences(True, delay) + self.netmon_cadences(False, delay), [12 * delay, 30 * delay])
+    # PROCESS_DELAY 0 is valid for the plugin loop: the save still gets a cadence the manager accepts, and the
+    # log says which.
+    self.assertEqual(self.netmon_cadences(False, 0.5), [30])
+    self.assertEqual(self.netmon_cadences(True, 0), [12])
+    self.assertIn("Netmon status save registered every 12s (PROCESS_DELAY=0)", self.netmon_lines)
+    # SAVE_NMON_EACH below 1 gives an oracle no cadence: the manager refuses it and the plugin does not start.
+    manager = SerializationManager(_Log())
+    # Stopped at the end, so a thread started if the refusal regressed does not outlive this test.
+    self.addCleanup(manager.stop, timeout=5)
+    with self.assertRaises(ValueError):
+      self.netmon_cadences(True, 10, save_nmon_each=0, manager=manager)
 
   def test_the_chain_store_registers_its_flush_right_after_loading_the_replica(self):
     # Its periodic save exists only through this registration; on_close removes it, so it must come before

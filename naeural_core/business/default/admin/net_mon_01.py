@@ -49,7 +49,7 @@ _CONFIG = {
   # enough so that the network status "often enough" meaning if there are 5-6 restarts per day
   # each summing up 1 minute (total 5-6 minutes) is way below 1% of the day. 
   # The default value is 12 which means that the network status is saved every 2 minutes
-  "SAVE_NMON_EACH"      : 12, # this saves each SAVE_NMON_EACH * PROCESS_DELAY seconds
+  "SAVE_NMON_EACH"      : 12, # oracle: saves each SAVE_NMON_EACH (at most 20) * PROCESS_DELAY s, PROCESS_DELAY counted as at least 1
 
   'VALIDATION_RULES': {
     **BasePluginExecutor.CONFIG['VALIDATION_RULES'],
@@ -103,19 +103,37 @@ class NetMon01Plugin(
     control how the current network is sent (only online nodes, index by address, sending period,
     compression) are read from the environment. Last, the periodic save of the network status is
     registered with the SerializationManager, which runs it on a thread kept for this save alone, so this
-    plugin's thread no longer runs the save.
+    plugin's thread no longer runs the save. The cadence it was registered with is logged.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------
     None
 
+    Raises
+    ------
+    ValueError
+      From ``SerializationManager.register`` when ``SAVE_NMON_EACH`` is below 1 on an oracle: the cadence is
+      then not positive and the plugin does not start. From 0 to 1 it used to fail at every iteration, with
+      a division by zero.
+
     Notes
     -----
     An oracle saves the heartbeat history and the epochs status every ``SAVE_NMON_EACH`` iterations (at
     most 20); any other node saves only its epochs status, every 30 iterations. One iteration is
-    ``PROCESS_DELAY`` seconds, so with the defaults that is every 120 s and every 300 s, as before. The
-    cadence is read once, here: a later change of ``SAVE_NMON_EACH`` or ``PROCESS_DELAY`` applies when the
-    plugin starts again (before, it applied from the next iteration).
+    ``PROCESS_DELAY`` seconds, counted as at least one second: with the defaults that is every 120 s and every
+    300 s, as before, and with a ``PROCESS_DELAY`` below one second (0 is valid for the plugin loop) every
+    12 s and every 30 s. Without that minimum, a ``PROCESS_DELAY`` of 0 would give a cadence of 0, which the
+    SerializationManager refuses, and the plugin would not start. The cadence is read once, here: a later
+    change of ``SAVE_NMON_EACH`` or ``PROCESS_DELAY`` applies when the plugin starts again (before, it
+    applied from the next iteration).
+
+    Examples
+    --------
+    >>> plugin.on_init()   # an oracle with PROCESS_DELAY 10: its status is saved every 12 * 10 = 120 s
     """
     # the following code was left here for historical reasons only
     # convert supervisor to bool if needed
@@ -173,13 +191,19 @@ class NetMon01Plugin(
     # only its epochs status.
     save = self.netmon.network_save_status if self.cfg_supervisor else self.netmon.epoch_manager.save_status
     # The same cadence as before, in seconds: every SAVE_NMON_EACH iterations (at most 20) on an oracle, every
-    # 30 iterations on any other node, one iteration being PROCESS_DELAY seconds. It is read here, once: a
-    # later change of those two settings applies when the plugin starts again.
-    every = (int(min(self.cfg_save_nmon_each, 20)) if self.cfg_supervisor else 30) * self.cfg_process_delay
+    # 30 iterations on any other node, one iteration being PROCESS_DELAY seconds and now at least one second.
+    # PROCESS_DELAY 0 is valid for the plugin loop (sibling admin plugins ship with it), but as a cadence it
+    # would run a 20 MB save back to back and the SerializationManager refuses it. One second per iteration
+    # is the chosen minimum: it is below every shipped value (3 to 20 s), so those are unchanged, and it keeps
+    # two saves at least as many seconds apart as there are iterations between them (12 s on an oracle by
+    # default, 30 s elsewhere). It is read here, once: a later change of those two settings applies when the
+    # plugin starts again.
+    every = (int(min(self.cfg_save_nmon_each, 20)) if self.cfg_supervisor else 30) * max(self.cfg_process_delay, 1)
     # The SerializationManager runs the save on a thread kept for this save alone. On this thread one save
     # stopped this plugin's iteration (history, rankings, the current-network payload) for 1.5-1.9 s on an
     # idle node and 6.1-6.3 s on a busy one (20 MB, 0.7 CPU); now the iteration does not wait for it.
     SerializationManager.instance.register(save, every=every)
+    self.P("Netmon status save registered every {}s (PROCESS_DELAY={})".format(every, self.cfg_process_delay))
     return
   
   @property

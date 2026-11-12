@@ -1820,19 +1820,37 @@ class Orchestrator(DecentrAIObject,
     return
 
   def _get_admin_pipeline_running_streams_snapshot(self):
-    """Return a running-stream snapshot limited to `admin_pipeline`.
+    """Return a capture-safe snapshot of the eligible admin pipeline only.
 
     Returns
     -------
     dict
-        Single-entry admin-pipeline snapshot, or an empty dict when absent.
+        Detached single-entry snapshot, or an empty dict when the admin pipeline
+        is absent from canonical configuration or is not runtime-eligible.
+
+    Notes
+    -----
+    Eligibility and the canonical copy share the runtime configuration lock.
+    Only the selected admin configuration is traversed, so this recurring lane
+    does not copy or resolve unrelated pipelines. The existing capture builder
+    resolves current environment references outside ``PLUGINS`` while preserving
+    canonical plugin secret references; no snapshot is cached between calls.
     """
-    running_streams = self._get_capture_streams_snapshot()
-    if ct.CONST_ADMIN_PIPELINE_NAME not in running_streams:
-      return {}
-    return {
-      ct.CONST_ADMIN_PIPELINE_NAME: running_streams[ct.CONST_ADMIN_PIPELINE_NAME]
-    }
+    self._ensure_runtime_secret_resolution_state()
+    admin_name = ct.CONST_ADMIN_PIPELINE_NAME
+    with self._runtime_config_lock:
+      if (
+        admin_name not in self._runtime_dct_config_streams
+        or admin_name not in self._current_dct_config_streams
+      ):
+        return {}
+      # Runtime values contain plugin plaintext; copy canonical state under the
+      # same lock as eligibility, preserving even a present empty admin mapping.
+      canonical_admin = deepcopy(self._current_dct_config_streams[admin_name])
+
+    # Transform the detached copy outside the lock, using the same redaction
+    # boundary as the all-stream capture path without traversing other streams.
+    return {admin_name: build_capture_pipeline_config(canonical_admin)}
 
   def collect_data(self):
     """

@@ -98,6 +98,27 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## Plugins and business manager
 
+- Linear centroid tracking computes row priority and nearest-column indices
+  once per assignment update. Its distance matrix does not change inside the
+  greedy loop, so repeated full-matrix argmin reductions add no information.
+  Preserve first-column ties, used-column conflicts, thresholds, recovery and
+  per-call freshness; this is not a different assignment algorithm or cache.
+  In the controlled E2 image, run
+  `python -m unittest naeural_core.utils.test_centroid_object_tracker_assignment`.
+  It uses real runtime imports and includes the existing six recovery cases
+  without executing their standalone stub loader.
+- Tracker metadata matching builds an ordered rectangle index during the first
+  detection's original scan and reuses it only within that call. Flat-four
+  numeric track rectangles with warning-free int32 casts use the fast path for
+  batches larger than two. Tiny batches and unusual shapes/dtypes retain the
+  legacy scan and broadcasting/cast behavior.
+  Duplicate rectangles preserve all matches in order, lazy metadata reads and
+  partial writes on failure. This does not change track assignment or IDs.
+  In the controlled E2 image, run
+  `python -m unittest naeural_core.business.test_framework.test_tracker_result_matching`
+  against the installed candidate core package with its real runtime imports.
+  Keep `python naeural_core/utils/test_centroid_object_tracker_recovery.py` as
+  supplemental linear-recovery coverage; its import stubs are not image acceptance.
 - `ct.PLUGIN_SEARCH.BLOCKED_BIZ_PLUGINS` (remote code execution plugins) are never instantiated, on
   any network, even from saved pipeline configs. Deeploy operations that include them fail with
   `CONFIGURATION_REJECTED`.
@@ -139,6 +160,11 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
   are canonical and redacted. Only BusinessManager receives `_runtime_dct_config_streams`, where
   `$EE_*` references and dAuth placeholders are resolved in memory. CaptureManager gets only
   runtime-eligible pipelines with redacted `PLUGINS`.
+- The recurring admin capture snapshot selects and copies only the eligible canonical
+  `admin_pipeline` under the runtime configuration lock, then applies the usual capture-safe
+  builder outside the lock. Do not route this lane through the all-stream snapshot or cache
+  its result: unrelated pipelines must not be traversed, and configuration/environment
+  changes must remain visible on the next call.
 - Pipelines with unresolved dAuth secrets are withheld and retried by one tracked worker. The cache
   key is pipeline name, job ID, `DEEPLOY_SPECS.date_updated` and the canonical `PLUGINS` hash; a
   fetch result applies only if the canonical snapshot is unchanged.

@@ -59,8 +59,7 @@ class _MultiClassTrackerMixin:
 
   def _match_tracking_results(self, img_inference, img_tracking_results, valid_class):
     """
-    Matches all inferences to the returned objects of the tracker,
-    then updates the inference dictionary with required info.
+    Attach tracker metadata using an ordered, call-local rectangle index.
 
     Parameters
     ----------
@@ -71,20 +70,56 @@ class _MultiClassTrackerMixin:
     valid_class : str
         The class of objects being tracked.
 
+    Returns
+    -------
+    None
+        Matching inference dictionaries are updated in place.
+
+    Notes
+    -----
+    The first detection retains the original scan and builds the index as it
+    goes, so a later malformed track cannot preempt earlier metadata writes.
+    Subsequent flat-four detections reuse it only when every track has ordinary
+    numeric coordinates with warning-free int32 conversion. Other shapes/dtypes
+    retain NumPy broadcasting and repeated cast warnings through the old scan.
+    Duplicate keys retain every match in insertion order, including earlier
+    metadata failures; no state survives the call. Tracker records must remain
+    stable during this synchronous mapping step, as in ``_track_objects``.
     """
-    for inference in img_inference:
-        inference_tlbr = np.array(self.get_inference_track_tlbr(inference)).astype(np.int32)
-        for track_id, object_info in img_tracking_results.items():
-            object_rectangle = np.array(object_info['rectangle']).astype(np.int32)
-            if (
-                np.all(inference_tlbr == object_rectangle)
-                and self.__get_track_class(inference) == valid_class
-            ):
-                inference[ct.TRACK_ID] = track_id
-                inference[ct.TRACKING_STARTED_AT] = object_info['first_update']
-                alive_time = (object_info['last_update'] - object_info['first_update']).total_seconds()
-                inference[ct.TRACKING_ALIVE_TIME] = alive_time
-                inference[ct.APPEARANCES] = object_info['appearances']
+    rectangle_index = {}
+    # Tiny batches do not amortize index construction; unsized inputs also scan.
+    can_index = isinstance(img_inference, (list, tuple)) and len(img_inference) > 2
+    for inference_index, inference in enumerate(img_inference):
+      inference_tlbr = np.array(self.get_inference_track_tlbr(inference)).astype(np.int32)
+      indexed = can_index and inference_index > 0 and inference_tlbr.shape == (4,)
+      candidates = (rectangle_index.get(tuple(inference_tlbr), ()) if indexed
+                    else img_tracking_results.items())
+      for track_id, object_info in candidates:
+        if not indexed:
+          raw_rectangle = np.array(object_info['rectangle'])
+          object_rectangle = raw_rectangle.astype(np.int32)
+          if can_index and inference_index == 0:
+            # Complex/object/string casts or non-finite/out-of-range floats may
+            # warn or have conversion side effects: repeat their legacy scan.
+            safe_numeric = raw_rectangle.dtype.kind in 'biu' or (
+              raw_rectangle.dtype.kind == 'f' and raw_rectangle.shape == (4,)
+              # Python floats avoid NumPy casting the int32 bounds to float16.
+              and all(-2147483648 <= float(value) < 2147483648 for value in raw_rectangle)
+            )
+            if object_rectangle.shape == (4,) and safe_numeric:
+              rectangle_index.setdefault(tuple(object_rectangle), []).append((track_id, object_info))
+            else:
+              can_index = False
+          if not np.all(inference_tlbr == object_rectangle):
+            continue
+        if self.__get_track_class(inference) == valid_class:
+          # Keep metadata reads lazy and ordered; a duplicate's last valid match
+          # wins, but a malformed earlier match must still fail first.
+          inference[ct.TRACK_ID] = track_id
+          inference[ct.TRACKING_STARTED_AT] = object_info['first_update']
+          alive_time = (object_info['last_update'] - object_info['first_update']).total_seconds()
+          inference[ct.TRACKING_ALIVE_TIME] = alive_time
+          inference[ct.APPEARANCES] = object_info['appearances']
 
   def __get_track_class(self, inference):
       """

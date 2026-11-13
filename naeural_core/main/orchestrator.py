@@ -411,9 +411,10 @@ class Orchestrator(DecentrAIObject,
         )
     # endwhile not done
 
-    # Warn also when a later round ended on None: dAuth answered "busy" before and then gave up on a failure
-    # that is not "busy", so the node runs on its local environment until it restarts, which the log must
-    # say. Not for a None in the first round: that is also what a VPN deployment gets, without any request.
+    # Warn also when a later round ended on None: an earlier round got an empty dict (for example from a busy
+    # oracle), and this round gave up on a failure that is not "busy". The node then runs on its local
+    # environment until it restarts, and the log must say so. Do not warn for a None in the first round: a VPN
+    # deployment also gets None there, without sending any request.
     if not done or (dct_env_output is None and tries > 1):
       self.P(f'WARNING: <{self.eth_address}> could not retrieve dAuth ({tries} rounds in {time() - start_ts:.1f}s, '
              f'limit {CHECK_AND_COMPLETE_TIMEOUT}s). Continuing with local environment...')

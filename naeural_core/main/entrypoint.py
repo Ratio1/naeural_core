@@ -488,6 +488,12 @@ def stop_on_sigterm(running):
     ------
     KeyboardInterrupt
       When SIGTERM arrives before ``main`` has stored the Orchestrator in ``running``.
+
+    Examples
+    --------
+    Never called directly: ``stop_on_sigterm`` installs it, and Python calls it on each SIGTERM.
+
+    >>> signal.signal(signal.SIGTERM, handler)   # in stop_on_sigterm()
     """
     # Read the Orchestrator at signal time: main stores it only after the constructor has run.
     eng = running.get('eng')
@@ -524,9 +530,10 @@ def main(additional_packages: list = None):
   Returns
   -------
   tuple
-    ``(exit_code, eng)``: the return code of the main loop (None after a flag-file shutdown-reset) or of
-    the forced shutdown (``ct.CODE_EXCEPTION`` when an exception escaped), and the Orchestrator, or None
-    when it was not created.
+    ``(exit_code, eng)``: ``exit_code`` is the return code of the main loop (None after a flag-file
+    shutdown-reset), ``ct.CODE_EXCEPTION`` from the forced shutdown when another local node already holds
+    the process lock, or ``ct.CODE_EXCEPTION`` when an exception escaped; ``eng`` is the Orchestrator, or
+    None when it was not created.
 
   Raises
   ------

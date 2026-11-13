@@ -1058,14 +1058,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     A write that leaves the replica as it was does not mark it for a save: a
     delete of a key this replica does not hold, and a local write whose value
-    equals the stored one (``==``) with the stored owner and readonly. Such a
-    write is still stored (its confirmations are reset), broadcast and
-    confirmed as before. What then differs between memory and the file until
-    the next save are the confirmation fields, which only the wait loop and
-    the confirmation handler of a write in progress use (a hash-sync answer
-    carries them and its receiver ignores them), and the value's type when
-    the new value is equal to the stored one but of another type (``1`` and
-    ``1.0``).
+    equals the stored one (``==``) with the stored owner and readonly. The
+    identical local write is still stored (its confirmations are reset),
+    broadcast and confirmed as before. A delete of a key not held stores
+    nothing; when it is local it is broadcast and its wait ends at once, as
+    for any delete. After an identical write, what differs between memory and
+    the file until the next save are the confirmation fields, which only the
+    wait loop and the confirmation handler of a write in progress use (a
+    hash-sync answer carries them and its receiver ignores them), and the
+    value when the new one is equal to the stored one but not in the same
+    form (``1`` and ``1.0``, or a dict with its keys in another order).
 
     Every call with a valid key is counted once for the ``CSTORE_STATS``
     line, by the label ``<bucket>/<origin>/<outcome>``: the bucket is the

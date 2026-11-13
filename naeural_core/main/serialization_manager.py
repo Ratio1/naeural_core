@@ -12,10 +12,10 @@ an idle node and 1.3 s on a busy one, and one network-monitor save (20 MB) 1.5-1
 owner no longer runs the save. It can still wait briefly for the lock the save copies the state under and
 for the interpreter while the save serializes: each save costs the same CPU and disk work as before.
 
-Why one thread per save: when all saves shared one thread, a chain-store save that became due while the
-network-monitor save was being written waited for it, so an accepted chain-store write reached the disk
-seconds later. Now saves no longer wait for each other. They still compete for the interpreter and the
-disk when two of them write at the same time.
+Why one thread per save and not one thread for all saves: on a shared thread, a chain-store save that
+became due while the network-monitor save was being written would wait for it, so an accepted chain-store
+write would reach the disk seconds later. With a thread each, the chain-store save does not wait for the
+network-monitor save. They still compete for the interpreter and the disk when both write at the same time.
 
 Every ``STATS_INTERVAL`` seconds each thread logs one ``SERIALIZATION_STATS`` line with how many times its
 save ran and how long the runs took in total and at most; this is how the cost of each save is read from a
@@ -59,6 +59,12 @@ class SerializationManager:
     Returns
     -------
     None
+
+    Examples
+    --------
+    >>> manager = SerializationManager(log)   # start() does this and publishes it as the instance
+    >>> manager._saves, manager._threads
+    ({}, [])
     """
     # Keep the node logger: a save that raises is reported in the node log with its traceback.
     self.log = log
@@ -69,8 +75,8 @@ class SerializationManager:
     self._lock = threading.Lock()
     # Set by stop(); it also wakes every save's thread from its one-second wait.
     self._stopping = threading.Event()
-    # Was: the one thread that ran all saves, created here. Now register() starts one thread per save and
-    # keeps it in this list, so stop() can wait for each. The list is replaced, never changed in place.
+    # The threads register() started, one per registration, so stop() can wait for each; a register() that
+    # starts a thread also drops the ones that have ended. The list is replaced, never changed in place.
     self._threads = []
     return
 
@@ -93,8 +99,8 @@ class SerializationManager:
     --------
     >>> SerializationManager.start(self.log)   # Orchestrator.startup()
     """
-    # Publish the manager, so owners can register as soon as start() returns. There is no thread to start
-    # here any more: register() starts the thread of each save.
+    # Publish the manager, so owners can register as soon as start() returns. No thread starts here:
+    # register() starts the thread of each save.
     cls.instance = cls(log)
     # Hand the running manager back; owners normally reach it through SerializationManager.instance.
     return cls.instance
@@ -159,9 +165,11 @@ class SerializationManager:
     # A new entry at every registration, which the save's thread compares with the table: the first run is
     # due one cadence from now, on the monotonic clock (the owner has just loaded or created its state).
     entry = [every, monotonic() + every]
-    # Was: every save ran on the manager's one thread, so a save that became due waited while another one
-    # was being written. Now each save gets a daemon thread of its own (a killed node does not wait for it,
-    # stop() does), named after the save; anything without a __qualname__ fails here, before the table changes.
+    # Before, each owner ran its save on its own plugin thread. Now each save gets a daemon thread of its own:
+    # the owner's thread does not spend the write, and a chain-store save that becomes due does not wait while
+    # the network-monitor save is being written, as it would on one thread shared by all saves. A killed node
+    # does not wait for the thread, stop() does. The thread is named after the save; anything without a
+    # __qualname__ fails here, before the table changes.
     thread = threading.Thread(
       target=self._run, args=(save, entry), name='serialization_manager:' + save.__qualname__, daemon=True
     )
@@ -241,8 +249,8 @@ class SerializationManager:
     """
     # Ask every thread to end after the save it may be in, and wake those that are waiting.
     self._stopping.set()
-    # Was: wait for the one thread. Now there is one thread per save, and the timeout bounds the whole stop,
-    # so all of them are waited for until one deadline on the monotonic clock.
+    # One thread per save, and the timeout bounds the whole stop, so all of them are waited for until one
+    # deadline on the monotonic clock.
     deadline = monotonic() + timeout
     # Every thread register() started; one that has ended returns at once.
     for thread in self._threads:
@@ -253,10 +261,10 @@ class SerializationManager:
 
   def _run(self, save, entry):
     """
-    Thread body of one save: once a second, run it when it is due, until it is no longer registered.
+    Thread body of one save: once a second, run it when it is due, until this registration of it ends.
 
-    The current time is read from the monotonic clock, the clock ``register`` schedules on. The thread
-    also ends when ``stop`` is called.
+    The registration ends when the save is unregistered or registered again. The current time is read from
+    the monotonic clock, the clock ``register`` schedules on. The thread also ends when ``stop`` is called.
 
     Parameters
     ----------
@@ -268,14 +276,24 @@ class SerializationManager:
     Returns
     -------
     None
+
+    Examples
+    --------
+    Never called directly: ``register`` starts it as the save's thread.
+
+    >>> thread = threading.Thread(
+    ...   target=self._run, args=(save, entry), name='serialization_manager:' + save.__qualname__, daemon=True
+    ... )
+    >>> thread.start()   # under self._lock, in register()
     """
     # New: this save's statistics since its last line, kept by this thread alone: when the counting began,
     # the number of runs, and their total and longest duration in seconds.
     stats = [monotonic(), 0, 0.0, 0.0]
     # Wake once a second (one cheap check) and leave as soon as stop() sets the event.
     while not self._stopping.wait(1):
-      # Was: run every save that is due, one after another. Now only this one, on the monotonic clock so a
-      # wall clock stepped back does not hold it back, and the thread ends once the save is not registered.
+      # Run only this thread's save, on the monotonic clock so a wall clock stepped back does not hold it back;
+      # the thread ends once this registration of the save is gone (unregistered or registered again) or
+      # stop() was called.
       if not self._run_due(save, entry, monotonic(), stats):
         return
     return
@@ -307,15 +325,23 @@ class SerializationManager:
     -----
     A save that raises is logged with its traceback and tried again at its next cadence; it does not
     stop this thread or the other saves.
+
+    Examples
+    --------
+    >>> self._run_due(save, entry, monotonic(), stats)   # in _run(), once a second
+    True
+    >>> SerializationManager.instance.unregister(save)
+    >>> self._run_due(save, entry, monotonic(), stats)   # the next check: the thread ends
+    False
     """
     # Hold the lock only to check and schedule, never during the save, so an owner can register or
     # unregister while a long save is being written.
     with self._lock:
       if self._stopping.is_set() or self._saves.get(save) is not entry:
-        # Was: skip this save in the pass. Now the thread ends: stop() was called, or the owner closed, or it
-        # registered again and that registration has its own thread; neither must start another save.
+        # The thread ends: stop() was called, or the owner closed, or it registered again and that registration
+        # has its own thread; in none of these cases may this thread start another save.
         return False
-      # Was: picked by the pass over all saves. Now this thread's own check, on the time it was given.
+      # This thread's own check, on the time it was given: the save is due when its next run is at or before now.
       due = entry[1] <= now
       if due:
         # Schedule the next run from the start of this one, so a slow save does not stretch the cadence; on

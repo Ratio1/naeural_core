@@ -194,10 +194,10 @@ class NetMon01Plugin(
     # 30 iterations on any other node, one iteration being PROCESS_DELAY seconds and now at least one second.
     # PROCESS_DELAY 0 is valid for the plugin loop (sibling admin plugins ship with it), but as a cadence it
     # would run a 20 MB save back to back and the SerializationManager refuses it. One second per iteration
-    # is the chosen minimum: it is below every shipped value (3 to 20 s), so those are unchanged, and it keeps
-    # two saves at least as many seconds apart as there are iterations between them (12 s on an oracle by
-    # default, 30 s elsewhere). It is read here, once: a later change of those two settings applies when the
-    # plugin starts again.
+    # is the chosen minimum: it is below every shipped NET_MON_01 value (5 to 20 s), so those are unchanged,
+    # and it keeps two saves at least as many seconds apart as there are iterations between them (12 s on an
+    # oracle by default, 30 s elsewhere). It is read here, once: a later change of those two settings applies
+    # when the plugin starts again.
     every = (int(min(self.cfg_save_nmon_each, 20)) if self.cfg_supervisor else 30) * max(self.cfg_process_delay, 1)
     # The SerializationManager runs the save on a thread kept for this save alone. On this thread one save
     # stopped this plugin's iteration (history, rankings, the current-network payload) for 1.5-1.9 s on an

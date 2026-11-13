@@ -1145,8 +1145,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     A local write or delete of a Tunnels Manager namespace is sent only to
     the oracle registry members (either registry) among its target peers;
     the others are left out of its send, its retries and its confirmation
-    count. With no member among them it returns False, as a write with no
-    target peers.
+    count. With no member among them, which includes a registry that cannot
+    be read on this node, it says so in red and returns False, as a write
+    with no target peers.
 
     Examples
     --------
@@ -1192,6 +1193,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         peers, include_default_peers = [peer for peer in target_peers if self.__registry_member(peer)], False
         # The targets checked below: with no member among them, the write ends as one with no target peers.
         target_peers = peers
+        if len(target_peers) == 0:
+          self.P(
+            f" === No oracle registry member among the targets of the Tunnels Manager write on key {key}, or the "
+            "registry could not be read: nothing is sent", color='r'
+          )
       if not local_sync_storage_op and len(target_peers) == 0:
         self.P(
           f" === No target peers resolved for chain-store write on key {key}",
@@ -1597,8 +1603,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     is not called for it, so it is counted once. When the registries cannot be read, ``__registry_member``
     answers False and the store is refused, as for the dAuth namespaces.
 
-    A refused delete is not reported back to its sender: a delete is not confirmed, so the node that sent it
-    treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
+    A refused delete is not reported back to its sender: the sender does not wait for the confirmations of a
+    delete, so it treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
     ``_set_value`` reads 0 confirmations of 0 required for a key it no longer holds and returns True, and
     ``__exec_received_confirm`` counts nothing for a deleted key.
 

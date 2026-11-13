@@ -17,7 +17,9 @@ from naeural_core.main.serialization_manager import SerializationManager
 
 # The harness of the hsync tests, with its fake network and the helpers that compose hash keys and records.
 from test_chain_store_hsync import (
-  _ChainStoreRuntimeHarness, _PeerSelectionHarness, _SummaryControlNetmon, _WhitelistBlockEngine, _hset_index, _hset_key,
+  _ChainStoreRuntimeHarness, _PeerSelectionHarness, _SummaryControlNetmon, _WhitelistBlockEngine, _hset_index,
+  _hset_key,
+  # The fake network that records what a store sends, and the composer of one hash record.
   _FakeNetwork, _hset_record,
 )
 
@@ -621,6 +623,7 @@ class TestNamespaceIndexGates(unittest.TestCase):
     """A sync request naming another hkey with a protected index is answered only to the namespace's senders."""
     # Per namespace: the sender its rule refuses and the sender it answers.
     cases = (("tunnels_manager_secrets", "peer2", "oracle"), ("DAUTH_JOB_SECRETS", "oracle", "peer1"))
+    # Each protected namespace in turn.
     for hkey, refused, answered in cases:
       # One sub-test each.
       with self.subTest(hkey=hkey):
@@ -650,6 +653,7 @@ class TestNamespaceIndexGates(unittest.TestCase):
       ("NODE_KEY_ROTATIONS", {"proof": "p"}, "oracle", "peer1", None),
       ("DEEPLOY_DEPLOYED_JOBS", "cid-7", "peer2", "oracle", {}),
     )
+    # Each protected namespace in turn.
     for hkey, value, refused, taken, kept in cases:
       # One sub-test each.
       with self.subTest(hkey=hkey):

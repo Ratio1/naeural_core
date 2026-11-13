@@ -361,6 +361,258 @@ class TestThread(unittest.TestCase):
     manager.stop(timeout=5)
     self.assertFalse(manager._threads[0].is_alive())
 
+  def test_a_save_registered_for_the_stop_runs_once_more_when_the_manager_stops(self):
+    """A save registered with at_stop runs one last time on its own thread, and stop() waits for it."""
+    # Where each run happened, and whether the last run was written to its end.
+    ran_on, finished = [], threading.Event()
+
+    def save():
+      """Note the thread, take 0.2 s as a write does, then say the write is done."""
+      # The name of the thread this run is on.
+      ran_on.append(threading.current_thread().name)
+      # A write that takes a moment, so a stop() that did not wait would return before it ends.
+      time.sleep(0.2)
+      # The write reached its end.
+      finished.set()
+
+    # A log that keeps its lines, to find the line about the last run.
+    log = _Log()
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(log)
+    # A cadence far away: no periodic run happens in this test, so the one run seen is the run at stop.
+    manager.register(save, every=100, at_stop=True)
+    # The stop: it is what starts the last run, and it must wait for it.
+    manager.stop(timeout=5)
+    # stop() returned only after the last run was written to its end...
+    self.assertTrue(finished.is_set())
+    # ...which ran exactly once, on the save's own thread...
+    self.assertEqual(ran_on, ["serialization_manager:" + save.__qualname__])
+    # ...and its duration is in the log, since it adds to the time the node needs to stop.
+    self.assertEqual(len([line for line in log.lines if "last save" in line and "at stop took" in line]), 1)
+
+  def test_a_save_not_registered_for_the_stop_gets_no_run_at_stop(self):
+    """Without at_stop nothing changes: stop() ends the thread and the save is not run."""
+    # One entry per run of the save.
+    runs = []
+
+    def save():
+      """Count a run."""
+      # One more run.
+      runs.append(1)
+
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(_Log())
+    # The default registration, as the chain store makes it: its owner saves in its own closing code.
+    manager.register(save, every=100)
+    # The stop, which must only end the thread.
+    manager.stop(timeout=5)
+    # No run was made, and the thread ended.
+    self.assertEqual(runs, [])
+    self.assertFalse(manager._threads[0].is_alive())
+
+  def test_a_registration_that_ended_before_the_stop_gets_no_run_at_stop(self):
+    """The last run belongs to the registration current at stop: an unregistered or replaced one gets none."""
+    # The name of the save for each run, in order.
+    runs = []
+
+    def gone():
+      """A save its owner unregisters before the node stops."""
+      # A run of the unregistered save, which must never happen.
+      runs.append("gone")
+
+    def again():
+      """A save registered twice: only its second registration is current at stop."""
+      # A run of the save that was registered again.
+      runs.append("again")
+
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(_Log())
+    # Two saves that ask for the last run, far from their first periodic run.
+    manager.register(gone, every=100, at_stop=True)
+    manager.register(again, every=100, at_stop=True)
+    # The threads of these two registrations, to wait for their end below.
+    first_threads = list(manager._threads)
+    # The owner of `gone` closes, and `again` is registered once more.
+    manager.unregister(gone)
+    manager.register(again, every=100, at_stop=True)
+    for thread in first_threads:
+      # Each ends at its next check, at most one second away.
+      thread.join(5)
+      # It did end: the absence of a run below is not just a thread that is still waiting.
+      self.assertFalse(thread.is_alive())
+    # Ending because the registration is gone or replaced is not a stop: no run.
+    self.assertEqual(runs, [])
+    # The stop of the node.
+    manager.stop(timeout=5)
+    # At stop only the current registration of `again` ran, once.
+    self.assertEqual(runs, ["again"])
+
+  def test_a_stop_that_comes_before_an_ended_registration_was_noticed_gives_it_no_run(self):
+    """An owner closes and the node stops within the same second: the unregistered save is not run at stop."""
+    # The name of the save for each run, in order.
+    runs = []
+
+    def gone():
+      """A save its owner unregisters just before the node stops."""
+      # A run of the unregistered save, which must never happen.
+      runs.append("gone")
+
+    def again():
+      """A save registered twice just before the node stops."""
+      # A run of the save that was registered again.
+      runs.append("again")
+
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(_Log())
+    # Two saves that ask for the last run, far from their first periodic run.
+    manager.register(gone, every=100, at_stop=True)
+    manager.register(again, every=100, at_stop=True)
+    # The owner of `gone` closes, and `again` is registered once more.
+    manager.unregister(gone)
+    manager.register(again, every=100, at_stop=True)
+    # Stop at once: the threads of the two ended registrations are still in their one-second wait, so it
+    # is the stop that wakes them, and they must see that their registration is over.
+    manager.stop(timeout=5)
+    # Only the registration of `again` that is current at stop ran, once.
+    self.assertEqual(runs, ["again"])
+
+  def test_a_registration_made_after_the_stop_was_asked_gets_no_run(self):
+    """An owner that registers while the node is already stopping gets a thread that ends at once, with no run."""
+    # One entry per run of the save.
+    runs = []
+
+    def save():
+      """Count a run."""
+      # One more run.
+      runs.append(1)
+
+    # The node's manager, already stopped when the owner arrives.
+    manager = SerializationManager.start(_Log())
+    manager.stop(timeout=5)
+    # A late owner asks for the periodic save and for the last run.
+    manager.register(save, every=100, at_stop=True)
+    # Its thread, the only one: it finds the stop at its first wait.
+    manager._threads[-1].join(5)
+    # The thread ended and made no run: stop() is over and would not have waited for one.
+    self.assertFalse(manager._threads[-1].is_alive())
+    self.assertEqual(runs, [])
+
+  def test_a_stop_asked_during_a_periodic_run_waits_for_it_and_for_the_last_run_after_it(self):
+    """When stop() comes during a periodic run, that run ends, the last run follows, and stop() waits for both."""
+    # Set when the first run started; set to let it end; what happened, in order.
+    entered, release, events = threading.Event(), threading.Event(), []
+
+    def save():
+      """The first call blocks as a slow write does; every call notes its start and its end."""
+      # This run started.
+      events.append("start")
+      if not entered.is_set():
+        # The first run: say it is being written, then wait to be released.
+        entered.set()
+        release.wait(10)
+      # This run ended.
+      events.append("end")
+
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(_Log())
+    # A short cadence, so the periodic run starts at the thread's first check.
+    manager.register(save, every=0.1, at_stop=True)
+    # Wait until the periodic run is being written.
+    self.assertTrue(entered.wait(5))
+    # Let that run end half a second after stop() was asked.
+    threading.Timer(0.5, release.set).start()
+    # The stop, asked while the periodic run is blocked.
+    manager.stop(timeout=5)
+    # Two whole runs, one after the other: the periodic one, then the last one.
+    self.assertEqual(events, ["start", "end", "start", "end"])
+    # stop() returned only after both: the thread has ended.
+    self.assertFalse(manager._threads[0].is_alive())
+
+  def test_a_stop_whose_timeout_ends_during_the_last_run_returns_and_the_run_goes_on(self):
+    """stop() waits no longer than its timeout for a slow last run; a later stop() waits for the rest, no new run."""
+    # Set when the last run started; set to let it end; one entry per run.
+    started, release, runs = threading.Event(), threading.Event(), []
+
+    def save():
+      """A last run that lasts until it is released."""
+      # One more run.
+      runs.append(1)
+      # The run is being written.
+      started.set()
+      # A write slower than the stop's timeout.
+      release.wait(10)
+
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(_Log())
+    # A cadence far away: the only run is the one at stop.
+    manager.register(save, every=100, at_stop=True)
+    # The moment the stop is asked, to measure how long it waits.
+    begun = time.monotonic()
+    # A stop that gives the saves 0.3 s.
+    manager.stop(timeout=0.3)
+    # How long stop() took.
+    waited = time.monotonic() - begun
+    # It came back at its timeout...
+    self.assertLess(waited, 1.0)
+    # ...while the last run was still being written.
+    self.assertTrue(started.wait(5) and manager._threads[0].is_alive())
+    # Let the write end.
+    release.set()
+    # A second stop waits for it...
+    manager.stop(timeout=5)
+    self.assertFalse(manager._threads[0].is_alive())
+    # ...and starts no second run.
+    self.assertEqual(runs, [1])
+
+  def test_a_last_run_that_fails_is_logged_in_red_and_stop_still_returns(self):
+    """A save that raises at stop is reported with its traceback and does not keep the node from closing."""
+    def save():
+      """Fail as a write to a full disk does."""
+      raise OSError("no space left")
+
+    # A log that keeps its lines and their colours.
+    log = _Log()
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(log)
+    # A cadence far away: the only run is the one at stop.
+    manager.register(save, every=100, at_stop=True)
+    # The stop, whose last run raises.
+    manager.stop(timeout=5)
+    # The log lines that report the failure with its traceback, whose last line is "OSError: ...", by position.
+    failed = [index for index, line in enumerate(log.lines)
+              if "at stop failed" in line and "OSError: no space left" in line]
+    # Reported once...
+    self.assertEqual(len(failed), 1)
+    # ...in red, like every failed save.
+    self.assertEqual(log.colors[failed[0]], 'r')
+    # The thread ended by itself, so stop() did not have to wait for its timeout.
+    self.assertFalse(manager._threads[0].is_alive())
+
+  def test_a_stop_asked_between_a_thread_s_wait_and_its_check_still_gets_the_last_run(self):
+    """stop() can come right after a thread's one-second wait returned: its check ends it, and the last run happens."""
+    # One entry per run of the save, and the waits the thread made on the stand-in event.
+    runs, waits = [], []
+
+    def save():
+      """Count a run."""
+      # One more run.
+      runs.append(1)
+
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(_Log())
+    # The table entry register() would store, put there by hand so that no real thread runs beside this test.
+    entry = [100, time.monotonic() + 100]
+    manager._saves[save] = entry
+    # The moment in question: the first wait reports "not stopping", and by the time of the check stop() was
+    # asked. Any later wait reports the stop, so a thread that wrongly kept looping ends instead of spinning.
+    manager._stopping = SimpleNamespace(
+      wait=lambda seconds: bool(waits.append(seconds)) or len(waits) > 1, is_set=lambda: True, set=lambda: None
+    )
+    # The thread body, run here on the test's thread.
+    manager._run(save, entry, True)
+    # One wait, then the check ended the loop without a periodic run, and the last run was made.
+    self.assertEqual((runs, len(waits)), ([1], 1))
+
 
 class TestClock(unittest.TestCase):
   """The cadence is counted on the monotonic clock: a wall clock stepped back must not hold the saves back."""

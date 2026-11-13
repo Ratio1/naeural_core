@@ -274,6 +274,19 @@ be replaced by an unversioned write or deletion. A signed higher generation
 allows explicit reuse after deletion. Both direct writes and HSync enforce the
 same rules, preventing stale cached pipeline discovery from reviving deletion.
 
+## Writer revisions (`cs_rev`)
+
+A writer that has its own source of order puts it in the value as an integer
+`cs_rev`; Tunnels Manager stores the signed client time of a credential update
+there. A record whose value carries an int `cs_rev` is not replaced by a live write
+with a lower one (refused as `refused_cs_rev` and not confirmed), and an hsync copy
+replaces it only when the copy carries an equal or higher `cs_rev`. A live write
+without `cs_rev` (a writer that does not version, or a delete) is applied by
+arrival as before, and records without `cs_rev` keep arrival order. In the Tunnels
+Manager namespaces the oracle-only sender rule is checked first. A node on older
+code applies these writes by arrival, so replicas can differ until every oracle
+runs this rule.
+
 ## Cost line in the node log (`CSTORE_STATS`)
 
 Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
@@ -308,6 +321,7 @@ Labels in `counts`:
     - `refused_oracle_only`: a Tunnels Manager write, or an unversioned deployed-job pointer, from a sender outside the oracle registries (remote), or a local Tunnels Manager write with no oracle registry member among its targets.
     - `refused_not_member`: a dAuth or key-rotation write refused by the registry-membership rules: locally (this node, or a target, outside the registry the namespace needs) or remotely (the sender outside it, or this node outside the dAuth registry; these remote drops were not counted before).
     - `refused_versioned`: the signed-record rule of the deployment and dAuth namespaces.
+    - `refused_cs_rev`: a value whose integer `cs_rev` is lower than the stored value's (below).
     - `refused_secret_rule`: a revocation marker emptied or changed, or a payload for a revoked secret revision.
     - `refused_token`: the stored record has another token.
     - `refused_readonly`: the stored record is readonly for another owner.

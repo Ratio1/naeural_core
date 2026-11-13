@@ -598,6 +598,47 @@ class TestOracleOnlyNamespaces(unittest.TestCase):
           key[:14] + "/remote_non_peer": 2,
         })
 
+  def test_tunnel_credentials_are_ordered_by_cs_rev_after_the_oracle_rule(self):
+    """In a tunnel namespace the oracle-only sender rule comes first; between oracles a lower cs_rev is refused, a
+    higher one applied, and a restart sync from an oracle holding an older credential does not bring it back."""
+    # A credential at cs_rev 200, written by "oracle" (oracle registry), as the records of its namespace are.
+    key, record = _hset_record("tunnels_manager_secrets", "0xabc", {"token": "new", "cs_rev": 200}, "oracle")
+    # The store of "node" (its chain peers: "peer1", dAuth registry, and "peer2", no registry) holding it.
+    store = make_signed_store()
+    # Held as a write leaves it.
+    store.storage[key] = copy.deepcopy(record)
+    # From "peer2", a newer revision, and from "oracle", an older one (an update that reaches this oracle late):
+    # neither is confirmed.
+    self.assertEqual([remote_store(store, key, {"token": "x", "cs_rev": 300}, "peer2"),
+                      remote_store(store, key, {"token": "old", "cs_rev": 100}, "oracle")], [[], []])
+    # The credential kept; "peer2" refused by the oracle rule before its revision is read, "oracle" by cs_rev.
+    self.assertEqual((store.storage[key][store.CS_VALUE]["token"], getattr(store, STATS)), ("new", {
+      # One refusal each, and the store of "oracle", which is not a chain peer of "node".
+      key[:14] + "/remote/refused_oracle_only": 1, key[:14] + "/remote/refused_cs_rev": 1,
+      # Counted before any check.
+      key[:14] + "/remote_non_peer": 1}))
+    # A newer revision from "oracle": stored and confirmed.
+    self.assertEqual(remote_store(store, key, {"token": "newer", "cs_rev": 300}, "oracle"), [["oracle"]])
+    # The caller's dict of a local write on "node", sent to "peer1", the registry member among its peers.
+    info = {}
+    # A local update older than the stored one: refused at once, nothing sent.
+    self.assertEqual(
+      (store._set_value(key, {"token": "late", "cs_rev": 250}, owner="node", result_info=info), info,
+       len(getattr(store, OPS))),
+      # Its word, and nothing queued.
+      (False, {"outcome": "refused_cs_rev"}, 0))
+    # The network of a restart sync: "node" asks "oracle", which still holds the cs_rev 200 credential.
+    network = _FakeNetwork()
+    # The requester, reachable for the answer.
+    network.register(store)
+    # "oracle", a registry member, so its answer is taken.
+    network.register(make_signed_peer("oracle", {key: record}))
+    # Its answer is taken but the older copy is not merged.
+    self.assertEqual(store._hsync("tunnels_manager_secrets", peers=["oracle"], include_default_peers=False),
+                     {"hkey": "tunnels_manager_secrets", "source_peer": "oracle", "merged_fields": 0})
+    # The newer credential kept.
+    self.assertEqual(store.storage[key][store.CS_VALUE], {"token": "newer", "cs_rev": 300})
+
   def test_tunnel_namespaces_answer_a_sync_request_only_to_a_registry_member(self):
     """A sync request for a tunnel namespace is answered to a registry member and not to another chain peer."""
     # Both Tunnels Manager namespaces.

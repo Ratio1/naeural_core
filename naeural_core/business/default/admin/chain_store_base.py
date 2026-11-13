@@ -912,6 +912,67 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       return False
     return True
 
+  def __stale_revision(self, key, value, snapshot=False):
+    """
+    Tell whether `value` must not replace the stored record because the stored one is newer.
+
+    Ordering is opt-in: a writer that has a source of truth outside the store (for example a
+    signed client timestamp) puts it in the value as an integer "cs_rev". Such a record is not
+    replaced by a value with a lower "cs_rev", whatever order writes reach this replica in, and a
+    peer snapshot (hsync after a restart) never replaces it with an older or unversioned copy.
+    A live write without "cs_rev" comes from a writer that does not version yet: for it, and
+    for records that carry no "cs_rev", the last arrival wins as before.
+
+    Parameters
+    ----------
+    key : str
+      Composed chain-store key of the write or of the snapshot record.
+    value : any
+      The incoming value. It is versioned only when it is a dict whose ``cs_rev`` is an int (a bool is not
+      taken as one).
+    snapshot : bool, optional
+      True for a record of a peer's hsync answer, which must not replace a versioned record with an
+      unversioned copy either; False (the default) for a live write.
+
+    Returns
+    -------
+    bool
+      True when the stored value carries an int ``cs_rev`` and the incoming one carries a lower one (or,
+      for a snapshot, none); False otherwise. An equal revision is not stale, so a retry of the same update
+      is applied as before.
+
+    Notes
+    -----
+    Acts from the wave 03 release with no switch: today only the Tunnels Manager credentials carry
+    ``cs_rev`` (the signed client time of the update). A live write refused here is counted as
+    ``refused_cs_rev`` and not confirmed, as every refused remote write. A delete (``value`` None) is a live
+    write without ``cs_rev`` and is applied; a snapshot never carries a delete (the merge skips None). The
+    cost per write is two dict reads and a few type checks.
+
+    Examples
+    --------
+    >>> self.__stale_revision(key, {"token": "old", "cs_rev": 100})   # the stored value has cs_rev 200
+    True
+    >>> self.__stale_revision(key, {"token": "legacy"})               # a writer that does not version yet
+    False
+    >>> self.__stale_revision(key, {"token": "legacy"}, snapshot=True)
+    True
+    """
+    # The stored value of the key, if any.
+    stored = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
+    # Its revision: the "cs_rev" of a dict value, else none.
+    stored = stored.get("cs_rev") if isinstance(stored, dict) else None
+    if type(stored) is not int:
+      # A record without an int revision is not ordered: the last arrival wins, as before.
+      return False
+    # The incoming value's revision, the same way.
+    incoming = value.get("cs_rev") if isinstance(value, dict) else None
+    if type(incoming) is not int:
+      # An unversioned copy: a live write still wins (its writer does not version yet), a snapshot never does.
+      return snapshot
+    # Only a lower revision loses; an equal one (a retry of the same update) is applied as before.
+    return incoming < stored
+
   def __hset_index(self, hkey):
     """
     Compute the composed-key prefix for one hash namespace.
@@ -1007,6 +1068,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     is the one whose index (``__hset_index``) ``hkey`` has, the prefix the
     records are selected by.
 
+    A record whose stored value carries an int ``cs_rev`` (``__stale_revision``)
+    is replaced only by a copy with a higher or equal ``cs_rev``: an older or
+    unversioned copy is skipped and not counted in the result.
+
     Examples
     --------
     >>> self.__merge_hset_snapshot("players", {key: record})
@@ -1032,6 +1097,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
         value = self.deepcopy(record.get(self.CS_VALUE))
         if value is None or not self.__versioned_record(key, value):
+          continue
+        if self.__stale_revision(key, value, snapshot=True):
+          # The peer's copy is older than ours, or unversioned over a versioned record: a restart sync must not
+          # bring it back.
           continue
         if self.__secret_namespace(key) == "DAUTH_JOB_SECRET_REVISIONS":
           prefix = self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")
@@ -1350,6 +1419,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       the dAuth registry, or a local dAuth secret write on a node in neither
       registry or with a target outside the dAuth registry;
     - ``refused_versioned``: the signed-record rule (``__versioned_record``);
+    - ``refused_cs_rev``: a value whose ``cs_rev`` is lower than the stored
+      value's (``__stale_revision``);
     - ``refused_secret_rule``: a changed or empty revocation marker, or a
       payload for a revoked secret revision;
     - ``refused_token``: the stored record has another token;
@@ -1454,6 +1525,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if not self.__versioned_record(key, value):
           # The signed-record rule of the namespace.
           outcome = "refused_versioned"
+          # Not stored; from a peer, not confirmed.
+          return False
+        if self.__stale_revision(key, value):
+          # A value with a lower "cs_rev" than the stored one: not stored, and from a peer not confirmed.
+          outcome = "refused_cs_rev"
+          # Before any other check of the value: the writer's own order says this copy is old.
           return False
         versioned_namespace = self.__namespace_for_key(key, ("DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS"))
         if versioned_namespace:

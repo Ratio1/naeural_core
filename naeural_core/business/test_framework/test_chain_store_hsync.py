@@ -532,6 +532,152 @@ class TestChainStoreHsync(unittest.TestCase):
     self.assertEqual(len(requester.sent_payloads), 1)
     self.assertEqual(len(responder.sent_payloads), 1)
 
+  def test_restart_sync_brings_back_an_old_value_unless_the_record_carries_a_revision(self):
+    """A restarted replica that holds the newer value and syncs from a peer holding an older one keeps its own
+    value when the record carries a cs_rev revision; without one the older copy wins, as before."""
+    # The field both replicas hold.
+    field = _hset_key("secrets", "wallet")
+    # Without revisions the peer's old token replaces the new one; with revisions the new one is kept.
+    for versioned, kept in ((False, "old-token"), (True, "new-token")):
+      # One sub-test each.
+      with self.subTest(versioned=versioned):
+        # The revisions of the new and the old value, or none.
+        new_rev, old_rev = ({"cs_rev": 200}, {"cs_rev": 100}) if versioned else ({}, {})
+        # The replica that holds the new value and restarts.
+        restarted = _ChainStoreRuntimeHarness(
+          "peer-requester",
+          storage=_build_hset_storage("secrets", {"wallet": {"token": "new-token", **new_rev}},
+                                      owner="peer-requester"),
+        )
+        # The peer that still holds the old value.
+        stale_peer = _ChainStoreRuntimeHarness(
+          "peer-1",
+          storage=_build_hset_storage("secrets", {"wallet": {"token": "old-token", **old_rev}}, owner="peer-1"),
+        )
+        # The network both answer on.
+        network = _FakeNetwork()
+        # The restarted replica, reachable for the answer.
+        network.register(restarted)
+        # The peer, which answers the sync.
+        network.register(stale_peer)
+        # The sync after the restart.
+        result = restarted._hsync("secrets", peers=["peer-1"], include_default_peers=False)
+        # Nothing merged when the record is versioned, the old copy merged when it is not.
+        self.assertEqual(result["merged_fields"], 0 if versioned else 1)
+        # The token the restarted replica holds.
+        self.assertEqual(restarted.storage[field][ChainStoreBasePlugin.CS_VALUE]["token"], kept)
+        # The other direction still works: a replica that is behind takes the newer copy.
+        stale_peer._hsync("secrets", peers=["peer-requester"], include_default_peers=False)
+        # Both replicas now hold the same token.
+        self.assertEqual(stale_peer.storage[field][ChainStoreBasePlugin.CS_VALUE]["token"], kept)
+
+  def test_a_live_write_is_ordered_by_its_revision_and_a_snapshot_never_downgrades(self):
+    """A live write with a lower cs_rev is refused (refused_cs_rev, not confirmed), a higher or unversioned one is
+    applied; a sync copy replaces a versioned record only with a higher revision."""
+    # The field written.
+    field = _hset_key("secrets", "wallet")
+    # A replica of "peer-1" holding the field at cs_rev 200, with "peer-2" as its peer.
+    node = self.make_versioned_replica(field)
+    # A late or replayed copy at cs_rev 100 from "peer-2": refused and not confirmed.
+    self.assertEqual(self.store_from_peer(node, field, {"token": "old-token", "cs_rev": 100}), 0)
+    # The new token kept, and the refusal counted under its word.
+    self.assertEqual((node.storage[field][node.CS_VALUE]["token"], node._ChainStoreBasePlugin__cs_stats),
+                     ("new-token", {field[:14] + "/remote/refused_cs_rev": 1}))
+    # The caller's dict of a local write.
+    info = {}
+    # The same old copy written locally: False with its word.
+    self.assertEqual(
+      (node._set_value(field, {"token": "old-token", "cs_rev": 100}, owner="local-writer", result_info=info), info),
+      (False, {"outcome": "refused_cs_rev"}))
+    # A newer copy from the peer: applied and confirmed.
+    self.assertEqual(self.store_from_peer(node, field, {"token": "newer-token", "cs_rev": 300}), 1)
+    # Its token stored.
+    self.assertEqual(node.storage[field][node.CS_VALUE]["token"], "newer-token")
+    # A writer that does not version yet (an oracle on older code): last arrival wins, as before.
+    self.assertEqual(self.store_from_peer(node, field, {"token": "legacy-writer"}), 1)
+    # Its token stored.
+    self.assertEqual(node.storage[field][node.CS_VALUE]["token"], "legacy-writer")
+    # A snapshot is old state by nature: it replaces a versioned record only with a newer version.
+    for snapshot_value, kept in (({"token": "unversioned"}, "new-token"),
+                                 ({"token": "old", "cs_rev": 100}, "new-token"),
+                                 ({"token": "newest", "cs_rev": 300}, "newest")):
+      # One sub-test each.
+      with self.subTest(snapshot=snapshot_value):
+        # A fresh replica holding cs_rev 200.
+        node = self.make_versioned_replica(field)
+        # The peer's record as a sync answer carries it.
+        key, record = _hset_record("secrets", "wallet", snapshot_value, owner="peer-2")
+        # The merge of that answer.
+        node._ChainStoreBasePlugin__merge_hset_snapshot("secrets", {key: record})
+        # The token kept or taken.
+        self.assertEqual(node.storage[field][node.CS_VALUE]["token"], kept)
+
+  @staticmethod
+  def make_versioned_replica(field):
+    """
+    Build the replica of "peer-1" holding ``field`` = {"token": "new-token", "cs_rev": 200}, written by "peer-2".
+
+    Parameters
+    ----------
+    field : str
+      The composed key of the "wallet" field of the "secrets" namespace.
+
+    Returns
+    -------
+    _ChainStoreRuntimeHarness
+      The replica, with "peer-2" as its only peer and an instance path for its confirmations.
+
+    Examples
+    --------
+    >>> node = TestChainStoreHsync.make_versioned_replica(_hset_key("secrets", "wallet"))
+    """
+    # The replica, with its peer and the versioned record.
+    node = _ChainStoreRuntimeHarness(
+      "peer-1", default_peers=["peer-2"],
+      storage=_build_hset_storage("secrets", {"wallet": {"token": "new-token", "cs_rev": 200}}, owner="peer-2"),
+    )
+    # The instance path its confirmations name: a list's copy method returns the path when called.
+    node.get_instance_path = ["peer-1", "stream", "CHAIN_STORE", "instance"].copy
+    # Ready.
+    return node
+
+  @staticmethod
+  def store_from_peer(node, field, value):
+    """
+    Deliver a live store of ``field`` = ``value`` from "peer-2" to ``node`` through its payload handler.
+
+    Parameters
+    ----------
+    node : _ChainStoreRuntimeHarness
+      The receiving replica.
+    field : str
+      The composed key written.
+    value : dict
+      The value written.
+
+    Returns
+    -------
+    int
+      How many payloads ``node`` sent back: 1 when it stored and confirmed the write, 0 when it refused it.
+
+    Examples
+    --------
+    >>> TestChainStoreHsync.store_from_peer(node, field, {"token": "t", "cs_rev": 300})
+    1
+    """
+    # Only what this store makes the replica send.
+    node.sent_payloads.clear()
+    # The payload as the network delivers it.
+    node.default_handler({
+      _PayloadData.EE_SENDER: "peer-2", _PayloadData.EE_ID: "peer-2", _PayloadData.EE_DESTINATION: ["peer-1"],
+      _PayloadData.EE_IS_ENCRYPTED: True,
+      "decoded": {node.CS_DATA: {
+        node.CS_OP: node.CS_STORE, node.CS_KEY: field, node.CS_VALUE: value, node.CS_OWNER: "peer-2",
+      }},
+    })
+    # The confirmations sent back.
+    return len(node.sent_payloads)
+
   def test_hsync_treats_empty_snapshot_as_successful_cold_state(self):
     requester = _ChainStoreRuntimeHarness(
       "peer-requester",

@@ -303,11 +303,22 @@ Labels in `counts`:
   - `changed`: the write was stored and changed this replica, so the replica will be saved. It says what happened here: a local write that changed the replica and then was not confirmed by the peers is still counted as `changed`.
   - `identical`: the value was already stored (a remote copy of it, or a local write with the same value, owner and readonly); the replica is not saved for it, but a local one is still broadcast and confirmed.
   - `absent_delete`: a delete of a key this replica does not hold; the replica is not saved for it.
-  - `refused`: any other way out: a token or readonly refusal, a refused version or revision, a protected-namespace refusal, no target peers, or an error before the write was stored.
+  - `refused_<reason>`: a refused write, one word per rule (before wave 03 all of them, and errors, were one `refused` label; a parser sums the labels that start with `refused_`):
+    - `refused_no_peers`: a local write with no target peer. The node's own address is never a peer, so on a seed whose whitelist holds only itself every write ends here at once (it used to wait 3 x 10 s).
+    - `refused_oracle_only`: a Tunnels Manager write, or an unversioned deployed-job pointer, from a sender outside the oracle registries (remote), or a local Tunnels Manager write with no oracle registry member among its targets.
+    - `refused_not_member`: a dAuth or key-rotation write refused by the registry-membership rules: locally (this node, or a target, outside the registry the namespace needs) or remotely (the sender outside it, or this node outside the dAuth registry; these remote drops were not counted before).
+    - `refused_versioned`: the signed-record rule of the deployment and dAuth namespaces.
+    - `refused_secret_rule`: a revocation marker emptied or changed, or a payload for a revoked secret revision.
+    - `refused_token`: the stored record has another token.
+    - `refused_readonly`: the stored record is readonly for another owner.
+  - `error`: the call raised before the replica changed (for example a bad `timeout`).
+- `<bucket>/local/unconfirmed` and `<bucket>/local/overwritten`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, or another write replaced the key during the wait.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.
 - `save_cpu_ms` (save back-off `report` or `on`): CPU milliseconds the periodic saves took on the save thread.
+
+A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to read the same word as `result_info["outcome"]` (the wait end when there is one, `error` when the call raised); the returned bool is unchanged.
 
 To find the hash namespace of a bucket, compute its prefix: `"hs:"` followed by the
 first 10 hex digits of the SHA-256 of the namespace name, followed by `":"`, as

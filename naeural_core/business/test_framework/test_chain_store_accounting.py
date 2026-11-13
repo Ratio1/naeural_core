@@ -9,6 +9,8 @@ import os
 import pickle
 import tempfile
 import threading
+# Real time of a write that must fail at once.
+import time
 import unittest
 from datetime import datetime as _datetime, timezone as _timezone
 from types import SimpleNamespace
@@ -312,25 +314,44 @@ class TestCheaperWrites(unittest.TestCase):
 
 class TestWritesThatChangeNothing(unittest.TestCase):
   def test_identical_local_write_is_not_saved_but_is_broadcast_and_confirmed_again(self):
+    """A local write of the stored value is not saved, but is sent and waits for confirmations again."""
+    # The store of "node", holding "key" = "value" with old confirmation fields.
     store = make_store()
+    # The record a write leaves.
     seed(store, "key", "value")
+    # The same value again; no peer answers in this test, so the wait ends unconfirmed.
     store._set_value("key", "value", owner="node", timeout=.1, max_retries=0)
+    # Not marked for a save.
     self.assertFalse(getattr(store, DIRTY))
+    # Queued once for the peers.
     self.assertEqual(len(getattr(store, OPS)), 1)
+    # The record, to check its confirmation fields.
     record = store.storage["key"]
+    # Confirmations reset.
     self.assertEqual(record[store.CS_CONFIRMATIONS], 0)
+    # No peer confirmed it yet.
     self.assertEqual(record["confirmed_peers"], [])
+    # Targets as the peers are now.
     self.assertEqual(record["target_peers"], ["peer1", "peer2"])
-    self.assertEqual(getattr(store, STATS), {"plain/local/identical": 1})
+    # Counted as identical, and as unconfirmed because no peer answered.
+    self.assertEqual(getattr(store, STATS), {"plain/local/identical": 1, "plain/local/unconfirmed": 1})
 
   def test_same_value_from_another_owner_or_with_another_readonly_is_saved(self):
+    """The stored value written by another owner, or with another readonly, changes the record and is saved."""
+    # Another owner, then the same owner with readonly.
     for owner, readonly in (("other", False), ("node", True)):
+      # One sub-test each.
       with self.subTest(owner=owner, readonly=readonly):
+        # The store of "node".
         store = make_store()
+        # Holding "key" = "value" of "node", not readonly.
         seed(store, "key", "value")
+        # The same value with the other owner or readonly; no peer answers.
         store._set_value("key", "value", owner=owner, readonly=readonly, timeout=.1, max_retries=0)
+        # Marked for a save.
         self.assertTrue(getattr(store, DIRTY))
-        self.assertEqual(getattr(store, STATS), {"plain/local/changed": 1})
+        # Counted as changed, and as unconfirmed because no peer answered.
+        self.assertEqual(getattr(store, STATS), {"plain/local/changed": 1, "plain/local/unconfirmed": 1})
 
   def test_a_resent_signed_record_is_compared_by_the_owner_and_readonly_its_namespace_gives_it(self):
     # A coordinator sends an unchanged record again as a repair. The caller passes its own owner and readonly;
@@ -356,11 +377,17 @@ class TestWritesThatChangeNothing(unittest.TestCase):
         self.assertEqual(len(getattr(store, OPS)), 1)  # still sent to the peers
 
   def test_changed_value_is_saved(self):
+    """A local write of another value is saved and counted as changed."""
+    # The store of "node".
     store = make_store()
+    # Holding "key" = "value".
     seed(store, "key", "value")
+    # Another value; no peer answers.
     store._set_value("key", "other", owner="node", timeout=.1, max_retries=0)
+    # Marked for a save.
     self.assertTrue(getattr(store, DIRTY))
-    self.assertEqual(getattr(store, STATS), {"plain/local/changed": 1})
+    # Counted as changed, and as unconfirmed because no peer answered.
+    self.assertEqual(getattr(store, STATS), {"plain/local/changed": 1, "plain/local/unconfirmed": 1})
 
   def test_remote_delete_of_an_absent_key_is_confirmed_and_not_saved(self):
     store = make_store()
@@ -386,33 +413,77 @@ class TestWritesThatChangeNothing(unittest.TestCase):
 
 class TestCounters(unittest.TestCase):
   def test_each_write_is_counted_once_by_bucket_origin_and_outcome(self):
+    """Each call is counted once by bucket, origin and outcome; a refusal by its word, a failed wait by its end."""
+    # The store of "node", with peers that do not answer here.
     store = make_store()
+    # A field of the "players" hash namespace, in the BUCKET bucket.
     hkey = _hset_key("players", "alpha")
+    # A remote write that changes the replica.
     self.assertTrue(store._set_value(hkey, "v", owner="peer1", local_sync_storage_op=True))
+    # The same remote write again: identical.
     self.assertTrue(store._set_value(hkey, "v", owner="peer1", local_sync_storage_op=True))
+    # A local write, unconfirmed.
     store._set_value("key", "v", owner="node", timeout=.1, max_retries=0)
+    # The same local write again, unconfirmed again.
     store._set_value("key", "v", owner="node", timeout=.1, max_retries=0)
+    # A local delete of a key not held: its wait ends at once.
     store._set_value("gone", None, owner="node", timeout=.1, max_retries=0)
+    # The same delete from a peer.
     store._set_value("gone", None, owner="peer1", local_sync_storage_op=True)
+    # A remote write with a token the stored record does not have: refused by its token.
     self.assertFalse(store._set_value("key", "w", owner="peer1", token="secret", local_sync_storage_op=True))
+    # A local write with no target peer: refused at once.
     self.assertFalse(store._set_value("key", "w", owner="node", include_default_peers=False))
+    # One label per outcome, the two failed waits counted apart, each refusal under its word.
     self.assertEqual(getattr(store, STATS), {
       BUCKET + "/remote/changed": 1, BUCKET + "/remote/identical": 1,
-      "plain/local/changed": 1, "plain/local/identical": 1, "plain/local/absent_delete": 1,
-      "plain/remote/absent_delete": 1, "plain/remote/refused": 1, "plain/local/refused": 1,
+      # The two local writes, each also unconfirmed.
+      "plain/local/changed": 1, "plain/local/identical": 1, "plain/local/unconfirmed": 2,
+      # The two deletes, and the remote write refused by its token.
+      "plain/local/absent_delete": 1, "plain/remote/absent_delete": 1, "plain/remote/refused_token": 1,
+      # The local write with no target peer.
+      "plain/local/refused_no_peers": 1,
     })
 
   def test_a_write_that_raises_is_counted_once_by_what_it_did_to_the_replica(self):
+    """A call that raises before the store counts "error"; one that raises while waiting counts "changed"."""
+    # The store of "node".
     store = make_store()
+    # A bad timeout raises before anything is stored.
     with self.assertRaises(ValueError):
-      store._set_value("key", "v", owner="node", timeout=-1)  # raises before the store: refused
-    self.assertEqual(getattr(store, STATS), {"plain/local/refused": 1})
+      # The call.
+      store._set_value("key", "v", owner="node", timeout=-1)
+    # Counted as an error (wave 02 counted it as "refused").
+    self.assertEqual(getattr(store, STATS), {"plain/local/error": 1})
+
     def failing_sleep(seconds):
+      """
+      Stand for the wait loop's sleep, raising as a stopped thread would.
+
+      Parameters
+      ----------
+      seconds : float
+        The sleep asked for; unused.
+
+      Returns
+      -------
+      None
+
+      Raises
+      ------
+      RuntimeError
+        Always.
+      """
+      # The wait loop's first sleep ends the call.
       raise RuntimeError("stopped")
+    # The wait loop sleeps through it.
     store.sleep = failing_sleep
+    # A write that is stored, then raises while it waits.
     with self.assertRaises(ValueError):
-      store._set_value("key", "v", owner="node")  # raises after the store, while waiting: the replica changed
-    self.assertEqual(getattr(store, STATS), {"plain/local/refused": 1, "plain/local/changed": 1})
+      # The call.
+      store._set_value("key", "v", owner="node")
+    # Counted by what it did to the replica: changed.
+    self.assertEqual(getattr(store, STATS), {"plain/local/error": 1, "plain/local/changed": 1})
 
   def test_stores_from_senders_outside_the_peers_are_counted(self):
     store = make_store()
@@ -519,9 +590,12 @@ class TestOracleOnlyNamespaces(unittest.TestCase):
         self.assertEqual((remote_store(store, key, None, "peer2"), key in store.storage), ([], True))
         # The member's delete: the record goes, confirmed.
         self.assertEqual((remote_store(store, key, None, "oracle"), key in store.storage), ([["oracle"]], False))
-        # The two refusals are counted as refused remote writes of the bucket ("oracle" is not a chain peer).
+        # The two refusals are counted under the oracle-only word of the bucket ("oracle" is not a chain peer).
         self.assertEqual(getattr(store, STATS), {
-          key[:14] + "/remote/refused": 2, key[:14] + "/remote/changed": 2, key[:14] + "/remote_non_peer": 2,
+          # The two refusals, the two applied writes.
+          key[:14] + "/remote/refused_oracle_only": 2, key[:14] + "/remote/changed": 2,
+          # The four stores, from senders outside the chain peers.
+          key[:14] + "/remote_non_peer": 2,
         })
 
   def test_tunnel_namespaces_answer_a_sync_request_only_to_a_registry_member(self):
@@ -592,8 +666,8 @@ class TestOracleOnlyNamespaces(unittest.TestCase):
     self.assertEqual((remote_store(store, key, None, "oracle"), key in store.storage), ([["oracle"]], False))
     # A pointer signed by its coordinator keeps its own rule: relayed by the outsider, it is stored and confirmed.
     self.assertEqual(remote_store(store, key, SIGNED_POINTER, "peer2"), [["peer2"]])
-    # The three refusals are counted as refused remote writes of the bucket.
-    self.assertEqual(getattr(store, STATS)[key[:14] + "/remote/refused"], 3)
+    # The three refusals are counted under the oracle-only word of the bucket.
+    self.assertEqual(getattr(store, STATS)[key[:14] + "/remote/refused_oracle_only"], 3)
 
   def test_sync_answer_from_outside_the_registries_keeps_only_signed_job_pointers(self):
     """From a chain peer outside the registries a sync merges signed job pointers only; from a member, all."""
@@ -633,10 +707,15 @@ class TestOracleOnlyNamespaces(unittest.TestCase):
                      [[], [["peer2"]], []])
     # "oracle" (oracle registry only) still writes a dAuth secret revision on a dAuth registry member.
     self.assertEqual(remote_store(store, secret, {"v": 1}, "oracle"), [["oracle"]])
-    # The tunnel refusal is counted; the dAuth refusal returns before any count, as it did.
+    # The tunnel refusal is counted under the oracle-only word; the dAuth refusal, not counted before, under
+    # the membership word.
     self.assertEqual(getattr(store, STATS), {
-      tunnel[:14] + "/remote/refused": 1, ordinary[:14] + "/remote/changed": 1,
-      secret[:14] + "/remote_non_peer": 1, secret[:14] + "/remote/changed": 1,
+      # The tunnel refusal and the ordinary write.
+      tunnel[:14] + "/remote/refused_oracle_only": 1, ordinary[:14] + "/remote/changed": 1,
+      # The dAuth refusal of "peer2", and the store of "oracle", which is not a chain peer.
+      secret[:14] + "/remote/refused_not_member": 1, secret[:14] + "/remote_non_peer": 1,
+      # The dAuth write of "oracle", applied.
+      secret[:14] + "/remote/changed": 1,
     })
     # The payloads sent so far, to tell the sync answers below apart.
     sent = len(store.sent_payloads)
@@ -679,12 +758,256 @@ class TestOracleOnlyNamespaces(unittest.TestCase):
     setattr(store, "_ChainStoreBasePlugin__chain_peers", ["peer2"])
     # One field of a tunnel namespace.
     key = _hset_key("tunnels_manager_secrets", "0xabc")
-    # Refused: not stored, nothing queued, counted as a refused local write.
+    # Refused: not stored, nothing queued, counted under the oracle-only word as a local write.
     self.assertEqual(
       (store._set_value(key, {"token": "t"}, owner="node"), key in store.storage, len(getattr(store, OPS)),
        getattr(store, STATS)),
-      (False, False, 0, {key[:14] + "/local/refused": 1}),
+      # Its word; wave 02 counted it as "refused".
+      (False, False, 0, {key[:14] + "/local/refused_oracle_only": 1}))
+
+
+class TestRefusalReasons(unittest.TestCase):
+  """Each way a write is refused has its own word, in the counters and for the caller; a lone seed fails at once."""
+
+  def test_the_refresh_leaves_out_the_node_itself_and_never_asks_netmon_about_it(self):
+    """A whitelist holding the node itself gives the other running nodes as peers; NetMon is not asked about it."""
+    # The store of "node".
+    store = make_store()
+    # Its whitelist holds itself and two peers.
+    store.bc = _WhitelistBlockEngine(["node", "peer1", "peer2"])
+    # NetMon reports all three running.
+    store.netmon = _SummaryControlNetmon(online_for_control={"node", "peer1", "peer2"})
+    # The refresh is due.
+    store._now = 61
+    # The refresh.
+    store._ChainStoreBasePlugin__maybe_refresh_chain_peers()
+    # The two peers only, and NetMon asked about them only.
+    self.assertEqual((store._ChainStoreBasePlugin__get_target_peers(), store.netmon.control_calls),
+                     (["peer1", "peer2"], ["peer1", "peer2"]))
+
+  def test_a_seed_whose_list_holds_only_itself_fails_a_write_at_once(self):
+    """A seed whose whitelist is itself: a write is False in under 0.1 s with no wait, and hsync raises at once."""
+    # The store of "node", whose whitelist holds only itself, running.
+    store = make_store()
+    # The whitelist of a seed on a new network.
+    store.bc = _WhitelistBlockEngine(["node"])
+    # NetMon reports it running.
+    store.netmon = _SummaryControlNetmon(online_for_control={"node"})
+    # The refresh is due, at fake time 61 s.
+    store._now = 61
+    # The refresh: no peer left.
+    store._ChainStoreBasePlugin__maybe_refresh_chain_peers()
+    # The caller's dict for the word.
+    info = {}
+    # Real time before the write.
+    started = time.monotonic()
+    # The write, as a plugin makes it (wave 02: 3 waits of 10 s, then False).
+    result = store._set_value("key", "v", owner="node", result_info=info)
+    # Real time it took.
+    elapsed = time.monotonic() - started
+    # False with its word, no fake time spent waiting, nothing queued or stored, one label.
+    self.assertEqual(
+      # The result, the word, the fake clock, the queue, the record and the counters.
+      (result, info, store._now, len(getattr(store, OPS)), "key" in store.storage, getattr(store, STATS)),
+      # What a refusal with no peer leaves.
+      (False, {"outcome": "refused_no_peers"}, 61, 0, False, {"plain/local/refused_no_peers": 1}))
+    # Under 0.1 s of real time.
+    self.assertLess(elapsed, 0.1)
+    # A namespace sync has no peer to ask either: it raises at once instead of after its 10 s timeout.
+    with self.assertRaisesRegex(ValueError, "No target peers"):
+      # The sync.
+      store._hsync("players")
+    # No fake time spent.
+    self.assertEqual(store._now, 61)
+
+  def test_every_refusal_exit_has_its_word(self):
+    """Each refusal returns False, gives its word to the caller, counts one label, queues and stores nothing."""
+    # Fields used below: a plain key, a key rotation, a dAuth secret, a deployment operation, a tunnel credential.
+    rotation, secret = _hset_key("NODE_KEY_ROTATIONS", "0xabc"), _hset_key("DAUTH_JOB_SECRETS", "7")
+    # A deployment operation and a tunnel credential.
+    operation, tunnel = _hset_key("DEEPLOY_OPERATIONS", "op"), _hset_key("tunnels_manager_secrets", "0xabc")
+    # A secret revision and its revocation marker.
+    revision, marker = (_hset_key("DAUTH_JOB_SECRET_REVISIONS", field) for field in ("7|1", "7|1|revoked"))
+    # What the marker of revision 1 of job 7 holds.
+    revoked = {"job_id": "7", "revision": 1}
+
+    def store_as(address=None, peers=None, records=()):
+      """
+      Build the signed store of ``make_signed_store``, as another node or with other peers, holding records.
+
+      Parameters
+      ----------
+      address : str, optional
+        The node's own address; "node" (a dAuth registry member) by default.
+      peers : list of str, optional
+        Its chain peers; "peer1" (dAuth registry) and "peer2" (no registry) by default.
+      records : tuple, optional
+        ``(key, value, readonly, token)`` records the store holds, owned by "peer1".
+
+      Returns
+      -------
+      _ChainStoreRuntimeHarness
+        The store.
+      """
+      # The store with the registries of make_signed_store.
+      store = make_signed_store()
+      # Its address and peers, when the case changes them.
+      store.ee_addr = address or store.ee_addr
+      # Its chain peers.
+      setattr(store, "_ChainStoreBasePlugin__chain_peers", peers if peers is not None else ["peer1", "peer2"])
+      # Each record, as a write of "peer1" leaves it.
+      for key, value, readonly, token in records:
+        # Held with its readonly and token.
+        seed(store, key, value, owner="peer1", readonly=readonly)
+        # The token, which seed leaves at None.
+        store.storage[key][store.CS_TOKEN] = token
+      # The store.
+      return store
+
+    # Per case: the word, the store, the key and value written, and whether the write comes from a peer.
+    cases = (
+      # A local write with no target peer at all.
+      ("no_peers", store_as(peers=[]), "key", "v", False),
+      # A local tunnel write whose only peer is no oracle.
+      ("oracle_only", store_as(peers=["peer2"]), tunnel, {"token": "t"}, False),
+      # A key rotation written on "peer2", outside the dAuth registry.
+      ("not_member", store_as(address="peer2"), rotation, {"proof": "p"}, False),
+      # A dAuth secret written on "peer2", in neither registry.
+      ("not_member", store_as(address="peer2"), secret, {"secret": "s"}, False),
+      # A dAuth secret written on "node" with "peer2", outside the dAuth registry, among its targets.
+      ("not_member", store_as(), secret, {"secret": "s"}, False),
+      # A deployment operation without its signed fields.
+      ("versioned", store_as(), operation, {"unsigned": True}, False),
+      # A revocation marker changed by a peer.
+      ("secret_rule", store_as(records=((marker, revoked, False, None),)), marker, {"job_id": "7"}, True),
+      # A payload sent by a peer for a revoked revision.
+      ("secret_rule", store_as(records=((marker, revoked, False, None),)), revision, {"secret": "s"}, True),
+      # A local write without the token the record holds.
+      ("token", store_as(records=(("key", "v", False, "t"),)), "key", "w", False),
+      # The same from a peer.
+      ("token", store_as(records=(("key", "v", False, "t"),)), "key", "w", True),
+      # A local write over a record readonly for "peer1".
+      ("readonly", store_as(records=(("key", "v", True, None),)), "key", "w", False),
+      # The same from a peer.
+      ("readonly", store_as(records=(("key", "v", True, None),)), "key", "w", True),
     )
+    # Each case in turn.
+    for word, store, key, value, remote in cases:
+      # One sub-test each.
+      with self.subTest(word=word, key=key[:14], remote=remote):
+        # The record held before the write, to show it is left as it was.
+        before = copy.deepcopy(store.storage.get(key))
+        # The caller's dict for the word.
+        info = {}
+        # The write, made by "node" when local, by "node" as owner from a peer when remote.
+        result = store._set_value(key, value, owner="node", local_sync_storage_op=remote, timeout=.1, max_retries=0,
+                                  result_info=info)
+        # The label of the case: the key's bucket, the origin and the word.
+        label = "{}/{}/refused_{}".format(key[:14] if key.startswith("hs:") else "plain",
+                                          "remote" if remote else "local", word)
+        # False, the word, one label, nothing queued, the record as it was.
+        self.assertEqual(
+          (result, info, getattr(store, STATS), len(getattr(store, OPS)), store.storage.get(key)),
+          # What each refusal leaves.
+          (False, {"outcome": "refused_" + word}, {label: 1}, 0, before))
+
+  def test_a_remote_membership_drop_is_counted_and_not_confirmed(self):
+    """Stores dropped by the membership rules before _set_value are counted as refused_not_member, not answered."""
+    # A key rotation from "oracle" (oracle registry, not dAuth) and a secret from "peer2" (no registry), on "node".
+    store = make_signed_store()
+    # The two fields.
+    rotation, secret = _hset_key("NODE_KEY_ROTATIONS", "0xabc"), _hset_key("DAUTH_JOB_SECRETS", "7")
+    # Neither confirmed.
+    self.assertEqual([remote_store(store, rotation, {"proof": "p"}, "oracle"),
+                      remote_store(store, secret, {"s": 1}, "peer2")], [[], []])
+    # A secret from "oracle" received by "oracle" itself, outside the dAuth registry: dropped too.
+    receiver = make_signed_peer("oracle", {})
+    # Not confirmed.
+    self.assertEqual(remote_store(receiver, secret, {"s": 1}, "peer1"), [])
+    # Each drop counted once by its bucket, nothing stored; "oracle" is not a chain peer of "node", so its rotation
+    # is also counted as a store from outside the peers.
+    self.assertEqual(
+      (getattr(store, STATS), getattr(receiver, STATS), rotation in store.storage, secret in store.storage),
+      # The counts of "node", then of "oracle", and nothing stored on "node".
+      ({rotation[:14] + "/remote/refused_not_member": 1, rotation[:14] + "/remote_non_peer": 1,
+        secret[:14] + "/remote/refused_not_member": 1}, {secret[:14] + "/remote/refused_not_member": 1}, False, False))
+
+  def test_a_write_whose_wait_fails_says_how(self):
+    """A write nobody confirms ends "unconfirmed"; one replaced during its wait ends "overwritten"; both "changed"."""
+    # The store of "node" with two silent peers.
+    store = make_store()
+    # The caller's dict.
+    info = {}
+    # A write with one retry: two sends, then False.
+    self.assertFalse(store._set_value("key", "v", owner="node", timeout=.1, max_retries=1, result_info=info))
+    # Its word, its two labels, and the two sends.
+    self.assertEqual((info, getattr(store, STATS), len(getattr(store, OPS))),
+                     ({"outcome": "unconfirmed"}, {"plain/local/changed": 1, "plain/local/unconfirmed": 1}, 2))
+    # A second store, whose wait sees a peer's write of the same key land.
+    store = make_store()
+    # The harness's sleep, kept to advance the fake clock.
+    sleep = store.sleep
+
+    def sleep_while_a_peer_writes(seconds):
+      """
+      Stand for the wait loop's sleep: a peer's write of the same key lands meanwhile.
+
+      Parameters
+      ----------
+      seconds : float
+        The sleep asked for.
+
+      Returns
+      -------
+      None
+      """
+      # The peer's write, applied as a remote store.
+      store._set_value("key", "other", owner="peer1", local_sync_storage_op=True)
+      # Then the sleep itself.
+      sleep(seconds)
+    # Used by the wait loop.
+    store.sleep = sleep_while_a_peer_writes
+    # The caller's dict.
+    info = {}
+    # The local write, replaced while it waits.
+    self.assertFalse(store._set_value("key", "v", owner="node", result_info=info))
+    # Its word and labels, and the peer's write.
+    self.assertEqual((info, getattr(store, STATS)), ({"outcome": "overwritten"}, {
+      # The local write and how its wait ended, and the peer's write.
+      "plain/local/changed": 1, "plain/local/overwritten": 1, "plain/remote/changed": 1}))
+
+  def test_the_api_gives_the_word_and_the_same_bool(self):
+    """chainstore_set and chainstore_hset fill result_info only when asked, and return the same bool either way."""
+    # A running store of "node" holding "key" with token "t", and a tunnel namespace with no oracle among its peers.
+    store = make_signed_store()
+    # The held record.
+    seed(store, "key", "v")
+    # Its token.
+    store.storage["key"][store.CS_TOKEN] = "t"
+    # The plugin API of another plugin on the same node, wired to that store's setter.
+    api = _PeerSelectionHarness()
+    # The store's own setter, as on_init publishes it.
+    api.plugins_shmem["__chain_storage_set"] = store._set_value
+    # The hash composition the API uses, as on a node.
+    api.str_to_base64, api.get_hash = store.str_to_base64, store.get_hash
+    # No explicit peers from the plugin config.
+    api.cfg_chainstore_peers = []
+    # A write with the wrong token, with and without the dict: the same False; the word only when asked.
+    info = {}
+    # With the dict.
+    self.assertEqual((api.chainstore_set("key", "w", result_info=info), api.chainstore_set("key", "w"), info),
+                     (False, False, {"outcome": "refused_token"}))
+    # The tunnel namespace, through hset, when no chain peer is an oracle.
+    setattr(store, "_ChainStoreBasePlugin__chain_peers", ["peer2"])
+    # The caller's dict.
+    info = {}
+    # Refused by the oracle-only rule.
+    self.assertEqual((api.chainstore_hset("tunnels_manager_secrets", "0xabc", {"t": 1}, result_info=info), info),
+                     (False, {"outcome": "refused_oracle_only"}))
+    # A value that is not JSON raises inside the API: False and "error".
+    info = {}
+    # The call.
+    self.assertEqual((api.chainstore_set("key", object(), result_info=info), info), (False, {"outcome": "error"}))
 
 
 class TestNamespaceIndexGates(unittest.TestCase):

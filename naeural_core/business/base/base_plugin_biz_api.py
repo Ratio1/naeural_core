@@ -413,6 +413,7 @@ class _BasePluginAPIMixin:
     include_configured_peers=True,
     timeout=None,
     max_retries=None,
+    result_info=None,
   ):
     """
     Set data in the R1 Chain Storage.
@@ -488,16 +489,42 @@ class _BasePluginAPIMixin:
       Maximum number of timeout-triggered rebroadcast retries for this write.
       If None, use the backend default behavior. Default is None.
 
+    result_info : dict, optional
+      Opt-in: a dict whose ``"outcome"`` this call sets to the word that says how the write ended, so a
+      caller can tell a refusal from a write that was not confirmed. Default is None, which changes nothing.
+      The words: ``changed``, ``identical`` and ``absent_delete`` for a write this node applied; one
+      ``refused_<reason>`` per refusal (``refused_no_peers``, ``refused_oracle_only``,
+      ``refused_not_member``, ``refused_versioned``, ``refused_secret_rule``, ``refused_token``,
+      ``refused_readonly``); ``unconfirmed`` or ``overwritten`` for a write applied here whose wait failed;
+      ``error`` when the call raised (a value that is not JSON, a bad timeout, and so on).
+
     Returns
     -------
     bool
       True if the value was successfully stored and confirmed by peers,
       False if the operation failed (timeout, no confirmations, etc.)
+      The same with and without ``result_info``.
+
+    Notes
+    -----
+    ``result_info`` is filled when the chain store's setter ran or the call raised. The ``refused_<reason>``
+    words are this node's own refusals and end the call at once; a write with no peer to send it to
+    (``refused_no_peers``, for example on a seed whose only whitelisted node is itself) no longer waits for
+    confirmations first. A peer that refuses the write does not answer, so the caller sees ``unconfirmed``
+    after the wait, as it saw False before.
 
     See Also
     --------
     chainstore_get : Retrieve a value from chain storage
     chainstore_hset : Store a value in a hash set within chain storage
+
+    Examples
+    --------
+    >>> info = {}
+    >>> self.chainstore_set("my_key", {"a": 1}, result_info=info)   # no peer confirmed it in time
+    False
+    >>> info
+    {'outcome': 'unconfirmed'}
     """
     self.start_timer("chainstore_set")
     memory = self.__chainstorage_memory()
@@ -531,6 +558,8 @@ class _BasePluginAPIMixin:
           timeout=timeout,
           max_retries=max_retries,
           debug=debug,
+          # The caller's dict, filled by the store with the word of how the write ended.
+          result_info=result_info,
         )
         elapsed = self.end_timer("chainstore_set")        
         if debug:
@@ -543,6 +572,9 @@ class _BasePluginAPIMixin:
       elapsed = self.end_timer("chainstore_set")
       msg = "Error in chainstore_set: {} after {:.4f}s".format(ex, elapsed)
       self.P(msg, color="red")      
+      if result_info is not None:
+        # The call raised, here or in the store: the caller reads "error" whatever the store had set.
+        result_info["outcome"] = "error"
     return result
   
   
@@ -628,6 +660,7 @@ class _BasePluginAPIMixin:
     include_configured_peers=True,
     timeout=None,
     max_retries=None,
+    result_info=None,
   ):
     """
     Store one field of a hash-like namespace in chain storage.
@@ -667,16 +700,31 @@ class _BasePluginAPIMixin:
     max_retries : int, optional
       Maximum number of timeout-triggered rebroadcast retries. If None, use
       the backend default behavior. Default is None.
+    result_info : dict, optional
+      Opt-in dict whose ``"outcome"`` is set to the word of how the write ended, as in
+      ``chainstore_set``. Default is None, which changes nothing.
 
     Returns
     -------
     bool
       True if the composed key was stored successfully, False otherwise.
 
+    Notes
+    -----
+    ``result_info`` is passed to ``chainstore_set`` as it is.
+
     See Also
     --------
     chainstore_set : Underlying chain-store write operation.
     chainstore_hget : Retrieve one field from a hash-like namespace.
+
+    Examples
+    --------
+    >>> info = {}
+    >>> self.chainstore_hset("tunnels_manager_secrets", "0xabc", {"cs_rev": 1}, result_info=info)  # no oracle peer
+    False
+    >>> info
+    {'outcome': 'refused_oracle_only'}
     """
     start_1 = self.time()
     composed_key = self.__hset_key(hkey, key)
@@ -693,6 +741,8 @@ class _BasePluginAPIMixin:
       include_configured_peers=include_configured_peers,
       timeout=timeout,
       max_retries=max_retries,
+      # The caller's dict, filled by chainstore_set.
+      result_info=result_info,
     )
     elapsed_2 = self.time() - start_2
     if debug:

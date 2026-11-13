@@ -384,6 +384,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   def __maybe_refresh_chain_peers(self):
     """
+    Refresh the default replication peers from the blockchain engine's whitelist, when due.
+
     This method refreshes the chain peers list from the network using the whitelist generated
     by the blockchain engine. This means it will allow broadcasting the local keys to all the
     oracle nodes in the network as well as the manually added nodes. This pretty much covers 
@@ -392,6 +394,27 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     However the chain storage should be also accessible to all the nodes in the network so that 
     they can ALL the values stored in the chain storage publicly
         
+    A whitelisted node is kept when NetMon reports it running (``__netmon_node_is_online_for_control``),
+    except the node itself, which is never a peer: its own copy of a store was dropped on arrival and never
+    confirmed. A seed whose whitelist holds only itself therefore has no default peer, and its writes fail at
+    once (``refused_no_peers``) instead of waiting 3 x 10 s for a confirmation that never comes.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Runs at most once per ``CHAIN_PEERS_REFRESH_INTERVAL`` seconds (from ``process`` and once from
+    ``on_init``). The own address is compared before NetMon is asked, so NetMon is never asked about this
+    node; both sides carry the address prefix (``get_whitelist(with_prefix=True)`` and ``ee_addr``). On an
+    oracle, whose whitelist holds itself, a write is no longer sent to itself either.
+
+    Examples
+    --------
+    >>> self.__maybe_refresh_chain_peers()   # whitelist [self, peer-1, peer-2], both peers running
+    >>> self.__get_target_peers()
+    ['peer-1', 'peer-2']
     """
     if (self.time() - self.__last_chain_peers_refresh) > self.cfg_chain_peers_refresh_interval:
       _chain_peers = self.bc.get_whitelist(with_prefix=True)
@@ -399,7 +422,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # control liveness check may use fresh oracle summaries when peer
       # heartbeats are intentionally not received.
       self.__chain_peers = [
-        peer for peer in _chain_peers if self.__netmon_node_is_online_for_control(peer)
+        # The node itself is left out first, before NetMon is asked: it never confirms its own writes, so with it
+        # in the list a seed holding only itself waited 3 x 10 s per write.
+        peer for peer in _chain_peers if peer != self.ee_addr and self.__netmon_node_is_online_for_control(peer)
       ]
       self.__last_chain_peers_refresh = self.time()
     return
@@ -1231,6 +1256,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     timeout=None,
     max_retries=None,
     debug=False, 
+    result_info=None,
   ):
     """
     Set a value in chain storage and optionally wait for confirmations.
@@ -1269,12 +1295,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       the built-in default.
     debug : bool, optional
       If True, print debug messages. Default is False.
+    result_info : dict, optional
+      A dict the caller passes to learn how the call ended: its ``"outcome"`` is set to the word of the
+      way out (below), also when the call raises. None (the default) sets nothing.
 
     Returns
     -------
     bool
       True if the desired state was stored successfully or was already present.
       False if the write was rejected or timed out after the allowed retries.
+      The bool is the same, on every path, as before ``result_info`` existed.
 
     Raises
     ------
@@ -1304,17 +1334,40 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     line, by the label ``<bucket>/<origin>/<outcome>``: the bucket is the
     first 14 characters of an ``hs:`` key (the prefix of its hash namespace)
     or ``plain``, the origin is ``local`` or ``remote``, and the outcome is
-    ``changed``, ``identical``, ``absent_delete`` or ``refused`` (any other
-    way out). ``changed`` says what happened to this replica: a local write
+    ``changed``, ``identical``, ``absent_delete``, a refusal word or
+    ``error``. ``changed`` says what happened to this replica: a local write
     that changed it and then was not confirmed, or raised while waiting, is
     still counted as ``changed``.
+
+    The refusal words, one per way out that refuses the write (wave 02
+    counted them all, and ``error``, as ``refused``):
+
+    - ``refused_no_peers``: a local write with no target peer (the node's own
+      address is never one);
+    - ``refused_oracle_only``: a local write of a Tunnels Manager namespace
+      with no oracle registry member among its targets;
+    - ``refused_not_member``: a local key-rotation write on a node outside
+      the dAuth registry, or a local dAuth secret write on a node in neither
+      registry or with a target outside the dAuth registry;
+    - ``refused_versioned``: the signed-record rule (``__versioned_record``);
+    - ``refused_secret_rule``: a changed or empty revocation marker, or a
+      payload for a revoked secret revision;
+    - ``refused_token``: the stored record has another token;
+    - ``refused_readonly``: the stored record is readonly for another owner.
+
+    ``error`` is a call that raised before it changed the replica (a bad
+    ``timeout`` or ``max_retries``, for example). A local write that changed
+    the replica and then failed its wait gets a second label,
+    ``<bucket>/local/<wait end>``: ``unconfirmed`` (too few confirmations
+    after the retries) or ``overwritten`` (another write replaced the key
+    during the wait). ``result_info["outcome"]`` is the wait end when there
+    is one, else the outcome. None of these words changes the bool returned.
 
     A local write or delete of a Tunnels Manager namespace is sent only to
     the oracle registry members (either registry) among its target peers;
     the others are left out of its send, its retries and its confirmation
     count. With no member among them, which includes a registry that cannot
-    be read on this node, it says so in red and returns False, as a write
-    with no target peers.
+    be read on this node, it says so in red and returns False at once.
 
     Examples
     --------
@@ -1322,11 +1375,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     True
     >>> self._set_value("key", "value", owner="peer1", local_sync_storage_op=True)  # a remote write, stored here
     True
+    >>> info = {}
+    >>> self._set_value("key", "other", owner="node", token="t", result_info=info), info  # held with no token
+    (False, {'outcome': 'refused_token'})
     """
     if not isinstance(key, str) or len(key) == 0:
       raise ValueError("Key must be a non-empty string.")
-    # Outcome counted once by the finally below; every way out that does not set it is a refusal.
-    outcome = "refused"
+    # Outcome counted once by the finally below: every way out sets its own word, so one left unset is an error
+    # (wave 02 counted every other way out as "refused"); and how a local write's wait ended, when it failed.
+    outcome, wait_end = "error", None
     try:
       where = "FROM_LOCAL: " if not local_sync_storage_op else "FROM_REMOTE: "
       debug = debug or self.cfg_chain_store_debug
@@ -1365,23 +1422,38 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             f" === No oracle registry member among the targets of the Tunnels Manager write on key {key}, or the "
             "registry could not be read: nothing is sent", color='r'
           )
+          # Its own word: the namespace's oracle-only rule left no target, as the receivers' rule refuses senders.
+          outcome = "refused_oracle_only"
+          # Ends here, before the generic no-peer exit below, so it is not counted under that word.
+          return False
       if not local_sync_storage_op and len(target_peers) == 0:
         self.P(
           f" === No target peers resolved for chain-store write on key {key}",
           color='y'
         )
+        # No peer to confirm it; a seed whose list holds only itself ends here at once (its own address is not a
+        # peer), where it waited 3 x 10 s for confirmations that never came.
+        outcome = "refused_no_peers"
         return False
       secret_namespace = self.__secret_namespace(key)
       rotation_namespace = self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,))
       if rotation_namespace and not local_sync_storage_op and not self.__registry_member(self.ee_addr, dauth_only=True):
+        # Only a dAuth registry member writes key rotations.
+        outcome = "refused_not_member"
         return False
       if secret_namespace and not local_sync_storage_op:
         if not self.__registry_member(self.ee_addr):
+          # This node is in neither registry.
+          outcome = "refused_not_member"
           return False
         if any(not self.__registry_member(peer, dauth_only=True) for peer in target_peers):
+          # A target outside the dAuth registry would receive a secret.
+          outcome = "refused_not_member"
           return False
       with self.__persistence_lock:
         if not self.__versioned_record(key, value):
+          # The signed-record rule of the namespace.
+          outcome = "refused_versioned"
           return False
         versioned_namespace = self.__namespace_for_key(key, ("DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS"))
         if versioned_namespace:
@@ -1396,8 +1468,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           if field.endswith("|revoked"):
             existing_marker = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
             if not value or (existing_marker and value != existing_marker):
+              # A revocation marker is never emptied nor changed.
+              outcome = "refused_secret_rule"
               return False
           elif value is not None and self.__revoked_secret(key) and not self.__erased_secret(key, value):
+            # A revoked revision takes only its redacted tombstone.
+            outcome = "refused_secret_rule"
             return False
         need_store = True
         existing_owner = None
@@ -1415,7 +1491,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           if token != existing_token:
             if debug:
               self.P(f" === Key {key} has a different token {existing_token} from {existing_owner} than the one provided {token} from {owner}", color='r')
-            need_store = False
+            # Refused, returned below: the stored record has another token.
+            need_store, outcome = False, "refused_token"
           elif value is None:
             # Always allow delete (set to None) regardless of current value
             if debug:
@@ -1438,7 +1515,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           elif is_readonly and existing_owner != owner:
             if debug:
               self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')
-            need_store = False
+            # Refused, returned below: the stored record is readonly for another owner.
+            need_store, outcome = False, "refused_readonly"
         # end if key in chain storage
         if need_store:
           if debug:
@@ -1499,6 +1577,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                 self.__get_key_owner(key) != owner or
                 self.__get_key_value(key) != value
               ):
+                # Counted in addition to "changed": this write's value is no longer the stored one.
+                wait_end = "overwritten"
                 return False
               recv_confirm = self.__get_key_confirmations(key)
               min_confirm = self.__get_key_min_confirmations(key)
@@ -1520,7 +1600,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                 if debug:
                   self.P(f" === {where}Key '{key}' has not enough confirmations after {max_retries} retries", color='r')
                 _done = True
-                need_store = False
+                # Counted in addition to "changed" or "identical": too few peers confirmed after the retries.
+                need_store, wait_end = False, "unconfirmed"
               else:
                 if debug:
                   self.P(f" === {where}Retrying key '{key}' with timeout...", color='r')
@@ -1543,6 +1624,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # namespace, or "plain"), origin and outcome, through the one counting helper. Nothing here can raise for
       # the valid key checked above.
       self.__cs_count(outcome, key, "remote" if local_sync_storage_op else "local")
+      if wait_end is not None:
+        # A local write whose wait failed: also counted by how it ended.
+        self.__cs_count(wait_end, key, "local")
+      if result_info is not None:
+        # The caller's copy of the word: the wait end when there is one, else the outcome.
+        result_info["outcome"] = wait_end or outcome
     return need_store
 
 
@@ -1760,12 +1847,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     A store from a sender that is not in this node's replication peers is counted as
     ``<bucket>/remote_non_peer`` for the ``CSTORE_STATS`` line, before any check of the write.
 
+    A write of a dAuth secret namespace from a sender in neither registry, or received by a node outside the
+    dAuth registry, and a key rotation from a sender outside the dAuth registry, are dropped unconfirmed and
+    counted as ``<bucket>/remote/refused_not_member`` (before, they were not counted).
+
     A write or delete of a Tunnels Manager namespace, or of a deployed-job pointer without a revision
     (``__oracle_only_write``), is applied only when the sender is an oracle registry member (either registry,
     as ``__registry_member`` reads them). A refused one gets no confirmation and is counted as
-    ``<bucket>/remote/refused``, the label ``_set_value`` gives the remote writes it refuses; ``_set_value``
-    is not called for it, so it is counted once. When the registries cannot be read, ``__registry_member``
-    answers False and the store is refused, as for the dAuth namespaces.
+    ``<bucket>/remote/refused_oracle_only``; ``_set_value`` is not called for it, so it is counted once. When
+    the registries cannot be read, ``__registry_member`` answers False and the store is refused, as for the
+    dAuth namespaces. The writes ``_set_value`` refuses are counted there, under their own words.
 
     A refused delete is not reported back to its sender: the sender does not wait for the confirmations of a
     delete, so it treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
@@ -1794,16 +1885,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
     if self.__secret_namespace(key):
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
+        # Counted as a refused remote write of the bucket; before, these drops were not counted at all.
+        self.__cs_count("refused_not_member", key, "remote")
         return
     if self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,)) and not self.__registry_member(peers, dauth_only=True):
+      # The same for a key rotation from a sender outside the dAuth registry.
+      self.__cs_count("refused_not_member", key, "remote")
       return
     # Tunnel namespaces and unversioned deployed-job pointers are written only by plugins that run on oracles: such
     # a write or delete is applied only when its sender is an oracle registry member. A refused one gets no
     # confirmation, like a write that _set_value refuses.
     if self.__oracle_only_write(key, value) and not self.__registry_member(peers):
-      # Counted under the label _set_value gives a refused remote write, through the one counting helper; the key
-      # is a str here (it is in a hash namespace), and its bucket is its "hs:" prefix.
-      self.__cs_count("refused", key, "remote")
+      # Counted under its own word, the one a local write gets when this rule leaves it no target, through the one
+      # counting helper; the key is a str here (it is in a hash namespace), and its bucket is its "hs:" prefix.
+      self.__cs_count("refused_oracle_only", key, "remote")
       return
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")

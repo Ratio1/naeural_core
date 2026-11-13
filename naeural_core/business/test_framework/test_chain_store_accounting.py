@@ -246,9 +246,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
 
     Notes
     -----
-    The counter state and the mode table the shared harness prepares are removed, so a test proves that
-    ``on_init`` creates them. The switches stay as the shared harness sets them (``cfg_cstore_*``, each in the
-    harness's mode); a test sets one to another value before calling ``on_init``.
+    The counter state, the mode table and the save back-off state the shared harness prepares are removed, so a
+    test proves that ``on_init`` creates them. The switches stay as the shared harness sets them
+    (``cfg_cstore_*``, each in the harness's mode); a test sets one to another value before calling ``on_init``.
 
     Examples
     --------
@@ -257,8 +257,10 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
     """
     super().__init__("node")
     self.plugins_shmem = {}
-    # on_init must create the counter state and the mode table itself: drop what the shared harness prepared.
-    for name in ("cs_stats", "cs_stats_last", "cs_stats_queue_peak", "cs_stats_lost", "cs_modes"):
+    # on_init must create the counter state, the mode table and the save back-off state itself: drop what the shared
+    # harness prepared.
+    for name in ("cs_stats", "cs_stats_last", "cs_stats_queue_peak", "cs_stats_lost", "cs_modes", "save_max_gap",
+                 "save_resume"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"

@@ -212,6 +212,15 @@ collects confirmations again. Confirmation counts use distinct authenticated
 transport senders from the actual target set. These are replica acknowledgments,
 not consensus, CAS, or distributed locking.
 
+Save back-off (`CSTORE_SAVE_BACKOFF`, `off` / `report` / `on`, wave 03 default
+`report`; ceiling `CSTORE_SAVE_MAX_GAP`, 30 s): after a save of d seconds the next
+save waits until `min(CSTORE_SAVE_MAX_GAP, 10 * d)` after that save started, on the
+monotonic clock. The first save after a start and the save at an orderly stop are
+immediate. A save of 0.26 s keeps the 5 s cadence; 1.93 s spaces the saves about
+21 s apart; 3 s or more, 30 to 35 s. In `on` a crash can then lose the writes of up
+to `CSTORE_SAVE_MAX_GAP` + 5 s + 1 s + d; `report` saves as `off` (wave 02) and only
+counts what `on` would defer. The network monitor's own save is not affected.
+
 The writer's local copy is applied before broadcast. Self is excluded from the
 remote target set. A positive configured `MIN_CONFIRMATIONS` takes precedence;
 otherwise the threshold is `floor(remote target count / 2) + 1`. With no remote
@@ -297,6 +306,8 @@ Labels in `counts`:
   - `refused`: any other way out: a token or readonly refusal, a refused version or revision, a protected-namespace refusal, no target peers, or an error before the write was stored.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
+- `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.
+- `save_cpu_ms` (save back-off `report` or `on`): CPU milliseconds the periodic saves took on the save thread.
 
 To find the hash namespace of a bucket, compute its prefix: `"hs:"` followed by the
 first 10 hex digits of the SHA-256 of the namespace name, followed by `":"`, as

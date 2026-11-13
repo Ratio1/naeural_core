@@ -254,7 +254,7 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     Notes
     -----
     Every wave 03 switch is in the class's ``CSTORE_MODE``: both as the ``cfg_cstore_*`` value on_init reads and
-    in the mode table on_init would build from them.
+    in the mode table on_init would build from them. The save back-off has its 30 s ceiling and no pause yet.
 
     Examples
     --------
@@ -296,6 +296,10 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     # The mode table on_init builds from them.
     self._ChainStoreBasePlugin__cs_modes = dict.fromkeys(("order", "lean_confirm", "handoff", "save_backoff"),
                                                          self.CSTORE_MODE)
+    # The save back-off's ceiling as the config gives it (the 30 s default) and as on_init reads it.
+    self.cfg_cstore_save_max_gap, self._ChainStoreBasePlugin__save_max_gap = 30, 30.0
+    # No save yet, so no pause: the first save is immediate, as after on_init.
+    self._ChainStoreBasePlugin__save_resume = 0.0
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

@@ -28,6 +28,9 @@ TODO:
 # Used at start-up to keep a replica file that gave no records under another name.
 import os
 from threading import Lock, RLock
+# Times each periodic save for the save back-off: its wall time on a clock no wall-clock step moves, and the CPU
+# time of the save thread.
+from time import monotonic, thread_time
 from ratio1.const.base import BCct, dAuth
 
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
@@ -73,6 +76,8 @@ _CONFIG = {
   "CSTORE_HANDOFF" : "report",
   # Saves spaced out after a slow save.
   "CSTORE_SAVE_BACKOFF" : "report",
+  # The longest pause, in seconds, the save back-off puts between two save starts (0 makes it pause nothing).
+  "CSTORE_SAVE_MAX_GAP" : 30,
 
   'VALIDATION_RULES' : { 
     **NetworkProcessorPlugin.CONFIG['VALIDATION_RULES'],
@@ -116,10 +121,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   # Seconds between two saves of a changed chain storage. The SerializationManager runs them at this cadence
   # on a thread of their own; one full-store save covers every write accepted since the previous one. That
   # thread checks once a second, so an accepted write reaches the disk after up to this cadence, plus up to
-  # one second until the thread's next check, plus this store's own save. A save of another owner runs on
-  # its own thread and does not delay this one, but the saves compete for the interpreter: on an oracle the
-  # network-monitor save (20 MB, measured at 1.5-1.9 s idle and 6.1-6.3 s busy under a 0.7 CPU limit, longer
-  # on a slower host) slows this save down while both run.
+  # one second until the thread's next check, plus this store's own save (with the save back-off on, a slow
+  # save stretches the cadence to up to CSTORE_SAVE_MAX_GAP: see __maybe_flush_chain_storage). A save of
+  # another owner runs on its own thread and does not delay this one, but the saves compete for the
+  # interpreter: on an oracle the network-monitor save (20 MB, measured at 1.5-1.9 s idle and 6.1-6.3 s busy
+  # under a 0.7 CPU limit, longer on a slower host) slows this save down while both run.
   CS_SAVE_INTERVAL = 5
   # Seconds between two CSTORE_STATS lines in the node log (written from process()); new, there was no such line.
   CS_STATS_INTERVAL = 300
@@ -139,13 +145,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The replica is read from this plugin's cache file (an empty store when there is none or it cannot be
     read). Then the counters of the ``CSTORE_STATS`` line start, the wave 03 switches (``CSTORE_ORDER``,
     ``CSTORE_LEAN_CONFIRM``, ``CSTORE_HANDOFF``, ``CSTORE_SAVE_BACKOFF``) are read once into the mode table
-    every later step reads, and the flush of a changed replica is registered with the SerializationManager,
-    which runs it on a thread kept for this save every ``CS_SAVE_INTERVAL`` seconds, so this plugin's thread
-    no longer runs the save. A switch set to anything but ``'off'``, ``'report'`` or ``'on'`` stops the
-    start. When the store this instance will use is empty although the replica file exists, the file is
-    renamed to ``object.pickle.unreadable-<UTC YYYYmmddHHMMSS>`` and a red line says so, so the first save
-    does not overwrite it. Then the getter, setter and hsync functions are placed in the shared plugin
-    memory, where the plugins' ``chainstore_*`` calls find them.
+    every later step reads, the save back-off's ceiling ``CSTORE_SAVE_MAX_GAP`` is read once too, and the
+    flush of a changed replica is registered with the SerializationManager, which runs it on a thread kept for
+    this save every ``CS_SAVE_INTERVAL`` seconds, so this plugin's thread no longer runs the save. A switch set
+    to anything but ``'off'``, ``'report'`` or ``'on'`` stops the start. When the store this instance will
+    use is empty although the replica file exists, the file is renamed to
+    ``object.pickle.unreadable-<UTC YYYYmmddHHMMSS>`` and a red line says so, so the first save does not
+    overwrite it. Then the getter, setter and hsync functions are placed in the shared plugin memory, where
+    the plugins' ``chainstore_*`` calls find them.
 
     Returns
     -------
@@ -158,6 +165,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       refused too); the message names each such config key and its value. The plugin then does not start:
       its setter is never published, so a blocking ``chainstore_set``, ``chainstore_get`` or
       ``chainstore_hlist`` on this node waits for it with no timeout.
+    TypeError
+      When ``CSTORE_SAVE_MAX_GAP`` is not a number nor a str (``None``, a list); the start stops the same way.
+      A str that is not a number raises ValueError instead; a numeric str such as ``"30"`` is taken.
 
     Notes
     -----
@@ -206,11 +216,17 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       "order": self.cfg_cstore_order, "lean_confirm": self.cfg_cstore_lean_confirm,
       "handoff": self.cfg_cstore_handoff, "save_backoff": self.cfg_cstore_save_backoff,
     }
+    # Monotonic time before which the save back-off defers a save: none before the first save, which is immediate.
+    self.__save_resume = 0.0
     # The replica is loaded: from here the SerializationManager saves it every CS_SAVE_INTERVAL seconds when
     # it changed. A full save took this plugin's thread 0.26 s on an idle node and 1.3 s on a busy one
     # (5 MB, 0.7 CPU), during which it confirmed no write; the thread no longer runs the save. Registered
     # before anything below can fail, so on_close always finds the registration it removes.
     SerializationManager.instance.register(self.__maybe_flush_chain_storage, every=self.CS_SAVE_INTERVAL)
+    # The save back-off's ceiling, read once like the switches; a value that is not a number stops the start here,
+    # after the registration, so on_close still finds it. No save reads it before: the store is not changed
+    # before the setter is published below.
+    self.__save_max_gap = float(self.cfg_cstore_save_max_gap)
     # The switches set to anything but the three modes, by config key; checked after the registration, so the
     # on_close that follows a failed start still finds the registration it removes.
     bad_modes = {
@@ -569,7 +585,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   def __maybe_flush_chain_storage(self):
     """
-    Save the chain storage if it changed since the last save.
+    Save the chain storage if it changed since the last save, spacing saves out after a slow one.
 
     The SerializationManager calls this on its own thread every
     `CS_SAVE_INTERVAL` seconds (registered in `on_init`), so the plugin thread
@@ -578,6 +594,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     path retries a failed save, because a failed save marks the store dirty
     again.
 
+    Save back-off (switch ``CSTORE_SAVE_BACKOFF``, read once at start): after a save that took d seconds of
+    wall time, the next save waits until ``min(CSTORE_SAVE_MAX_GAP, 10 * d)`` seconds after that save started.
+    The first save after a start is immediate, and so is the save of an orderly stop (``on_close`` saves
+    directly, not through this method).
+
+    - ``'off'``: wave 02, every call that finds the store changed saves; no clock is read, nothing new counted.
+    - ``'report'``: every such call saves, as in wave 02. A call inside the pause counts ``saves_deferred`` (the
+      save ``'on'`` would have skipped) and its save does not restart the pause, so the counts follow the
+      ``'on'`` schedule: ``saves - saves_deferred`` is what ``'on'`` would have saved.
+    - ``'on'``: a call inside the pause counts ``saves_deferred`` and returns without saving; the store stays
+      changed, so the first call after the pause saves it.
+
+    In ``'report'`` and ``'on'`` every save also adds its CPU time on the save thread, in milliseconds, to
+    ``save_cpu_ms``.
+
     Returns
     -------
     None
@@ -585,16 +616,56 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Notes
     -----
     Safe to call from another thread: `__save_chain_storage` copies the records
-    under the persistence lock and orders overlapping saves with the save lock.
+    under the persistence lock and orders overlapping saves with the save lock. The pause is read and set
+    only here, on the one thread of this registration, so it takes no lock.
+
+    The pause is kept on the monotonic clock, so a wall clock set back cannot hold saves back. With the
+    defaults, a save of 0.26 s (an idle healthy oracle) leaves the 5 s cadence as it was; 1.3 s (a busy
+    0.7-core oracle) and 1.93 s (a 0.35-core oracle under load) space the save starts about 15 s and 21 s
+    apart; any save of 3 s up to 30 s, 30 to 35 s (the pause is rounded up to the manager's 5 s cadence).
+    Saves then take at most 10 % of the wall time while d is 3 s or less. In ``'on'``, writes accepted after a
+    save starts reach the disk at the next save, so a crash can lose those of up to ``CSTORE_SAVE_MAX_GAP`` +
+    5 s (the cadence) + 1 s (the manager's check) + d, against 5 s + 1 s + d in wave 02. A failed save also
+    sets the pause from its own duration and is retried after it.
+
+    The cost in ``'report'`` and ``'on'``: one clock read and one comparison per call that finds the store
+    changed, and three clock reads, two counts and one ``min`` per save; nothing per write.
 
     Examples
     --------
     >>> SerializationManager.instance.register(self.__maybe_flush_chain_storage, every=self.CS_SAVE_INTERVAL)
+    >>> self.__maybe_flush_chain_storage()   # 'on', 1.93 s save: the calls of the next 19.3 s are deferred
     """
     if not self.__chain_storage_dirty:
       return
-    # The cadence is the manager's: no interval check here, the manager calls this every CS_SAVE_INTERVAL seconds.
+    # The back-off's mode, read once at start.
+    mode = self.__cs_modes["save_backoff"]
+    if mode == "off":
+      # Wave 02: every call that finds the store changed saves, and no clock is read. The cadence is the manager's:
+      # it calls this every CS_SAVE_INTERVAL seconds.
+      self.__save_chain_storage()
+      return
+    # When this call starts, on the monotonic clock: a wall clock set back would otherwise stretch the pause.
+    started = monotonic()
+    # Inside the pause the last save outside a pause set; a save made inside it does not restart it, so 'report'
+    # follows the schedule of 'on'.
+    deferred = started < self.__save_resume
+    if deferred:
+      # The save 'on' skips here; in 'report', the count of what 'on' would have skipped.
+      self.__cs_count("saves_deferred")
+      if mode == "on":
+        return
+    # The save thread's CPU time before the save.
+    cpu = thread_time()
     self.__save_chain_storage()
+    # The CPU milliseconds this save took on the save thread, summed per CSTORE_STATS line.
+    self.__cs_count("save_cpu_ms", n=round(1000 * (thread_time() - cpu)))
+    if not deferred:
+      # The next save waits until min(CSTORE_SAVE_MAX_GAP, 10 x d) after this one started, d being its wall time:
+      # saves then take at most 10 % of the wall time while d is 3 s or less (at the 30 s default), and two save
+      # starts are at most the ceiling plus one cadence (5 s) and the manager's check (1 s) apart for any d up
+      # to the ceiling.
+      self.__save_resume = started + min(self.__save_max_gap, 10 * (monotonic() - started))
     return
 
 

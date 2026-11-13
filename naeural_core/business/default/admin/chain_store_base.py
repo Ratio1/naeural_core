@@ -62,6 +62,18 @@ _CONFIG = {
   
   "CHAIN_PEERS_REFRESH_INTERVAL" : 60,
 
+  # The wave 03 switches of the store. Each is 'off' (wave 02 behaviour), 'report' (the rule runs and is counted in
+  # the CSTORE_STATS line, nothing acts on it) or 'on' (the rule acts). on_init reads them once and stops the start
+  # on any other value; wave 03 ships all four in 'report', and a later release changes only these defaults.
+  # Ordering of writes (version stamps and deletes that stick).
+  "CSTORE_ORDER" : "report",
+  # Confirmations by key and stamp instead of echoing the value.
+  "CSTORE_LEAN_CONFIRM" : "report",
+  # The writer re-sends its own unconfirmed writes.
+  "CSTORE_HANDOFF" : "report",
+  # Saves spaced out after a slow save.
+  "CSTORE_SAVE_BACKOFF" : "report",
+
   'VALIDATION_RULES' : { 
     **NetworkProcessorPlugin.CONFIG['VALIDATION_RULES'],
   },  
@@ -125,28 +137,46 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Load the stored replica, publish the chain-store API to the other plugins and start the periodic save.
 
     The replica is read from this plugin's cache file (an empty store when there is none or it cannot be
-    read). Then the counters of the ``CSTORE_STATS`` line start, and the flush of a changed replica is
-    registered with the SerializationManager, which runs it on a thread kept for this save every
-    ``CS_SAVE_INTERVAL`` seconds, so this plugin's thread no longer runs the save. When the store this
-    instance will use is empty although the replica file exists, the file is renamed to
-    ``object.pickle.unreadable-<UTC YYYYmmddHHMMSS>`` and a red line says so, so the first save does not
-    overwrite it. Then the getter, setter and hsync functions are placed in the shared plugin memory, where
-    the plugins' ``chainstore_*`` calls find them.
+    read). Then the counters of the ``CSTORE_STATS`` line start, the wave 03 switches (``CSTORE_ORDER``,
+    ``CSTORE_LEAN_CONFIRM``, ``CSTORE_HANDOFF``, ``CSTORE_SAVE_BACKOFF``) are read once into the mode table
+    every later step reads, and the flush of a changed replica is registered with the SerializationManager,
+    which runs it on a thread kept for this save every ``CS_SAVE_INTERVAL`` seconds, so this plugin's thread
+    no longer runs the save. A switch set to anything but ``'off'``, ``'report'`` or ``'on'`` stops the
+    start. When the store this instance will use is empty although the replica file exists, the file is
+    renamed to ``object.pickle.unreadable-<UTC YYYYmmddHHMMSS>`` and a red line says so, so the first save
+    does not overwrite it. Then the getter, setter and hsync functions are placed in the shared plugin
+    memory, where the plugins' ``chainstore_*`` calls find them.
 
     Returns
     -------
     None
 
+    Raises
+    ------
+    ValueError
+      When a switch is not exactly ``'off'``, ``'report'`` or ``'on'`` (``'ON'``, ``True`` and ``None`` are
+      refused too); the message names each such config key and its value. The plugin then does not start:
+      its setter is never published, so a blocking ``chainstore_set``, ``chainstore_get`` or
+      ``chainstore_hlist`` on this node waits for it with no timeout.
+
     Notes
     -----
     The registration comes after the load, so a save can never run before the stored replica is in memory,
-    and before the steps that can fail, so ``on_close`` always finds the registration it removes.
+    and before the steps that can fail, so ``on_close`` always finds the registration it removes. The switch
+    check is one of those steps. Nothing checks one switch against another yet.
 
     The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
     and the plugin does not start, where it used to start empty and fail at its first save. A file that
     held a legitimately empty store is renamed too; that loses nothing. A store that is empty because there
     is no file renames nothing and logs nothing new. A store taken over from a previous instance of this
     plugin in the same process is used as it is; the file is renamed only when that store is empty too.
+
+    Examples
+    --------
+    >>> plugin.on_init()   # every switch 'report', the wave 03 default
+    >>> plugin.on_init()   # with CSTORE_SAVE_BACKOFF set to 'ON'
+    Traceback (most recent call last):
+    ValueError: Chain-store switches must be 'off', 'report' or 'on', got: {'CSTORE_SAVE_BACKOFF': 'ON'}
     """
     super().on_init() # not mandatory anymore?
     
@@ -170,11 +200,25 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__cs_stats_last, self.__cs_stats_queue_peak = self.time(), 0
     # The plugin's own count of lost inputs at start, so the first line reports only what was lost after it.
     self.__cs_stats_lost = self.lost_inputs_count
+    # The wave 03 switches, read once here so the code never reads them from the config again: a config change
+    # acts at the next start, where it is checked again. Each CSTORE_STATS line carries this table as "modes".
+    self.__cs_modes = {
+      "order": self.cfg_cstore_order, "lean_confirm": self.cfg_cstore_lean_confirm,
+      "handoff": self.cfg_cstore_handoff, "save_backoff": self.cfg_cstore_save_backoff,
+    }
     # The replica is loaded: from here the SerializationManager saves it every CS_SAVE_INTERVAL seconds when
     # it changed. A full save took this plugin's thread 0.26 s on an idle node and 1.3 s on a busy one
     # (5 MB, 0.7 CPU), during which it confirmed no write; the thread no longer runs the save. Registered
     # before anything below can fail, so on_close always finds the registration it removes.
     SerializationManager.instance.register(self.__maybe_flush_chain_storage, every=self.CS_SAVE_INTERVAL)
+    # The switches set to anything but the three modes, by config key; checked after the registration, so the
+    # on_close that follows a failed start still finds the registration it removes.
+    bad_modes = {
+      "CSTORE_" + name.upper(): mode for name, mode in self.__cs_modes.items() if mode not in ("off", "report", "on")
+    }
+    if bad_modes:
+      # Fail loudly: the store does not start (one START FAILURE line) rather than run a rule in a mode nobody chose.
+      raise ValueError(f"Chain-store switches must be 'off', 'report' or 'on', got: {bad_modes}")
       
     memory = self.plugins_shmem
       
@@ -210,6 +254,53 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__maybe_refresh_chain_peers()
     return
   
+
+  def __cs_count(self, event, key=None, origin=None, n=1):
+    """
+    Count one event for the next ``CSTORE_STATS`` line.
+
+    The one counting helper of the line: a count of the whole store goes under the event's own name (for
+    example ``saves``), a count of one write under ``<bucket>/<origin>/<event>``, where the bucket is the
+    first 14 characters of an ``hs:`` key (the prefix shared by every field of one hash namespace) or
+    ``plain``. The count is made under the persistence lock, like every count of the line, and ``process``
+    takes and resets the counters at each line.
+
+    Parameters
+    ----------
+    event : str
+      What happened, for example ``"saves"`` or ``"changed"``.
+    key : str, optional
+      The composed chain-store key the event is about; None (the default) for a count of the whole store.
+      It must be a str when given (a key that came from the network is checked before it reaches here).
+    origin : str, optional
+      Where the write came from, ``"local"`` or ``"remote"``; used only with ``key``.
+    n : int, optional
+      How much to add, 1 by default (a sum such as milliseconds can add more).
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The lock is the re-entrant persistence lock, so a caller that already holds it can count. The cost is a
+    slice, a format, a lock and one dict update per call.
+
+    Examples
+    --------
+    >>> self.__cs_count("saves")                                           # counts["saves"] += 1
+    >>> self.__cs_count("changed", "hs:0123456789:YWxwaGE=", "remote")     # counts["hs:0123456789:/remote/changed"]
+    >>> self.__cs_count("changed", "plain-key", "local")                   # counts["plain/local/changed"]
+    """
+    if key is not None:
+      # The label of one write: its namespace bucket, its origin and the event.
+      event = "{}/{}/{}".format(key[:14] if key.startswith("hs:") else "plain", origin, event)
+    # Under the persistence lock, as every count of the line; process() swaps the dict under the same lock.
+    with self.__persistence_lock:
+      # A plain increment of one counter of a small dict (one label per bucket, origin and event).
+      self.__cs_stats[event] = self.__cs_stats.get(event, 0) + n
+    return
+
 
   def __netmon_node_is_online_for_control(self, peer):
     """
@@ -435,7 +526,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The records are copied under the persistence lock and the dirty flag is cleared there; the copy is then
     written outside that lock. The whole save runs under the save lock, which is one for the process, so
     snapshots reach the file in the order they were taken, also across a restart of this plugin. Each save
-    is counted as ``saves`` for the ``CSTORE_STATS`` line.
+    is counted as ``saves`` for the ``CSTORE_STATS`` line, through ``__cs_count``.
 
     Returns
     -------
@@ -445,6 +536,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     A failed write marks the store dirty again, so the next flush retries it. A failed write is counted too:
     the count is taken where the dirty flag is cleared, before the write.
+
+    Examples
+    --------
+    >>> self.__save_chain_storage()   # from the periodic flush, or from on_close at an orderly stop
     """
     # Callers persist after releasing the persistence lock. Records are copied
     # shallowly under that lock so concurrent writers and confirmations cannot
@@ -461,8 +556,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           for key, record in self.__chain_storage.items()
         }
         self.__chain_storage_dirty = False
-        # Count this save for the CSTORE_STATS line, under the lock already held here; before, saves were not counted.
-        self.__cs_stats["saves"] = self.__cs_stats.get("saves", 0) + 1
+        # Count this save for the CSTORE_STATS line, through the one counting helper (the lock it takes is the
+        # one already held here, and it is re-entrant).
+        self.__cs_count("saves")
       try:
         self.cacheapi_save_pickle(snapshot, verbose=False, strict=True)
       except Exception as exc:
@@ -1373,12 +1469,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       raise ValueError(err_msg)
     finally:
       # Count this call once for the CSTORE_STATS line, by namespace bucket (the "hs:" prefix of one hash
-      # namespace, or "plain"), origin and outcome. Nothing here can raise for the valid key checked above.
-      label = "{}/{}/{}".format(key[:14] if key.startswith("hs:") else "plain", "remote" if local_sync_storage_op else "local", outcome)
-      # Under the persistence lock, as every count of the line.
-      with self.__persistence_lock:
-        # A plain increment of one counter of a small dict; it holds one label per bucket, origin and outcome.
-        self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
+      # namespace, or "plain"), origin and outcome, through the one counting helper. Nothing here can raise for
+      # the valid key checked above.
+      self.__cs_count(outcome, key, "remote" if local_sync_storage_op else "local")
     return need_store
 
 
@@ -1637,12 +1730,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # a write or delete is applied only when its sender is an oracle registry member. A refused one gets no
     # confirmation, like a write that _set_value refuses.
     if self.__oracle_only_write(key, value) and not self.__registry_member(peers):
-      # Counted under the label _set_value gives a refused remote write; the bucket is the key's "hs:" prefix.
-      label = key[:14] + "/remote/refused"
-      # Under the persistence lock, as every count of the CSTORE_STATS line.
-      with self.__persistence_lock:
-        # A plain increment of one counter; one label per bucket.
-        self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
+      # Counted under the label _set_value gives a refused remote write, through the one counting helper; the key
+      # is a str here (it is in a hash namespace), and its bucket is its "hs:" prefix.
+      self.__cs_count("refused", key, "remote")
       return
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
@@ -1927,7 +2017,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Every ``CS_STATS_INTERVAL`` seconds the lap also writes one ``CSTORE_STATS`` line: the counters taken
     (and reset) under the persistence lock, then logged outside it as one JSON object with sorted keys::
 
-      CSTORE_STATS {"counts":{...},"lost_inputs":0,"period_s":300,"queue_peak":0}
+      CSTORE_STATS {"counts":{...},"lost_inputs":0,"modes":{"handoff":"report","lean_confirm":"report",
+                    "order":"report","save_backoff":"report"},"period_s":300,"queue_peak":0}
+
+    (one line in the log). ``modes`` is the table of the wave 03 switches read once by ``on_init``.
 
     Returns
     -------
@@ -1938,7 +2031,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The line is written also when nothing was counted, so a missing line means this loop is not running
     (or the wall clock, which times the interval, was set back). ``queue_peak`` is the largest input queue
     a lap found when it reached this method, after the lap took its inputs, so a full queue shows as
-    ``lost_inputs``: the increase of the plugin's own count of inputs dropped at a full queue.
+    ``lost_inputs``: the increase of the plugin's own count of inputs dropped at a full queue. Adding
+    ``modes`` costs one small dict in a line written every 300 s; a parser that reads the line by key is
+    not affected by the new key.
+
+    Examples
+    --------
+    >>> self.process()   # one lap of the plugin loop; every 300 s it also logs the CSTORE_STATS line
     """
     self.__maybe_refresh_chain_peers()
     self.__maybe_broadcast()
@@ -1952,8 +2051,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # The clock and the plugin's count of lost inputs, read once: for this line and as the start of the next one.
       now, lost = self.time(), self.lost_inputs_count
       # One JSON object with sorted keys on one line, built and logged outside the lock.
+      # Also the mode of each wave 03 switch, read once at start, so a line says whether each rule counted in it
+      # acted ('on') or was only evaluated ('report').
       self.P("CSTORE_STATS " + self.json_dumps({
-        "period_s": round(now - self.__cs_stats_last), "counts": counts,
+        "period_s": round(now - self.__cs_stats_last), "counts": counts, "modes": self.__cs_modes,
         "queue_peak": self.__cs_stats_queue_peak, "lost_inputs": lost - self.__cs_stats_lost,
       }, sort_keys=True))
       # The next line is measured from here.

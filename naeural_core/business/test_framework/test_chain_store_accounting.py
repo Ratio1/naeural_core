@@ -29,6 +29,25 @@ OPS = "_ChainStoreBasePlugin__ops"
 BUCKET = _hset_index("players")  # "hs:" + 10 hex digits + ":", 14 characters
 
 
+def modes():
+  """
+  Give the mode table every harness starts with: each wave 03 switch in the harness's mode.
+
+  Returns
+  -------
+  dict
+    ``{"order", "lean_confirm", "handoff", "save_backoff"}`` each mapped to ``_ChainStoreRuntimeHarness.CSTORE_MODE``
+    ('off', or 'report' in the report-mode run), as the ``modes`` of a ``CSTORE_STATS`` line shows it.
+
+  Examples
+  --------
+  >>> modes()
+  {'order': 'off', 'lean_confirm': 'off', 'handoff': 'off', 'save_backoff': 'off'}
+  """
+  # Read at call time, so the report-mode run, which sets the harness's mode for each test, gets 'report'.
+  return dict.fromkeys(("order", "lean_confirm", "handoff", "save_backoff"), _ChainStoreRuntimeHarness.CSTORE_MODE)
+
+
 def make_store():
   store = _ChainStoreRuntimeHarness("node", default_peers=["peer1", "peer2"])
   setattr(store, OPS, collections.deque())
@@ -213,10 +232,33 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
   timezone = _timezone
 
   def __init__(self, data_folder):
+    """
+    Build the store of "node" with what on_init needs, but without the state on_init must create itself.
+
+    Parameters
+    ----------
+    data_folder : str
+      The node's data folder; the replica file is ``chain_store/object.pickle`` under it.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The counter state and the mode table the shared harness prepares are removed, so a test proves that
+    ``on_init`` creates them. The switches stay as the shared harness sets them (``cfg_cstore_*``, each in the
+    harness's mode); a test sets one to another value before calling ``on_init``.
+
+    Examples
+    --------
+    >>> store = _StartHarness(folder)
+    >>> store.on_init()
+    """
     super().__init__("node")
     self.plugins_shmem = {}
-    # on_init must create the counter state itself: drop what the shared harness prepared.
-    for name in ("cs_stats", "cs_stats_last", "cs_stats_queue_peak", "cs_stats_lost"):
+    # on_init must create the counter state and the mode table itself: drop what the shared harness prepared.
+    for name in ("cs_stats", "cs_stats_last", "cs_stats_queue_peak", "cs_stats_lost", "cs_modes"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"
@@ -395,35 +437,62 @@ class TestCounters(unittest.TestCase):
     self.assertEqual(len(store.saved_storage), 2)
 
   def test_stats_line_is_written_once_per_interval_and_resets_the_counters(self):
+    """One CSTORE_STATS line per interval, with the counts, queue peak, lost inputs and switch modes; counts reset."""
+    # The store of "node", with its two peers running.
     store = make_store()
+    # Its whitelist, for the peer refresh process() makes.
     store.bc = _WhitelistBlockEngine(["peer1", "peer2"])
+    # Both peers running.
     store.netmon = _SummaryControlNetmon(online_for_control={"peer1", "peer2"})
+    # One remote write to count.
     store._set_value("key", "v", owner="peer1", local_sync_storage_op=True)
+    # A lap at 100 s finds 7 inputs queued.
     store.input_queue_size, store._now = 7, 100
+    # That lap.
     store.process()
+    # Then 3 queued and 4 lost.
     store.input_queue_size, store.lost_inputs_count = 3, 4
+    # A lap just before the interval ends.
     store._now = store.CS_STATS_INTERVAL - 0.1
+    # That lap.
     store.process()
+    # No line yet.
     self.assertEqual([msg for msg in store.messages if msg.startswith("CSTORE_STATS ")], [])
+    # The interval ends.
     store._now = store.CS_STATS_INTERVAL
+    # The lap that writes the line.
     store.process()
+    # A second lap at the same time writes none.
     store.process()
+    # The lines written.
     lines = [msg for msg in store.messages if msg.startswith("CSTORE_STATS ")]
+    # One line.
     self.assertEqual(len(lines), 1)
+    # On one log line.
     self.assertNotIn("\n", lines[0])
+    # Its JSON object.
     stats = json.loads(lines[0][len("CSTORE_STATS "):])
+    # With sorted keys.
     self.assertEqual(list(stats), sorted(stats))
+    # Its fields.
     self.assertEqual(stats, {
-      "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 7, "lost_inputs": 4,
+      # The counts, queue peak and lost inputs as before, and the mode of each switch (all in the harness's mode).
+      "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 7, "lost_inputs": 4, "modes": modes(),
     })
+    # The counters start again.
     self.assertEqual(getattr(store, STATS), {})
     # The next interval: a line also when nothing was counted, measured from the previous line.
     store._now = 2 * store.CS_STATS_INTERVAL
+    # The lap that writes it.
     store.process()
+    # The lines written.
     lines = [msg for msg in store.messages if msg.startswith("CSTORE_STATS ")]
+    # Two now.
     self.assertEqual(len(lines), 2)
+    # The second line's fields.
     self.assertEqual(json.loads(lines[1][len("CSTORE_STATS "):]), {
-      "period_s": 300, "counts": {}, "queue_peak": 3, "lost_inputs": 0,
+      # The modes again: they are in every line.
+      "period_s": 300, "counts": {}, "queue_peak": 3, "lost_inputs": 0, "modes": modes(),
     })
 
 
@@ -751,17 +820,27 @@ class TestStart(unittest.TestCase):
     self.assertEqual([msg for msg, _ in store.lines if "unreadable" in msg], [])
 
   def test_a_started_store_counts_its_writes_and_writes_its_line(self):
+    """A store started by on_init counts its writes and logs its line with the modes on_init read."""
     # The counter state comes from on_init here, not from the test harness.
     store = self.start()
+    # One remote write, applied.
     self.assertTrue(store._set_value("key", "v", owner="peer1", local_sync_storage_op=True))
+    # Counted.
     self.assertEqual(getattr(store, STATS), {"plain/remote/changed": 1})
+    # A whitelist for the peer refresh process() makes.
     store.bc = _WhitelistBlockEngine(["peer1"])
+    # Its peer running.
     store.netmon = _SummaryControlNetmon(online_for_control={"peer1"})
+    # The interval ends.
     store._now = store.CS_STATS_INTERVAL
+    # The lap that writes the line.
     store.process()
+    # The lines written.
     lines = [msg for msg, _ in store.lines if msg.startswith("CSTORE_STATS ")]
+    # The first line's fields.
     self.assertEqual(json.loads(lines[0][len("CSTORE_STATS "):]), {
-      "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 0, "lost_inputs": 0,
+      # With the modes on_init read from the harness's switches.
+      "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 0, "lost_inputs": 0, "modes": modes(),
     })
 
   def test_a_save_of_a_restarted_instance_waits_for_a_save_of_the_closed_one(self):

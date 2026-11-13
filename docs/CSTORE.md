@@ -271,7 +271,7 @@ Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
 the node log, one JSON object with sorted keys:
 
 ```text
-CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"lost_inputs":<n>,"period_s":300,"queue_peak":<n>}
+CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"lost_inputs":<n>,"modes":{"handoff":"report","lean_confirm":"report","order":"report","save_backoff":"report"},"period_s":300,"queue_peak":<n>}
 ```
 
 The line is written also when nothing was counted, so a missing line means the
@@ -284,6 +284,7 @@ Fields:
 - `counts`: the counters of that period, by label (below); only labels seen in the period appear.
 - `queue_peak`: the largest number of inputs still waiting in the plugin's input queue when a loop lap reached the chain-store step in the period. The lap has taken its inputs by then, so a queue that filled up shows in `lost_inputs`, not here.
 - `lost_inputs`: how much the plugin's `lost_inputs_count` grew: inputs that arrived while the input queue was full, when the queue drops its oldest input.
+- `modes`: the mode of each wave 03 switch of the plugin config (`CSTORE_ORDER`, `CSTORE_LEAN_CONFIRM`, `CSTORE_HANDOFF`, `CSTORE_SAVE_BACKOFF`), read once at start: `off` (wave 02 behaviour), `report` (the rule runs and is counted, nothing acts on it) or `on` (the rule acts). Any other value stops the plugin's start. The same table is in every line until the next start.
 
 Labels in `counts`:
 

@@ -230,7 +230,38 @@ class _OldNetmonStub:
 
 
 class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
+  # The mode of every wave 03 switch in a harness: 'off' runs these suites as wave 02 behaviour; the report-mode run
+  # in test_chain_store_switches.py sets 'report' here for each of its tests.
+  CSTORE_MODE = "off"
+
   def __init__(self, ee_addr, default_peers=None, storage=None):
+    """
+    Build a chain store with the state on_init would give it, without starting it.
+
+    Parameters
+    ----------
+    ee_addr : str
+      The node's address: its writes and confirmations are sent from it.
+    default_peers : list of str, optional
+      The replication peers the store starts with, as a peer refresh would leave them; none by default.
+    storage : dict, optional
+      Records (composed key -> record) the store holds, deep-copied; empty by default.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Every wave 03 switch is in the class's ``CSTORE_MODE``: both as the ``cfg_cstore_*`` value on_init reads and
+    in the mode table on_init would build from them.
+
+    Examples
+    --------
+    >>> store = _ChainStoreRuntimeHarness("peer-1", default_peers=["peer-2"])
+    >>> store._ChainStoreBasePlugin__cs_modes["save_backoff"]
+    'off'
+    """
     self.ee_addr = ee_addr
     self.ee_id = f"{ee_addr}-id"
     self._stream_id = "stream"
@@ -258,6 +289,13 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__cs_stats_last, self._ChainStoreBasePlugin__cs_stats_queue_peak = self._now, 0
     self._ChainStoreBasePlugin__cs_stats_lost = 0
     self.lost_inputs_count = 0
+    # The four switches as on_init reads them from the plugin config, each in this harness's mode.
+    self.cfg_cstore_order = self.cfg_cstore_lean_confirm = self.CSTORE_MODE
+    # The other two.
+    self.cfg_cstore_handoff = self.cfg_cstore_save_backoff = self.CSTORE_MODE
+    # The mode table on_init builds from them.
+    self._ChainStoreBasePlugin__cs_modes = dict.fromkeys(("order", "lean_confirm", "handoff", "save_backoff"),
+                                                         self.CSTORE_MODE)
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

@@ -430,9 +430,10 @@ def stop_on_sigterm(running):
   timeout and kill the process, and nothing is flushed. With this handler
   SIGTERM ends the main loop the way a STOP command does: the node sends a
   SHUTDOWN-status heartbeat and closes its managers and plugins. The chain
-  store saves its pending writes as it closes; the network-monitor and epoch
-  state get no extra save at stop and keep only their periodic save. The
-  stop timeout of the container must leave room for that.
+  store saves its pending writes as it closes, and the network-monitor or
+  epoch state is saved once more as the last step of the close. The stop
+  timeout of the container must leave room for the whole close: a node
+  killed before its end keeps only its periodic saves.
   A SIGTERM during start-up, once the Orchestrator exists, ends the dAuth
   wait (no new round starts), lets the managers finish starting and then
   closes the node without entering the main loop.

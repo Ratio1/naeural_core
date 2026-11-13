@@ -1490,9 +1490,9 @@ class Orchestrator(DecentrAIObject,
 
     The loop leaves at its next check and closes as after a STOP command:
     SHUTDOWN-status heartbeat, then the managers and plugins are closed; the
-    chain store saves its pending writes as it closes, while the
-    network-monitor and epoch state get no extra save at stop and keep only
-    their periodic save. During start-up no new dAuth round starts and the
+    chain store saves its pending writes as it closes, and the
+    network-monitor or epoch state is saved once more when the
+    SerializationManager stops, as the last step of the close. During start-up no new dAuth round starts and the
     main loop is not entered. The method only sets a value, so a signal
     handler may call it.
 
@@ -2040,9 +2040,9 @@ class Orchestrator(DecentrAIObject,
 
     First sends the SHUTDOWN-status heartbeat, unless a shutdown or exception stop already ran. The order
     matters. Plugins close before the SerializationManager stops, so a plugin that saves on close (the
-    chain store does) still makes that final save; the manager is stopped last, makes no extra save and
-    only waits, for at most 60 seconds in total, for the periodic saves that are being written at that
-    moment (each save has its own thread).
+    chain store does) still makes that final save; the manager is stopped last: it runs once more the saves
+    registered for the stop (the network monitor's status) and waits, for at most 60 seconds in total, for
+    them and for the periodic saves that are being written at that moment (each save has its own thread).
 
     Returns
     -------
@@ -2058,9 +2058,9 @@ class Orchestrator(DecentrAIObject,
       self._serving_manager.stop_all_servers()
     if self._capture_manager is not None:
       self._capture_manager.close()
-    # Last step: let the state saves that are being written finish (at most 60 s for all of them), so the
-    # node does not exit in the middle of one. Plugins that save on close made their final saves when they
-    # closed above.
+    # Last step: let the state saves that are being written finish and run once more the saves registered for
+    # the stop (the network monitor's status), at most 60 s for all of them, so the node does not exit in the
+    # middle of one. Plugins that save on close made their final saves when they closed above.
     SerializationManager.instance.stop(timeout=60)
     return
 

@@ -45,11 +45,14 @@ _CONFIG = {
   "SAVE_STATUS_SNAPSHOT": False,
   "STATUS_SNAPSHOT_FILE": "netmon_status.json",
   #
-  # The SAVE_NMON_EACH is used to save the network status to the database and should trigger
-  # enough so that the network status "often enough" meaning if there are 5-6 restarts per day
-  # each summing up 1 minute (total 5-6 minutes) is way below 1% of the day. 
-  # The default value is 12 which means that the network status is saved every 2 minutes
-  "SAVE_NMON_EACH"      : 12, # oracle: saves each SAVE_NMON_EACH (at most 20) * PROCESS_DELAY s, PROCESS_DELAY counted as at least 1
+  # Seconds between two saves of the network status on an oracle (the heartbeat history and the epochs
+  # status, about 20 MB). A setting of its own: it was SAVE_NMON_EACH (12) iterations of PROCESS_DELAY, so
+  # 120 s with the default PROCESS_DELAY of 10. One save costs an oracle with 0.7 CPU core 1.5-1.9 s when
+  # idle and 6.1-6.3 s when busy, so 600 s means five times fewer of them. The status is also saved once
+  # more as the last step of a clean stop, so the longer interval costs data only when the node crashes or
+  # is killed before its close ends (a container stop timeout shorter than the close): then up to 10
+  # minutes of recorded heartbeats, plus the time of one save.
+  "SAVE_NMON_SECONDS"   : 600,
 
   'VALIDATION_RULES': {
     **BasePluginExecutor.CONFIG['VALIDATION_RULES'],
@@ -116,24 +119,24 @@ class NetMon01Plugin(
     Raises
     ------
     ValueError
-      From ``SerializationManager.register`` when ``SAVE_NMON_EACH`` is below 1 on an oracle: the cadence is
-      then not positive and the plugin does not start. From 0 to 1 it used to fail at every iteration, with
-      a division by zero.
+      From ``SerializationManager.register`` when ``SAVE_NMON_SECONDS`` is not a positive, finite number on
+      an oracle: the plugin does not start.
 
     Notes
     -----
-    An oracle saves the heartbeat history and the epochs status every ``SAVE_NMON_EACH`` iterations (at
-    most 20); any other node saves only its epochs status, every 30 iterations. One iteration is
-    ``PROCESS_DELAY`` seconds, counted as at least one second: with the defaults that is every 120 s and every
-    300 s, as before, and with a ``PROCESS_DELAY`` below one second (0 is valid for the plugin loop) every
-    12 s and every 30 s. Without that minimum, a ``PROCESS_DELAY`` of 0 would give a cadence of 0, which the
-    SerializationManager refuses, and the plugin would not start. The cadence is read once, here: a later
-    change of ``SAVE_NMON_EACH`` or ``PROCESS_DELAY`` applies when the plugin starts again (before, it
-    applied from the next iteration).
+    An oracle saves the heartbeat history and the epochs status every ``SAVE_NMON_SECONDS`` (600 s); any
+    other node saves only its epochs status, every 300 s. Both are seconds of their own and no longer a
+    number of plugin iterations: before, an oracle saved every ``SAVE_NMON_EACH`` (12, at most 20)
+    iterations and any other node every 30, one iteration being ``PROCESS_DELAY`` seconds, so every 120 s
+    and 300 s with the default ``PROCESS_DELAY`` of 10. ``SAVE_NMON_EACH`` is no longer read. The save is
+    registered with ``at_stop``: it runs once more as the last step of a clean stop, so it is made when the
+    close reaches its end (before, nothing was saved at stop and a restart lost what was recorded since the
+    last periodic save). The interval is read once, here: a later change of ``SAVE_NMON_SECONDS`` applies
+    when the plugin starts again.
 
     Examples
     --------
-    >>> plugin.on_init()   # an oracle with PROCESS_DELAY 10: its status is saved every 12 * 10 = 120 s
+    >>> plugin.on_init()   # an oracle: its status is saved every 600 s and once at a clean stop
     """
     # the following code was left here for historical reasons only
     # convert supervisor to bool if needed
@@ -190,20 +193,23 @@ class NetMon01Plugin(
     # What is saved, as before: an oracle saves the heartbeat history and the epochs status, any other node
     # only its epochs status.
     save = self.netmon.network_save_status if self.cfg_supervisor else self.netmon.epoch_manager.save_status
-    # The same cadence as before, in seconds: every SAVE_NMON_EACH iterations (at most 20) on an oracle, every
-    # 30 iterations on any other node, one iteration being PROCESS_DELAY seconds and now at least one second.
-    # PROCESS_DELAY 0 is valid for the plugin loop (sibling admin plugins ship with it), but as a cadence it
-    # would run a 20 MB save back to back and the SerializationManager refuses it. One second per iteration
-    # is the chosen minimum: it is below every shipped NET_MON_01 value (5 to 20 s), so those are unchanged,
-    # and it keeps two saves at least as many seconds apart as there are iterations between them (12 s on an
-    # oracle by default, 30 s elsewhere). It is read here, once: a later change of those two settings applies
+    # Seconds between two saves, no longer a number of iterations of PROCESS_DELAY seconds: SAVE_NMON_SECONDS
+    # (600 s) on an oracle, where it was 12 iterations, 120 s with the default PROCESS_DELAY of 10, for a
+    # 20 MB save; 300 s on any other node, which saves only its small epochs status (it was 30 iterations,
+    # the same 300 s with that default). A value that is not a positive number is refused by the
+    # SerializationManager and the plugin does not start. It is read here, once: a later change applies
     # when the plugin starts again.
-    every = (int(min(self.cfg_save_nmon_each, 20)) if self.cfg_supervisor else 30) * max(self.cfg_process_delay, 1)
+    every = self.cfg_save_nmon_seconds if self.cfg_supervisor else 300
     # The SerializationManager runs the save on a thread kept for this save alone. On this thread one save
     # stopped this plugin's iteration (history, rankings, the current-network payload) for 1.5-1.9 s on an
     # idle node and 6.1-6.3 s on a busy one (20 MB, 0.7 CPU); now the iteration does not wait for it.
-    SerializationManager.instance.register(save, every=every)
-    self.P("Netmon status save registered every {}s (PROCESS_DELAY={})".format(every, self.cfg_process_delay))
+    # at_stop: one more save as the last step of a clean stop, so a restart whose close reaches its end loses
+    # nothing of what was recorded since the last periodic save. A restart the node starts itself, such as
+    # a release update, does; a stop from the host does when the container's stop timeout leaves room for the
+    # close. Before, nothing was saved at stop and every restart lost up to one interval, which would now be
+    # up to 600 s on an oracle.
+    SerializationManager.instance.register(save, every=every, at_stop=True)
+    self.P("Netmon status save registered every {}s and at a clean stop".format(every))
     return
   
   @property
@@ -392,8 +398,9 @@ class NetMon01Plugin(
     Notes
     -----
     The periodic save of the network status is not made here: ``on_init`` registered it with the
-    SerializationManager, which runs it on a thread kept for this save alone, at the same cadence. One save
-    used to stop this thread for 1.5-1.9 s on an idle node and 6.1-6.3 s on a busy one (20 MB at 0.7 CPU).
+    SerializationManager, which runs it on a thread kept for this save alone, every ``SAVE_NMON_SECONDS``
+    on an oracle (300 s on any other node) and once more as the last step of a clean stop. One save used to
+    stop this thread for 1.5-1.9 s on an idle node and 6.1-6.3 s on a busy one (20 MB at 0.7 CPU).
     """
     payload = None
     self.netmon.epoch_manager.maybe_update_cached_data()
@@ -415,7 +422,7 @@ class NetMon01Plugin(
     current_ranking = ranking
     current_new = new_nodes
     # The periodic save of the network status is no longer made here: on_init registered it with the
-    # SerializationManager, which runs it on a thread kept for this save alone, at the same cadence.
+    # SerializationManager, which runs it on a thread kept for this save alone (see on_init for the interval).
     if self.cfg_supervisor:
       self.netmon.epoch_manager._maybe_calculate_stats()
 

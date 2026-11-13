@@ -634,63 +634,105 @@ class TestOwners(unittest.TestCase):
   """The two owners hand their periodic save to the manager and no longer run it on their own thread."""
 
   def test_the_network_monitor_plugin_registers_its_save_and_does_not_save_in_its_loop(self):
+    """The plugin hands its save to the manager, for an interval of its own and for the stop, and saves nowhere else."""
+    # The plugin's source, read as text: importing it would import the node.
     source = (_ROOT / "business" / "default" / "admin" / "net_mon_01.py").read_text(encoding="utf-8")
+    # The text of on_init, where the save is registered...
     on_init = source.split("  def on_init(self):", 1)[1].split("\n  def ", 1)[0]
+    # ...and of _process, the plugin's loop, where the save used to be made.
     process = source.split("  def _process(self):", 1)[1].split("\n  def ", 1)[0]
-    self.assertIn("SerializationManager.instance.register(save, every=every)", on_init)
-    self.assertIn("* max(self.cfg_process_delay, 1)", on_init)  # the cadence in seconds, not in iterations
+    # The registration asks for the last run at a clean stop.
+    self.assertIn("SerializationManager.instance.register(save, every=every, at_stop=True)", on_init)
+    # on_init without its comments...
+    init_code = "\n".join(line for line in on_init.splitlines() if not line.strip().startswith("#"))
+    # ...and without its docstring: only what runs.
+    init_code = init_code.split('"""', 2)[2]
+    # The interval is the plugin's own setting in seconds...
+    self.assertIn("self.cfg_save_nmon_seconds", init_code)
+    # ...and no longer a number of iterations of the loop delay.
+    self.assertNotIn("cfg_process_delay", init_code)
+    self.assertNotIn("cfg_save_nmon_each", init_code)
+    # _process without its comments...
     code = "\n".join(line for line in process.splitlines() if not line.strip().startswith("#"))
-    code = code.split('"""', 2)[2]  # without the docstring
+    # ...and without its docstring.
+    code = code.split('"""', 2)[2]
+    # The loop makes neither of the two saves itself.
     self.assertNotIn("network_save_status(", code)
     self.assertNotIn("epoch_manager.save_status(", code)
 
-  def netmon_cadences(self, supervisor, process_delay, save_nmon_each=12, manager=None):
+  def netmon_cadences(self, supervisor, process_delay, save_nmon_seconds=600, manager=None):
     """
-    Run NetMon01Plugin.on_init on a stand-in node and return the cadences its save was registered with.
+    Run NetMon01Plugin.on_init on a stand-in node and return what its save was registered with.
+
+    The plugin class is loaded from its source with stand-ins for the node, given the settings an instance
+    would have, and its on_init is run; the stand-in manager records the registration.
 
     Parameters
     ----------
     supervisor : bool
       True for an oracle.
-    process_delay, save_nmon_each : int or float
-      The plugin's PROCESS_DELAY and SAVE_NMON_EACH.
+    process_delay : int or float
+      The plugin's PROCESS_DELAY, which must not change the interval.
+    save_nmon_seconds : int or float
+      The plugin's SAVE_NMON_SECONDS.
     manager : SerializationManager or None
-      The manager on_init registers with; None records the cadence without one.
+      The manager on_init registers with; None records the registration without one.
 
     Returns
     -------
     list
-      The cadences registered, in seconds. The plugin's log lines are left in ``self.netmon_lines``.
+      One ``(seconds, at_stop)`` pair per registration. The plugin's log lines are left in
+      ``self.netmon_lines``.
+
+    Examples
+    --------
+    >>> self.netmon_cadences(True, 10)
+    [(600, True)]
     """
+    # What the stand-in manager was asked to register, and what the plugin logged.
     registered, self.netmon_lines = [], []
-    manager = manager or SimpleNamespace(register=lambda save, every: registered.append(every))
+    # A stand-in manager that keeps the interval and the stop flag of each registration.
+    manager = manager or SimpleNamespace(register=lambda save, every, at_stop: registered.append((every, at_stop)))
+    # The plugin class with that manager in place of the node's.
     plugin_class = _load_network_monitor_plugin(manager)
+    # An instance without the node's constructor: only what on_init reads is set below.
     plugin = plugin_class.__new__(plugin_class)
+    # A network monitor whose two saves do nothing.
     netmon = SimpleNamespace(network_save_status=lambda: None, epoch_manager=SimpleNamespace(save_status=lambda: None))
     # Without np the sending period, not set in os_environ, ends as 0 in on_init's own except, as on a node.
     vars(plugin).update(
       cfg_supervisor=supervisor, is_supervisor_node=supervisor, cfg_supervisor_log_time=None, os_environ={},
-      cfg_save_nmon_each=save_nmon_each, cfg_process_delay=process_delay, netmon=netmon, const=mock.Mock(),
+      cfg_save_nmon_seconds=save_nmon_seconds, cfg_process_delay=process_delay, netmon=netmon, const=mock.Mock(),
       P=lambda msg, **kwargs: self.netmon_lines.append(msg),
     )
+    # The start of the plugin: it registers the save.
     plugin.on_init()
     return registered
 
-  def test_the_network_monitor_saves_every_so_many_iterations_of_at_least_one_second(self):
-    # The shipped PROCESS_DELAY values (3, 5, 10, 20) keep their cadence: 12 iterations on an oracle, 30 elsewhere.
-    for delay in (3, 5, 10, 20):
-      self.assertEqual(self.netmon_cadences(True, delay) + self.netmon_cadences(False, delay), [12 * delay, 30 * delay])
-    # PROCESS_DELAY 0 is valid for the plugin loop: the save still gets a cadence the manager accepts, and the
-    # log says which.
-    self.assertEqual(self.netmon_cadences(False, 0.5), [30])
-    self.assertEqual(self.netmon_cadences(True, 0), [12])
-    self.assertIn("Netmon status save registered every 12s (PROCESS_DELAY=0)", self.netmon_lines)
-    # SAVE_NMON_EACH below 1 gives an oracle no cadence: the manager refuses it and the plugin does not start.
+  def test_the_network_monitor_save_has_an_interval_of_its_own_in_seconds_and_runs_at_stop(self):
+    """An oracle saves every SAVE_NMON_SECONDS, any other node every 300 s, whatever PROCESS_DELAY is; both at stop."""
+    # The setting as the plugin ships it: 600 s, under the name on_init reads as cfg_save_nmon_seconds.
+    self.assertEqual(_load_network_monitor_plugin(None).CONFIG["SAVE_NMON_SECONDS"], 600)
+    # Loop delays that ship or are valid (0 is, for the plugin loop): none of them moves the interval any more.
+    for delay in (0, 0.5, 5, 10, 20):
+      with self.subTest(delay=delay):
+        # An oracle: 600 s, where it was 12 iterations of the loop delay.
+        self.assertEqual(self.netmon_cadences(True, delay), [(600, True)])
+        # Any other node: 300 s for its small epochs status.
+        self.assertEqual(self.netmon_cadences(False, delay), [(300, True)])
+    # The setting is the oracle's interval, and the log says what was registered.
+    self.assertEqual(self.netmon_cadences(True, 10, save_nmon_seconds=900), [(900, True)])
+    self.assertIn("Netmon status save registered every 900s and at a clean stop", self.netmon_lines)
+    # Another node does not read the setting.
+    self.assertEqual(self.netmon_cadences(False, 10, save_nmon_seconds=900), [(300, True)])
+    # The real manager, to see an interval that is not a positive number refused: the plugin does not start.
     manager = SerializationManager(_Log())
     # Stopped at the end, so a thread started if the refusal regressed does not outlive this test.
     self.addCleanup(manager.stop, timeout=5)
-    with self.assertRaises(ValueError):
-      self.netmon_cadences(True, 10, save_nmon_each=0, manager=manager)
+    for bad in (0, -5, None, "600"):
+      # Each of these must be refused when the plugin registers its save.
+      with self.subTest(bad=bad), self.assertRaises(ValueError):
+        self.netmon_cadences(True, 10, save_nmon_seconds=bad, manager=manager)
 
   def test_the_chain_store_registers_its_flush_right_after_loading_the_replica(self):
     # Its periodic save exists only through this registration; on_close removes it, so it must come before

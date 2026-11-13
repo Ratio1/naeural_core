@@ -701,12 +701,39 @@ class _BasePluginAPIMixin:
 
   
   def chainstore_hlist(self, hkey : str, token=None, debug=False):
+    """
+    List the field names stored under one hash namespace of the local replica.
+
+    Walks the keys of the chain storage held in the shared plugin memory and returns, decoded, every field
+    whose composed key starts with the prefix of ``hkey``.
+
+    Parameters
+    ----------
+    hkey : str
+      Logical hash namespace.
+    token : any, optional
+      Not used by the listing. Default is None.
+    debug : bool, optional
+      Not used by the listing. Default is False.
+
+    Returns
+    -------
+    list of str
+      The field names of ``hkey`` found in the local replica.
+
+    Notes
+    -----
+    The keys are copied before the walk: this runs on the caller's thread while the chain-store thread
+    and the threads of other plugins that write to the store add and remove keys.
+    """
     index = self.__hset_index(hkey)
     memory = self.__chainstorage_memory()
     self.__maybe_wait_for_chain_state_init()
     chain_storage = memory.get('__chain_storage')
     result = []
-    for key in chain_storage:
+    # Walk a copy of the keys: before, the loop walked the live store, which the chain-store thread and other
+    # writers change meanwhile, and that could raise "dictionary changed size during iteration".
+    for key in list(chain_storage):
       if not isinstance(key, str) or key == "":
         self.P("Invalid key type in chain storage: {}".format(type(key)), color="red")
         continue

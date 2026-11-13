@@ -10,6 +10,8 @@ the network status to the database and triggering the epoch serialization
 from naeural_core.business.base import BasePluginExecutor
 from naeural_core.business.mixins_admin.network_monitor_mixin import _NetworkMonitorMixin, NMonConst
 from naeural_core.constants import NET_MON_01_SUPERVISOR_LOG_TIME
+# Runs the periodic network-status save on its own thread instead of on this plugin's thread.
+from naeural_core.main.serialization_manager import SerializationManager
 
 __VER__ = '1.0.1'
 
@@ -43,11 +45,14 @@ _CONFIG = {
   "SAVE_STATUS_SNAPSHOT": False,
   "STATUS_SNAPSHOT_FILE": "netmon_status.json",
   #
-  # The SAVE_NMON_EACH is used to save the network status to the database and should trigger
-  # enough so that the network status "often enough" meaning if there are 5-6 restarts per day
-  # each summing up 1 minute (total 5-6 minutes) is way below 1% of the day. 
-  # The default value is 12 which means that the network status is saved every 2 minutes
-  "SAVE_NMON_EACH"      : 12, # this saves each SAVE_NMON_EACH * PROCESS_DELAY seconds
+  # Seconds between two saves of the network status on an oracle (the heartbeat history and the epochs
+  # status, about 20 MB). A setting of its own: it was SAVE_NMON_EACH (12) iterations of PROCESS_DELAY, so
+  # 120 s with the default PROCESS_DELAY of 10. One save costs an oracle with 0.7 CPU core 1.5-1.9 s when
+  # idle and 6.1-6.3 s when busy, so 600 s means five times fewer of them. The status is also saved once
+  # more as the last step of a clean stop, so the longer interval costs data only when the node crashes or
+  # is killed before its close ends (a container stop timeout shorter than the close): then up to 10
+  # minutes of recorded heartbeats, plus the time of one save.
+  "SAVE_NMON_SECONDS"   : 600,
 
   'VALIDATION_RULES': {
     **BasePluginExecutor.CONFIG['VALIDATION_RULES'],
@@ -63,7 +68,6 @@ class NetMon01Plugin(
 
   def __init__(self, **kwargs):
     super(NetMon01Plugin, self).__init__(**kwargs)
-    self._nmon_counter = 0
     self.__supervisor_log_time = 0
     self.__state_loaded = False
     self.__last_epoch_debug_time = 0
@@ -95,6 +99,45 @@ class NetMon01Plugin(
     return str(value).lower() in ['true', '1', 'yes']
   
   def on_init(self):
+    """
+    Settle the supervisor flag, read the sending options from the environment and start the periodic save.
+
+    The supervisor flag of the configuration is aligned with the node's real role. The options that
+    control how the current network is sent (only online nodes, index by address, sending period,
+    compression) are read from the environment. Last, the periodic save of the network status is
+    registered with the SerializationManager, which runs it on a thread kept for this save alone, so this
+    plugin's thread no longer runs the save. The cadence it was registered with is logged.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+      From ``SerializationManager.register`` when ``SAVE_NMON_SECONDS`` is not a positive, finite number on
+      an oracle: the plugin does not start.
+
+    Notes
+    -----
+    An oracle saves the heartbeat history and the epochs status every ``SAVE_NMON_SECONDS`` (600 s); any
+    other node saves only its epochs status, every 300 s. Both are seconds of their own and no longer a
+    number of plugin iterations: before, an oracle saved every ``SAVE_NMON_EACH`` (12, at most 20)
+    iterations and any other node every 30, one iteration being ``PROCESS_DELAY`` seconds, so every 120 s
+    and 300 s with the default ``PROCESS_DELAY`` of 10. ``SAVE_NMON_EACH`` is no longer read. The save is
+    registered with ``at_stop``: it runs once more as the last step of a clean stop, so it is made when the
+    close reaches its end (before, nothing was saved at stop and a restart lost what was recorded since the
+    last periodic save). The interval is read once, here: a later change of ``SAVE_NMON_SECONDS`` applies
+    when the plugin starts again.
+
+    Examples
+    --------
+    >>> plugin.on_init()   # an oracle: its status is saved every 600 s and once at a clean stop
+    """
     # the following code was left here for historical reasons only
     # convert supervisor to bool if needed
     is_supervisor = self.cfg_supervisor
@@ -147,6 +190,26 @@ class NetMon01Plugin(
     msg += f'\n  - {self.is_supervisor_node=}'
     msg += f'\n  - {self.cfg_supervisor_log_time=}'
     self.P(msg)
+    # What is saved, as before: an oracle saves the heartbeat history and the epochs status, any other node
+    # only its epochs status.
+    save = self.netmon.network_save_status if self.cfg_supervisor else self.netmon.epoch_manager.save_status
+    # Seconds between two saves, no longer a number of iterations of PROCESS_DELAY seconds: SAVE_NMON_SECONDS
+    # (600 s) on an oracle, where it was 12 iterations, 120 s with the default PROCESS_DELAY of 10, for a
+    # 20 MB save; 300 s on any other node, which saves only its small epochs status (it was 30 iterations,
+    # the same 300 s with that default). A value that is not a positive number is refused by the
+    # SerializationManager and the plugin does not start. It is read here, once: a later change applies
+    # when the plugin starts again.
+    every = self.cfg_save_nmon_seconds if self.cfg_supervisor else 300
+    # The SerializationManager runs the save on a thread kept for this save alone. On this thread one save
+    # stopped this plugin's iteration (history, rankings, the current-network payload) for 1.5-1.9 s on an
+    # idle node and 6.1-6.3 s on a busy one (20 MB, 0.7 CPU); now the iteration does not wait for it.
+    # at_stop: one more save as the last step of a clean stop, so a restart whose close reaches its end loses
+    # nothing of what was recorded since the last periodic save. A restart the node starts itself, such as
+    # a release update, does; a stop from the host does when the container's stop timeout leaves room for the
+    # close. Before, nothing was saved at stop and every restart lost up to one interval, which would now be
+    # up to 600 s on an oracle.
+    SerializationManager.instance.register(save, every=every, at_stop=True)
+    self.P("Netmon status save registered every {}s and at a clean stop".format(every))
     return
   
   @property
@@ -319,9 +382,28 @@ class NetMon01Plugin(
   
 
   def _process(self):
+    """
+    Run one monitoring iteration and, when it is time, build the current-network payload.
+
+    Each iteration refreshes the epoch manager's cached data, updates the node history and the rankings
+    and, on an oracle, calculates the epoch statistics, checks for lost nodes and periodically logs the
+    network. When the sending period has passed (on an oracle, or on any node configured to send), it
+    builds the payload that carries the current network.
+
+    Returns
+    -------
+    GeneralPayload or None
+      The current-network payload when one is due in this iteration, otherwise None.
+
+    Notes
+    -----
+    The periodic save of the network status is not made here: ``on_init`` registered it with the
+    SerializationManager, which runs it on a thread kept for this save alone, every ``SAVE_NMON_SECONDS``
+    on an oracle (300 s on any other node) and once more as the last step of a clean stop. One save used to
+    stop this thread for 1.5-1.9 s on an idle node and 6.1-6.3 s on a busy one (20 MB at 0.7 CPU).
+    """
     payload = None
     self.netmon.epoch_manager.maybe_update_cached_data()
-    self._nmon_counter += 1      
     self._maybe_load_state()
     
     # TODO: change to addresses later
@@ -339,18 +421,9 @@ class NetMon01Plugin(
     is_supervisor = False
     current_ranking = ranking
     current_new = new_nodes
-    if not self.cfg_supervisor:
-      if (self._nmon_counter % 30) == 0: 
-        self.P("Saving local epoch manager status ...")
-        self.netmon.epoch_manager.save_status()
-      #endif save status if not supervisor
-    else: # supervisor
-      # save status
-      save_nmon_each = int(min(self.cfg_save_nmon_each, 20)) # default no more than 20 iterations
-      if (self._nmon_counter % save_nmon_each) == 0: 
-        self.P("Saving netmon status for {} nodes".format(len(current_nodes)))
-        self.netmon.network_save_status()
-      #endif save status
+    # The periodic save of the network status is no longer made here: on_init registered it with the
+    # SerializationManager, which runs it on a thread kept for this save alone (see on_init for the interval).
+    if self.cfg_supervisor:
       self.netmon.epoch_manager._maybe_calculate_stats()
 
       is_anomaly, alerted_nodes = self._supervisor_check()

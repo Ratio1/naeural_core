@@ -250,7 +250,41 @@ class DeploymentLifecycle:
 
   @staticmethod
   def _runtime_artifacts(plugin):
-    """Read cached workload bindings, retaining only safe exact identifiers."""
+    """
+    Read the workload's cached runtime binding and keep only its exact, safe identifiers.
+
+    A containerized plugin exposes what it actually runs through `get_deployment_runtime_artifacts`.
+    The node signs these values into its report; the coordinator keeps them for a retired revision and
+    sends them back when that revision must be restored. Only three fields pass, each only in its
+    strict form, so nothing else a plugin returns (environment, credentials, free text) can leave
+    the node this way.
+
+    Parameters
+    ----------
+    plugin : object
+      A business plugin instance, or any object; one without the getter has no binding.
+
+    Returns
+    -------
+    dict
+      The fields that are present and well formed among `image_id` (`sha256:` and 64 hex digits, the
+      image's id in the node's Docker store), `image_ref` (`repository@sha256:...`, where a registry
+      serves exactly that image) and `git_commit` (40 hex digits). Empty when the plugin exposes
+      nothing or its getter raises.
+
+    Notes
+    -----
+    `image_ref` is what lets a restored revision be pulled again on a node whose Docker store no
+    longer holds the image: the image id alone names it only inside the store that had it. A
+    coordinator or node on an older version ignores the field and behaves as before.
+
+    Examples
+    --------
+    >>> DeploymentLifecycle._runtime_artifacts(container_app)
+    {'image_id': 'sha256:9f2c...', 'image_ref': 'ghcr.io/acme/shop@sha256:4f1c...'}
+    >>> DeploymentLifecycle._runtime_artifacts(native_plugin)
+    {}
+    """
     getter = getattr(plugin, "get_deployment_runtime_artifacts", None)
     if not callable(getter):
       return {}
@@ -263,6 +297,14 @@ class DeploymentLifecycle:
       commit = artifacts.get("git_commit")
       if isinstance(image_id, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         result["image_id"] = image_id
+      # Where a registry serves exactly that image. Reported so that a restoration can pull the image
+      # again when the node's Docker store lost it; before, only the store-local id travelled.
+      image_ref = artifacts.get("image_ref")
+      if isinstance(image_ref, str) and re.fullmatch(
+          r"(?:[\w.\-]+(?::\d+)?/)?[\w.\-/]+@sha256:[0-9a-f]{64}", image_ref, re.ASCII):
+        # A repository (with an optional registry host and port) and a digest, and nothing else: a ":"
+        # is accepted only as the registry port, so no tag, no credentials and no free text pass.
+        result["image_ref"] = image_ref
       if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit):
         result["git_commit"] = commit
       return result

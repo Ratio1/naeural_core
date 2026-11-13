@@ -3,7 +3,7 @@ import copy
 import hashlib
 import json
 import unittest
-from threading import Lock, RLock
+from threading import RLock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -249,12 +249,15 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._now = 0.0
     self._ChainStoreBasePlugin__chain_storage = copy.deepcopy(storage or {})
     self._ChainStoreBasePlugin__persistence_lock = RLock()
-    self._ChainStoreBasePlugin__save_lock = Lock()
     self._ChainStoreBasePlugin__chain_storage_dirty = False
-    self._ChainStoreBasePlugin__last_chain_storage_save = 0
     self._ChainStoreBasePlugin__chain_peers = list(default_peers or [])
     self._ChainStoreBasePlugin__pending_hsync = {}
     self._ChainStoreBasePlugin__last_chain_peers_refresh = self._now
+    # The state on_init creates for the CSTORE_STATS line, and the plugin's own queue counters it reads.
+    self._ChainStoreBasePlugin__cs_stats = {}
+    self._ChainStoreBasePlugin__cs_stats_last, self._ChainStoreBasePlugin__cs_stats_queue_peak = self._now, 0
+    self._ChainStoreBasePlugin__cs_stats_lost = 0
+    self.lost_inputs_count = 0
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

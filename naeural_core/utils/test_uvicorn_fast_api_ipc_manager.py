@@ -3,6 +3,7 @@ import os
 import queue
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -239,3 +240,16 @@ class FastApiServerIntegrationTest(unittest.TestCase):
       extra_uvicorn_args=("--forwarded-allow-ips", "192.0.2.1"),
     )
     self.assertEqual(client_ip, "127.0.0.1")
+
+
+class IpcModuleFootprintTest(unittest.TestCase):
+  def test_ipc_module_loads_only_the_standard_library(self):
+    # The uvicorn app process imports only this module; keep the node out of it. (The IPC manager process is
+    # spawned and re-runs the node's main script, so this test says nothing about it.)
+    code = (
+      "import sys, naeural_core.utils.uvicorn_fast_api_ipc_manager\n"
+      "heavy = [m for m in ('torch', 'numpy', 'pandas', 'ratio1', 'naeural_core.core_logging') if m in sys.modules]\n"
+      "sys.exit(str(heavy) if heavy else 0)\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    self.assertEqual(res.returncode, 0, res.stderr)

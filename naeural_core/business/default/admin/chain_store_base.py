@@ -25,13 +25,21 @@ TODO:
 """
 
 
+# Used at start-up to keep a replica file that gave no records under another name.
+import os
 from threading import Lock, RLock
 from ratio1.const.base import BCct, dAuth
 
 from naeural_core.business.base.network_processor import NetworkProcessorPlugin
+# Runs this plugin's periodic replica save on its own thread instead of on the plugin thread.
+from naeural_core.main.serialization_manager import SerializationManager
 
 # Node key rotations: written only by dAuth servers, each value a signed rotation proof.
 NODE_KEY_ROTATIONS_HKEY = "NODE_KEY_ROTATIONS"
+# Tunnels Manager namespaces (tunnel credentials, and TCP routes under the plugin's default TCP_ROUTES_HKEY): the
+# plugin runs only on oracles, so a remote write, a sync request or a sync answer for them is taken only from an
+# oracle registry member.
+TUNNELS_MANAGER_HKEYS = ("tunnels_manager_secrets", "tunnels_manager_tcp_routes")
 
 _CONFIG = {
   **NetworkProcessorPlugin.CONFIG,
@@ -93,12 +101,53 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SNAPSHOT = "snapshot"
   CS_RESPONSE = "response"
   CS_SENDER = "sender"
-  CS_SAVE_INTERVAL = 5  # seconds between process() flushes of a dirty chain storage
-  
-  
+  # Seconds between two saves of a changed chain storage. The SerializationManager runs them at this cadence
+  # on a thread of their own; one full-store save covers every write accepted since the previous one. That
+  # thread checks once a second, so an accepted write reaches the disk after up to this cadence, plus up to
+  # one second until the thread's next check, plus this store's own save. A save of another owner runs on
+  # its own thread and does not delay this one, but the saves compete for the interpreter: on an oracle the
+  # network-monitor save (20 MB, measured at 1.5-1.9 s idle and 6.1-6.3 s busy under a 0.7 CPU limit, longer
+  # on a slower host) slows this save down while both run.
+  CS_SAVE_INTERVAL = 5
+  # Seconds between two CSTORE_STATS lines in the node log (written from process()); new, there was no such line.
+  CS_STATS_INTERVAL = 300
+  # One lock for every save of the replica file in this process. Before, each plugin instance created its own:
+  # the last save of an instance that is closing and the first save of the instance that replaces it run on
+  # two threads, and without a common lock the older snapshot could be the one left in the file. With one
+  # lock the snapshots reach the file in the order they were taken.
+  __save_lock = Lock()
+
+
   
   
   def on_init(self):
+    """
+    Load the stored replica, publish the chain-store API to the other plugins and start the periodic save.
+
+    The replica is read from this plugin's cache file (an empty store when there is none or it cannot be
+    read). Then the counters of the ``CSTORE_STATS`` line start, and the flush of a changed replica is
+    registered with the SerializationManager, which runs it on a thread kept for this save every
+    ``CS_SAVE_INTERVAL`` seconds, so this plugin's thread no longer runs the save. When the store this
+    instance will use is empty although the replica file exists, the file is renamed to
+    ``object.pickle.unreadable-<UTC YYYYmmddHHMMSS>`` and a red line says so, so the first save does not
+    overwrite it. Then the getter, setter and hsync functions are placed in the shared plugin memory, where
+    the plugins' ``chainstore_*`` calls find them.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The registration comes after the load, so a save can never run before the stored replica is in memory,
+    and before the steps that can fail, so ``on_close`` always finds the registration it removes.
+
+    The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
+    and the plugin does not start, where it used to start empty and fail at its first save. A file that
+    held a legitimately empty store is renamed too; that loses nothing. A store that is empty because there
+    is no file renames nothing and logs nothing new. A store taken over from a previous instance of this
+    plugin in the same process is used as it is; the file is renamed only when that store is empty too.
+    """
     super().on_init() # not mandatory anymore?
     
     self.P(" === ChainStoreBasicPlugin INIT")
@@ -107,15 +156,25 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     self.__ops = self.deque()
     self.__persistence_lock = RLock()
-    self.__save_lock = Lock()
     self.__chain_storage_dirty = False
-    self.__last_chain_storage_save = 0
     
     try:
       self.__chain_storage = self.cacheapi_load_pickle(default={}, verbose=True)
     except Exception as e:
       self.P(f" === Chain storage could not be loaded: {e}")
       self.__chain_storage = {}
+    # Counters of the CSTORE_STATS line (label -> count), taken and reset by process() at each line.
+    self.__cs_stats = {}
+    # Where the next CSTORE_STATS line is measured from: the time of the last line and the largest input queue
+    # seen since then.
+    self.__cs_stats_last, self.__cs_stats_queue_peak = self.time(), 0
+    # The plugin's own count of lost inputs at start, so the first line reports only what was lost after it.
+    self.__cs_stats_lost = self.lost_inputs_count
+    # The replica is loaded: from here the SerializationManager saves it every CS_SAVE_INTERVAL seconds when
+    # it changed. A full save took this plugin's thread 0.26 s on an idle node and 1.3 s on a busy one
+    # (5 MB, 0.7 CPU), during which it confirmed no write; the thread no longer runs the save. Registered
+    # before anything below can fail, so on_close always finds the registration it removes.
+    SerializationManager.instance.register(self.__maybe_flush_chain_storage, every=self.CS_SAVE_INTERVAL)
       
     memory = self.plugins_shmem
       
@@ -125,7 +184,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.P(" === Chain storage already exists", color="r")
       self.__chain_storage = memory[self.CS_STORAGE_MEM]
     ## END DEBUG ONLY
-    
+
+    # The file the strict save writes. Before, a replica file that gave no records (it could not be read, or
+    # it held none) was silently overwritten by the first save; now it is kept under another name. Checked on
+    # the store this instance will use, after the branch above: a store taken over from a previous instance
+    # that holds records is saved over the file as before. A file that held a legitimately empty store is
+    # renamed too, which loses nothing.
+    replica_file = os.path.join(self.log.get_data_folder(), self._persistence_fld.lstrip("/"), "object.pickle")
+    if not self.__chain_storage and os.path.exists(replica_file):
+      # Next to the replica, named after the UTC time of this start, where no save writes.
+      kept_file = "{}.unreadable-{}".format(replica_file, self.datetime.now(self.timezone.utc).strftime("%Y%m%d%H%M%S"))
+      # Move it aside before the first save can replace it: no save writes before a write is accepted, and no
+      # write is accepted before the setter is published below.
+      os.rename(replica_file, kept_file)
+      self.P(f" === Chain storage replica file gave no records; kept it as {kept_file}, the store starts empty", color='r')
+
     memory[self.CS_STORAGE_MEM] = self.__chain_storage
     memory[self.CS_GETTER] = self._get_value
     memory[self.CS_SETTER] = self._set_value
@@ -272,9 +345,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Returns
     -------
     list of str
-      Effective peer list used for confirmation math and outbound sends.
+      Effective peer list used for confirmation math and outbound sends. Always a new list, so the caller
+      may extend it without changing the plugin's peers.
+
+    Notes
+    -----
+    The default peers are copied with ``list()``: they are address strings in a list that the refresh
+    replaces and nobody changes in place, so a deep copy bought nothing, and this runs several times per
+    write.
     """
-    send_to = self.deepcopy(self.__chain_peers) if include_default_peers else []
+    # A plain copy: before, a deep copy of this list of address strings, which is rebuilt on refresh and never
+    # changed in place, on a path that runs several times per write.
+    send_to = list(self.__chain_peers) if include_default_peers else []
     for peer in self.__normalize_peer_list(peers):
       if peer not in send_to:
         send_to.append(peer)
@@ -347,6 +429,23 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   
   def __save_chain_storage(self):
+    """
+    Write a snapshot of the whole chain storage to the replica file.
+
+    The records are copied under the persistence lock and the dirty flag is cleared there; the copy is then
+    written outside that lock. The whole save runs under the save lock, which is one for the process, so
+    snapshots reach the file in the order they were taken, also across a restart of this plugin. Each save
+    is counted as ``saves`` for the ``CSTORE_STATS`` line.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A failed write marks the store dirty again, so the next flush retries it. A failed write is counted too:
+    the count is taken where the dirty flag is cleared, before the write.
+    """
     # Callers persist after releasing the persistence lock. Records are copied
     # shallowly under that lock so concurrent writers and confirmations cannot
     # change the store while it is pickled; the disk write runs outside it.
@@ -362,7 +461,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           for key, record in self.__chain_storage.items()
         }
         self.__chain_storage_dirty = False
-      self.__last_chain_storage_save = self.time()
+        # Count this save for the CSTORE_STATS line, under the lock already held here; before, saves were not counted.
+        self.__cs_stats["saves"] = self.__cs_stats.get("saves", 0) + 1
       try:
         self.cacheapi_save_pickle(snapshot, verbose=False, strict=True)
       except Exception as exc:
@@ -373,20 +473,31 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   def __maybe_flush_chain_storage(self):
     """
-    Save the chain storage if it changed and the last save is old enough.
+    Save the chain storage if it changed since the last save.
 
-    Accepted writes only mark the store dirty, so one full-store save covers
-    every write made during the last `CS_SAVE_INTERVAL` seconds. The same
-    path retries a failed save.
+    The SerializationManager calls this on its own thread every
+    `CS_SAVE_INTERVAL` seconds (registered in `on_init`), so the plugin thread
+    no longer runs the save. Accepted writes only mark the store dirty, so one
+    full-store save covers every write made since the previous run. The same
+    path retries a failed save, because a failed save marks the store dirty
+    again.
 
     Returns
     -------
     None
+
+    Notes
+    -----
+    Safe to call from another thread: `__save_chain_storage` copies the records
+    under the persistence lock and orders overlapping saves with the save lock.
+
+    Examples
+    --------
+    >>> SerializationManager.instance.register(self.__maybe_flush_chain_storage, every=self.CS_SAVE_INTERVAL)
     """
     if not self.__chain_storage_dirty:
       return
-    if self.time() - self.__last_chain_storage_save < self.CS_SAVE_INTERVAL:
-      return
+    # The cadence is the manager's: no interval check here, the manager calls this every CS_SAVE_INTERVAL seconds.
     self.__save_chain_storage()
     return
 
@@ -411,6 +522,46 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   def __secret_namespace(self, key):
     """Identify the protected mutable and revision-specific dAuth namespaces."""
     return self.__namespace_for_key(key, ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"))
+
+  def __oracle_only_write(self, key, value):
+    """
+    Tell whether a remote write is applied only when its sender is an oracle registry member.
+
+    Two kinds of record are written only by plugins that run on oracles: every field of the Tunnels Manager
+    namespaces (``TUNNELS_MANAGER_HKEYS``), and a deployed-job pointer whose value carries no revision, the
+    unversioned form that ``__versioned_job_record`` accepts (a plain CID string, ``None`` for a delete, or a
+    dict without ``revision``). A pointer with a revision keeps the rule of ``__versioned_job_record``: the
+    signature of its coordinator is checked, whoever relays it.
+
+    Parameters
+    ----------
+    key : any
+      Composed chain-store key of the write, as received; a key that is not a str is in no namespace.
+    value : any
+      Value of the write; ``None`` for a delete.
+
+    Returns
+    -------
+    bool
+      True for a write that only an oracle registry member may make; False for every other write.
+
+    Examples
+    --------
+    >>> self.__oracle_only_write(self.__hset_index("tunnels_manager_secrets") + "MHhhYmM=", None)
+    True
+    >>> self.__oracle_only_write(self.__hset_index("DEEPLOY_DEPLOYED_JOBS") + "Nw==", "cid")
+    True
+    >>> self.__oracle_only_write(self.__hset_index("DEEPLOY_DEPLOYED_JOBS") + "Nw==", {"revision": 2})
+    False
+    >>> self.__oracle_only_write(self.__hset_index("players") + "YWxwaGE=", "v")
+    False
+    """
+    # Every write and delete of a Tunnels Manager namespace, and a deployed-job pointer whose value has no revision
+    # (read as __versioned_job_record reads it).
+    return self.__namespace_for_key(key, TUNNELS_MANAGER_HKEYS) is not None or (
+      self.__namespace_for_key(key, ("DEEPLOY_DEPLOYED_JOBS",)) is not None
+      and (value.get("revision") if isinstance(value, dict) else None) is None
+    )
 
   def __revoked_secret(self, key, snapshot=None):
     """Check whether a secret revision has a local or incoming revocation.
@@ -606,8 +757,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The export freezes ``self.__chain_storage.items()`` into a list before
     filtering. That keeps snapshot generation stable even if another local
     write mutates the dictionary while the snapshot is being assembled.
+
+    A dAuth namespace is exported only by a dAuth registry member. The
+    namespace is the one whose index (``__hset_index``) ``hkey`` has, the
+    prefix the records are selected by.
+
+    Examples
+    --------
+    >>> list(self.__export_hset_snapshot("players"))  # composed keys of the fields that carry no token
+    ['hs:...:YWxwaGE=']
     """
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS") and not self.__registry_member(self.ee_addr, dauth_only=True):
+    # The dAuth rule applies to the namespace of the index hkey has, the prefix the records are selected by below.
+    if self.__secret_namespace(self.__hset_index(hkey)) and not self.__registry_member(self.ee_addr, dauth_only=True):
       return {}
     index = self.__hset_index(hkey)
     snapshot = {}
@@ -649,10 +810,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The merge is additive only. Remote fields that overlap the local replica
     overwrite stale values, while fields absent from the remote snapshot are
     preserved locally and are never pruned by this method.
+
+    A dAuth namespace is merged only by a dAuth registry member. The namespace
+    is the one whose index (``__hset_index``) ``hkey`` has, the prefix the
+    records are selected by.
+
+    Examples
+    --------
+    >>> self.__merge_hset_snapshot("players", {key: record})
+    1
     """
     if not isinstance(snapshot, dict):
       return 0
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS") and not self.__registry_member(self.ee_addr, dauth_only=True):
+    # The dAuth rule applies to the namespace of the index hkey has, the prefix the records are selected by below.
+    if self.__secret_namespace(self.__hset_index(hkey)) and not self.__registry_member(self.ee_addr, dauth_only=True):
       return 0
 
     index = self.__hset_index(hkey)
@@ -723,7 +894,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         changed = True
 
     if changed:
-      # Saved by the next periodic flush in process().
+      # Saved by the SerializationManager's next flush (every CS_SAVE_INTERVAL s).
       self.__chain_storage_dirty = True
     return merged_fields
   
@@ -842,8 +1013,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     When ``value`` is ``None``, the key is deleted locally. The existing
     delete semantics and related trade-offs described below are preserved.
-    The caller must hold the persistence lock and mark the chain storage
-    dirty after releasing it.
+    The caller must hold the persistence lock and, after releasing it, mark
+    the chain storage dirty when the call changed the replica (``_set_value``
+    does not mark it for a delete of a key not held or for a write of what
+    was already stored).
     """
     # key should be composed of the chainstore app identity and the actual key
     # so if two chainstore apps are running on the same node, they will not overwrite each other
@@ -946,13 +1119,50 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     This method blocks the caller thread while waiting for confirmations on
     local-originated writes.
+
+    A write that leaves the replica as it was does not mark it for a save: a
+    delete of a key this replica does not hold, and a local write whose value
+    equals the stored one (``==``) with the stored owner and readonly. The
+    identical local write is still stored (its confirmations are reset),
+    broadcast and confirmed as before. A delete of a key not held stores
+    nothing; when it is local it is broadcast and its wait ends at once, as
+    for any delete. After an identical write, what differs between memory and
+    the file until the next save are the confirmation fields, which only the
+    wait loop and the confirmation handler of a write in progress use (a
+    hash-sync answer carries them and its receiver ignores them), and the
+    value when the new one is equal to the stored one but not in the same
+    form (``1`` and ``1.0``, or a dict with its keys in another order).
+
+    Every call with a valid key is counted once for the ``CSTORE_STATS``
+    line, by the label ``<bucket>/<origin>/<outcome>``: the bucket is the
+    first 14 characters of an ``hs:`` key (the prefix of its hash namespace)
+    or ``plain``, the origin is ``local`` or ``remote``, and the outcome is
+    ``changed``, ``identical``, ``absent_delete`` or ``refused`` (any other
+    way out). ``changed`` says what happened to this replica: a local write
+    that changed it and then was not confirmed, or raised while waiting, is
+    still counted as ``changed``.
+
+    A local write or delete of a Tunnels Manager namespace is sent only to
+    the oracle registry members (either registry) among its target peers;
+    the others are left out of its send, its retries and its confirmation
+    count. With no member among them, which includes a registry that cannot
+    be read on this node, it says so in red and returns False, as a write
+    with no target peers.
+
+    Examples
+    --------
+    >>> self._set_value("key", "value", owner="node", timeout=5, max_retries=1)  # confirmed by enough peers
+    True
+    >>> self._set_value("key", "value", owner="peer1", local_sync_storage_op=True)  # a remote write, stored here
+    True
     """
     if not isinstance(key, str) or len(key) == 0:
       raise ValueError("Key must be a non-empty string.")
+    # Outcome counted once by the finally below; every way out that does not set it is a refusal.
+    outcome = "refused"
     try:
       where = "FROM_LOCAL: " if not local_sync_storage_op else "FROM_REMOTE: "
       debug = debug or self.cfg_chain_store_debug
-      debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
       if owner is None:
         owner = self.get_instance_path()
       if timeout is not None and (
@@ -975,6 +1185,19 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         peers=peers,
         include_default_peers=include_default_peers,
       )
+      # A local write of a Tunnels Manager namespace goes only to oracle registry members, the senders a write or a
+      # sync request of it is taken from: the default peers (the allowed list) and the configured or extra peers may
+      # name other nodes, which are left out of this write's targets.
+      if not local_sync_storage_op and self.__namespace_for_key(key, TUNNELS_MANAGER_HKEYS):
+        # The members, as the only explicit targets of the send, its retries and its confirmation count.
+        peers, include_default_peers = [peer for peer in target_peers if self.__registry_member(peer)], False
+        # The targets checked below: with no member among them, the write ends as one with no target peers.
+        target_peers = peers
+        if len(target_peers) == 0:
+          self.P(
+            f" === No oracle registry member among the targets of the Tunnels Manager write on key {key}, or the "
+            "registry could not be read: nothing is sent", color='r'
+          )
       if not local_sync_storage_op and len(target_peers) == 0:
         self.P(
           f" === No target peers resolved for chain-store write on key {key}",
@@ -1012,6 +1235,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         need_store = True
         existing_owner = None
         existing_value = None
+        # True when this write leaves the replica as it was, so it does not mark it for a save; before, every
+        # stored write marked it, and a marked replica is saved whole at the next flush. A delete of a key this
+        # replica does not hold (local or remote) changes nothing here; a later version that records deletions
+        # would record its marker at this point. The identical local write is decided below.
+        unchanged = value is None and key not in self.__chain_storage
         if key in self.__chain_storage:
           existing_value = self.__get_key_value(key)
           existing_owner = self.__get_key_owner(key)
@@ -1032,9 +1260,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             if debug:
               self.P(f" === Key {key} stored by {existing_owner} has the same value")
             if local_sync_storage_op:
+              # Counted as identical: the value was already stored. Before, this way out was not counted.
+              outcome = "identical"
               return True
             # A previous timeout may have left only the local copy. Re-publish
             # and collect distinct peer confirmations instead of claiming success.
+            # The replica stays as it was when the final owner and readonly (after the namespace rules above)
+            # match the stored ones too; the token is already known to be equal here. Before, it was marked.
+            unchanged = owner == existing_owner and readonly == is_readonly
           elif is_readonly and existing_owner != owner:
             if debug:
               self.P(f" === Key {key} readonly by {existing_owner} (requester: {owner})", color='r')
@@ -1048,6 +1281,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               action_str = "overwriting"
             else:
               action_str = "setting"
+            # The value shortened for this log line only; before, it was built at the top of every write, also
+            # with debug off.
+            debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
             self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
           self.__set_key_value(
             key=key, value=value, owner=owner,
@@ -1056,11 +1292,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             peers=peers,
             include_default_peers=include_default_peers,
           )
+          # The outcome counted for this call: a delete of a key not held, a write of what was already stored,
+          # or a change of the replica. Before, nothing was counted.
+          outcome = ("absent_delete" if value is None else "identical") if unchanged else "changed"
       if need_store:
-        # Saved by the next periodic flush in process(). The flag is set after
-        # the change is in the store, so a concurrent snapshot that clears it
-        # either contains this write or is followed by another flush.
-        self.__chain_storage_dirty = True
+        # A write that left the replica as it was does not mark it for a save; before, every stored write did.
+        if not unchanged:
+          # Saved by the SerializationManager's next flush (every CS_SAVE_INTERVAL s). The flag is set after
+          # the change is in the store, so a concurrent snapshot that clears it
+          # either contains this write or is followed by another flush.
+          self.__chain_storage_dirty = True
         if not local_sync_storage_op:
           # now send set-value (including confirmation request) to all
           op = {
@@ -1130,6 +1371,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     except Exception as e:
       err_msg = f" === Error in _set_value for key {key}[Q:{self.input_queue_size}/{self.cfg_max_inputs_queue_size}]: {e}\n{self.trace_info()}"
       raise ValueError(err_msg)
+    finally:
+      # Count this call once for the CSTORE_STATS line, by namespace bucket (the "hs:" prefix of one hash
+      # namespace, or "plain"), origin and outcome. Nothing here can raise for the valid key checked above.
+      label = "{}/{}/{}".format(key[:14] if key.startswith("hs:") else "plain", "remote" if local_sync_storage_op else "local", outcome)
+      # Under the persistence lock, as every count of the line.
+      with self.__persistence_lock:
+        # A plain increment of one counter of a small dict; it holds one label per bucket, origin and outcome.
+        self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
     return need_store
 
 
@@ -1175,6 +1424,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     A valid peer response with an empty snapshot is a successful cold-state
     sync. Timeout means that no valid peer response was accepted at all.
+
+    A dAuth namespace is synced only by a dAuth registry member from dAuth
+    registry members. The namespace is the one whose index (``__hset_index``)
+    ``hkey`` has, the prefix the merge selects records by.
+
+    Examples
+    --------
+    >>> self._hsync("players", peers=["0xai_peer"], include_default_peers=False)
+    {'hkey': 'players', 'source_peer': '0xai_peer', 'merged_fields': 2}
     """
     debug = debug or self.cfg_chain_store_debug
     if not isinstance(hkey, str) or len(hkey) == 0:
@@ -1196,7 +1454,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if len(allowed_peers) == 0:
       raise ValueError(f"No target peers resolved for hsync '{hkey}'.")
 
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+    # The dAuth rule applies to the namespace of the index hkey has, the prefix the merge selects records by.
+    if self.__secret_namespace(self.__hset_index(hkey)):
       if not self.__registry_member(self.ee_addr, dauth_only=True):
         raise ValueError("Protected namespace requires a dAuth registry participant")
       if any(not self.__registry_member(peer, dauth_only=True) for peer in allowed_peers):
@@ -1323,22 +1582,67 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ----------
     data : dict
       Decrypted chain-store operation payload.
-    peers : str or list, optional
-      Sender address or addresses that should receive the confirmation.
+    peers : str, optional
+      Address of the node that sent this store: the payload's ``EE_SENDER``, one address, passed by
+      ``default_handler``. The confirmation goes back to it. It is not the ``PEERS`` list of the message, which
+      this method does not read.
 
     Returns
     -------
     None
+
+    Notes
+    -----
+    A store from a sender that is not in this node's replication peers is counted as
+    ``<bucket>/remote_non_peer`` for the ``CSTORE_STATS`` line, before any check of the write.
+
+    A write or delete of a Tunnels Manager namespace, or of a deployed-job pointer without a revision
+    (``__oracle_only_write``), is applied only when the sender is an oracle registry member (either registry,
+    as ``__registry_member`` reads them). A refused one gets no confirmation and is counted as
+    ``<bucket>/remote/refused``, the label ``_set_value`` gives the remote writes it refuses; ``_set_value``
+    is not called for it, so it is counted once. When the registries cannot be read, ``__registry_member``
+    answers False and the store is refused, as for the dAuth namespaces.
+
+    A refused delete is not reported back to its sender: the sender does not wait for the confirmations of a
+    delete, so it treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
+    ``_set_value`` reads 0 confirmations of 0 required for a key it no longer holds and returns True, and
+    ``__exec_received_confirm`` counts nothing for a deleted key.
+
+    Examples
+    --------
+    >>> key = self.__hset_index("tunnels_manager_secrets") + "MHhhYmM="
+    >>> self.__exec_store({"key": key, "value": {"token": "t"}, "owner": "x"}, peers="0xai_oracle")  # stored
+    >>> self.__exec_store({"key": key, "value": None, "owner": "x"}, peers="0xai_other")  # refused, not confirmed
     """
     key = data.get(self.CS_KEY, None)
     value = data.get(self.CS_VALUE , None)
     owner = data.get(self.CS_OWNER, None)
     readonly = data.get(self.CS_READONLY, False) # if the key is readonly local node consumers cannot overwrite it
     token = data.get(self.CS_TOKEN, None)
+    if peers not in self.__chain_peers:
+      # Count stores whose sender (``peers`` is that one address) is outside this node's replication peers, by
+      # namespace bucket, without asking the blockchain engine; before, they were not counted. One store, one
+      # count. The key comes from the network and may not be a str.
+      label = (key[:14] if isinstance(key, str) and key.startswith("hs:") else "plain") + "/remote_non_peer"
+      # Under the persistence lock, as every count of the CSTORE_STATS line.
+      with self.__persistence_lock:
+        # A plain increment of one counter; one label per bucket.
+        self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
     if self.__secret_namespace(key):
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
     if self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,)) and not self.__registry_member(peers, dauth_only=True):
+      return
+    # Tunnel namespaces and unversioned deployed-job pointers are written only by plugins that run on oracles: such
+    # a write or delete is applied only when its sender is an oracle registry member. A refused one gets no
+    # confirmation, like a write that _set_value refuses.
+    if self.__oracle_only_write(key, value) and not self.__registry_member(peers):
+      # Counted under the label _set_value gives a refused remote write; the bucket is the key's "hs:" prefix.
+      label = key[:14] + "/remote/refused"
+      # Under the persistence lock, as every count of the CSTORE_STATS line.
+      with self.__persistence_lock:
+        # A plain increment of one counter; one label per bucket.
+        self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
       return
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
@@ -1427,6 +1731,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     The response carries only the requested hash namespace snapshot. This
     keeps the wire payload small and avoids broad chain-store exports.
+
+    A request for a dAuth namespace is answered only between dAuth registry
+    members. A request for a Tunnels Manager namespace is answered only when
+    the sender is an oracle registry member (either registry); another
+    sender gets no answer. The namespace of a request is the one whose index
+    (``__hset_index``) its ``hkey`` has, the prefix the export selects
+    records by.
+
+    Examples
+    --------
+    >>> self.__exec_hsync_request({"request_id": "r1", "hkey": "players"}, peers="0xai_any")  # answered
+    >>> self.__exec_hsync_request({"request_id": "r2", "hkey": "tunnels_manager_secrets"}, peers="0xai_other")  # not
     """
     request_id = data.get(self.CS_REQUEST_ID, None)
     hkey = data.get(self.CS_HKEY, None)
@@ -1435,9 +1751,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if not isinstance(hkey, str) or len(hkey) == 0:
       return
 
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+    # The index hkey has: the export selects the records by it, so the namespace rules below are applied to it.
+    index = self.__hset_index(hkey)
+    if self.__secret_namespace(index):
       if not self.__registry_member(peers, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
+    # The Tunnels Manager namespaces are read only by plugins that run on oracles: their snapshot is sent only to an
+    # oracle registry member.
+    if self.__namespace_for_key(index, TUNNELS_MANAGER_HKEYS) and not self.__registry_member(peers):
+      return
     snapshot = self.__export_hset_snapshot(hkey)
     if self.cfg_chain_store_debug:
       self.P(
@@ -1479,6 +1801,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The first valid response wins. This keeps each ``_hsync`` call
     deterministic and avoids merging multiple peer views into a single refresh
     operation. Freshness arbitration remains a documented follow-up concern.
+
+    An answer for a Tunnels Manager namespace is taken only from an oracle
+    registry member (either registry); another sender's answer is dropped and
+    the sync keeps waiting. From the answer of a sender outside the registries
+    for ``DEEPLOY_DEPLOYED_JOBS``, only the records that are not unversioned
+    pointers (``__oracle_only_write``) are kept for the merge, and that answer
+    still ends the wait; a signed pointer in it keeps its own check there.
+    The namespace of an answer is the one whose index (``__hset_index``) its
+    ``hkey`` has, the prefix the merge selects records by.
+
+    Examples
+    --------
+    >>> self.__exec_hsync_response({"request_id": rid, "hkey": "players", "snapshot": {}}, sender="0xai_peer")
+    >>> self.__pending_hsync[rid]["response"]["sender"]
+    '0xai_peer'
     """
     request_id = data.get(self.CS_REQUEST_ID, None)
     pending = self.__pending_hsync.get(request_id, None)
@@ -1495,14 +1832,32 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if hkey != pending.get(self.CS_HKEY, None):
       return
 
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+    # The index hkey has (a str: it equals the pending sync's): the merge selects the records by it, so the namespace
+    # rules below are applied to it.
+    index = self.__hset_index(hkey)
+    if self.__secret_namespace(index):
       if not self.__registry_member(sender, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
-    if hkey == NODE_KEY_ROTATIONS_HKEY and not self.__registry_member(sender, dauth_only=True):
+    # The key rotations are written only by dAuth servers: an answer for the namespace of this index is taken only
+    # from a dAuth registry member.
+    if self.__namespace_for_key(index, (NODE_KEY_ROTATIONS_HKEY,)):
+      if not self.__registry_member(sender, dauth_only=True):
+        return
+    # The Tunnels Manager namespaces are written only by plugins that run on oracles: an answer for them is taken
+    # only from an oracle registry member, so another sender's answer does not end the wait of the sync.
+    if self.__namespace_for_key(index, TUNNELS_MANAGER_HKEYS) and not self.__registry_member(sender):
       return
     snapshot = data.get(self.CS_SNAPSHOT, {})
     if not isinstance(snapshot, dict):
       return
+    # Unversioned deployed-job pointers are written only by plugins that run on oracles: from the answer of a sender
+    # outside the registries the merge gets only the other records (a signed pointer keeps its own check there).
+    if self.__namespace_for_key(index, ("DEEPLOY_DEPLOYED_JOBS",)) and not self.__registry_member(sender):
+      # Drops the unversioned pointers, and the records that are not dicts, which the merge skips anyway.
+      snapshot = {
+        key: record for key, record in snapshot.items()
+        if isinstance(record, dict) and not self.__oracle_only_write(key, record.get(self.CS_VALUE))
+      }
 
     # Accept only one response from the precomputed peer set so an unrelated
     # or late peer cannot replace the snapshot chosen for this sync request.
@@ -1560,20 +1915,89 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   
   def process(self):
+    """
+    Run one plugin lap: refresh the replication peers when due and send the queued writes.
+
+    Saving is not part of the lap any more: the SerializationManager calls
+    ``__maybe_flush_chain_storage`` on its own thread every ``CS_SAVE_INTERVAL`` seconds. This thread used
+    to run the full-store save itself (0.26 s on an idle node, 1.3 s on a busy one for 5 MB at 0.7 CPU)
+    and handled no write meanwhile. It can still wait briefly on the persistence lock while the save
+    copies the records, and on the interpreter while the save serializes them.
+
+    Every ``CS_STATS_INTERVAL`` seconds the lap also writes one ``CSTORE_STATS`` line: the counters taken
+    (and reset) under the persistence lock, then logged outside it as one JSON object with sorted keys::
+
+      CSTORE_STATS {"counts":{...},"lost_inputs":0,"period_s":300,"queue_peak":0}
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The line is written also when nothing was counted, so a missing line means this loop is not running
+    (or the wall clock, which times the interval, was set back). ``queue_peak`` is the largest input queue
+    a lap found when it reached this method, after the lap took its inputs, so a full queue shows as
+    ``lost_inputs``: the increase of the plugin's own count of inputs dropped at a full queue.
+    """
     self.__maybe_refresh_chain_peers()
     self.__maybe_broadcast()
-    self.__maybe_flush_chain_storage()
+    # Keep the largest input queue seen since the last CSTORE_STATS line; before, it was not kept.
+    self.__cs_stats_queue_peak = max(self.__cs_stats_queue_peak, self.input_queue_size)
+    if self.time() - self.__cs_stats_last >= self.CS_STATS_INTERVAL:
+      # Take the counters and start new ones, under the lock the counts are made under.
+      with self.__persistence_lock:
+        # The counts go to the new dict from here; the old one is only read below.
+        counts, self.__cs_stats = self.__cs_stats, {}
+      # The clock and the plugin's count of lost inputs, read once: for this line and as the start of the next one.
+      now, lost = self.time(), self.lost_inputs_count
+      # One JSON object with sorted keys on one line, built and logged outside the lock.
+      self.P("CSTORE_STATS " + self.json_dumps({
+        "period_s": round(now - self.__cs_stats_last), "counts": counts,
+        "queue_peak": self.__cs_stats_queue_peak, "lost_inputs": lost - self.__cs_stats_lost,
+      }, sort_keys=True))
+      # The next line is measured from here.
+      self.__cs_stats_last, self.__cs_stats_queue_peak, self.__cs_stats_lost = now, 0, lost
     return
 
 
   def on_close(self):
     """
-    Save pending chain storage changes before the plugin stops.
+    End the periodic save of this instance, then save pending chain storage changes before the plugin stops.
+
+    The registration made in ``on_init`` is removed first, so the thread the SerializationManager keeps
+    for this instance's save ends at its next check and a restarted instance registers its own. A save that
+    thread had already picked can still run once after the removal, even after this method returned: the
+    manager does not wait for it, and the flush checks the dirty flag before it takes the save lock. That
+    late save writes the same shared store (the dict a restarted instance takes over from the shared plugin
+    memory) through an atomic file replace. Every save of the replica file in this process takes the one
+    class-level save lock, so a save of the restarted instance cannot be overtaken by that late save: the
+    file always ends with the newest snapshot. A save that is being written at the moment of the removal
+    is waited for; if it failed it left the store marked as changed, and the final save below writes it
+    again.
 
     Returns
     -------
     None
+
+    Raises
+    ------
+    KeyError
+      When ``on_init`` did not reach the registration (it failed before it, or never ran).
+
+    Notes
+    -----
+    The final save runs on the closing plugin's own thread, as before.
     """
+    # Stop the periodic save of this instance first: its thread ends at its next check, and a restarted
+    # instance registers its own save. A save that thread already picked can still run once after this
+    # method returned; it writes the same shared store under the one save lock of the process, so it cannot
+    # land after a newer save of the restarted instance.
+    SerializationManager.instance.unregister(self.__maybe_flush_chain_storage)
+    # Wait for a save the manager may be writing right now: if that write fails it marks the store dirty
+    # again, and the check below must see it, or the changes since the last good save would stay unsaved.
+    with self.__save_lock:
+      pass
     if self.__chain_storage_dirty:
       self.__save_chain_storage()
     super().on_close()

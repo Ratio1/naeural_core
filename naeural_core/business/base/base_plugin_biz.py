@@ -9,7 +9,8 @@ from time import time, sleep, perf_counter
 from copy import deepcopy
 from collections import deque, OrderedDict
 from functools import partial
-from threading import RLock, Thread
+# Event backs `_loop_wakeup`, the per-plugin signal that ends an IDLE_LOOP_WAIT as soon as work arrives.
+from threading import Event, RLock, Thread
 
 # local dependencies
 from naeural_core import constants as ct
@@ -105,6 +106,9 @@ _CONFIG = {
 
   'PLUGIN_LOOP_RESOLUTION': 20,   # proposed loop res
   'FORCED_LOOP_SLEEP': None,  # use predefined sleep time
+  # Opt-in, in seconds. 0 keeps the fixed-rate loop. When longer than the normal lap sleep, a lap with no queued
+  # input blocks up to this long until work wakes it, so an idle request-driven plugin stops polling for nothing.
+  'IDLE_LOOP_WAIT': 0,
 
   'CLOSE_PIPELINE_WHEN_DONE': False,
 
@@ -400,6 +404,87 @@ class BasePluginExecutor(
                pipeline_use_local_comms_only=False,
                pipelines_view_function=None,
                **kwargs):
+    """
+    Create a business plugin instance and the state its plugin loop runs on.
+
+    Stores the constructor inputs, initializes the error-tracking, timing, execution and queue state, and
+    creates ``_loop_wakeup``, the event that ends an ``IDLE_LOOP_WAIT`` early when inputs, a request, an
+    instance command, a config update or a stop arrive. The parent constructor then runs ``startup()``, which
+    builds the instance config. The plugin thread itself is started later by ``start_thread``.
+
+    Parameters
+    ----------
+    log : Logger
+      Node logger, also passed to the base object constructor.
+    global_shmem : dict
+      Node-wide shared memory holding engine handles (blockchain manager, R1FS, loop-stage setter).
+      Not meant for plugin code.
+    plugins_shmem : dict
+      Memory shared between plugin instances.
+    stream_id : str
+      Name of the pipeline this instance belongs to.
+    signature : str
+      Plugin signature.
+    default_config : dict
+      Default config of the plugin, the base the first instance config is merged onto.
+    upstream_config : dict
+      Instance config received from the pipeline.
+    environment_variables : dict, optional
+      Node-level config merged into the instance config before ``upstream_config``.
+    version : str, optional
+      Module version of the plugin. Default "0.0.0".
+    initiator_id : str, optional
+      Id of the sender whose command created the pipeline, as stored in the pipeline config.
+    initiator_addr : str, optional
+      Address of the sender whose command created the pipeline, as stored in the pipeline config.
+    modified_by_id : str, optional
+      Id of the sender of the latest change; defaults to ``initiator_id``.
+    modified_by_addr : str, optional
+      Address of the sender of the latest change; defaults to ``initiator_addr``.
+    session_id : str, optional
+      Session id of the pipeline config.
+    threaded_execution_chain : bool, optional
+      Must be True: ``_instance_init`` raises ValueError for non-threaded execution. Default True.
+    payloads_deque : collections.deque, optional
+      Outgoing payload queue shared with the business manager; a new ``deque(maxlen=1000)`` when None.
+    commands_deque : collections.deque, optional
+      Outgoing command queue shared with the business manager; a new ``deque(maxlen=1000)`` when None.
+    ee_ver : str, optional
+      Version of the node software.
+    runs_in_docker : bool, optional
+      Whether the node runs in a container. Default False.
+    docker_branch : str, optional
+      Docker source of the node: the business manager passes the ``AINODE_DOCKER_SOURCE`` environment variable
+      (None when it is not set). The update monitor uses it in place of the git branch when the node runs in
+      docker. Default "main".
+    debug_config_changes : bool, optional
+      Log details while merging config changes. Default False.
+    pipeline_use_local_comms_only : bool, optional
+      Pipeline-level flag; when True ``use_local_comms_only`` is True for this instance. Default False.
+    pipelines_view_function : callable, optional
+      Returns the node's pipelines; backs ``node_pipelines``. None makes ``node_pipelines`` return None.
+    **kwargs : dict
+      Forwarded to the base object constructor.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+      From ``startup()`` when ``threaded_execution_chain`` is False.
+
+    Examples
+    --------
+    The business manager builds each instance roughly like this:
+
+    >>> plugin = PluginClass(
+    ...   log=log, global_shmem=shmem, plugins_shmem=plugins_shmem, stream_id='pipeline', signature='MY_PLUGIN',
+    ...   default_config=PluginClass.CONFIG, upstream_config={'INSTANCE_ID': 'inst-1'},
+    ... )
+    >>> plugin.start_thread()
+    """
     self.__version__ = version
 
     self.__global_shmem = global_shmem  # global access to various engines - not allowed in plugin code
@@ -476,6 +561,9 @@ class BasePluginExecutor(
 
     # execution vars
     self.done_loop = False
+    # Set by the producers of work (inputs, web app requests, instance commands, config updates) and by stop, so a
+    # lap blocked in an IDLE_LOOP_WAIT runs at once instead of waiting out the timeout.
+    self._loop_wakeup = Event()
 
     self._was_stopped_last_iter = False  # for `FORCED_PAUSE`
     self._pause_transition_in_progress = False
@@ -1165,7 +1253,29 @@ class BasePluginExecutor(
       return "{:.1f}h".format(round(val / 3600, 1))
 
   def add_to_inputs_deque(self, data):
+    """
+    Queue one upstream input for the plugin loop and wake the loop if it is waiting idle.
+
+    Called by ``add_inputs`` on a business manager thread (its main-loop delivery or its admin-pipeline dispatch
+    thread), not on the plugin thread. The input goes into the bounded inputs deque, then ``_loop_wakeup`` is set
+    so a plugin that opted into ``IDLE_LOOP_WAIT`` processes it on the next lap instead of after the idle timeout.
+
+    Parameters
+    ----------
+    data : dict
+      Upstream input snapshot for this instance, as prepared by ``add_inputs``.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> plugin.add_to_inputs_deque(inputs)   # inputs: the snapshot add_inputs prepared; wakes an idle loop
+    """
     self.upstream_inputs_deque.append(data)
+    # Set only after the append, so the lap it releases already finds the input queued.
+    self._loop_wakeup.set()
     return
 
   def copy_simple_data(self, dct_data):
@@ -1427,6 +1537,23 @@ class BasePluginExecutor(
     return
 
   def stop_thread(self):
+    """
+    Stop the plugin thread and wait for it to end.
+
+    Sets ``done_loop``, wakes the loop through ``_loop_wakeup`` so a lap blocked in an ``IDLE_LOOP_WAIT`` sees the
+    stop at once, then joins the thread for up to ``cfg_plugin_stop_timeout`` seconds (config key
+    ``PLUGIN_STOP_TIMEOUT``; 15 when it is not set or not a number, never below 0). Afterwards it cleans this
+    instance's shared memory and logs whether the thread ended in time.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> plugin.start_thread()
+    >>> plugin.stop_thread()   # returns once the loop exits or the stop timeout passes
+    """
     DEFAULT_TIMEOUT = 15
     timeout = getattr(self, 'cfg_plugin_stop_timeout', DEFAULT_TIMEOUT)
     try:
@@ -1437,6 +1564,9 @@ class BasePluginExecutor(
     self.P(ct.BM_PLUGIN_END_PREFIX +
            "[main-thr] Received STOP {} thread command...".format(self.instance_hash), color='b')
     self.done_loop = True
+    # End a pending idle wait at once, so the loop sees done_loop now and the join below is not held up by
+    # the IDLE_LOOP_WAIT timeout.
+    self._loop_wakeup.set()
     self.thread.join(timeout=timeout)
     is_alive = self.thread.is_alive()
     self.plugins_shared_mem.clean_instance()
@@ -1521,6 +1651,36 @@ class BasePluginExecutor(
     IMPORTANT: it runs on the same thread as the BusinessManager so it should not block!
 
     For the particular case when only INSTANCE_COMMAND is modified then the plugin should not reset its state
+
+    A config equal to the current one returns at once. A non-empty ``INSTANCE_COMMAND`` takes the command path:
+    it is stored for the plugin loop and the call returns without the full config update. Otherwise the call
+    waits up to 10 s for a running exec to finish, pauses the loop, applies the new config (rolling back to the
+    last good one on error) and resumes the loop. The command path and the full update (applied or rolled back)
+    set ``_loop_wakeup`` so a plugin waiting in an ``IDLE_LOOP_WAIT`` acts on the change on its next lap instead
+    of after the idle timeout. If the lifecycle lock is busy the call returns without applying the new config
+    and without setting the event; the next manager refresh retries it.
+
+    Parameters
+    ----------
+    upstream_config : dict
+      New instance config from the pipeline. Non-actionable keys are removed from it in place, and on the
+      command path its ``INSTANCE_COMMAND`` is reset to ``{}`` in place.
+    session_id : str, optional
+      Session id of the change; replaces the stored one when given and different.
+    modified_by_addr : str, optional
+      Address of the sender of the change; stored together with ``modified_by_id`` when that id changes.
+    modified_by_id : str, optional
+      Id of the sender of the change; replaces the stored modified-by id and address when given and different.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    Send a command only; it is stored and an idle-waiting plugin loop passes it to ``on_command`` on its next lap:
+
+    >>> plugin.maybe_update_instance_config({**plugin.get_upstream_config(), 'INSTANCE_COMMAND': 'RESTART'})
     """
     # first cleanup all the non-actionable keys
     for k in self.ct.NON_ACTIONABLE_INSTANCE_CONFIG_KEYS:
@@ -1554,6 +1714,9 @@ class BasePluginExecutor(
       # reset the command for the upstream config
       self._upstream_config['INSTANCE_COMMAND'] = {}  
       upstream_config['INSTANCE_COMMAND'] = {}
+      # Wake an idle loop so the command runs on the next lap. Without it the command could sit for up to
+      # IDLE_LOOP_WAIT, widening the window in which a later command for this instance overwrites it.
+      self._loop_wakeup.set()
       return
     # endif is just a command
 
@@ -1631,6 +1794,9 @@ class BasePluginExecutor(
     finally:
       self.loop_paused = False
       self._plugin_lifecycle_lock.release()
+      # Wake an idle loop so it runs with the new (or rolled-back) config now, not after the IDLE_LOOP_WAIT
+      # timeout.
+      self._loop_wakeup.set()
     return
 
   def _create_notification(self, msg, info=None, notif=ct.PAYLOAD_CT.STATUS_TYPE.STATUS_NORMAL, use_local_comms_only=False, **kwargs):

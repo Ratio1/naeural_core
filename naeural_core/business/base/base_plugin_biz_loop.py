@@ -103,10 +103,32 @@ class _BasePluginLoopMixin(object):
   
   
   def _recalc_plugin_resolution(self):
+    """
+    Record the time since the previous process call and refresh the measured plugin loop rate.
+
+    ``process_wrapper`` calls this on every process call of every plugin thread. It appends the elapsed time to
+    a deque of the last 100 lap times and sets ``actual_plugin_resolution`` to laps per second over that window,
+    rounded to 0.1. The rate is computed as ``len / sum`` in plain Python: the same value as ``1 / mean``, without
+    the deque-to-array conversion ``np.mean`` did on every lap, a cost every plugin thread paid in GIL time.
+
+    Returns
+    -------
+    None
+      Updates ``actual_plugin_resolution`` in place; does nothing while ``last_process_time`` is not set yet.
+
+    Notes
+    -----
+    The ``or 1e-9`` guard keeps a window whose laps all measured 0 s from raising ZeroDivisionError.
+
+    Examples
+    --------
+    Two recorded laps of 0.05 s each give ``2 / 0.1``, so ``actual_plugin_resolution`` becomes 20.0.
+    """
     if self.last_process_time is not None:
       this_lap = self.time_from_last_process
       self.__lap_times.append(this_lap)
-      self.__plugin_resolution = round(1 / np.mean(self.__lap_times), 1)
+      # sum() over <=100 floats; np.mean converted the deque to an array on every lap.
+      self.__plugin_resolution = round(len(self.__lap_times) / (sum(self.__lap_times) or 1e-9), 1)
     return  
   
 
@@ -205,6 +227,27 @@ class _BasePluginLoopMixin(object):
       return
     self.high_level_execution_chain()
     return  
+
+  def _idle_loop_wait(self):
+    """
+    Seconds a lap with no queued input may wait for work instead of polling.
+
+    A plugin that sets `IDLE_LOOP_WAIT` above its loop period stops looping at a fixed rate while it
+    has nothing to do: the lap blocks on ``_loop_wakeup``, which inputs, requests, instance commands,
+    config changes and stop set. Subclasses override this to return 0 while they have work of their
+    own (a web app that is starting or has queued requests).
+
+    Returns
+    -------
+    int or float
+      `IDLE_LOOP_WAIT` of this plugin in seconds; 0 (the default) keeps the fixed-rate loop.
+
+    Examples
+    --------
+    >>> _CONFIG = {**BasePluginExecutor.CONFIG, 'IDLE_LOOP_WAIT': 0.25}   # about 4 laps a second while nothing arrives
+    """
+    # `IDLE_LOOP_WAIT` is in the base plugin config, so every plugin has it; 0 keeps the fixed-rate loop.
+    return self.cfg_idle_loop_wait
   
   
   
@@ -434,6 +477,20 @@ class _BasePluginLoopMixin(object):
 
     Instance commands remain ahead of the process-delay, force-pause and
     working-hours gates, in that order, but do not run during config updates.
+
+    When ``_idle_loop_wait()`` (``IDLE_LOOP_WAIT``) is longer than the lap
+    sleep and the input queue is empty, the lap first sleeps the lap sleep
+    and then blocks on ``_loop_wakeup`` for the rest of ``IDLE_LOOP_WAIT``,
+    so a lap with nothing arriving lasts about ``IDLE_LOOP_WAIT`` seconds.
+    Inputs, requests, instance commands, config updates and stop set the
+    event, so instead of waiting for the timeout, work that arrives during
+    the wait ends it at once and work that arrives during the sleep is acted
+    on as soon as the sleep ends, while an idle plugin stops polling at a
+    fixed rate. Because the sleep comes first, the 20 ms floor above also
+    applies to a lap that follows a wake-up, so the loop stays at most 50 Hz.
+    Every input wakes the loop, so an opted-in plugin that receives inputs it
+    does not use (for example admin network inputs) laps as often as they
+    arrive, up to that 50 Hz.
     """
     try: 
       plugin_loop_initialized = False
@@ -523,7 +580,23 @@ class _BasePluginLoopMixin(object):
           # configured slower loops or exception backoff.
           sleep_time = max(0.020, sleep_time)
           self.start_timer('loop_sleep')
-          if sleep_time > 0:
+          # Opt-in IDLE_LOOP_WAIT (0 by default keeps the fixed-rate sleep below); a subclass returns 0 while it
+          # has work of its own, e.g. a web app that is starting or has queued requests.
+          idle_wait = self._idle_loop_wait()
+          if idle_wait > sleep_time and self.input_queue_size == 0:
+            # Sleep the normal lap time first, so the 20 ms floor holds for every lap: a producer that sets the
+            # event on every lap (for example a client sending requests back to back) cannot drive more than
+            # 50 laps a second.
+            sleep(sleep_time)
+            # Nothing queued: block for the rest of idle_wait until a producer sets the event (after queueing
+            # its work). Work that arrived during the sleep has already set it, so the wait returns at once.
+            # The lap that follows sees what woke it.
+            self._loop_wakeup.wait(idle_wait - sleep_time)
+            # Re-arm for the next idle lap. A set() landing between wait() and clear() loses no work: producers
+            # store their work before set(), and the loop re-checks commands, the input queue and
+            # _idle_loop_wait() before it can block again.
+            self._loop_wakeup.clear()
+          elif sleep_time > 0:
             sleep(sleep_time)
           self.end_timer('loop_sleep')
         except:

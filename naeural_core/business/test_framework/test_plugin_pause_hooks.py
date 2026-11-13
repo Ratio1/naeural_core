@@ -1,6 +1,6 @@
 import sys
 import threading
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 import unittest
 
 from test_modified_by_propagation import (
@@ -346,6 +346,29 @@ class PluginPauseHookTests(unittest.TestCase):
     self.assertTrue(plugin._init_process_finalized)
     self.assertEqual(states, [False])
     self.assertEqual(plugin.pause_events, ["pause", "resume"])
+
+  def test_commands_config_changes_and_stop_wake_an_idle_loop(self):
+    # A loop in its IDLE_LOOP_WAIT must not sit on a command, a new config or a stop.
+    plugin = self._make_plugin()
+    plugin.cfg_instance_id = "instance"
+    plugin.time = lambda: 0
+    plugin._BasePluginExecutor__set_loop_stage = lambda **_kwargs: None
+    plugin._BasePluginExecutor__on_config = lambda: None
+    plugin._update_instance_config = lambda: None
+    plugin.reset_exec_counter_after_config = lambda: None
+    for upstream in ({"INSTANCE_COMMAND": "RESTART"}, {"VALUE": 1}):
+      with self.subTest(upstream=upstream):
+        plugin._loop_wakeup.clear()
+        plugin.maybe_update_instance_config(upstream)
+        self.assertTrue(plugin._loop_wakeup.is_set())
+    plugin._loop_wakeup.clear()
+    plugin.thread = threading.Thread(target=plugin._loop_wakeup.wait, args=(5,))
+    plugin.thread.start()
+    plugin.plugins_shared_mem = SimpleNamespace(clean_instance=lambda: None)
+    plugin.ct.BM_PLUGIN_END_PREFIX = ""
+    plugin.stop_thread()
+    self.assertTrue(plugin.done_loop)
+    self.assertFalse(plugin.thread.is_alive())  # the stop ended the wait, well before 5 s
 
 
 if __name__ == "__main__":

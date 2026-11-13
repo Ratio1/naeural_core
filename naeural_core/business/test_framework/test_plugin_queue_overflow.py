@@ -36,6 +36,7 @@ class TestPluginQueueOverflow(unittest.TestCase):
     plugin.cfg_max_inputs_queue_size = 2
     plugin.cfg_plugin_loop_resolution = 20
     plugin.actual_plugin_resolution = 1
+    plugin._loop_wakeup = Mock()  # add_to_inputs_deque now wakes the plugin loop
     plugin.get_plugin_loop_resolution = Mock(return_value=1)
     plugin.queue_full_warning = False
     plugin.queue_full_delays_count = 0
@@ -89,6 +90,10 @@ class TestPluginQueueOverflow(unittest.TestCase):
     self.assertEqual(plugin.lost_inputs_count, 0)
     plugin.P.assert_not_called()
     plugin._create_abnormal_notification.assert_not_called()
+
+  def test_queued_input_wakes_an_idle_plugin_loop(self):
+    self.plugin.add_inputs({"value": 0})
+    self.plugin._loop_wakeup.set.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -170,6 +170,42 @@ class FastApiWebAppPlugin(BasePlugin):
       return None
     return configured_value
 
+  def _idle_loop_wait(self):
+    """
+    Idle wait for a web app: none while its server starts or requests are pending.
+
+    Narrows the base ``IDLE_LOOP_WAIT`` hook so a web app that opted in only blocks on
+    ``_loop_wakeup`` when it truly has nothing to do. Bringing uvicorn up (the plugin loop polls the
+    start commands of a first start or of a restart) and working through queued or postponed requests
+    can take several laps, and nothing sets the wake-up event between those laps: the request monitor
+    sets it only when a request arrives. In those states the loop therefore keeps its normal rate. Web
+    apps that keep the default ``IDLE_LOOP_WAIT`` of 0 are not affected.
+
+    Returns
+    -------
+    float or int
+      Seconds the next lap may wait for a wake-up: the configured ``IDLE_LOOP_WAIT``, or 0 to keep the
+      normal loop rate.
+
+    Examples
+    --------
+    >>> app._idle_loop_wait()   # IDLE_LOOP_WAIT=0.25, server up, start commands done, nothing queued
+    0.25
+    >>> app._idle_loop_wait()   # same app with one request in the incoming queue
+    0
+    """
+    # The configured IDLE_LOOP_WAIT; 0 means this web app did not opt in and the checks below are moot.
+    wait = super(FastApiWebAppPlugin, self)._idle_loop_wait()
+    # Start-up and queued or postponed requests keep the normal loop rate.
+    # start_commands_finished is reset by every server restart (reload, pause/resume).
+    if wait and (not self.uvicorn_server_started or not all(self.start_commands_finished)
+                 or self._incoming_requests or self.postponed_requests):
+      # Work pending for the loop itself: no idle wait, the next lap comes after the normal sleep.
+      return 0
+    # Nothing pending: the lap may block for up to `wait` seconds, ended early by a request, input, command,
+    # config change or stop.
+    return wait
+
   def get_debug_timings_steps(self):
     configured_value = self.cfg_debug_timings_steps
     if not isinstance(configured_value, int):
@@ -564,10 +600,56 @@ class FastApiWebAppPlugin(BasePlugin):
     return
 
   def _start_request_monitor_thread(self):
+    """
+    Start the request monitor thread unless one is already running.
+
+    The monitor moves requests from the uvicorn side (``_server_queue``) into the plugin's incoming
+    queue, where the plugin loop runs their endpoints. It is also the door of that queue: a request
+    is refused at once with a 503 (busy, retryable) when the queue is full or when its oldest entry has
+    already waited past the queue-wait limit, and every request it queues wakes a plugin loop that is
+    waiting idle. The door judges by the age of that oldest entry, not by the expected wait of the new
+    request.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The thread is a daemon named ``FastApiWebAppRequestMonitor``; calling this while it is alive does
+    nothing. It runs until ``_stop_request_monitor`` is set or an unexpected error ends it, in which case
+    ``_process`` starts it again with a backoff, up to ``MAX_REQUEST_MONITOR_RESTART_RETRIES`` times.
+    """
     if self._request_monitor_thread is not None and self._request_monitor_thread.is_alive():
       return
 
     def _monitor():
+      """
+      Request monitor loop: admit each server request to the incoming queue or refuse it at once.
+
+      For each request read from ``_server_queue`` (a blocking read with a 0.25 s timeout, so the stop
+      flag is re-checked while no request comes) it runs the ``on_request`` hook (not for timing
+      reports) and warns when the hook outlasts ``REQUEST_TIMEOUT``. It then queues the request and wakes
+      the plugin loop, or refuses it with a 503 when the queue already holds ``MAX_INCOMING_REQUESTS`` or
+      its oldest entry (a request or a timing report) has already waited longer than the queue-wait limit
+      (``MAX_QUEUE_WAIT``, capped by ``REQUEST_TIMEOUT``). Refusing at the door answers the caller at once
+      instead of after a long wait in a lagging queue.
+
+      Returns
+      -------
+      None
+
+      Notes
+      -----
+      Refusing by the age of the queue head needs no state: it refuses only while the head has already
+      waited past the limit, and it stops as soon as the head is within the limit again. It judges by the
+      age of the head, not by the expected wait of the new request: after a stall the plugin loop takes at
+      most ``MAX_INCOMING_PER_LOOP`` queued entries per lap, expired ones included, so while the expired
+      entries drain, new requests that would still have been served in time are refused too. A burst or a
+      short stall that has not expired yet is still queued, up to ``MAX_INCOMING_REQUESTS``. A refused
+      timing report gets no answer, as nobody waits for one. An unexpected error outside the per-request
+      handling is logged and ends the thread.
+      """
       try:
         while not self._stop_request_monitor.is_set():
           try:
@@ -577,6 +659,9 @@ class FastApiWebAppPlugin(BasePlugin):
           except Exception as exc:
             self.P(f"Request monitor error: {exc}", color='r')
             continue
+          # Reset for each request before the try: the refusal below skips timing reports, and if inspecting
+          # this request raises, the flag must be neither missing nor left over from the previous request.
+          is_profile_event = False
           try:
             value = request.get('value')
             is_profile_event = (
@@ -595,20 +680,45 @@ class FastApiWebAppPlugin(BasePlugin):
                   )
           except Exception:
             self.P(f"Exception in on_request:\n{self.get_exception()}", color='r')
+          # The same limit the plugin loop uses to expire queued requests: MAX_QUEUE_WAIT capped by
+          # REQUEST_TIMEOUT, or REQUEST_TIMEOUT alone when MAX_QUEUE_WAIT is unset; None when neither is set,
+          # which turns the age check below off.
+          max_wait = self.get_max_queue_wait()
           with self._incoming_lock:
-            queue_full = len(self._incoming_requests) >= self.get_max_incoming_requests()
+            # Queue length under the lock: used by the size check and reported in the refusal log.
+            queued = len(self._incoming_requests)
+            # Enqueue time of the oldest queued entry, a request or a timing report (both carry one). The door
+            # judges by the age of this entry, not by the expected wait of the new request: after a stall the
+            # loop takes at most MAX_INCOMING_PER_LOOP queued entries per lap, expired ones included, so while
+            # the expired ones drain, new requests that would still have been served in time are refused too.
+            head_put = self._incoming_requests[0].get('t_put_wall_ns') if queued else None
+            # Age of the queue head in seconds; 0 for an empty queue or a head without an integer enqueue time
+            # (the uvicorn side always sends one), so such a head never triggers the age refusal.
+            head_wait = (time.time_ns() - head_put) / 1e9 if isinstance(head_put, int) else 0.0
+            # Refuse when the queue is at its MAX_INCOMING_REQUESTS cap or its head has expired. The age is
+            # read fresh for each request, so the door reopens as soon as the head is within the limit again.
+            queue_full = queued >= self.get_max_incoming_requests() or (
+              max_wait is not None and head_wait > max_wait
+            )
             if not queue_full:
               self._incoming_requests.append(request)
-          if queue_full:
+              # Wake the plugin loop if it is in an IDLE_LOOP_WAIT, so the request runs on the next lap
+              # instead of after the wait; set only after the request is queued, so that lap sees it.
+              self._loop_wakeup.set()
+          # A refused timing report gets no answer: nobody waits for one.
+          if queue_full and not is_profile_event:
             now = time.time()
             if now - self._last_incoming_drop_log_ts >= INCOMING_DROP_LOG_INTERVAL_S:
               self._last_incoming_drop_log_ts = now
               self.P(
-                "Dropping incoming request: incoming queue is full.",
+                f"Refusing incoming requests: {queued} queued, the oldest for {head_wait:.0f}s.",
                 color='y'
               )
-            # Answer at once instead of leaving the HTTP side waiting for REQUEST_TIMEOUT.
-            self._reply_unhandled_request(request, 503, "Server busy: request queue is full.")
+            # Answer at once instead of leaving the HTTP side waiting for REQUEST_TIMEOUT. One text names both
+            # causes, so a refusal by age does not claim that the queue is full.
+            self._reply_unhandled_request(
+              request, 503, "Server busy: request queue is full or its oldest entry has waited past the limit."
+            )
       except Exception:
         self.P(f"Request monitor crashed:\n{self.get_exception()}", color='r')
         return

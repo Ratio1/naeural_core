@@ -1,6 +1,6 @@
 import unittest
 from copy import deepcopy
-from threading import Lock
+from threading import Event, Lock
 from types import SimpleNamespace
 
 from naeural_core.business.base.base_plugin_biz import BasePluginExecutor
@@ -245,6 +245,7 @@ class PerNodeBusinessConfigTests(unittest.TestCase):
     plugin._session_id = "session"
     plugin._plugin_loop_in_exec = False
     plugin._plugin_lifecycle_lock = Lock()
+    plugin._loop_wakeup = Event()  # a config update now wakes the plugin loop
     plugin._instance_config = {"AI_ENGINE": "llama_cpp_small"}
     plugin._instance_config_unmaterialized = {"AI_ENGINE": "llama_cpp_small"}
     plugin.config_data = {"AI_ENGINE": "llama_cpp_small"}

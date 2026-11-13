@@ -6,7 +6,7 @@ import sys
 import types
 import unittest
 from collections import deque
-from threading import RLock
+from threading import Event, RLock
 from unittest import mock
 
 
@@ -89,6 +89,7 @@ class _Plugin(_LOOP._BasePluginLoopMixin, _Scheduling):
     self.cfg_process_delay = 0
     self.cfg_max_process_delay = None
     self.cfg_forced_loop_sleep = None
+    self.cfg_idle_loop_wait = 0  # the base plugin config default: fixed-rate loop
     self.cfg_instance_command = "PING"
     self.cfg_instance_command_log = False
     self.cfg_simulate_crash_loop = False
@@ -239,6 +240,55 @@ class TestPluginLoopWaits(unittest.TestCase):
     plugin.pause_loop()
     self.assertEqual(self._run(plugin), [0.020])
     self.assertEqual(plugin.events, ["init", "sleep", "close", "drain"])
+
+  def test_idle_wait_blocks_on_the_wakeup_event_only_with_an_empty_queue(self):
+    # An empty queue sleeps the 20 ms floor first, then waits only for the rest of IDLE_LOOP_WAIT.
+    for queued, expected_waits, expected_sleeps in ((0, [0.25 - 0.020], [0.020]), (1, [], [0.020])):
+      with self.subTest(queued=queued):
+        plugin = _Plugin()
+        plugin.cfg_idle_loop_wait = 0.25
+        plugin.input_queue_size = queued
+        waits = []
+        def fake_wait(timeout):
+          waits.append(timeout)
+          plugin._stop_requested = True
+        plugin._loop_wakeup = mock.Mock(wait=fake_wait)
+        self.assertEqual(self._run(plugin), expected_sleeps)
+        self.assertEqual(waits, expected_waits)
+        self.assertIn("execute", plugin.events)
+
+  def test_idle_wait_keeps_the_20_ms_floor_when_every_lap_is_woken(self):
+    """A wake-up on every lap (requests back to back) must not lift the 20 ms floor between laps."""
+    plugin = _Plugin()
+    plugin.cfg_idle_loop_wait = 0.25
+    plugin.input_queue_size = 0
+    plugin._loop_wakeup = Event()
+    plugin._loop_checks = -1  # done_loop then allows two laps
+    lap_starts = []
+
+    def execute():
+      lap_starts.append(plugin.now)
+      plugin._loop_wakeup.set()  # a request queued while this lap runs, as the request monitor does
+
+    def fake_sleep(seconds):
+      plugin.now += seconds
+
+    plugin.execute = execute
+    with mock.patch.object(_LOOP, "time", lambda: plugin.now), \
+         mock.patch.object(_LOOP, "sleep", fake_sleep), \
+         mock.patch.dict(_SCHEDULING_GLOBALS, {"time": lambda: plugin.now}):
+      plugin.plugin_loop()
+    self.assertEqual(len(lap_starts), 2)
+    self.assertGreaterEqual(lap_starts[1] - lap_starts[0], 0.020 - 1e-9)  # tolerance for float sums
+
+  def test_plugin_resolution_is_the_mean_lap_rate_without_numpy(self):
+    # numpy is stubbed in this harness, so this also proves the lap no longer uses it.
+    plugin = _Plugin()
+    with mock.patch.dict(_SCHEDULING_GLOBALS, {"time": lambda: plugin.now}):
+      for lap in (0.1, 0.3):
+        plugin._BasePluginExecutor__last_process_time = plugin.now - lap
+        plugin._recalc_plugin_resolution()
+    self.assertEqual(plugin.actual_plugin_resolution, 5.0)  # 2 laps in 0.4 s
 
   def test_postponed_wait_clamps_actual_remaining_delay(self):
     """The real postponement property, not positive config alone, gates work."""

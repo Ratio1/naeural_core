@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from ratio1.const.base import BCct
+from naeural_core.main.serialization_manager import SerializationManager
 
 from test_chain_store_hsync import _ChainStoreRuntimeHarness, _hset_key, _hset_record
 
@@ -359,6 +360,21 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.publish()
     self.assertEqual(calls, [])
 
+  def test_a_node_reports_where_a_registry_serves_its_image_and_nothing_else(self):
+    # The image id names an image only inside one Docker store. The registry reference is what lets a
+    # restored revision be pulled again; it passes only as a plain repository and digest.
+    image_id, reference = "sha256:" + "a" * 64, "ghcr.io/acme/shop@sha256:" + "d" * 64
+    def reported(**artifacts):
+      return DeploymentLifecycle._runtime_artifacts(SimpleNamespace(get_deployment_runtime_artifacts=lambda: artifacts))
+    self.assertEqual(reported(image_id=image_id, image_ref=reference), {"image_id": image_id, "image_ref": reference})
+    # A ":" passes only as the port of the registry.
+    with_port = "registry:5000/team/app@sha256:" + "d" * 64
+    self.assertEqual(reported(image_id=image_id, image_ref=with_port), {"image_id": image_id, "image_ref": with_port})
+    for unsafe in ("ghcr.io/acme/shop:stable", "user:secret@ghcr.io/acme/shop@sha256:" + "d" * 64,
+                   "ghcr.io/acme/shop:stable@sha256:" + "d" * 64, "https://ghcr.io/acme/shop@sha256:" + "d" * 64,
+                   "ghcr.io/acme/shop@sha256:short", reference + " --privileged", 7, None):
+      self.assertEqual(reported(image_id=image_id, image_ref=unsafe, environment={"TOKEN": "x"}), {"image_id": image_id})
+
   def test_runtime_artifacts_survive_retirement_restart_and_stopped_report(self):
     previous = config(revision=1)
     previous["DEEPLOY_SPECS"] = {"job_id": 7, "revision": 1}
@@ -463,23 +479,24 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     store._ChainStoreBasePlugin__exec_received_confirm(data, sender="peer2")
     self.assertEqual(store.storage["key"][store.CS_CONFIRMATIONS], 2)
 
-  def test_writes_are_saved_once_per_interval_outside_persistence_lock(self):
+  def test_writes_are_saved_by_the_flush_outside_persistence_lock_and_never_by_process(self):
+    # The SerializationManager calls the flush on its own thread every CS_SAVE_INTERVAL seconds.
     store = self.make_store()
+    flush = store._ChainStoreBasePlugin__maybe_flush_chain_storage
     lock = store._ChainStoreBasePlugin__persistence_lock
     saves = []
     store.cacheapi_save_pickle = lambda obj, *args, **kwargs: saves.append((lock._is_owned(), sorted(obj)))
     for key in ("key1", "key2"):
       self.assertTrue(store._set_value(key, "value", owner="node", local_sync_storage_op=True))
-    self.assertEqual(saves, [])
-    store._now += store.CS_SAVE_INTERVAL
+    store._now += 10 * store.CS_SAVE_INTERVAL
     store.process()
+    self.assertEqual(saves, [])  # the plugin thread does not save, however long ago the last save was
+    flush()
     self.assertEqual(saves, [(False, ["key1", "key2"])])
+    flush()
+    self.assertEqual(len(saves), 1)  # nothing changed: nothing written
     self.assertTrue(store._set_value("key3", "value", owner="node", local_sync_storage_op=True))
-    store.process()
-    self.assertEqual(len(saves), 1)
-    store._now += store.CS_SAVE_INTERVAL
-    store.process()
-    store.process()
+    flush()
     self.assertEqual(len(saves), 2)
     self.assertIn("key3", saves[-1][1])
 
@@ -490,16 +507,52 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     self.assertTrue(store._set_value("key", "value", owner="node", local_sync_storage_op=True))
     self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)
 
-  def test_close_saves_pending_writes(self):
-    store = self.make_store()
+  def test_close_saves_pending_writes_and_ends_the_periodic_save(self):
+    manager = SerializationManager.instance = SerializationManager(log=None)  # the save's thread would first run 5 s after on_init; each store is closed before
+    self.addCleanup(setattr, SerializationManager, "instance", None)
     saved = []
-    store.cacheapi_save_pickle = lambda obj, *args, **kwargs: saved.append(obj)
-    store.on_close()
-    self.assertEqual(saved, [])
-    store._set_value("key", "value", owner="node", local_sync_storage_op=True)
-    store.on_close()
-    self.assertEqual(len(saved), 1)
+    for pending in (False, True):
+      store = self.make_store()
+      flush = store._ChainStoreBasePlugin__maybe_flush_chain_storage
+      store.cacheapi_save_pickle = lambda obj, *args, **kwargs: saved.append(obj)
+      manager.register(flush, every=store.CS_SAVE_INTERVAL)
+      if pending:
+        store._set_value("key", "value", owner="node", local_sync_storage_op=True)
+      store.on_close()
+      self.assertEqual(len(saved), int(pending))
+      self.assertNotIn(flush, manager._saves)  # the closed store is no longer registered with the manager
     self.assertIn("key", saved[0])
+    self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)
+
+  def test_close_waits_for_a_save_in_progress_and_writes_again_when_it_failed(self):
+    # The manager's thread is inside a save when the plugin closes, and that write then fails.
+    from threading import Event, Thread
+    manager = SerializationManager.instance = SerializationManager(log=None)
+    self.addCleanup(setattr, SerializationManager, "instance", None)
+    store = self.make_store()
+    flush = store._ChainStoreBasePlugin__maybe_flush_chain_storage
+    manager.register(flush, every=store.CS_SAVE_INTERVAL)
+    writing, fail_now, attempts = Event(), Event(), []
+    def failing_then_fine(obj, *args, **kwargs):
+      attempts.append(sorted(obj))
+      if len(attempts) == 1:
+        writing.set()
+        fail_now.wait(5)
+        raise OSError("disk full")
+    store.cacheapi_save_pickle = failing_then_fine
+    store._set_value("key", "value", owner="node", local_sync_storage_op=True)
+    manager_save = Thread(target=flush)
+    manager_save.start()
+    self.assertTrue(writing.wait(5))
+    closing = Thread(target=store.on_close)
+    closing.start()
+    closing.join(0.3)
+    self.assertTrue(closing.is_alive())  # on_close waits for the write in progress
+    fail_now.set()
+    closing.join(5)
+    manager_save.join(5)
+    self.assertFalse(closing.is_alive())
+    self.assertEqual(attempts, [["key"], ["key"]])  # the failed write was made again by on_close
     self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)
 
   def test_save_writes_a_snapshot_not_the_live_store(self):
@@ -507,8 +560,7 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     saved = []
     store.cacheapi_save_pickle = lambda obj, *args, **kwargs: saved.append(obj)
     store._set_value("key", "value", owner="node", local_sync_storage_op=True)
-    store._now += store.CS_SAVE_INTERVAL
-    store.process()
+    store._ChainStoreBasePlugin__maybe_flush_chain_storage()
     live = store.storage["key"]
     snapshot = saved[-1]["key"]
     self.assertIsNot(saved[-1], store.storage)
@@ -517,8 +569,9 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     live["confirmed_peers"].append("peer1")
     self.assertNotIn("peer1", snapshot.get("confirmed_peers", []))
 
-  def test_failed_save_is_retried_from_process(self):
+  def test_failed_save_is_retried_by_the_next_flush(self):
     store = self.make_store()
+    flush = store._ChainStoreBasePlugin__maybe_flush_chain_storage
     attempts = []
     def flaky_save(obj, *args, **kwargs):
       attempts.append(obj)
@@ -526,14 +579,10 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
         raise OSError("disk full")
     store.cacheapi_save_pickle = flaky_save
     self.assertTrue(store._set_value("key", "value", owner="node", local_sync_storage_op=True))
-    store._now += store.CS_SAVE_INTERVAL
-    store.process()
+    flush()
     self.assertEqual(len(attempts), 1)
-    self.assertTrue(store._ChainStoreBasePlugin__chain_storage_dirty)
-    store.process()
-    self.assertEqual(len(attempts), 1)
-    store._now += store.CS_SAVE_INTERVAL
-    store.process()
+    self.assertTrue(store._ChainStoreBasePlugin__chain_storage_dirty)  # so the manager's next call retries
+    flush()
     self.assertEqual(len(attempts), 2)
     self.assertIn("key", attempts[-1])
     self.assertFalse(store._ChainStoreBasePlugin__chain_storage_dirty)

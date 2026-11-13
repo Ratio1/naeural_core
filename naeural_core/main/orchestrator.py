@@ -14,6 +14,8 @@ from naeural_core import constants as ct
 
 from naeural_core.main.app_monitor import ApplicationMonitor
 from naeural_core.main.net_mon import NetworkMonitor
+# Runs the periodic state saves (chain store, network monitor), each on a background thread of its own.
+from naeural_core.main.serialization_manager import SerializationManager
 from naeural_core.main.command_handlers import ExecutionEngineCommandHandlers
 from naeural_core.main.orchestrator_mixins import (
   _ValidateConfigStartupMixin,
@@ -91,12 +93,28 @@ class Orchestrator(DecentrAIObject,
   def __init__(self, log : Logger, **kwargs):
     """Initialize orchestrator runtime state and manager placeholders.
 
+    Sets every manager to None and creates the main-loop, runtime-secret and shutdown state before the base
+    object constructor runs, because that constructor calls ``startup()``. Two fields serve CPU savings in
+    the runtime-secret resolver and the plugin loop, and are created here so they are read as plain attributes:
+    ``_runtime_secret_settled_streams`` (the pipelines dict a resolver pass left with nothing pending,
+    so later passes on the same dict return at once) and ``_mean_loop_freq_cache`` (the last main-loop rate
+    handed to plugins, reused for up to one second).
+
     Parameters
     ----------
     log : Logger
       Runtime logger.
     **kwargs
       Additional object initialization arguments.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> eng = Orchestrator(log=l)
+    >>> return_code = eng.main_loop()
     """
     if __APP_VER__ is None:
       self.__version__ = __CORE_VER__
@@ -152,6 +170,12 @@ class Orchestrator(DecentrAIObject,
     self._runtime_config_lock = Lock()
     self._runtime_secret_cache = {}
     self._runtime_secret_retry_state = {}
+    # The pipelines dict on which the last resolver pass left nothing pending. While it is still the current
+    # dict the resolver pass (every 0.25 s) returns at once instead of copying and walking every pipeline.
+    self._runtime_secret_settled_streams = None
+    # (monotonic time, value) of the last mean main-loop rate. Plugins ask for it on every lap they run; it
+    # is recomputed only once the cached value is a second old.
+    self._mean_loop_freq_cache = None
     self._should_send_initial_log = False
     self._initial_log_sent = False
     self._last_offline_log = 0
@@ -206,7 +230,29 @@ class Orchestrator(DecentrAIObject,
 
 
   def startup(self):
+    """
+    Start the node-wide helpers that must exist before any manager or plugin, then announce the node.
+
+    Runs once, from the constructor (the base object calls it at the end of its own ``__init__``). It
+    starts the SerializationManager, which runs the periodic state saves of the chain store and the network
+    monitor on background threads, one per save, so that neither saves on its own thread. It then logs the
+    start banner, applies an ``EE_DEVICE`` override, loads the admin pipeline config, starts the application
+    timer and validates the startup config.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Because this runs from the constructor, the SerializationManager exists on both paths that later
+    reach ``close_main_loop``: the main loop's ``finally`` and a forced shutdown before the main loop starts.
+    """
     super().startup()    
+    # Start the state saver before any manager or plugin exists, so the plugins that keep state can register
+    # their saves instead of writing on their own threads. startup() runs from the constructor, so the saver
+    # also exists on every path that reaches close_main_loop().
+    SerializationManager.start(self.log)
     self.P(
       "Starting Execution Engine '{}' v.{}, core {}, (WORK_OFFLINE={})".format(
         self.cfg_eeid, self.__version__, self.core_version,
@@ -295,19 +341,60 @@ class Orchestrator(DecentrAIObject,
     return
   
   def _check_and_complete_environment_variables(self):
+    """
+    Complete the node's environment variables from dAuth at start-up, retrying within a time limit.
+
+    Calls ``blockchain_manager.dauth_autocomplete`` in rounds until it returns either None or a non-empty
+    dict of variables, sleeping a random 16-29 s after each round that returns an empty dict. No new round
+    starts once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed, or once a stop was requested
+    (``request_stop``, called by the SIGTERM handler); the node then continues with its local environment.
+    When dAuth returned variables, the logger config is reloaded so they take effect.
+
+    Each round first sends a new-key announcement that still waits for dAuth's confirmation
+    (``_maybe_announce_node_key``), and after the request switches to a new node key when the answering dAuth
+    oracle reported the current one as revoked (``_rotate_revoked_node_key``); the next round then asks
+    with the new key.
+
+    The first round allows up to five tries; every later round at most two, so one failure that is not
+    "busy" is retried once instead of ending dAuth. Before, every round could make five tries, so a round
+    started just before the limit could overrun it by a whole five-try round.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    An empty dict means no variables yet (for example a busy oracle), so another round is made. None means
+    that no further round is useful: ``dauth_autocomplete`` gave up on the request (a bad URL, or on its
+    last try a failure that is not "busy", such as a refused connection, a connect timeout or a status like
+    530), or dAuth is not used on this deployment (with a VPN the SDK returns None without sending a
+    request). A warning is logged when the node continues without dAuth variables at the time limit, after
+    a stop request, or because a later round ended on None. A None in the first round is not warned here,
+    as before: it is the normal answer on a VPN deployment. A stop request does not interrupt the request
+    or the pause in progress.
+    """
     
     self.P(f"Node <{self.eth_address}> completing setup for network <{self.evm_network}>...")
     start_ts = time()
     done = False
     tries = 0
-    while not done and (time() - start_ts) < CHECK_AND_COMPLETE_TIMEOUT:
+    # Stays None when a stop was requested before the first round, so the checks after the loop still work.
+    dct_env_output = None
+    # A stop requested during start-up (request_stop, called by the SIGTERM handler) ends the wait: no new
+    # round starts, so a node that is asked to stop does not keep waiting for dAuth up to the time limit.
+    while not done and (time() - start_ts) < CHECK_AND_COMPLETE_TIMEOUT and self._return_code is None:
       tries += 1
       self._maybe_announce_node_key()
       dct_env_output = self.blockchain_manager.dauth_autocomplete(
         dauth_endp=None,  # get automatically
         add_env=True,
         debug=False,
-        max_tries=5,
+        # Five tries in the first round; each later round sends at most two requests, so one failure that is
+        # not "busy" (a refused connection, a status like 530) is retried once instead of ending dAuth for
+        # good, and a round that starts near the end cannot overrun CHECK_AND_COMPLETE_TIMEOUT by a whole
+        # five-try round.
+        max_tries=5 if tries == 1 else 2,
         sender_alias=self.cfg_eeid,
       )
       if self.blockchain_manager.dauth_revoked_by is not None:
@@ -324,9 +411,13 @@ class Orchestrator(DecentrAIObject,
         )
     # endwhile not done
 
-    if not done:
-      self.P(f'WARNING: <{self.eth_address}> could not retrieve dAuth in {CHECK_AND_COMPLETE_TIMEOUT}s. '
-             f'Continuing with local environment...')
+    # Warn also when a later round ended on None: an earlier round got an empty dict (for example from a busy
+    # oracle), and this round gave up on a failure that is not "busy". The node then runs on its local
+    # environment until it restarts, and the log must say so. Do not warn for a None in the first round: a VPN
+    # deployment also gets None there, without sending any request.
+    if not done or (dct_env_output is None and tries > 1):
+      self.P(f'WARNING: <{self.eth_address}> could not retrieve dAuth ({tries} rounds in {time() - start_ts:.1f}s, '
+             f'limit {CHECK_AND_COMPLETE_TIMEOUT}s). Continuing with local environment...')
 
     if dct_env_output is not None and len(dct_env_output) > 0:
       self.P(f'Reloading config due to dAuth modification of following env vars: {list(dct_env_output.keys())}')
@@ -1066,6 +1157,18 @@ class Orchestrator(DecentrAIObject,
   def _resolve_runtime_streams_once(self, now=None):
     """Attempt due dAuth resolutions once without blocking the main loop.
 
+    Copies the current pipelines under ``_runtime_config_lock``, reconciles the runtime view with them and,
+    for every pipeline with a dAuth secret placeholder that is neither cached nor waiting for its retry
+    time, fetches the secret bundle and stores the runtime pipeline if that pipeline is still unchanged. A
+    failed resolution withholds the pipeline and, while it is unchanged, schedules a retry with exponential
+    back-off.
+
+    The resolver thread calls this in a loop, sleeping ``RUNTIME_SECRET_RESOLVER_POLL_SECONDS`` (0.25 s)
+    between calls. When the last full pass finished on the same pipelines dict object and left nothing
+    pending (no retry wait, no failed resolution), the pass returns 0 at once. Otherwise every pass
+    deep-copies and reconciles all pipelines, mostly while holding the lock that the main-loop and
+    admin-collector snapshots also need.
+
     Parameters
     ----------
     now : float or None, optional
@@ -1074,16 +1177,44 @@ class Orchestrator(DecentrAIObject,
     Returns
     -------
     int
-      Number of pipeline versions resolved during this pass.
+      Number of pipeline versions resolved during this pass (0 when the pass was skipped).
+
+    Notes
+    -----
+    Object identity is a safe "nothing changed" test because ``choose_current_running_streams``, the only
+    code that replaces the dict after ``__init__``, assigns a new dict whenever any pipeline differs. A side
+    effect: ``$EE_*`` references are no longer re-expanded every 0.25 s while the config is unchanged, so an
+    ``EE_*`` variable changed at runtime is picked up by the next full pass (a pipeline change or pending
+    work), not within 0.25 s.
+
+    Examples
+    --------
+    >>> eng._resolve_runtime_streams_once()   # new dict holding one pipeline whose secrets resolve
+    1
+    >>> eng._resolve_runtime_streams_once()   # same dict, nothing pending: the pass is skipped
+    0
     """
     self._ensure_runtime_secret_resolution_state()
     fixed_now = now is not None
     now = time() if now is None else now
     with self._runtime_config_lock:
-      canonical_streams = deepcopy(self._current_dct_config_streams)
+      # Keep a reference to the dict itself (not a copy): its identity is what marks it as settled at the
+      # end of this pass.
+      current_streams = self._current_dct_config_streams
+      # choose_current_running_streams replaces this dict only when a pipeline changes, so an
+      # unchanged dict with nothing pending needs no copy, reconcile or placeholder walk.
+      if current_streams is self._runtime_secret_settled_streams:
+        # Skip the whole pass: 0 pipelines resolved, and the lock is released at once.
+        return 0
+      # Reached only for a new dict or one with work pending: copy it as before; the loop below then works
+      # on the copy and makes its dAuth requests without holding the lock.
+      canonical_streams = deepcopy(current_streams)
     self._reconcile_runtime_streams(canonical_streams)
 
     resolved_count = 0
+    # Becomes True when any pipeline still needs a later pass (retry wait or failed resolution); only a pass
+    # that ends with it False may mark this dict as settled.
+    pending = False
     for pipeline_name, pipeline_config in canonical_streams.items():
       if not contains_dauth_secret_placeholder(pipeline_config):
         continue
@@ -1100,6 +1231,8 @@ class Orchestrator(DecentrAIObject,
           continue
         retry_state = self._runtime_secret_retry_state.get(cache_key, {})
         if now < retry_state.get("next_retry", 0):
+          # Still waiting for its retry time: a later pass must run even if the dict does not change.
+          pending = True
           continue
 
       job_id = cache_key[1]
@@ -1123,6 +1256,9 @@ class Orchestrator(DecentrAIObject,
       except Exception as exc:
         if vars(self).get("_Orchestrator__done", False):
           return resolved_count
+        # Resolving this pipeline failed (fetch, revision check or build): a later pass must retry it, so
+        # this dict must not be marked as settled.
+        pending = True
         with self._runtime_config_lock:
           current_pipeline = self._current_dct_config_streams.get(pipeline_name)
           if current_pipeline != pipeline_config:
@@ -1165,6 +1301,9 @@ class Orchestrator(DecentrAIObject,
         self._runtime_secret_retry_state.pop(cache_key, None)
         self._runtime_dct_config_streams[pipeline_name] = runtime_pipeline
       resolved_count += 1
+    # Remember the dict only when nothing is left to do, so the next passes on it return at once; with work
+    # pending, clear the mark so the next pass runs in full.
+    self._runtime_secret_settled_streams = None if pending else current_streams
     return resolved_count
 
   def _fetch_dauth_job_secret_bundle(self, job_id, revision=None):
@@ -1345,6 +1484,47 @@ class Orchestrator(DecentrAIObject,
         self.P("Node oracle refresh thread joined.", color='y')
     return
 
+  def request_stop(self):
+    """
+    Ask the main loop to end in an orderly way.
+
+    The loop leaves at its next check and closes as after a STOP command:
+    SHUTDOWN-status heartbeat, then the managers and plugins are closed; the
+    chain store saves its pending writes as it closes, and the
+    network-monitor or epoch state is saved once more when the
+    SerializationManager stops, as the last step of the close. During start-up no new dAuth round starts and the
+    main loop is not entered. The method only sets a value, so a signal
+    handler may call it.
+
+    It is the target of the SIGTERM handler installed by the entrypoint. A
+    container runtime stops the node with SIGTERM; with this method the node
+    leaves through the normal shutdown path instead of being killed after the
+    stop timeout, or of leaving through the error path, whose EXCEPTION-status
+    heartbeat makes the other nodes' network monitors report it as
+    PAST-EXCEPTION for the next hour.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A return code that is already set (for example by a command received
+    earlier) is kept, so a SIGTERM never overrides an earlier decision.
+
+    Examples
+    --------
+    >>> eng.request_stop()                       # no return code set yet
+    >>> eng._return_code == ct.CODE_SHUTDOWN
+    True
+    """
+    if self._return_code is None:
+      # Only a plain assignment, safe inside a signal handler. The main loop reads _return_code near the end
+      # of each lap (after the stage it is in finishes), breaks, and its finally runs close_main_loop(),
+      # which sends the SHUTDOWN heartbeat.
+      self._return_code = ct.CODE_SHUTDOWN
+    return
+
   def _maybe_gracefull_stop(self):
     if self._in_shutdown:
       return
@@ -1399,9 +1579,42 @@ class Orchestrator(DecentrAIObject,
 
 
   def _get_mean_loop_freq(self):
+    """
+    Return the mean main-loop rate in Hz, capped at the configured MAIN_LOOP_RESOLUTION.
+
+    This is the MAIN_LOOP_RESOLUTION_CALLBACK that plugins read on every lap they run: a plugin's target
+    lap rate is at least three times this value. The value comes from a numpy mean over the main-loop timer
+    laps, and a plugin thread typically asks for it 20-40 times a second, so the result is recomputed only
+    once the cached value is a second old (monotonic clock) and the cached value is returned in between.
+
+    Returns
+    -------
+    float or int
+      ``min(cfg_main_loop_resolution, 1 / mean main-loop time)``; a mean of 0 is treated as 1 ms. Before
+      the first timed main-loop lap the timer mean is -1, so the result is -1.0.
+
+    Notes
+    -----
+    The main-loop mean moves slowly, so a lag of up to one second in the plugins' minimum lap rate is
+    harmless. The monotonic clock keeps the cache correct when the wall clock is changed.
+
+    Examples
+    --------
+    >>> rate = eng._get_mean_loop_freq()          # computed and cached
+    >>> rate == eng._get_mean_loop_freq()         # within 1 s: the cached value
+    True
+    """
+    # Plugins call this on every lap they run; it is a mean over the last main-loop laps,
+    # so recomputing it (numpy over a deque) more than once a second buys nothing.
+    cached = self._mean_loop_freq_cache
+    if cached is not None and monotonic() - cached[0] < 1:
+      # Less than a second old: hand back the cached rate without the numpy timer mean.
+      return cached[1]
     main_loop_time = self.log.get_timer_mean(self._main_loop_timer_name)
     ml_time = 1e-3 if main_loop_time == 0 else main_loop_time
     result = min(self.cfg_main_loop_resolution, 1 / ml_time)
+    # Store the new rate with its time so the calls of the next second reuse it.
+    self._mean_loop_freq_cache = (monotonic(), result)
     return result
 
   def _get_last_timing(self):
@@ -1665,6 +1878,30 @@ class Orchestrator(DecentrAIObject,
 
 
   def _maybe_delay_main_loop(self):
+    """
+    Pad the main-loop lap so that it lasts at least one cycle, then record the cycle time.
+
+    The cycle is ``1 / MAIN_LOOP_RESOLUTION`` seconds, lengthened to the communication manager's mean
+    loop time when that is longer and the node is not working offline. The thread sleeps once for the rest
+    of the cycle, and at least 1 ms so it always yields. Before, it yielded 1 ms and then slept in 1 ms
+    steps until the cycle ended; each step woke the main thread and asked for the GIL, about 600-900 times
+    a second, for no work.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    ``time.sleep`` and ``perf_counter`` both use the monotonic clock, so the cycle still ends at or after
+    the wait time. On a lap that already overran its cycle the 1 ms yield is now included in
+    ``loop_timings`` (about 1 ms more in the average loop timing).
+
+    Examples
+    --------
+    With a 50 ms cycle and 10 ms already spent in the lap, the thread makes one 40 ms sleep; on a lap that
+    took 60 ms it sleeps 1 ms.
+    """
     self.log.start_timer('delay')
     wait_time = 1 / self.cfg_main_loop_resolution # max wait time
     current_cycle_time = perf_counter() - self._last_main_loop_pass_time # cycle time since last pass
@@ -1673,10 +1910,11 @@ class Orchestrator(DecentrAIObject,
       # increase wait time if need be
       wait_time = avg_comm_loop_timings 
 
-    sleep(0.001) # no matter what go ahead and yield
-    while current_cycle_time < wait_time:
-      sleep(0.001)
-      current_cycle_time = perf_counter() - self._last_main_loop_pass_time # recalc cycle time 
+    # Sleep once for the rest of the cycle (at least 1 ms, to yield) instead of in 1 ms
+    # steps, each of which woke this thread and asked for the GIL.
+    sleep(max(0.001, wait_time - current_cycle_time))
+    # Measure the cycle again after the single sleep, so loop_timings records the real lap length.
+    current_cycle_time = perf_counter() - self._last_main_loop_pass_time
 
     self.loop_timings.append(current_cycle_time) # done after time extension if needed
     self._last_main_loop_pass_time = perf_counter() # reset
@@ -1797,6 +2035,19 @@ class Orchestrator(DecentrAIObject,
     return
 
   def close_main_loop(self):
+    """
+    Close the node: stop communication, plugins, serving and capture, then the state saver.
+
+    First sends the SHUTDOWN-status heartbeat, unless a shutdown or exception stop already ran. The order
+    matters. Plugins close before the SerializationManager stops, so a plugin that saves on close (the
+    chain store does) still makes that final save; the manager is stopped last: it runs once more the saves
+    registered for the stop (the network monitor's status) and waits, for at most 60 seconds in total, for
+    them and for the periodic saves that are being written at that moment (each save has its own thread).
+
+    Returns
+    -------
+    None
+    """
     self.P('Closing connections and stopping threads...', color='m')
     self._maybe_gracefull_stop()
     if self._comm_manager is not None:
@@ -1807,6 +2058,10 @@ class Orchestrator(DecentrAIObject,
       self._serving_manager.stop_all_servers()
     if self._capture_manager is not None:
       self._capture_manager.close()
+    # Last step: let the state saves that are being written finish and run once more the saves registered for
+    # the stop (the network monitor's status), at most 60 s for all of them, so the node does not exit in the
+    # middle of one. Plugins that save on close made their final saves when they closed above.
+    SerializationManager.instance.stop(timeout=60)
     return
 
   def refresh_business_plugins(self):
@@ -2678,6 +2933,21 @@ class Orchestrator(DecentrAIObject,
     go back on log to see where that particular stage progress stopped. Multiple layers of loop stage
     debug info have been added for debug purposes.
 
+    A stop requested during start-up (``request_stop``, called by the SIGTERM handler) is acted on before
+    the first lap: when ``_return_code`` is set once ``_init_all_processes`` returns, ``_init_main_loop``
+    and the loop are skipped; when it is set during ``_init_main_loop``, the loop is skipped. In both cases
+    the ``finally`` still runs ``close_main_loop``.
+
+    Returns
+    -------
+    int or None
+      The return code: one set earlier (by a command or by ``request_stop``), ``ct.CODE_SHUTDOWN`` or
+      ``ct.CODE_EXCEPTION`` from the end-of-lap checks, ``ct.CODE_EXCEPTION`` after an exception, or None
+      when the loop ended without a return code (for example after a flag-file shutdown-reset).
+
+    Examples
+    --------
+    >>> return_code = eng.main_loop()   # entrypoint.main()
     """
     captures_data_metadata, dct_servers_inputs, dct_servers_outputs, dct_business_inputs, payloads = None, None, None, None, None
     check_ram_on_shutdown = self.check_ram_on_shutdown
@@ -2685,10 +2955,22 @@ class Orchestrator(DecentrAIObject,
     try:
       return_code = None
       
+      # Complete dAuth and start the managers. A stop requested meanwhile (request_stop, called by the SIGTERM
+      # handler) means no new dAuth round starts, and it is acted on right below.
       self._init_all_processes()      
-      self._init_main_loop()
+      if self._return_code is None:
+        # No stop was requested while dAuth or the managers were starting: send the first heartbeat, prime
+        # the admin pipeline and warm up serving. With a stop requested all three are skipped.
+        self._init_main_loop()
+      # Read the stop request once more, after the warm-up, so the loop below is skipped when it is set.
+      return_code = self._return_code
+      if return_code is not None:
+        self.P("Stop requested during start-up (return code {}): closing without entering the main loop.".format(
+          return_code), color='r')
       
-      while not self.__done:
+      # Enter the loop only without a stop request; otherwise the finally below closes the node at once, and
+      # no first lap starts the business plugins only for them to be closed again.
+      while return_code is None and not self.__done:
         
         shutdown_reset_required = self.check_shutdown_reset_by_file()
         if shutdown_reset_required:

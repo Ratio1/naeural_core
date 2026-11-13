@@ -206,7 +206,28 @@ class LogReader():
     return chunk
 
   def _do_select_read(self):
-    ready, _, _ = select.select([self.buff_reader], [], [], 0.1)  # Wait up to 0.1s
+    """
+    Wait up to 0.5 s for the child's pipe to become readable, then read one chunk.
+
+    The reader thread calls this in a loop. ``select`` returns as soon as output or end of file is ready, so the
+    timeout never delays output; it only bounds how long the thread takes to notice ``done`` while the child is
+    silent. 0.5 s (was 0.1 s) wakes an idle reader 5x less often and still lets the thread see ``done`` within
+    the 1 s join in ``stop()``.
+
+    Returns
+    -------
+    bytes or None
+      Up to ``size`` bytes from the pipe; ``b''`` when the pipe is at end of file (the child closed it);
+      None when nothing became readable within the timeout. Bytes because every caller passes an unbuffered
+      binary pipe (``bufsize=0``); a text-mode stream would return str.
+
+    Examples
+    --------
+    >>> text = self._do_select_read()   # as in _run: None after 0.5 s of silence, b'' once the pipe closed
+    """
+    # select returns at once when output or EOF is ready; the timeout only bounds how soon
+    # `done` is seen. 0.5 s stays inside stop()'s 1 s join and cuts idle wake-ups 5x.
+    ready, _, _ = select.select([self.buff_reader], [], [], 0.5)
     text = None
     if ready:
       text = self.buff_reader.read(self.buf_reader_size)
@@ -221,6 +242,32 @@ class LogReader():
     return
 
   def _run(self):
+    """
+    Reader thread body: move the child's output into ``buffer`` until stopped or the pipe ends.
+
+    Loops while ``done`` is False, reading one chunk per ``_do_select_read`` call and appending non-empty chunks
+    through ``on_text``. A ``b''`` read after select reported the pipe readable means end of file: the child
+    closed the pipe, so the loop ends instead of spinning on select plus an empty read, which held the GIL until
+    the plugin closed. Text already read stays in ``buffer`` for ``get_next_characters``. On exit it sets
+    ``exited`` and, unless a ``ForceStopException`` stopped it, logs and closes the stream.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Other exceptions inside the loop are caught and logged; they end the thread instead of propagating.
+
+    Examples
+    --------
+    >>> proc = subprocess.Popen([sys.executable, '-c', "print('hello')"], stdout=subprocess.PIPE, bufsize=0)
+    >>> reader = LogReader(owner, proc.stdout)   # starts a thread running _run
+    >>> _ = proc.wait()
+    >>> reader.thread.join(timeout=5)   # the thread ends by itself at end of file
+    >>> reader.get_next_characters()
+    'hello\\n'
+    """
     force_stop = False
     log_msg = None
     try:
@@ -229,8 +276,9 @@ class LogReader():
         text = self._do_select_read()
         if text:  # Check if any data is read
           self.on_text(text)
-        else:
-          pass # break can lead to early exit so nothing to do
+        elif text is not None:
+          # b'' after select = EOF: the child closed the pipe; looping on it spins a core
+          break
         # endif any data ready
       # self.exited needs to be set to True as soon as the loop is exited
       # in order to avoid any forced exception during the finally block.

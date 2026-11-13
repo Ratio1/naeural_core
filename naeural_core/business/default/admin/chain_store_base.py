@@ -1481,8 +1481,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ----------
     data : dict
       Decrypted chain-store operation payload.
-    peers : str or list, optional
-      Sender address or addresses that should receive the confirmation.
+    peers : str, optional
+      Address of the node that sent this store: the payload's ``EE_SENDER``, one address, passed by
+      ``default_handler``. The confirmation goes back to it. It is not the ``PEERS`` list of the message, which
+      this method does not read.
 
     Returns
     -------
@@ -1499,8 +1501,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     readonly = data.get(self.CS_READONLY, False) # if the key is readonly local node consumers cannot overwrite it
     token = data.get(self.CS_TOKEN, None)
     if peers not in self.__chain_peers:
-      # Count stores from nodes outside this node's replication peers, by namespace bucket, without asking the
-      # blockchain engine; before, they were not counted. The key comes from the network and may not be a str.
+      # Count stores whose sender (``peers`` is that one address) is outside this node's replication peers, by
+      # namespace bucket, without asking the blockchain engine; before, they were not counted. One store, one
+      # count. The key comes from the network and may not be a str.
       label = (key[:14] if isinstance(key, str) and key.startswith("hs:") else "plain") + "/remote_non_peer"
       # Under the persistence lock, as every count of the CSTORE_STATS line.
       with self.__persistence_lock:

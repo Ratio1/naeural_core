@@ -36,6 +36,10 @@ from naeural_core.main.serialization_manager import SerializationManager
 
 # Node key rotations: written only by dAuth servers, each value a signed rotation proof.
 NODE_KEY_ROTATIONS_HKEY = "NODE_KEY_ROTATIONS"
+# Tunnels Manager namespaces (tunnel credentials, and TCP routes under the plugin's default TCP_ROUTES_HKEY): the
+# plugin runs only on oracles, so a remote write, a sync request or a sync answer for them is taken only from an
+# oracle registry member.
+TUNNELS_MANAGER_HKEYS = ("tunnels_manager_secrets", "tunnels_manager_tcp_routes")
 
 _CONFIG = {
   **NetworkProcessorPlugin.CONFIG,
@@ -519,6 +523,46 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """Identify the protected mutable and revision-specific dAuth namespaces."""
     return self.__namespace_for_key(key, ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"))
 
+  def __oracle_only_write(self, key, value):
+    """
+    Tell whether a remote write is applied only when its sender is an oracle registry member.
+
+    Two kinds of record are written only by plugins that run on oracles: every field of the Tunnels Manager
+    namespaces (``TUNNELS_MANAGER_HKEYS``), and a deployed-job pointer whose value carries no revision, the
+    unversioned form that ``__versioned_job_record`` accepts (a plain CID string, ``None`` for a delete, or a
+    dict without ``revision``). A pointer with a revision keeps the rule of ``__versioned_job_record``: the
+    signature of its coordinator is checked, whoever relays it.
+
+    Parameters
+    ----------
+    key : any
+      Composed chain-store key of the write, as received; a key that is not a str is in no namespace.
+    value : any
+      Value of the write; ``None`` for a delete.
+
+    Returns
+    -------
+    bool
+      True for a write that only an oracle registry member may make; False for every other write.
+
+    Examples
+    --------
+    >>> self.__oracle_only_write(self.__hset_index("tunnels_manager_secrets") + "MHhhYmM=", None)
+    True
+    >>> self.__oracle_only_write(self.__hset_index("DEEPLOY_DEPLOYED_JOBS") + "Nw==", "cid")
+    True
+    >>> self.__oracle_only_write(self.__hset_index("DEEPLOY_DEPLOYED_JOBS") + "Nw==", {"revision": 2})
+    False
+    >>> self.__oracle_only_write(self.__hset_index("players") + "YWxwaGE=", "v")
+    False
+    """
+    # Every write and delete of a Tunnels Manager namespace, and a deployed-job pointer whose value has no revision
+    # (read as __versioned_job_record reads it).
+    return self.__namespace_for_key(key, TUNNELS_MANAGER_HKEYS) is not None or (
+      self.__namespace_for_key(key, ("DEEPLOY_DEPLOYED_JOBS",)) is not None
+      and (value.get("revision") if isinstance(value, dict) else None) is None
+    )
+
   def __revoked_secret(self, key, snapshot=None):
     """Check whether a secret revision has a local or incoming revocation.
 
@@ -713,8 +757,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The export freezes ``self.__chain_storage.items()`` into a list before
     filtering. That keeps snapshot generation stable even if another local
     write mutates the dictionary while the snapshot is being assembled.
+
+    A dAuth namespace is exported only by a dAuth registry member. The
+    namespace is the one whose index (``__hset_index``) ``hkey`` has, the
+    prefix the records are selected by.
+
+    Examples
+    --------
+    >>> list(self.__export_hset_snapshot("players"))  # composed keys of the fields that carry no token
+    ['hs:...:YWxwaGE=']
     """
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS") and not self.__registry_member(self.ee_addr, dauth_only=True):
+    # The dAuth rule applies to the namespace of the index hkey has, the prefix the records are selected by below.
+    if self.__secret_namespace(self.__hset_index(hkey)) and not self.__registry_member(self.ee_addr, dauth_only=True):
       return {}
     index = self.__hset_index(hkey)
     snapshot = {}
@@ -756,10 +810,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The merge is additive only. Remote fields that overlap the local replica
     overwrite stale values, while fields absent from the remote snapshot are
     preserved locally and are never pruned by this method.
+
+    A dAuth namespace is merged only by a dAuth registry member. The namespace
+    is the one whose index (``__hset_index``) ``hkey`` has, the prefix the
+    records are selected by.
+
+    Examples
+    --------
+    >>> self.__merge_hset_snapshot("players", {key: record})
+    1
     """
     if not isinstance(snapshot, dict):
       return 0
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS") and not self.__registry_member(self.ee_addr, dauth_only=True):
+    # The dAuth rule applies to the namespace of the index hkey has, the prefix the records are selected by below.
+    if self.__secret_namespace(self.__hset_index(hkey)) and not self.__registry_member(self.ee_addr, dauth_only=True):
       return 0
 
     index = self.__hset_index(hkey)
@@ -1077,6 +1141,19 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     way out). ``changed`` says what happened to this replica: a local write
     that changed it and then was not confirmed, or raised while waiting, is
     still counted as ``changed``.
+
+    A local write or delete of a Tunnels Manager namespace is sent only to
+    the oracle registry members (either registry) among its target peers;
+    the others are left out of its send, its retries and its confirmation
+    count. With no member among them it returns False, as a write with no
+    target peers.
+
+    Examples
+    --------
+    >>> self._set_value("key", "value", owner="node", timeout=5, max_retries=1)  # confirmed by enough peers
+    True
+    >>> self._set_value("key", "value", owner="peer1", local_sync_storage_op=True)  # a remote write, stored here
+    True
     """
     if not isinstance(key, str) or len(key) == 0:
       raise ValueError("Key must be a non-empty string.")
@@ -1107,6 +1184,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         peers=peers,
         include_default_peers=include_default_peers,
       )
+      # A local write of a Tunnels Manager namespace goes only to oracle registry members, the senders a write or a
+      # sync request of it is taken from: the default peers (the allowed list) and the configured or extra peers may
+      # name other nodes, which are left out of this write's targets.
+      if not local_sync_storage_op and self.__namespace_for_key(key, TUNNELS_MANAGER_HKEYS):
+        # The members, as the only explicit targets of the send, its retries and its confirmation count.
+        peers, include_default_peers = [peer for peer in target_peers if self.__registry_member(peer)], False
+        # The targets checked below: with no member among them, the write ends as one with no target peers.
+        target_peers = peers
       if not local_sync_storage_op and len(target_peers) == 0:
         self.P(
           f" === No target peers resolved for chain-store write on key {key}",
@@ -1333,6 +1418,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     A valid peer response with an empty snapshot is a successful cold-state
     sync. Timeout means that no valid peer response was accepted at all.
+
+    A dAuth namespace is synced only by a dAuth registry member from dAuth
+    registry members. The namespace is the one whose index (``__hset_index``)
+    ``hkey`` has, the prefix the merge selects records by.
+
+    Examples
+    --------
+    >>> self._hsync("players", peers=["0xai_peer"], include_default_peers=False)
+    {'hkey': 'players', 'source_peer': '0xai_peer', 'merged_fields': 2}
     """
     debug = debug or self.cfg_chain_store_debug
     if not isinstance(hkey, str) or len(hkey) == 0:
@@ -1354,7 +1448,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if len(allowed_peers) == 0:
       raise ValueError(f"No target peers resolved for hsync '{hkey}'.")
 
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+    # The dAuth rule applies to the namespace of the index hkey has, the prefix the merge selects records by.
+    if self.__secret_namespace(self.__hset_index(hkey)):
       if not self.__registry_member(self.ee_addr, dauth_only=True):
         raise ValueError("Protected namespace requires a dAuth registry participant")
       if any(not self.__registry_member(peer, dauth_only=True) for peer in allowed_peers):
@@ -1494,6 +1589,24 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     A store from a sender that is not in this node's replication peers is counted as
     ``<bucket>/remote_non_peer`` for the ``CSTORE_STATS`` line, before any check of the write.
+
+    A write or delete of a Tunnels Manager namespace, or of a deployed-job pointer without a revision
+    (``__oracle_only_write``), is applied only when the sender is an oracle registry member (either registry,
+    as ``__registry_member`` reads them). A refused one gets no confirmation and is counted as
+    ``<bucket>/remote/refused``, the label ``_set_value`` gives the remote writes it refuses; ``_set_value``
+    is not called for it, so it is counted once. When the registries cannot be read, ``__registry_member``
+    answers False and the store is refused, as for the dAuth namespaces.
+
+    A refused delete is not reported back to its sender: a delete is not confirmed, so the node that sent it
+    treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
+    ``_set_value`` reads 0 confirmations of 0 required for a key it no longer holds and returns True, and
+    ``__exec_received_confirm`` counts nothing for a deleted key.
+
+    Examples
+    --------
+    >>> key = self.__hset_index("tunnels_manager_secrets") + "MHhhYmM="
+    >>> self.__exec_store({"key": key, "value": {"token": "t"}, "owner": "x"}, peers="0xai_oracle")  # stored
+    >>> self.__exec_store({"key": key, "value": None, "owner": "x"}, peers="0xai_other")  # refused, not confirmed
     """
     key = data.get(self.CS_KEY, None)
     value = data.get(self.CS_VALUE , None)
@@ -1513,6 +1626,17 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
     if self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,)) and not self.__registry_member(peers, dauth_only=True):
+      return
+    # Tunnel namespaces and unversioned deployed-job pointers are written only by plugins that run on oracles: such
+    # a write or delete is applied only when its sender is an oracle registry member. A refused one gets no
+    # confirmation, like a write that _set_value refuses.
+    if self.__oracle_only_write(key, value) and not self.__registry_member(peers):
+      # Counted under the label _set_value gives a refused remote write; the bucket is the key's "hs:" prefix.
+      label = key[:14] + "/remote/refused"
+      # Under the persistence lock, as every count of the CSTORE_STATS line.
+      with self.__persistence_lock:
+        # A plain increment of one counter; one label per bucket.
+        self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
       return
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
@@ -1601,6 +1725,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     The response carries only the requested hash namespace snapshot. This
     keeps the wire payload small and avoids broad chain-store exports.
+
+    A request for a dAuth namespace is answered only between dAuth registry
+    members. A request for a Tunnels Manager namespace is answered only when
+    the sender is an oracle registry member (either registry); another
+    sender gets no answer. The namespace of a request is the one whose index
+    (``__hset_index``) its ``hkey`` has, the prefix the export selects
+    records by.
+
+    Examples
+    --------
+    >>> self.__exec_hsync_request({"request_id": "r1", "hkey": "players"}, peers="0xai_any")  # answered
+    >>> self.__exec_hsync_request({"request_id": "r2", "hkey": "tunnels_manager_secrets"}, peers="0xai_other")  # not
     """
     request_id = data.get(self.CS_REQUEST_ID, None)
     hkey = data.get(self.CS_HKEY, None)
@@ -1609,9 +1745,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if not isinstance(hkey, str) or len(hkey) == 0:
       return
 
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+    # The index hkey has: the export selects the records by it, so the namespace rules below are applied to it.
+    index = self.__hset_index(hkey)
+    if self.__secret_namespace(index):
       if not self.__registry_member(peers, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
+    # The Tunnels Manager namespaces are read only by plugins that run on oracles: their snapshot is sent only to an
+    # oracle registry member.
+    if self.__namespace_for_key(index, TUNNELS_MANAGER_HKEYS) and not self.__registry_member(peers):
+      return
     snapshot = self.__export_hset_snapshot(hkey)
     if self.cfg_chain_store_debug:
       self.P(
@@ -1653,6 +1795,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The first valid response wins. This keeps each ``_hsync`` call
     deterministic and avoids merging multiple peer views into a single refresh
     operation. Freshness arbitration remains a documented follow-up concern.
+
+    An answer for a Tunnels Manager namespace is taken only from an oracle
+    registry member (either registry); another sender's answer is dropped and
+    the sync keeps waiting. From the answer of a sender outside the registries
+    for ``DEEPLOY_DEPLOYED_JOBS``, only the records that are not unversioned
+    pointers (``__oracle_only_write``) are kept for the merge, and that answer
+    still ends the wait; a signed pointer in it keeps its own check there.
+    The namespace of an answer is the one whose index (``__hset_index``) its
+    ``hkey`` has, the prefix the merge selects records by.
+
+    Examples
+    --------
+    >>> self.__exec_hsync_response({"request_id": rid, "hkey": "players", "snapshot": {}}, sender="0xai_peer")
+    >>> self.__pending_hsync[rid]["response"]["sender"]
+    '0xai_peer'
     """
     request_id = data.get(self.CS_REQUEST_ID, None)
     pending = self.__pending_hsync.get(request_id, None)
@@ -1669,14 +1826,32 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if hkey != pending.get(self.CS_HKEY, None):
       return
 
-    if hkey in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS"):
+    # The index hkey has (a str: it equals the pending sync's): the merge selects the records by it, so the namespace
+    # rules below are applied to it.
+    index = self.__hset_index(hkey)
+    if self.__secret_namespace(index):
       if not self.__registry_member(sender, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
         return
-    if hkey == NODE_KEY_ROTATIONS_HKEY and not self.__registry_member(sender, dauth_only=True):
+    # The key rotations are written only by dAuth servers: an answer for the namespace of this index is taken only
+    # from a dAuth registry member.
+    if self.__namespace_for_key(index, (NODE_KEY_ROTATIONS_HKEY,)):
+      if not self.__registry_member(sender, dauth_only=True):
+        return
+    # The Tunnels Manager namespaces are written only by plugins that run on oracles: an answer for them is taken
+    # only from an oracle registry member, so another sender's answer does not end the wait of the sync.
+    if self.__namespace_for_key(index, TUNNELS_MANAGER_HKEYS) and not self.__registry_member(sender):
       return
     snapshot = data.get(self.CS_SNAPSHOT, {})
     if not isinstance(snapshot, dict):
       return
+    # Unversioned deployed-job pointers are written only by plugins that run on oracles: from the answer of a sender
+    # outside the registries the merge gets only the other records (a signed pointer keeps its own check there).
+    if self.__namespace_for_key(index, ("DEEPLOY_DEPLOYED_JOBS",)) and not self.__registry_member(sender):
+      # Drops the unversioned pointers, and the records that are not dicts, which the merge skips anyway.
+      snapshot = {
+        key: record for key, record in snapshot.items()
+        if isinstance(record, dict) and not self.__oracle_only_write(key, record.get(self.CS_VALUE))
+      }
 
     # Accept only one response from the precomputed peer set so an unrelated
     # or late peer cannot replace the snapshot chosen for this sync request.

@@ -80,7 +80,7 @@ class _IoTListener(_IOT_MODULE.BaseIoTQueueListenerDataCapture):
 
 class TestIoTListenerCredentialsLog(unittest.TestCase):
 
-  def _make_listener(self, user, password, os_environ=None, comm_environment=None):
+  def _make_listener(self, user, password, os_environ=None, comm_environment=None, params_hosts=None, own_host=None):
     """
     Build a listener without its thread, on a shared communication config whose broker is "broker.example".
 
@@ -94,6 +94,10 @@ class TestIoTListenerCredentialsLog(unittest.TestCase):
       The process environment the listener sees. Default None: empty.
     comm_environment : dict, optional
       The COMMUNICATION_ENVIRONMENT section of the node's startup config. Default None: no such section.
+    params_hosts : str or list, optional
+      An explicit broker candidate list (``HOSTS``) in the shared communication config. Default None: no such key.
+    own_host : str, optional
+      A broker of the listener's own, set in its settings in place of the shared one. Default None: the shared one.
 
     Returns
     -------
@@ -131,6 +135,9 @@ class TestIoTListenerCredentialsLog(unittest.TestCase):
       key: "#DEFAULT"
       for key in ["HOST", "PORT", "USER", "PASS", "QOS", "SECURED"]
     }
+    if own_host is not None:
+      # Except the broker, when the listener has one of its own.
+      listener.config["HOST"] = own_host
     # The shared objects: the communication config with its broker.
     listener.shmem = {
       "io_formatter_manager": None,
@@ -148,6 +155,9 @@ class TestIoTListenerCredentialsLog(unittest.TestCase):
         },
       },
     }
+    if params_hosts is not None:
+      # An explicit candidate list next to the shared broker.
+      listener.shmem["config_communication"]["PARAMS"]["HOSTS"] = params_hosts
     # No connection is made in these tests.
     listener._maybe_reconnect_to_controller_server = mock.Mock()
     # The listener, before _init().
@@ -210,30 +220,41 @@ class TestIoTListenerCredentialsLog(unittest.TestCase):
     allocated = {"EE_MQTT_HOST": "broker.example", "EE_MQTT_HOSTS": self.HOSTS}
     # The same list allocated to another primary.
     elsewhere = {"EE_MQTT_HOST": "other.example", "EE_MQTT_HOSTS": self.HOSTS}
-    # (process environment, COMMUNICATION_ENVIRONMENT, expected HOSTS)
+    # An explicit candidate list in the communication parameters: a part of the brokers, chosen by the operator.
+    pinned = '["broker.example", "pinned.example"]'
+    # (process environment, COMMUNICATION_ENVIRONMENT, HOSTS of the communication parameters, expected HOSTS)
     cases = [
       # The process environment alone decides.
-      (allocated, None, self.HOSTS),
+      (allocated, None, None, self.HOSTS),
       # Another primary: nothing.
-      (elsewhere, None, None),
+      (elsewhere, None, None, None),
       # The startup config's values come before the process environment's: its primary is another broker.
-      (allocated, {"EE_MQTT_HOST": "other.example"}, None),
+      (allocated, {"EE_MQTT_HOST": "other.example"}, None, None),
       # The startup config's primary is the listener's broker, the process environment's is not.
-      (elsewhere, {"EE_MQTT_HOST": "broker.example"}, self.HOSTS),
+      (elsewhere, {"EE_MQTT_HOST": "broker.example"}, None, self.HOSTS),
       # The startup config carries the list itself.
-      ({"EE_MQTT_HOST": "broker.example"}, {"EE_MQTT_HOSTS": '["broker.example", "third.example"]'},
+      ({"EE_MQTT_HOST": "broker.example"}, {"EE_MQTT_HOSTS": '["broker.example", "third.example"]'}, None,
        '["broker.example", "third.example"]'),
       # A HOSTS entry in the startup config switches the dAuth list off.
-      (allocated, {"HOSTS": '["x.example"]'}, None),
+      (allocated, {"HOSTS": '["x.example"]'}, None, None),
+      # A HOSTS variable in the process environment does not: only the startup config's entry is the switch.
+      ({**allocated, "HOSTS": '["x.example"]'}, None, None, self.HOSTS),
       # No list anywhere.
-      ({"EE_MQTT_HOST": "broker.example"}, None, None),
+      ({"EE_MQTT_HOST": "broker.example"}, None, None, None),
+      # An explicit list in the communication parameters is used in place of the dAuth list.
+      (allocated, None, pinned, pinned),
+      # Also with no dAuth values at all.
+      ({}, None, pinned, pinned),
+      # And with the startup config's switch set: the explicit list stays.
+      (allocated, {"HOSTS": '["x.example"]'}, pinned, pinned),
     ]
     # Every combination.
-    for os_environ, comm_environment, expected in cases:
+    for os_environ, comm_environment, params_hosts, expected in cases:
       # Each combination is reported on its own.
-      with self.subTest(os_environ=os_environ, comm_environment=comm_environment):
+      with self.subTest(os_environ=os_environ, comm_environment=comm_environment, params_hosts=params_hosts):
         # The listener's choice.
-        listener = self._make_listener("u", "p", os_environ=os_environ, comm_environment=comm_environment)
+        listener = self._make_listener(
+          "u", "p", os_environ=os_environ, comm_environment=comm_environment, params_hosts=params_hosts)
         # What its wrapper gets.
         chosen = self._wrapper_hosts(listener)
         # The comm manager, with the startup config's section as its environment variables.
@@ -242,12 +263,31 @@ class TestIoTListenerCredentialsLog(unittest.TestCase):
         manager._environment_variables = dict(comm_environment or {})
         # The helper the manager's settings parser uses.
         manager.log = SimpleNamespace(str_to_bool=Logger.str_to_bool)
+        # The communication parameters as the manager gets them: the broker, and the explicit list when set.
+        params = {"HOST": "broker.example", **({} if params_hosts is None else {"HOSTS": params_hosts})}
         # The same process environment for the manager.
         with mock.patch.dict(os.environ, os_environ, clear=True):
           # The manager's choice for a communicator on the same broker.
-          prepared = manager._prepare_comm_config_instance({"HOST": "broker.example"})
+          prepared = manager._prepare_comm_config_instance(params)
         # The expected value, and the same from both.
         self.assertEqual((chosen, prepared.get("HOSTS")), (expected, expected))
+
+  def test_a_listener_on_its_own_broker_gets_no_explicit_list_and_no_dauth_list(self):
+    """The explicit list of the communication parameters belongs to their broker: a listener on another one gets none."""
+    # The explicit list of the shared communication config.
+    pinned = '["broker.example", "pinned.example"]'
+    # The listener has its own broker, which is not the one dAuth allocated.
+    listener = self._make_listener(
+      "u", "p", os_environ={"EE_MQTT_HOST": "broker.example", "EE_MQTT_HOSTS": self.HOSTS},
+      params_hosts=pinned, own_host="own.example")
+    # Neither list: its wrapper keeps the single broker.
+    self.assertIsNone(self._wrapper_hosts(listener))
+    # Its own broker is the one dAuth allocated, and the communication parameters still carry an explicit list.
+    listener = self._make_listener(
+      "u", "p", os_environ={"EE_MQTT_HOST": "own.example", "EE_MQTT_HOSTS": self.HOSTS},
+      params_hosts=pinned, own_host="own.example")
+    # The explicit list switches the dAuth list off for the listener as it does for the communicators.
+    self.assertIsNone(self._wrapper_hosts(listener))
 
   def test_init_redacts_broker_credentials_in_log(self):
     listener = self._make_listener(user="broker-user", password="broker-secret")

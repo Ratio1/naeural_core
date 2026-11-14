@@ -196,8 +196,13 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     environment second, and a ``HOSTS`` entry in ``COMMUNICATION_ENVIRONMENT`` switches the list off. Before,
     the listener had only its primary and retried it until it came back, while the node's communicators had
     already moved to another broker; the node received no payloads in that time. A listener on any other
-    broker (a stream with its own ``HOST``) gets no list. An explicit ``HOSTS`` list in the communication
-    parameters or in a stream's settings is not read by the listener.
+    broker (a stream with its own ``HOST``) gets no list.
+
+    An explicit ``HOSTS`` list in the communication parameters comes first, as it does for the communicators:
+    they use it in place of dAuth's list, so the listener takes it too when its broker is the parameters'
+    ``HOST``, and no listener gets dAuth's list then. With dAuth's list in that case, the listener could move to
+    a broker outside the explicit list while the communicators stayed inside it. A ``HOSTS`` entry in a
+    stream's own settings is not read.
 
     Examples
     --------
@@ -228,7 +233,12 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     comm_env = self.log.config_data.get('COMMUNICATION_ENVIRONMENT') or {}
     # One lookup table in that order: the process environment, overridden by the startup config's values.
     runtime = {**self.os_environ, **comm_env}
-    if (
+    if "HOSTS" in params:
+      if self._comm_config[ct.COMMS.HOST] == params.get(ct.COMMS.HOST):
+        # The explicit candidate list of the communication parameters, which the communicators use in place
+        # of dAuth's: it belongs to the parameters' HOST, so a listener on a broker of its own does not get it.
+        self._comm_config["HOSTS"] = params["HOSTS"]
+    elif (
       "HOSTS" not in comm_env
       and self._comm_config[ct.COMMS.HOST]
       and self._comm_config[ct.COMMS.HOST] == runtime.get("EE_MQTT_HOST")

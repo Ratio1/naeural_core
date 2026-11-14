@@ -82,7 +82,7 @@ class TestCommandPreparationImmutability(unittest.TestCase):
 
   def test_prepare_command_does_not_mutate_original_envelope(self):
     """Preparing a command leaves the caller's command as it was; the prepared copy holds the body encrypted."""
-    # The payload encryption setting is off, as on every node: a command is encrypted all the same.
+    # The payload encryption setting is off, its default: a command is encrypted all the same.
     harness = _CommandHarness()
     # The caller's command.
     original = _command()

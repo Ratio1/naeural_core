@@ -1748,7 +1748,7 @@ class BaseCommThread(
 
     Notes
     -----
-    Before, a command was encrypted only when ``ENCRYPTED_COMMS`` was set, which no node has: commands
+    Before, a command was encrypted only when ``ENCRYPTED_COMMS`` was set, and it is off by default: commands
     (pipeline configurations with their environment values among them) left readable for every client of
     the brokers, on a topic any of them may subscribe to. There is no unencrypted form any more and no
     setting for one. Receivers need no change: they have always decrypted a command that says it is
@@ -1774,7 +1774,7 @@ class BaseCommThread(
     # The action and the payload as one JSON text: the part of a command that is encrypted.
     str_data = self.log.safe_json_dumps(critical_data, ensure_ascii=False)
     # Always encrypted for the receiver, whatever ENCRYPTED_COMMS says; before, only with that setting, which
-    # is off on every node. A failure raises (no address, an address without a key): there is no unencrypted
+    # is off by default. A failure raises (no address, an address without a key): there is no unencrypted
     # form to fall back to.
     str_enc_data = self.bc_engine.encrypt(
       plaintext=str_data,

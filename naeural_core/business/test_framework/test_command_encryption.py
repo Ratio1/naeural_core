@@ -78,7 +78,7 @@ class _Sender:
     self.bc_engine = engine
     # The logger whose JSON helpers the preparation uses.
     self.log = log
-    # The value every node has in its startup configuration: payload encryption off.
+    # The default value of the setting: payload encryption off.
     self.cfg_encrypted_comms = False
     # No filter of the debug print.
     self.cfg_debug_log_payloads_pipelines, self.cfg_debug_log_payloads_signatures = [], []
@@ -254,7 +254,7 @@ class TestNodeCommandsLeaveEncrypted(unittest.TestCase):
     return manager
 
   def test_a_command_is_encrypted_whatever_the_payload_encryption_setting_is(self):
-    """With ENCRYPTED_COMMS off (every node's setting) a prepared command has no readable ACTION or PAYLOAD."""
+    """With ENCRYPTED_COMMS off (the default) a prepared command has no readable ACTION or PAYLOAD."""
     # A communicator of the sending node; its payload encryption setting is off.
     sender = _Sender(self.sender, self.log)
     # The command, and a copy to compare with afterwards.

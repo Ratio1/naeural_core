@@ -8,8 +8,8 @@ import unittest
 
 # The counter attribute's private name.
 from test_chain_store_accounting import STATS
-# The payload field names of the test network and the composer of a hash key.
-from test_chain_store_hsync import _PayloadData, _hset_key
+# The payload field names of the test network and the composers of a namespace's key prefix and of a hash key.
+from test_chain_store_hsync import _PayloadData, _hset_index, _hset_key
 # The order tests' store builder, record builder and constants.
 from test_chain_store_order import KEY, NOW_MS, make, record
 
@@ -106,6 +106,35 @@ class TestInputsNoNodeSends(unittest.TestCase):
         self.assertEqual(len(handle(store, {"op": "SSTORE", "key": KEY, "value": "v", "owner": "peer1"})), 1)
         # Held now.
         self.assertEqual(store.storage[KEY]["value"], "v")
+
+  def test_a_store_to_a_secret_revision_key_whose_field_does_not_decode_is_dropped_and_counted(self):
+    """A store from a registry member to a dAuth member under DAUTH_JOB_SECRET_REVISIONS whose key's field part is
+    base64 without its padding, is not UTF-8 once decoded, or holds a lone surrogate leaves the handler without an
+    exception, stores nothing, is neither confirmed nor answered and counts <bucket>/remote/refused_invalid_key;
+    a key of the namespace whose field decodes is still stored and confirmed."""
+    # The prefix of the namespace's keys, which is also the counters' bucket.
+    prefix = _hset_index("DAUTH_JOB_SECRET_REVISIONS")
+    # Field parts the node's decoder raises for: no padding, bytes that are not UTF-8, a lone surrogate.
+    bad = ("YWxwaGE", "_w==", "a\ud800")
+    # Each mode: the check has no switch.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A dAuth member's store ("node"); the sender "peer1" is a dAuth member and one of its replication peers.
+        store = make(mode, signed=True)
+        # The stamp the stores carry: a refused stamped store is answered in 'on', so none may be answered here.
+        stamp = {} if mode == "off" else {"ver": [NOW_MS, "peer1"]}
+        # Each such key, as a write and as a delete: nothing comes back and nothing is raised.
+        sent = [handle(store, {"op": "SSTORE", "key": prefix + field, "value": value, "owner": "peer1", **stamp})
+                for field in bad for value in ({"secret": "s"}, None)]
+        # No confirmation and no answer for any of them.
+        self.assertEqual(sent, [[]] * (2 * len(bad)))
+        # Nothing stored, and one count per store under the namespace's bucket.
+        self.assertEqual((store.storage, getattr(store, STATS)),
+                         ({}, {prefix + "/remote/refused_invalid_key": 2 * len(bad)}))
+        # A key of the namespace whose field decodes: applied and confirmed as before.
+        self.assertEqual(len(handle(store, {"op": "SSTORE", "key": _hset_key("DAUTH_JOB_SECRET_REVISIONS", "7|1"),
+                                            "value": {"secret": "s"}, "owner": "peer1", **stamp})), 1)
 
   def test_a_confirmation_whose_key_is_not_a_str_is_dropped_and_counted(self):
     """A full confirmation, a lean one and a refusal answer whose key is a number, a bool, a list, a dict or

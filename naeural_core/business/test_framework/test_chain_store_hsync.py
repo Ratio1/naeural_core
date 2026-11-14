@@ -365,10 +365,45 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     return encoded.decode("utf-8")
 
   @staticmethod
-  def base64_to_str(value, url_safe=True):  # pylint: disable=unused-argument
-    padding = "=" * ((4 - len(value) % 4) % 4)
-    raw = f"{value}{padding}".encode("utf-8")
+  def base64_to_str(value, url_safe=True):
+    """
+    Decode base64 text to a str exactly as the node's helper does (``plugin_base_utils.base64_to_str``).
+
+    No padding is added and nothing is caught, so a text the node's helper raises for raises here too: one
+    without its padding, one that is not UTF-8 once decoded, one that holds a lone surrogate. Before, this
+    stand-in added the missing padding, and a key no node decodes passed in the tests.
+
+    Parameters
+    ----------
+    value : str
+      The base64 text, for example the field part of a composed hash key.
+    url_safe : bool, optional
+      True (the default) for the URL-safe alphabet the hash keys use; False for the standard one.
+
+    Returns
+    -------
+    str
+      The decoded text.
+
+    Raises
+    ------
+    ValueError
+      ``binascii.Error`` for wrong padding, ``UnicodeDecodeError`` for bytes that are not UTF-8,
+      ``UnicodeEncodeError`` for a text UTF-8 cannot encode (all are ValueError).
+
+    Examples
+    --------
+    >>> _ChainStoreRuntimeHarness.base64_to_str("YWxwaGE=")
+    'alpha'
+    >>> _ChainStoreRuntimeHarness.base64_to_str("YWxwaGE")
+    Traceback (most recent call last):
+    binascii.Error: Incorrect padding
+    """
+    # The text as bytes, as the node's helper encodes it.
+    raw = value.encode("utf-8")
+    # Decoded with the alphabet asked for.
     decoded = base64.urlsafe_b64decode(raw) if url_safe else base64.b64decode(raw)
+    # And read as UTF-8.
     return decoded.decode("utf-8")
 
   @staticmethod

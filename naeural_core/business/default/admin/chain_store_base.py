@@ -3716,7 +3716,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     as ``<bucket>/remote/refused_invalid_key`` under the bucket of the key after the prefix; ``_set_value``
     would raise for it, and a raise here would stall the plugin loop. So is a store or a delete whose key is
     not a non-empty str (a number, a list, a dict, a missing or empty key), which no node of this release
-    sends: counted as ``plain/remote/refused_invalid_key``.
+    sends: counted as ``plain/remote/refused_invalid_key``. And so is a store or a delete, from a registry
+    member to a dAuth registry member, of a ``DAUTH_JOB_SECRET_REVISIONS`` key whose field part does not decode
+    (base64 without its padding, bytes that are not UTF-8, a lone surrogate): the revocation rules decode that
+    part, and the decoder's error left the handler; counted under the namespace's bucket.
 
     A refused delete is not reported back to its sender: the sender does not wait for the confirmations of a
     delete, so it treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
@@ -3750,10 +3753,23 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # the tombstones' prefix, or under "plain" for a key that is not a str.
       self.__cs_count("refused_invalid_key", key.removeprefix(self.CS_DEL) if isinstance(key, str) else "", "remote")
       return
-    if self.__secret_namespace(key):
+    # The dAuth secret namespace of the key, if it is in one.
+    secret = self.__secret_namespace(key)
+    if secret:
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
         # Counted as a refused remote write of the bucket; before, these drops were not counted at all.
         self.__cs_count("refused_not_member", key, "remote")
+        return
+    if secret == "DAUTH_JOB_SECRET_REVISIONS":
+      try:
+        # The field part of the key (after the 14 characters of the namespace's prefix), decoded as _set_value and
+        # the revocation rules decode it. Its sender chooses it: one that is base64 without its padding, is not
+        # UTF-8 once decoded, or holds a lone surrogate raised there, and that error left the payload handler.
+        self.base64_to_str(key[14:], url_safe=True)
+      except ValueError:
+        # No node of this release writes such a key (the writer composes the field part with str_to_base64): the
+        # store is dropped unconfirmed and counted under the namespace's bucket, like a key that is not a str.
+        self.__cs_count("refused_invalid_key", key, "remote")
         return
     if self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,)) and not self.__registry_member(peers, dauth_only=True):
       # The same for a key rotation from a sender outside the dAuth registry.

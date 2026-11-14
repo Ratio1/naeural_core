@@ -745,8 +745,8 @@ class _BasePluginAPIMixin:
       Opt-in dict whose ``"outcome"`` is set to the word of how the write ended, as in
       ``chainstore_set``. Default is None, which changes nothing.
     wait : bool, optional
-      True (the default) waits for the confirmations; False returns at once once the write is stored here and
-      queued, as in ``chainstore_set``.
+      True (the default) waits for the confirmations; False returns without waiting for any confirmation once
+      the write is stored here and queued (it still takes the store's persistence lock), as in ``chainstore_set``.
 
     Returns
     -------

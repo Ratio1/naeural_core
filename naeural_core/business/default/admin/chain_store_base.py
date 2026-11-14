@@ -3061,8 +3061,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     - none left: dropped, counted ``<bucket>/local/unconfirmed``.
 
     With the defaults (timeout 10 s, 2 retries) the store goes at 0, 10 and 20 s and the entry ends unconfirmed at
-    30 s, as a blocking write; after that the hand-off (``__maybe_handoff``) re-sends to targets that never settled,
-    as for any own record.
+    30 s, as a blocking write; after that, with ``CSTORE_HANDOFF`` 'on', the hand-off (``__maybe_handoff``) re-sends
+    to targets that never settled, as for any own record (in 'report' it only counts what it would send).
 
     Returns
     -------

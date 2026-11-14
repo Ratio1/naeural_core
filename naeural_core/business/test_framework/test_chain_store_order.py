@@ -1082,12 +1082,15 @@ class TestRefusalAnswers(unittest.TestCase):
     """'on' answers a refused stamped store with one message to its sender: the key, the echoed stamp, the word and
     the held stamp, no value. 'report' answers nothing; an unstamped store, a future stamp and a store dropped for
     its sender's membership are never answered (the future one is counted)."""
+    # In 'report' an older store is applied and confirmed in the full form, with the store's stamp (the lean switch
+    # in 'report').
+    full = {"op": "SCONFIRM", "key": KEY, "value": "a", "owner": "peer2", "confirm_by_addr": "node",
+            "confirm_by": ["node", "stream", "CHAIN_STORE", "instance"], "ver": [NOW_MS + 1000, "peer2"]}
+    # In 'on' it is refused with an answer.
+    answer = {"op": "SCONFIRM", "key": KEY, "ver": [NOW_MS + 1000, "peer2"], "refused": "older",
+              "held_ver": [NOW_MS + 2000, "peer1"]}
     # Each mode and what an older store gets back.
-    for mode, sent in (("report", [{"op": "SCONFIRM", "key": KEY, "value": "a", "owner": "peer2",
-                                    "confirm_by": ["node", "stream", "CHAIN_STORE", "instance"],
-                                    "confirm_by_addr": "node"}]),
-                       ("on", [{"op": "SCONFIRM", "key": KEY, "ver": [NOW_MS + 1000, "peer2"], "refused": "older",
-                                "held_ver": [NOW_MS + 2000, "peer1"]}])):
+    for mode, sent in (("report", [full]), ("on", [answer])):
       # One sub-test each.
       with self.subTest(mode=mode):
         # A replica holding "b" stamped by peer1 at +2 s, and a plain record with a token.
@@ -1096,10 +1099,12 @@ class TestRefusalAnswers(unittest.TestCase):
         # An older store from peer2: its answer, sent to peer2 alone.
         self.assertEqual((deliver(store, KEY, "a", "peer2", [NOW_MS + 1000, "peer2"]),
                           store.sent_payloads[-1]["node_addr"]), (sent, ["peer2"]))
-        # An unstamped store refused by its token, and a store stamped 61 s ahead: nothing sent back.
-        self.assertEqual([deliver(store, "tok", "w", "peer2"),
-                          deliver(store, KEY, "c", "peer2", [NOW_MS + 61_000, "peer2"])],
-                         [[], [] if mode == "on" else [sent[0] | {"value": "c"}]])
+        # What 'report' sends for the store stamped 61 s ahead, which it applies.
+        future = [full | {"value": "c", "ver": [NOW_MS + 61_000, "peer2"]}] if mode == "report" else []
+        # What an unstamped store refused by its token and the future one get back.
+        replies = [deliver(store, "tok", "w", "peer2"), deliver(store, KEY, "c", "peer2", [NOW_MS + 61_000, "peer2"])]
+        # Nothing for the first; nothing for the future one in 'on'.
+        self.assertEqual(replies, [[], future])
     # A dAuth secret from a sender outside the registries: dropped before any rule, never answered.
     store = make("on", signed=True)
     # The store and what came back.
@@ -1109,16 +1114,16 @@ class TestRefusalAnswers(unittest.TestCase):
   def test_the_writer_settles_a_matching_answer_once_and_takes_the_held_stamp(self):
     """A refusal answer settles its sender on the writer's own record whose stamp it echoes, once, without counting
     a confirmation, and moves the writer's clock up to the held stamp (not to one more than 60 s ahead); an answer
-    from a non-target, a settled sender, for another stamp, for a remote record or for a key not held changes
-    nothing."""
+    from a non-target, a settled sender, for another stamp or none, for a remote record or for a key not held
+    changes nothing."""
     # A writer in 'report' (the writer side acts in every mode) with peers peer1 and peer2, and a remote record.
     store = make("report", storage={"remote": record("remote", "v", "peer1", [NOW_MS, "peer1"])})
     # Its own write of KEY, unconfirmed.
     local_write(store, KEY, "v")
     # Its stamp.
     ver = store.storage[KEY]["ver"]
-    # Answers that change nothing: a non-target, another stamp, a remote record, a key not held.
-    for sender, key, echoed in (("peer3", KEY, ver), ("peer1", KEY, [NOW_MS - 1, "node"]),
+    # Answers that change nothing: a non-target, another stamp, no stamp, a remote record, a key not held.
+    for sender, key, echoed in (("peer3", KEY, ver), ("peer1", KEY, [NOW_MS - 1, "node"]), ("peer1", KEY, None),
                                 ("peer1", "remote", [NOW_MS, "peer1"]), ("peer1", "absent", ver)):
       # Delivered.
       refusal(store, key, sender, echoed)
@@ -1183,6 +1188,158 @@ class TestRefusalAnswers(unittest.TestCase):
         self.assertFalse(writer._set_value(KEY, "a", owner="node", timeout=10, max_retries=0, result_info=info))
         # How it ended and how long it waited (fake clock): at once when both refused, the whole timeout otherwise.
         self.assertEqual((info["outcome"], writer._now - NOW < 1), (end, not silent))
+
+
+def confirm(store, key, sender, **fields):
+  """
+  Deliver one confirmation from ``sender`` to the writer ``store``, with the given fields.
+
+  Parameters
+  ----------
+  store : _ChainStoreRuntimeHarness
+    The writer.
+  key : str
+    The confirmed key.
+  sender : str
+    The confirming receiver.
+  **fields
+    The other fields of the body: ``value``, ``owner`` and ``ver`` as the form being tested carries them.
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> confirm(store, KEY, "peer1", ver=[NOW_MS, "node"])                 # lean form
+  >>> confirm(store, KEY, "peer1", value="v", owner="node")             # the previous release's full form
+  """
+  # Through the payload handler, as the network delivers it.
+  store.default_handler({_PayloadData.EE_SENDER: sender, _PayloadData.EE_ID: sender,
+                         _PayloadData.EE_DESTINATION: [store.ee_addr], _PayloadData.EE_IS_ENCRYPTED: True,
+                         "decoded": {store.CS_DATA: {store.CS_OP: store.CS_CONFIRM, store.CS_KEY: key, **fields}}})
+
+
+class TestLeanConfirmations(unittest.TestCase):
+  """With CSTORE_LEAN_CONFIRM 'on' a stamped store is confirmed by key and stamp; the writer counts either form."""
+
+  def test_the_form_of_a_confirmation_follows_the_lean_switch_and_the_stamp(self):
+    """A stamped store is confirmed with {op, key, ver} in 'on', with the full form plus the stamp in 'report' and
+    with the previous release's full form in 'off'; an unstamped store gets the full form in every mode."""
+    # The full form of the previous release for value "v" from peer1.
+    full = {"op": "SCONFIRM", "key": KEY, "value": "v", "owner": "peer1",
+            "confirm_by": ["node", "stream", "CHAIN_STORE", "instance"], "confirm_by_addr": "node"}
+    # Each mode and the forms a stamped and an unstamped store get back.
+    for mode, stamped in (("off", full), ("report", {**full, "ver": [NOW_MS, "peer1"]}),
+                          ("on", {"op": "SCONFIRM", "key": KEY, "ver": [NOW_MS, "peer1"]})):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A replica in this mode.
+        store = make(mode)
+        # A stamped store, then an unstamped one of another key.
+        self.assertEqual((deliver(store, KEY, "v", "peer1", [NOW_MS, "peer1"]),
+                          deliver(store, KEY[:-1] + "x", "v", "peer1")), ([stamped], [{**full, "key": KEY[:-1] + "x"}]))
+
+  def test_the_writer_counts_a_lean_confirmation_by_the_stamp_it_sent(self):
+    """A lean confirmation counts when it echoes the stamp of the writer's last own store (sent_ver), once per
+    target, also after a peer's identical write raised the record's stamp; another stamp, a non-target or a
+    duplicate does not count; a full confirmation of the previous release counts by value as before."""
+    # The writer in 'report': the writer side acts in every mode, and its stamps need 'report' or 'on'.
+    store = make("report")
+    # Its own write of KEY.
+    local_write(store, KEY, "v")
+    # The stamp it sent.
+    sent = store.storage[KEY]["sent_ver"]
+    # A peer's identical write with a newer stamp raises the record's stamp, not sent_ver.
+    deliver(store, KEY, "v", "peer2", [NOW_MS + 5000, "peer2"])
+    # Lean confirmations that do not count: another stamp (the raised one), and a non-target.
+    confirm(store, KEY, "peer1", ver=store.storage[KEY]["ver"])
+    # The non-target.
+    confirm(store, KEY, "peer3", ver=sent)
+    # Nothing counted.
+    self.assertEqual(store.storage[KEY]["confirms"], 0)
+    # peer1's lean confirmation of the stamp sent, twice.
+    for _ in range(2):
+      # Delivered.
+      confirm(store, KEY, "peer1", ver=sent)
+    # peer2 confirms in the previous release's full form.
+    confirm(store, KEY, "peer2", value="v", owner="node")
+    # Both counted once.
+    self.assertEqual((store.storage[KEY]["confirms"], store.storage[KEY]["confirmed_peers"]), (2, ["peer1", "peer2"]))
+
+  def test_report_counts_where_the_two_rules_disagree(self):
+    """In 'report' a full confirmation with a stamp counts by value; one that echoes an earlier own stamp of the same
+    value (after an identical rewrite) counts disagree_own, one whose value differs but whose stamp is the one sent
+    counts disagree_other and is not counted as a confirmation."""
+    # The writer in 'report'.
+    store = make("report")
+    # Its write of KEY, and the stamp it sent.
+    local_write(store, KEY, "v")
+    # The first stamp.
+    first = store.storage[KEY]["sent_ver"]
+    # The same value written again a second later: a fresh stamp.
+    store._now += 1
+    # The identical rewrite.
+    local_write(store, KEY, "v")
+    # A late full confirmation of the first write: counted by value, and counted as disagree_own.
+    confirm(store, KEY, "peer1", value="v", owner="node", ver=first)
+    # A full confirmation of the second stamp with another value: not counted, disagree_other.
+    confirm(store, KEY, "peer2", value="w", owner="node", ver=store.storage[KEY]["sent_ver"])
+    # One confirmation, and one count of each disagreement.
+    self.assertEqual((store.storage[KEY]["confirms"],
+                      {label: n for label, n in getattr(store, STATS).items() if "disagree" in label}),
+                     (1, {BUCKET + "/confirm/disagree_own": 1, BUCKET + "/confirm/disagree_other": 1}))
+
+  def test_a_lean_confirmation_of_a_delete_counts_on_its_tombstone(self):
+    """A lean confirmation of a local delete counts on the tombstone the delete left."""
+    # The writer in 'on', holding KEY.
+    store = make("on", storage={KEY: record(KEY, "v", "peer1")})
+    # Its local delete.
+    local_write(store, KEY, None)
+    # peer1's lean confirmation of the delete's stamp.
+    confirm(store, KEY, "peer1", ver=store.storage[TOMB]["sent_ver"])
+    # Counted on the tombstone.
+    self.assertEqual(store.storage[TOMB]["confirms"], 1)
+
+  def test_a_lean_and_a_full_confirmation_both_end_the_wait(self):
+    """A write that needs two confirmations ends True when one receiver confirms in the lean form ('on') and the other
+    in the previous release's full form ('off')."""
+    # A network that delivers at once.
+    network = _FakeNetwork()
+    # The writer in 'on', needing both peers.
+    writer = make("on")
+    # Two confirmations required.
+    writer.cfg_min_confirmations = 2
+    # peer1 confirms lean, peer2 as the previous release.
+    for store in (writer, make("on", "peer1", peers=("node",)), make("off", "peer2", peers=("node",))):
+      # Reachable.
+      network.register(store)
+    # The writer's sleep.
+    sleep = writer.sleep
+
+    def sleep_and_send(seconds):
+      """
+      Stand for the wait loop's sleep: the plugin loop sends the queued store meanwhile.
+
+      Parameters
+      ----------
+      seconds : float
+        The sleep asked for.
+
+      Returns
+      -------
+      None
+      """
+      # The store goes out, the confirmations come back at once.
+      writer._ChainStoreBasePlugin__maybe_broadcast()
+      # Then the sleep itself.
+      sleep(seconds)
+    # Used by the wait loop.
+    writer.sleep = sleep_and_send
+    # Confirmed by both.
+    self.assertTrue(writer._set_value(KEY, "v", owner="node", timeout=10, max_retries=0))
+    # Both counted.
+    self.assertEqual(sorted(writer.storage[KEY]["confirmed_peers"]), ["peer1", "peer2"])
 
 
 class _QueuedNetwork(_FakeNetwork):

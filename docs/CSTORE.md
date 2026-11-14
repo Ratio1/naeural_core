@@ -373,6 +373,24 @@ settled, one at least by a refusal, and too few confirmed it; `result_info["outc
 is then `refused_by_peers`. A writer of the previous release sends no stamp, so it is
 never answered.
 
+### Lean confirmations (`CSTORE_LEAN_CONFIRM`)
+
+Switch `CSTORE_LEAN_CONFIRM` (`off`, `report` or `on`, read once at start; `report` by
+default). A receiver confirms a stamped store it applied (changed, identical or a delete
+of a key not held) with `{op, key, ver}` in `on`, instead of echoing the value, and with
+the previous release's full form plus `ver` in `report`. An unstamped store, and every
+store with the switch `off`, get the previous release's full form.
+
+The writer counts both forms in every mode: a message that carries a value (the full
+form) by the echoed owner and value, as before; a lean one by its stamp, which must be
+the record's `sent_ver`, the stamp of the writer's last own store (own records and
+tombstones keep it, so a confirmation still counts after a peer's identical write raised
+the record's stamp). A full form with a stamp that the two rules judge apart counts
+`disagree_own` (an echo of an earlier own stamp of the same value: the value was
+rewritten since) or `disagree_other` (any other case, where the lean rule would decide
+differently). A writer of the previous release sends no stamp, so it never gets a lean
+confirmation.
+
 ### Write-permission count
 
 With `CSTORE_ORDER` not `off`, every write the order rule admits (and every hsync copy
@@ -432,6 +450,7 @@ Labels in `counts`:
 - `<bucket>/local/unconfirmed`, `<bucket>/local/overwritten` and `<bucket>/local/refused_by_peers`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, another write replaced the key during the wait, or every target settled with at least one refusal answer and too few confirmations.
 - `<bucket>/<origin>/ver_<word>` (`CSTORE_ORDER` `report` or `on`): a write or copy the order rule gives a word (`future`, `origin`, `older`, `older_than_delete`, `unstamped`, `collision`), counted whether or not it is refused; `<origin>` is `local`, `remote` or `hsync` (a record of a sync answer). `ver_invalid`: a stamp that is not `[int, str]`, treated as none. `<bucket>/hsync/ver_copy_delete`: a tombstone copy that removes (`on`) or would remove (`report`) a value held.
 - `<bucket>/<origin>/tombstone_new`: a delete that left a new tombstone; `<origin>` also `hsync` in `on`.
+- `<bucket>/confirm/disagree_own`, `<bucket>/confirm/disagree_other` (`CSTORE_LEAN_CONFIRM` `report` on the receivers): a full confirmation with a stamp that the value rule and the stamp rule judge apart (above).
 - `<bucket>/<origin>/perm_readonly`, `<bucket>/<origin>/delete_foreign` (`CSTORE_ORDER` `report` or `on`): the write-permission count (above); counts only.
 - `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.

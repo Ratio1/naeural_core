@@ -135,6 +135,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_DEL = "dl:"
   # A refusal answer: the confirmation message with the refusal word and the receiver's stamp for the key.
   CS_REFUSED, CS_HELD_VER = "refused", "held_ver"
+  # On this node's own records: the stamp of its last own store, which confirmations and refusal answers echo.
+  CS_SENT_VER = "sent_ver"
   # The namespaces with write rules of their own (the signed ones and the dAuth secret revisions): the write-permission
   # count leaves them out.
   CS_PROTECTED_NAMESPACES = (
@@ -1784,7 +1786,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     leaves a tombstone: a record under ``"dl:" + key`` with value None, the
     delete's owner, readonly and token, and its stamp; a local one gets the
     confirmation fields of a local write, a remote one the -1 of a remote
-    write. A tombstone already held with an equal or newer stamp is kept as
+    write; a local record or tombstone also keeps the stamp as ``sent_ver``,
+    the one its confirmations and refusal answers echo. A tombstone already
+    held with an equal or newer stamp is kept as
     it is; an older one is replaced (a stamp-only change: ``_set_value``
     does not mark it for a save). A new tombstone is counted as
     ``<bucket>/<origin>/tombstone_new``. Storing a value removes the key's
@@ -1836,6 +1840,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.CS_TOKEN     : token,
       # The write's stamp, when it has one; a record of the previous release's form otherwise.
       **({self.CS_VER: ver} if ver is not None else {}),
+      # A local write's stamp again, as the one its store carried: a peer's identical write can raise the record's
+      # stamp later, and the confirmations and refusal answers of this store still echo this one.
+      **({self.CS_SENT_VER: ver} if ver is not None and not local_sync_storage_op else {}),
     }
     self.__reset_confirmations(
       # The record's own key: the tombstone's for a delete, so a confirmation of a local delete has a record to land on.
@@ -2556,6 +2563,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The store's version stamp and its verified sender go to ``_set_value``, whose order rule reads them
     (switch ``CSTORE_ORDER``; with it 'off' the stamp is dropped there).
 
+    Confirmation form (switch ``CSTORE_LEAN_CONFIRM``, read once at start): a stamped store (order switch not
+    'off') is confirmed with ``{op, key, ver}`` when the switch is 'on', and with the previous release's full
+    form plus ``ver`` when it is 'report'; an unstamped store, and every store with the switch 'off', get the
+    previous release's full form.
+
     Refusal answer (order switch ``CSTORE_ORDER`` 'on' only): a stamped store that ``_set_value`` refuses is
     answered to its sender with one confirmation message ``{op, key, ver, refused, held_ver}``: the store's
     stamp echoed, the refusal word without its ``refused_`` prefix, and this node's stamp for the key (None
@@ -2636,6 +2648,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # now send confirmation of the storage execution
       if self.cfg_chain_store_debug:
         self.P(f" === REMOTE: {self.CS_CONFIRM} for {key} of {owner} back to sender {peers}")
+      # The lean switch, read once at start.
+      lean = self.__cs_modes["lean_confirm"]
       data = {
         self.CS_DATA : {
           self.CS_OP : self.CS_CONFIRM,
@@ -2644,8 +2658,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           self.CS_OWNER : owner,
           self.CS_CONFIRM_BY : self.get_instance_path(),
           self.CS_CONFIRM_BY_ADDR : self.ee_addr,
+          # The previous release's full form; with the lean switch 'report' it also carries the store's stamp, so the
+          # writer counts how the lean rule would have judged it.
+          **({self.CS_VER: ver} if ver is not None and lean != "off" else {}),
         }
       }
+      if ver is not None and lean == "on":
+        # A stamped store with the lean switch 'on': confirmed by key and stamp, without echoing the value.
+        data = {self.CS_DATA: {self.CS_OP: self.CS_CONFIRM, self.CS_KEY: key, self.CS_VER: ver}}
       self.__send_data_to_chain_peers(data, peers=peers, include_default_peers=False)
     elif ver is not None and self.__cs_modes["order"] == "on" and info["outcome"] != "refused_future":
       # A refused stamped store, with the order switch 'on': answered to its sender in a confirmation message that
@@ -2673,8 +2693,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ``confirms``, so the wait of ``_set_value`` can end at once once every target settled. Its ``held_ver``,
     when well formed and not a future stamp, moves this node's stamp clock up to it. Handled in every mode.
 
-    A confirmation counts when it echoes the owner and value of the record it is for, the sender is one of
-    the record's targets and has not confirmed it yet. The record is the key's, or, when the key is not held,
+    A confirmation counts when the sender is one of the record's targets, has not confirmed it yet, and the
+    confirmation matches the record: a message that carries a value (the full form, the previous release's)
+    when it echoes the record's owner and value; a lean one (``{op, key, ver}``, sent by a receiver with
+    ``CSTORE_LEAN_CONFIRM`` 'on') when its stamp is the record's ``sent_ver``, the stamp of this node's last
+    own store, so it still counts after a peer's identical write raised the record's stamp. A full form that
+    also carries a stamp ('report') is counted by value; when the two rules disagree it is counted as
+    ``<bucket>/confirm/disagree_own`` (an echo of an earlier own stamp of the same value) or
+    ``disagree_other``. The record is the key's, or, when the key is not held,
     the tombstone a stamped delete left under ``"dl:" + key`` (none with the order switch 'off'), so a delete's
     confirmation (value None) now lands on the tombstone of a local delete instead of being dropped.
 
@@ -2707,8 +2733,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       with self.__persistence_lock:
         # This node's own record the refused store was for: the key's, else the tombstone of its delete.
         record = self.__chain_storage.get(key) or self.__chain_storage.get(f"{self.CS_DEL}{key}")
-        if (record is None or record.get(self.CS_CONFIRMATIONS, -1) < 0
-            or record.get(self.CS_VER) != data.get(self.CS_VER)
+        if (record is None or record.get(self.CS_CONFIRMATIONS, -1) < 0 or data.get(self.CS_VER) is None
+            or record.get(self.CS_SENT_VER) != data.get(self.CS_VER)
             or sender not in record.get("target_peers", []) or sender in record["confirmed_peers"]):
           return
         # Settled by the refusal: no confirmation will come from it for this stamp.
@@ -2727,11 +2753,25 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       local_owner = self.__get_key_owner(target)
       # The value.
       local_value = self.__get_key_value(target)
+      # The previous release's rule: the echoed owner and value are the record's.
+      by_value = owner == local_owner and value == local_value
+      # The lean rule: the echoed stamp is the one of this node's last own store of the record.
+      by_stamp = data.get(self.CS_VER) is not None and data[self.CS_VER] == self.__chain_storage.get(
+        target, {}).get(self.CS_SENT_VER)
+      if self.CS_VALUE in data and self.CS_VER in data and by_value != by_stamp and target in self.__chain_storage:
+        # A full confirmation with a stamp ('report') the two rules judge apart. The stamp it echoes, checked for form.
+        echoed = self.__ver_valid(data[self.CS_VER])
+        # "own" when it echoes an earlier own stamp of the same value (an identical rewrite since), "other" otherwise
+        # (the lean rule would decide differently from the previous release's), under the key's bucket.
+        self.__cs_count("disagree_own" if by_value and echoed is not None and echoed[1] == self.ee_addr
+                        else "disagree_other", target.removeprefix(self.CS_DEL), "confirm")
       if value is None and target not in self.__chain_storage:
         # Deletion confirmed — key already removed locally, nothing to increment
         if self.cfg_chain_store_debug:
           self.P(f" === LOCAL: Key {key} deletion confirmed by {confirm_by}")
-      elif owner == local_owner and value == local_value:
+      elif by_value if self.CS_VALUE in data else by_stamp:
+        # Counted by the rule of its form: a message that carries a value (the full form) by the echoed owner and
+        # value, as the previous release; a lean one, without a value, by its stamp.
         # The record confirmed.
         record = self.__chain_storage.get(target, {})
         confirmed = record.setdefault("confirmed_peers", [])

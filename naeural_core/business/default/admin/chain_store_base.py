@@ -1946,9 +1946,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     The record is encoded once as a namespace-sync answer would carry it, ``{key: {key, value, owner, readonly,
     token, ver}}``, with the encoder every message leaves with (``json_dumps``: compact, a non-ASCII character as
-    itself) and then as UTF-8, the bytes that travel. Every path that stores a record asks this first: a local
-    write and a store from a peer (``_set_value``, a hand-off re-send included) and each copy of a namespace-sync
-    answer (``__merge_hset_snapshot``).
+    itself) and then as UTF-8, the bytes that travel. Every path that stores a record asks this before it stores:
+    a local write and a store from a peer (``_set_value``, a hand-off re-send included) and each copy of a
+    namespace-sync answer (``__merge_hset_snapshot``). Each asks after its signed-record, ``cs_rev`` and namespace
+    rules, which give the record the owner, readonly mark and token it is stored with, and before the order rule;
+    so a record those rules refuse is not measured, and a signed one has its signature checked before its size.
 
     Parameters
     ----------
@@ -2136,17 +2138,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     is replaced only by a copy with a higher or equal ``cs_rev``: an older or
     unversioned copy is skipped and not counted in the result.
 
-    A copy that takes more than ``CS_MAX_RECORD_BYTES`` on the wire, or that
-    no message could carry (``__wire_refusal``, asked with the copy's key,
-    value, owner, readonly mark, token and stamp as the peer sent them), is
-    skipped before any other rule reads it and counted as
-    ``<bucket>/hsync/refused_too_large`` or ``refused_unencodable``; the
-    other copies of the answer are merged. In every mode. A copy that is the
-    record held under its key field for field (key, value, owner, readonly
-    mark, stamp and token) is not measured, as nothing of it is stored: a
-    periodic sync between replicas that agree pays one comparison per copy,
-    and one JSON encoding only for each copy that differs, under the
-    persistence lock.
+    A copy is measured as the record it would be stored as (``__wire_refusal``,
+    asked with the copy's key and value, the owner, readonly mark and token
+    the namespace rules give it, and its stamp): after the signed-record,
+    ``cs_rev`` and namespace rules and before the order rule, as
+    ``_set_value`` measures a write. One that takes more than
+    ``CS_MAX_RECORD_BYTES`` on the wire, or that no message could carry, is
+    skipped and counted as ``<bucket>/hsync/refused_too_large`` or
+    ``refused_unencodable``; the other copies of the answer are merged. In
+    every mode. A copy the earlier rules skip is not measured, as it is not
+    stored either; a delete copy is measured only with the order switch
+    'on', where it is stored. A copy that would be stored as the record
+    held under its key field for field (value, owner, readonly mark, token
+    and stamp) is not measured, as nothing of it is stored: a periodic sync
+    between replicas that agree pays one comparison per copy, and one JSON
+    encoding only for each copy that differs, under the persistence lock.
 
     A copy whose value is a dict equal (``==``) to the one held under its key
     is not put through the signed-record rule (``__versioned_record``) where
@@ -2223,18 +2229,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # The copy's stamp, checked for form (a malformed one counts ver_invalid and is unstamped); none is read
         # with the order switch 'off'.
         ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, "hsync")
-        # The record held under the key, to tell a copy that is this record field for field (most copies of a periodic
-        # sync between replicas that agree): nothing of such a copy is stored, so it is not measured.
+        # The record held under the key ({} when none): a copy's value is compared with its value, and the record the
+        # copy would be stored as with the whole of it.
         held = self.__chain_storage.get(key, {})
-        if any(held.get(field) != record.get(field) for field in self.CS_EXPORT_FIELDS + (self.CS_TOKEN,)):
-          # Why the copy must not be stored for its wire form, if so (too large, or not encodable), from the fields
-          # as the peer sent them and before any rule reads them.
-          word = self.__wire_refusal(key, value, record.get(self.CS_OWNER), record.get(self.CS_READONLY, False),
-                                     record.get(self.CS_TOKEN), ver)
-          if word is not None:
-            # Skipped and counted as a refused write is, under the key's bucket; the rest of the answer is merged.
-            self.__cs_count("refused_" + word, key, "hsync")
-            continue
         if value is None and self.__chain_storage.get(self.CS_DEL + key, {}).get(self.CS_VALUE) is not None:
           # A delete copy of a key whose "dl:" record holds a value (an older release's caller wrote it there; it is
           # no tombstone): skipped in every mode, as the previous release skips every delete copy, so the tombstone
@@ -2288,6 +2285,22 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           record[self.CS_OWNER] = value["coordinator"]
           readonly = False
           token = None
+        # Whether the copy would be stored as another record than the one held: any of the fields it is stored with
+        # differs. A copy that would be stored as the held record field for field (most copies of a periodic sync
+        # between replicas that agree) stores nothing, so it is not measured.
+        if any(held.get(field) != stored for field, stored in (
+            (self.CS_VALUE, value), (self.CS_OWNER, record.get(self.CS_OWNER)), (self.CS_READONLY, readonly),
+            (self.CS_TOKEN, token), (self.CS_VER, ver))):
+          # Why the copy must not be stored for its wire form, if so (too large, or not encodable): measured here, after
+          # the namespace rules, with the owner, readonly mark and token it would be stored with, as _set_value
+          # measures a write. Before, it was measured with those its sender gave it: a value whose coordinator the rule
+          # stores as owner passed under the cap and was stored over it.
+          word = self.__wire_refusal(key, value, record.get(self.CS_OWNER), readonly, token, ver)
+          if word is not None:
+            # Skipped and counted as a refused write is, under the key's bucket; the rest of the answer is merged.
+            self.__cs_count("refused_" + word, key, "hsync")
+            # Before the order rule, which then neither counts nor takes the stamp of a copy refused here.
+            continue
         # The order rule's word for the copy (counted as ver_<word>; it also moves the clock up to a stamp taken),
         # None when admitted or with the order switch 'off'.
         reason = None if order == "off" else self.__ver_admit(key, value, ver, None, "hsync")

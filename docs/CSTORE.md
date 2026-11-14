@@ -353,8 +353,11 @@ No switch: it acts in every mode. One record may take at most `CS_MAX_RECORD_BYT
 the token a store carries: `{key: {key, value, owner, readonly, token, ver}}` as compact
 JSON with non-ASCII characters as themselves, in UTF-8 bytes. Every field a store or a
 sync answer can fill counts, not only the value. The record is measured with the owner,
-readonly mark, token and stamp it would be stored with, so a writer and its receivers
-measure the same bytes, on every path that stores a record:
+readonly mark, token and stamp it would be stored with: after the signed-record, `cs_rev`
+and namespace rules, which can replace the owner, mark and token a sender gave, and before
+the order rule. So a writer and its receivers measure the same bytes, on every path that
+stores a record, and a record those earlier rules refuse is not measured (a signed one has
+its signature checked before its size):
 
 - a local write returns `False` at once with `refused_too_large`; nothing is stored or
   sent;
@@ -362,7 +365,8 @@ measure the same bytes, on every path that stores a record:
   (`refused_too_large`); with `CSTORE_ORDER` `on` a stamped one gets the refusal answer
   `too_large`;
 - a copy in a sync answer is skipped and counted `<bucket>/hsync/refused_too_large`; the
-  other copies of the answer are merged.
+  other copies of the answer are merged. A copy that would be stored as the record already
+  held, field for field, is not measured: nothing of it is stored.
 
 The same paths refuse a record no message can carry, as `refused_unencodable`: a key,
 value, owner, readonly mark, token or stamp that holds a string UTF-8 cannot encode (a

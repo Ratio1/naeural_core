@@ -29,6 +29,8 @@ from test_chain_store_accounting import STATS, _StartHarness
 from test_chain_store_hsync import _hset_key
 # The order tests' store builder, deliverer of a live store, record builder, constants and private names.
 from test_chain_store_order import BUCKET, CLOCK, EXPORT, KEY, MERGE, NOW_MS, answers, deliver, make, record
+# The builder of a signed deployment operation as a replica holds it.
+from test_chain_store_resync import operation
 
 # The cap, in bytes of the record's wire form.
 CAP = 524_288
@@ -247,6 +249,49 @@ class TestSizeCap(unittest.TestCase):
         self.assertEqual(getattr(store, MERGE)("players", {KEY: {**held, field: value}}), 0)
         # The held record stays as it was, its stamp included.
         self.assertEqual(store.storage[KEY], held)
+
+  def test_a_sync_copy_is_measured_as_the_record_it_would_be_stored_as(self):
+    """A sync copy is measured with the owner, readonly mark and token the namespace rules store it with, not with
+    those its sender gave it: a job record whose value names a coordinator of 300,000 characters would be stored
+    with that owner, over the cap, and is skipped, as the same record is refused as a live store; a signed
+    operation sent with an owner of 600,000 characters is stored with its coordinator as owner, and is merged; a
+    copy that would be stored as the record already held is not measured, also when that record is over the cap."""
+    # A field of the job secrets, and their bucket.
+    job = _hset_key("DAUTH_JOB_SECRETS", "9")
+    # A value without a revision that names a long coordinator: the namespace rule stores it as the record's owner.
+    grown = {"coordinator": "c" * 300_000, "note": "x"}
+    # Each mode: the cap has no switch.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A dAuth member's replica ("node"; "peer1" is a member too, "oracle" is in the oracle registry).
+        store = node(mode, signed=True)
+        # As its sender gives it (owner "o") the copy is under the cap; as it would be stored, over it.
+        self.assertEqual((wire_size(job, grown, "o") < CAP, wire_size(job, grown, grown["coordinator"]) > CAP),
+                         (True, True))
+        # The stamp the copy and the store carry (none is read in 'off').
+        stamp = None if mode == "off" else [NOW_MS, "peer1"]
+        # Skipped as a sync copy.
+        self.assertEqual(getattr(store, MERGE)("DAUTH_JOB_SECRETS", {job: record(job, grown, "o", stamp)}), 0)
+        # Refused as a live store from a dAuth member (answered in 'on' when stamped).
+        self.assertEqual(answers(deliver(store, job, grown, "peer1", stamp, owner="o")),
+                         ["too_large"] if mode == "on" else [])
+        # Not held, and counted once on each path under the same word and no other: the order rule ran on neither,
+        # so the stamp clock did not move to their stamp.
+        self.assertEqual((job in store.storage, getattr(store, STATS), getattr(store, CLOCK)), (False, {
+          job[:14] + "/hsync/refused_too_large": 1, job[:14] + "/remote/refused_too_large": 1}, 0))
+        # A signed operation as a replica holds it, and a copy of it whose sender names an owner over the cap.
+        key, held = operation("x", 1)
+        # The copy's owner as sent.
+        sent = {**held, "owner": "o" * 600_000}
+        # Merged: the rule stores the coordinator as owner, so the record stored is a small one.
+        self.assertEqual((getattr(store, MERGE)("DEEPLOY_OPERATIONS", {key: sent}), store.storage[key]["owner"]),
+                         (1, "oracle"))
+        # A replica that holds a record over the cap, from before the cap.
+        store = node(mode, storage={KEY: record(KEY, "x" * 600_000, "peer1")})
+        # A copy equal to it: nothing of it is stored, so it is not measured and counts nothing.
+        self.assertEqual((getattr(store, MERGE)("players", {KEY: record(KEY, "x" * 600_000, "peer1")}),
+                          getattr(store, STATS)), (0, {}))
 
 class TestUnencodable(unittest.TestCase):
   """A record the wire's encoder or UTF-8 cannot take is refused wherever a record is stored, under its own word."""

@@ -2,7 +2,8 @@ import copy
 import json
 import unittest
 from collections import deque
-from threading import Lock
+# Lock: the stand-in's buffer locks. Event: the stop signal the real constructor creates and stop() sets.
+from threading import Event, Lock
 
 from naeural_core import constants as ct
 from naeural_core.comm.base.base_comm_thread import BaseCommThread
@@ -132,22 +133,46 @@ class TestCommandQueueAdmission(unittest.TestCase):
     self.assertEqual(queued["PAYLOAD"]["VALUES"], [1, 2, 3])
 
   def test_closed_command_buffer_rejects_post_stop_admission(self):
+    """After stop(), both stop signals are set and a command sent late is refused and counted as closed."""
+    # A command communicator stand-in with the observable send buffer the real one uses.
     harness = _CommandHarness(capacity=2, observable=True)
+    # stop() also closes the receive buffer.
     harness._recv_buff = ObservableMessageBuffer(capacity=1)
+    # The two stop signals as the real constructor creates them: not stopping.
     harness._stop = False
+    # The event a comm thread waits on during a reconnect back-off; stop() sets it.
+    harness._stop_event = Event()
+    # No heartbeat ingress worker on this stand-in.
     harness._stop_heartbeat_ingress_worker = lambda **kwargs: None
 
     class _ThreadProbe:
       def join(self):
+        """
+        Stand in for the comm thread's join.
+
+        The thread has already ended, so the join returns at once.
+
+        Returns
+        -------
+        None
+        """
         return
 
+    # The comm thread stop() joins.
     harness._thread = _ThreadProbe()
 
+    # The real stop of the base communicator.
     BaseCommThread.stop(harness)
 
+    # Both signals: the loops read the flag, a thread in a back-off waits on the event.
+    self.assertTrue(harness._stop and harness._stop_event.is_set())
+    # A command sent after the stop is refused.
     self.assertFalse(harness.send(_command("late-command")))
+    # The buffer's own counters after the refused send.
     snapshot = harness._send_buff.snapshot()
+    # Nothing was queued.
     self.assertEqual(snapshot.depth, 0)
+    # The refusal is counted as "closed", not as "full".
     self.assertEqual(snapshot.rejected_closed, 1)
 
   def test_dequeued_retry_is_visible_without_exposing_command_payload(self):

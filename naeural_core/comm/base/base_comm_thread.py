@@ -13,7 +13,8 @@ from time import perf_counter, time
 from collections import deque
 from naeural_core import DecentrAIObject
 from naeural_core import Logger
-from threading import Lock, Thread
+# Event: the stop signal a comm thread can wait on, so a reconnect back-off ends the moment stop() is called.
+from threading import Event, Lock, Thread
 
 from naeural_core.bc import DefaultBlockEngine
 from naeural_core.main.net_mon import NetworkMonitor
@@ -121,6 +122,63 @@ class BaseCommThread(
                loop_resolution=50,
                **kwargs
                ):
+    """
+    Communicator thread base: prepare the buffers, the connection flags and the stop signals of one channel pair.
+
+    Builds the send and receive buffers for the communicator type, merges the configuration (defaults, then the
+    node environment) and validates it, and takes the managers it needs from the shared memory. No thread is
+    started here: ``start`` does that.
+
+    Parameters
+    ----------
+    log : Logger
+      The node logger.
+    shmem : dict
+      The node's shared objects; ``heavy_ops_manager``, ``network_monitor`` and ``io_formatter_manager`` are read.
+    signature : str
+      Name of the communicator plugin, used in its log prefix.
+    comm_type : str
+      Communicator type (``DEFAULT``, ``COMMANDCONTROL``, ``HEARTBEATS``, ``NOTIFICATIONS`` or the same with
+      the ``L_`` prefix of a local communicator); it selects the loop ``start`` runs and the buffer kinds.
+    default_config : dict
+      The plugin's default configuration.
+    upstream_config : dict
+      Configuration received from the communication manager.
+    environment_variables : dict, optional
+      Node environment configuration merged over the defaults. Default None (nothing merged).
+    send_channel_name : str, optional
+      Name of the channel this communicator publishes to. Default None.
+    recv_channel_name : str, optional
+      Name of the channel this communicator reads from; None disables receiving. Default None.
+    timers_section : str, optional
+      Section name for this communicator's timers. Default ``'comms'``.
+    extra_receive_buffer : int, optional
+      Slots added to the receive buffer's capacity. Default 0.
+    loop_resolution : int, optional
+      Laps per second of the communicator loop. Default 50.
+    **kwargs
+      Passed to the base object constructor.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Two stop signals are created, ``_stop`` (read by the loops at the top of each lap) and ``_stop_event`` (what
+    a waiting thread sleeps on). ``stop`` is the only place that sets either, and it sets both: a caller that
+    set ``_stop`` alone would leave a thread waiting out a reconnect back-off, and ``stop`` joins that thread
+    without a time limit.
+
+    Examples
+    --------
+    >>> comm = MQTTCommThread(
+    ...   log=log, shmem=shmem, signature='MQTT', comm_type='HEARTBEATS',
+    ...   default_config=MQTTCommThread.CONFIG, upstream_config={},
+    ... )
+    >>> comm._stop, comm._stop_event.is_set()
+    (False, False)
+    """
     self._signature = signature
     self._comm_type = comm_type
     self._config = None
@@ -212,6 +270,9 @@ class BaseCommThread(
     self._bandwidth_mutex = False
 
     self._stop = False
+    # Set by stop() together with _stop. A comm thread waits on it instead of sleeping, so the wait after a failed
+    # connect burst (50 s by default) ends when the node closes; before, stop() joined a thread that slept on.
+    self._stop_event = Event()
     self._thread_stopped = False
     self._thread_logs = deque()
     self._thread = None
@@ -1152,7 +1213,37 @@ class BaseCommThread(
     return
 
   def stop(self):
+    """
+    Stop this communicator: end its thread, then discard what is still queued.
+
+    Sets both stop signals, closes the buffers that can be closed, stops the heartbeat ingress worker (it drains
+    for at most 10 s), then waits for the comm thread without a time limit and clears both buffers.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The join has no time limit, so everything the comm thread can wait on must end when stop is asked. The
+    reconnect back-off (50 s by default) does: the thread waits on ``_stop_event``, which is set here. Before,
+    that back-off was a plain sleep, and a node whose only broker was down when it closed stayed in this join
+    for up to 50 s per communicator (100 s for the heartbeat and command loops, which reconnect twice in a
+    lap); the node's close reached no plugin in that time. A connect attempt that is already running when stop
+    is asked is not cut short; it ends at the client's own connect timeout.
+
+    This method is the only place that sets ``_stop`` or ``_stop_event``.
+
+    Examples
+    --------
+    >>> comm.stop()                       # CommunicationManager.close(), for each communicator
+    >>> comm._stop, comm._stop_event.is_set()
+    (True, True)
+    """
     self._stop = True
+    # Wake the comm thread if it is waiting out a failed connect burst: it returns from the wait at once, sees
+    # _stop at the top of its next lap and ends, so the join below does not wait for the rest of the back-off.
+    self._stop_event.set()
     close_send_buffer = getattr(self._send_buff, 'close', None)
     if callable(close_send_buffer):
       close_send_buffer(discard=False)

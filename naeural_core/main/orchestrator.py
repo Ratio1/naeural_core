@@ -70,6 +70,9 @@ SHUTDOWN_DELAY = 5
 CHECK_AND_COMPLETE_ITERATIONS = 30 # how many iterations to wait for the dAuth completion
 CHECK_AND_COMPLETE_SLEEP_PERIOD = 30 # how many seconds to wait between iterations
 CHECK_AND_COMPLETE_TIMEOUT = CHECK_AND_COMPLETE_ITERATIONS * CHECK_AND_COMPLETE_SLEEP_PERIOD
+# Longest pause, in seconds, between two start-up dAuth rounds: the pause doubles after each round that brought no
+# variables and stops growing here.
+CHECK_AND_COMPLETE_MAX_PAUSE = 300
 CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle checks
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
 RUNTIME_SECRET_RESOLVER_POLL_SECONDS = 0.25
@@ -345,8 +348,9 @@ class Orchestrator(DecentrAIObject,
     Complete the node's environment variables from dAuth at start-up, retrying within a time limit.
 
     Calls ``blockchain_manager.dauth_autocomplete`` in rounds until it returns either None or a non-empty
-    dict of variables, sleeping a random 16-29 s after each round that returns an empty dict. No new round
-    starts once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed, or once a stop was requested
+    dict of variables, pausing after each round that returns an empty dict: a random 16-29 s after the first
+    such round, twice as long after each further one, at most ``CHECK_AND_COMPLETE_MAX_PAUSE`` (300 s). No new
+    round starts once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed, or once a stop was requested
     (``request_stop``, called by the SIGTERM handler); the node then continues with its local environment.
     When dAuth returned variables, the logger config is reloaded so they take effect.
 
@@ -372,7 +376,19 @@ class Orchestrator(DecentrAIObject,
     request). A warning is logged when the node continues without dAuth variables at the time limit, after
     a stop request, or because a later round ended on None. A None in the first round is not warned here,
     as before: it is the normal answer on a VPN deployment. A stop request does not interrupt the request
-    or the pause in progress.
+    in progress; it ends the pause in progress within a second.
+
+    An empty dict is also what a refusal looks like here (a node key that is not linked to a license, a
+    revoked key, a release that is too old): the answer carries no variables either. Before, every empty
+    round was followed by the same 16-29 s pause, so a refused node made about 40 rounds in its 900 s and,
+    restarted by its host, went on at that rate for good; many such nodes kept the oracles' dAuth thread busy
+    refusing. With the growing pause a node makes 6 or 7 rounds in that time. The price is paid by a
+    licensed node that meets busy oracles several times in a row: its later rounds come later. The pause that
+    is running when the time limit passes is finished before the node continues.
+
+    Examples
+    --------
+    >>> self._check_and_complete_environment_variables()   # refused: rounds at about 0, 22, 67, 157, 337, 637 s
     """
     
     self.P(f"Node <{self.eth_address}> completing setup for network <{self.evm_network}>...")
@@ -404,11 +420,18 @@ class Orchestrator(DecentrAIObject,
 
       if not done:
         elapsed = time() - start_ts
-        self.P(f'Retrying dAuth completion({tries} tries so far in {elapsed:.1f}s)...')
-        sleep(
-          CHECK_AND_COMPLETE_SLEEP_PERIOD / 2 + 
-          np.random.randint(1, CHECK_AND_COMPLETE_SLEEP_PERIOD // 2)
-        )
+        # The random 16-29 s that followed every empty round before.
+        pause = CHECK_AND_COMPLETE_SLEEP_PERIOD / 2 + np.random.randint(1, CHECK_AND_COMPLETE_SLEEP_PERIOD // 2)
+        # Now only after the first empty round: twice as long after each further one, at most 300 s. An empty
+        # answer is a busy oracle or a refusal, and neither is helped by asking again every 16-29 s.
+        pause = min(pause * 2 ** (tries - 1), CHECK_AND_COMPLETE_MAX_PAUSE)
+        self.P(f'Retrying dAuth completion({tries} tries so far in {elapsed:.1f}s), next try in {pause:.0f}s...')
+        # Slept one second at a time: a pause of up to 300 s must not hold back a stop request.
+        for _ in range(int(pause)):
+          if self._return_code is not None:
+            break
+          # One second of the pause.
+          sleep(1)
     # endwhile not done
 
     # Warn also when a later round ended on None: an earlier round got an empty dict (for example from a busy

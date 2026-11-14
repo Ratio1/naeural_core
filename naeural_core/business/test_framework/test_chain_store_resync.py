@@ -628,6 +628,95 @@ class TestMergeOfTheValueHeld(unittest.TestCase):
         self.assertEqual(store.storage[key], held)
 
 
+class TestMergeRegistryReads(unittest.TestCase):
+  """One merge reads each registry at most once, however many signed copies it checks, also when the read fails."""
+
+  def test_a_merge_reads_each_registry_once_and_does_not_repeat_a_read_that_failed(self):
+    """A merge of 20 signed operations the replica lacks reads the dAuth and the oracle registry once each, not
+    once per operation, and merges them all; the next merge reads them again; with a registry read that fails,
+    the merge makes that read once, not 20 times, and merges nothing; and a question for dAuth members only is
+    not answered from the oracle registry the same merge has read."""
+    # Twenty signed operations of the coordinator "oracle", which the replica lacks.
+    answer = dict(operation("op%d" % index, 1) for index in range(20))
+    # A replica of a dAuth member.
+    store = oracle("report")
+    # The registry reads made, by registry.
+    reads = []
+    # The dAuth registry, each read recorded.
+    store.bc.get_eth_dauth_oracles = lambda: reads.append("dauth") or ["node", "peer1"]
+    # The oracle registry, each read recorded.
+    store.bc.get_eth_oracles = lambda: reads.append("oracles") or ["oracle"]
+    # All twenty are merged, on one read of each registry.
+    self.assertEqual((getattr(store, MERGE)("DEEPLOY_OPERATIONS", answer), reads), (20, ["dauth", "oracles"]))
+    # A second merge, of twenty others, reads them again: nothing read for one merge is kept for the next.
+    self.assertEqual((getattr(store, MERGE)("DEEPLOY_OPERATIONS", dict(operation("more%d" % index, 1)
+                                                                       for index in range(20))), reads),
+                     (20, ["dauth", "oracles"] * 2))
+    # The first twenty again, each with a token: copies of the values held that would be stored, so each is put
+    # through the rule before its store. They are stored on one more read of each registry.
+    self.assertEqual((getattr(store, MERGE)("DEEPLOY_OPERATIONS", {key: {**held, "token": "T"}
+                                                                   for key, held in answer.items()}), reads),
+                     (20, ["dauth", "oracles"] * 3))
+    # A replica whose oracle registry cannot be read (the remote call fails once the engine's copy has expired).
+    store = oracle("report")
+    # The failing reads made.
+    failed = []
+
+    def failing():
+      """
+      Stand for a registry read whose remote call fails: record the call, then raise as the block engine does.
+
+      Returns
+      -------
+      None
+        Never returns.
+
+      Raises
+      ------
+      RuntimeError
+        Always.
+
+      Examples
+      --------
+      >>> failing()
+      Traceback (most recent call last):
+      RuntimeError: registry call failed
+      """
+      # One more remote call made.
+      failed.append(1)
+      # As the block engine lets the remote call's error out.
+      raise RuntimeError("registry call failed")
+
+    # The oracle registry's read fails.
+    store.bc.get_eth_oracles = failing
+    # Nothing is merged (no coordinator can be found in a registry), on one failing read for the twenty copies.
+    self.assertEqual((getattr(store, MERGE)("DEEPLOY_OPERATIONS", answer), len(failed), store.storage), (0, 1, {}))
+    # Two current secrets of jobs, signed by the coordinator "oracle": one published by the dAuth member "peer1",
+    # one by "oracle2", which is in the oracle registry only.
+    secrets = {}
+    # Each job and its publisher.
+    for job, author in (("1", "peer1"), ("2", "oracle2")):
+      # The field of the job's secrets.
+      key = _hset_key("DAUTH_JOB_SECRETS", job)
+      # Its versioned record, published (EE_SENDER) by that author.
+      secrets[key] = record(key, {"job_id": job, "deployment_revision": 1, "operation_id": "op", "coordinator": "oracle",
+                                  "EE_SENDER": author, "EE_SIGN": "valid"}, "oracle")
+    # A dAuth member's replica whose oracle registry also holds "oracle2".
+    store = oracle("report")
+    # The reads of this merge.
+    reads.clear()
+    # The dAuth registry, each read recorded.
+    store.bc.get_eth_dauth_oracles = lambda: reads.append("dauth") or ["node", "peer1"]
+    # The two oracles, each read recorded.
+    store.bc.get_eth_oracles = lambda: reads.append("oracles") or ["oracle", "oracle2"]
+    # Only the record a dAuth member published is merged: the second one's publisher is asked for among dAuth
+    # members only, although the merge has read the oracle registry for the first record's coordinator.
+    self.assertEqual((getattr(store, MERGE)("DAUTH_JOB_SECRETS", secrets), sorted(store.storage)),
+                     (1, [_hset_key("DAUTH_JOB_SECRETS", "1")]))
+    # One read of each registry for the merge's own membership check and both records' publishers and coordinator.
+    self.assertEqual(reads, ["dauth", "oracles"])
+
+
 class TestResyncStart(unittest.TestCase):
   """on_init leaves the resync ready for the first lap that finds a peer."""
 

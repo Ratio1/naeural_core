@@ -318,9 +318,20 @@ them by, nor any unsigned namespace. A node of the previous release never asks, 
 answers these requests as today.
 
 Cost, on the node image's interpreter under a 0.35 CPU limit: an idle lap of the step
-takes under 1 microsecond; merging one answer of 1,000 signed operations (2.1 MB) that all
-equal the held ones took 82 ms of CPU and 214 ms of wall time, under the persistence lock,
-with no signature check. An oracle answers about two such requests per namespace and round.
+takes under 1 microsecond. Merging one answer of 1,000 signed operations (2.7 MB of JSON),
+with real signature checks, took 1.1 to 1.8 s of CPU and 3 to 5 s of wall time when the
+replica lacks them all (one signature check per record: the first answers after an
+absence), and 0.07 to 0.15 s of CPU and 0.2 to 0.5 s of wall time when it holds them all,
+whether the copies carry the same stamps, other stamps or none (no signature check: every
+later answer). The merge runs on the plugin thread under the persistence lock: for that
+time the store handles no other message, and local writers, the counters and the save's
+copy wait. An oracle answers about two such requests per namespace and round.
+
+One merge reads each oracle registry at most once, for all its copies, and does not repeat
+a read that failed: the copies whose rule needs that registry are then skipped. The block
+engine keeps a registry for ten minutes and remembers no failure, so without this a merge
+made one remote call per signed copy the replica lacks while the registry's remote call
+failed or hung (about 20 s each for a call that hangs).
 
 In every merge, a caller's `hsync` included, a copy whose value is a dict equal to the one
 held under its key is not put through the signed-record rule while it leaves everything
@@ -416,7 +427,9 @@ did not hold, outside the protected namespaces (the five signed ones and
 `DAUTH_JOB_SECRET_REVISIONS`), counts `new_keys/<sender>` when its verified sender is
 neither one of this node's replication peers nor in an oracle registry. An overwrite, a
 delete and a refused store count nothing. The registries are read only for such a store
-from a sender outside the replication peers. The per-sender counts of a period show how
+from a sender outside the replication peers, once per store and under the persistence
+lock: while a registry's remote call hangs after the block engine's copy expired, each
+such store holds the lock for that call (about 20 s). The per-sender counts of a period show how
 many keys a node outside the oracles adds, which is what a limit is set from.
 
 The limit is the number `CSTORE_NEW_KEYS_MAX` of the plugin config, read once at start

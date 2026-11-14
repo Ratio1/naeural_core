@@ -786,9 +786,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     a blocking sync (``_hsync``) has no ``until`` and is left to its caller. A lap with nothing pending and no
     request due costs one copy of the (empty) pending table and two comparisons (under 1 microsecond, measured
     on the node image's interpreter under a 0.35 CPU limit). The registries are read once for this node and
-    once per replication peer at each request, never between requests. Merging one answer of 1,000 signed
-    operations (2.1 MB) that all equal the held ones took 82 ms of CPU and 214 ms of wall time under the same
-    limit, with no signature check.
+    once per replication peer at each request, never between requests, and at most once more for each answer's
+    merge. Merging one answer of 1,000 signed operations (2.7 MB of JSON), under the same limit and with real
+    signature checks: 1.1 to 1.8 s of CPU and 3 to 5 s of wall time when the replica lacks them all (one
+    signature check per record: the first answers after an absence), and 0.07 to 0.15 s of CPU and 0.2 to 0.5 s
+    of wall time when it holds them all (no signature check: every later answer). For that time this thread
+    handles no store, confirmation or sync request, and the persistence lock is held: local writers, every
+    counter and the save's copy wait for it.
 
     It has no switch and acts in every mode of the order switch: the merge it feeds applies the rules a caller's
     sync gets, and for these namespaces a lower signed sequence or revision is refused in every mode. A node of
@@ -1370,13 +1374,66 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       return None
     return next((name for name in namespaces if key.startswith(self.__hset_index(name))), None)
 
-  def __registry_member(self, address, dauth_only=False):
-    """Authorize a transport identity against registry ETH addresses; fail closed."""
+  def __registry_member(self, address, dauth_only=False, memo=None):
+    """
+    Tell whether a node address is in an oracle registry; anything that fails answers False (fail closed).
+
+    The address is converted to its ETH address and looked up in the dAuth oracle registry and, unless
+    ``dauth_only``, in the oracle registry, each read through the block engine.
+
+    Parameters
+    ----------
+    address : any
+      The node address asked about: a verified sender, this node, or an address a value names. One that is
+      not a valid address answers False.
+    dauth_only : bool, optional
+      True to count only dAuth registry members; False (the default) counts members of either registry.
+    memo : dict, optional
+      A dict the caller keeps for one merge of a sync answer: each registry is read at most once for it, and
+      a read that failed is not made again (that registry then has no member, for this memo). None (the
+      default) reads for this call alone.
+
+    Returns
+    -------
+    bool
+      True when the address is in a registry that counts; False when it is not, when the address cannot be
+      converted, or when a registry cannot be read.
+
+    Notes
+    -----
+    The block engine keeps each registry for ten minutes and remembers no failure: once its copy has expired
+    and the registry's remote call fails or hangs, every call here makes that call again (about 20 s each for
+    one that hangs: 10 s per try, two tries). A merge asks once per signed record its replica lacks, under the
+    persistence lock, so it passes a memo: one such call per merge, not one per record. A memo is never kept
+    beyond its merge, so a change of a registry is read at the next one.
+
+    Examples
+    --------
+    >>> self.__registry_member("0xai_an_oracle")
+    True
+    >>> self.__registry_member("0xai_an_oracle", dauth_only=True)   # in the oracle registry only
+    False
+    >>> memo = {}
+    >>> [self.__registry_member(address, memo=memo) for address in ("0xai_a", "0xai_b")]   # two answers, one read
+    [True, False]
+    """
     try:
       eth_address = self.bc.node_address_to_eth_address(address).lower()
-      allowed = list(self.bc.get_eth_dauth_oracles() or [])
-      if not dauth_only:
-        allowed.extend(self.bc.get_eth_oracles() or [])
+      # The registries read for the caller's memo so far; a call without one reads for itself.
+      memo = {} if memo is None else memo
+      # The members that count for this question.
+      allowed = []
+      # The dAuth registry always, the oracle registry unless only dAuth members count; the memo is keyed by the
+      # read itself.
+      for read in (self.bc.get_eth_dauth_oracles, self.bc.get_eth_oracles)[:1 if dauth_only else 2]:
+        if read not in memo:
+          # Empty before the read, so a read that fails is not made again for this memo: the registry then has no
+          # member here (fail closed), where each later question made the failing call again.
+          memo[read] = []
+          # The registry's addresses, read once per memo.
+          memo[read] = list(read() or [])
+        # Only the registries of this question, also when the memo holds the other one.
+        allowed.extend(memo[read])
       return eth_address in {item.lower() for item in allowed}
     except Exception:
       return False
@@ -1473,13 +1530,42 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     marker = self.__chain_storage.get(marker_key, {}).get(self.CS_VALUE) or (snapshot or {}).get(marker_key, {}).get(self.CS_VALUE)
     return isinstance(marker, dict) and marker.get("job_id") == value["job_id"] and marker.get("revision") == value["revision"]
 
-  def __versioned_job_record(self, key, value, namespace):
+  def __versioned_job_record(self, key, value, namespace, memo=None):
     """Protect canonical pointers and current bundles with signed generations.
 
     The generation increases across deployment, restore and delete commits; it
     is independent of the runtime configuration revision restored after failure.
     A higher generation permits explicit reuse after deletion. Once a versioned
     record exists, unversioned writes and stale snapshot repair cannot replace it.
+
+    Parameters
+    ----------
+    key : str
+      Composed key of the record, in ``namespace``.
+    value : any
+      The incoming value; None for a delete. It is versioned when it is a dict that carries the namespace's
+      generation (``revision`` for ``DEEPLOY_DEPLOYED_JOBS``, ``deployment_revision`` for ``DAUTH_JOB_SECRETS``).
+    namespace : str
+      ``"DEEPLOY_DEPLOYED_JOBS"`` or ``"DAUTH_JOB_SECRETS"``.
+    memo : dict, optional
+      The caller's registry memo for one merge (``__registry_member``); None (the default) reads the
+      registries for this call.
+
+    Returns
+    -------
+    bool
+      True when the value may replace what is held: an unversioned value while nothing versioned is held, or a
+      versioned one whose generation is an int of at least 1, whose job id is the key's field, whose author is
+      its coordinator (or a dAuth registry member, for ``DAUTH_JOB_SECRETS``), whose coordinator is a registry
+      member, whose signature verifies, whose pointer fields are consistent, and whose generation is not below
+      the held one (an equal one only with the same content). False otherwise, and when any check raises.
+
+    Examples
+    --------
+    >>> self.__versioned_job_record(key, "cid", "DEEPLOY_DEPLOYED_JOBS")   # nothing versioned held
+    True
+    >>> self.__versioned_job_record(key, {"revision": 0}, "DEEPLOY_DEPLOYED_JOBS")
+    False
     """
     version_key = "revision" if namespace == "DEEPLOY_DEPLOYED_JOBS" else "deployment_revision"
     local = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
@@ -1496,11 +1582,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # dAuth attests the coordinator's verified operation when publishing its
       # custodied current bundle. Public pointers remain coordinator-signed.
       authorized_author = author == principal or (
-        namespace == "DAUTH_JOB_SECRETS" and self.__registry_member(author, dauth_only=True)
+        # The author's membership, through the caller's memo: a merge reads each registry once, not once per record.
+        namespace == "DAUTH_JOB_SECRETS" and self.__registry_member(author, dauth_only=True, memo=memo)
       )
       if (value.get("job_id") != field or not isinstance(value.get("operation_id"), str)
           or not value["operation_id"] or not authorized_author
-          or not self.__registry_member(principal)
+          # The same for the coordinator's membership.
+          or not self.__registry_member(principal, memo=memo)
           or not self.bc.verify(value, return_full_info=True, log_hash_sign_fails=False).valid):
         return False
       if namespace == "DEEPLOY_DEPLOYED_JOBS":
@@ -1541,13 +1629,51 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     except Exception:
       return False
 
-  def __versioned_record(self, key, value):
-    """Validate signed operation/node records before accepting sequence order."""
+  def __versioned_record(self, key, value, memo=None):
+    """
+    The signed-record rule: tell whether a value may be stored under a key of a signed namespace.
+
+    A key rotation is judged by ``__node_key_rotation_record``, a deployed-job pointer and a job's current
+    secrets by ``__versioned_job_record``. A deployment operation (``DEEPLOY_OPERATIONS``) and a node operation
+    (``DEEPLOY_NODE_OPERATIONS``) must be a dict with an int ``sequence``, an ``operation_id`` and a principal
+    (the ``coordinator``, or the ``node_addr``) that the key's field names and that signed the value; the
+    coordinator of a deployment operation must be an oracle registry member; and the sequence must not be below
+    the held one. A key of any other namespace passes.
+
+    Parameters
+    ----------
+    key : str
+      Composed key of the write or the copy.
+    value : any
+      The incoming value; None for a delete.
+    memo : dict, optional
+      The caller's registry memo for one merge (``__registry_member``); None (the default) reads the
+      registries for this call.
+
+    Returns
+    -------
+    bool
+      True when the value may be stored as far as this rule goes; False when the namespace's rule refuses it,
+      and when a check raises.
+
+    Notes
+    -----
+    The cost for a signed record is one signature check (about 1.2 ms of CPU, 3 to 4 ms of wall time under a
+    0.35 CPU limit) and, for a deployment operation, a job pointer and a job's secrets, the registry lookups.
+
+    Examples
+    --------
+    >>> self.__versioned_record("plain-key", "v")
+    True
+    >>> self.__versioned_record(self.__hset_index("DEEPLOY_OPERATIONS") + "b3A=", "text")
+    False
+    """
     if self.__namespace_for_key(key, (NODE_KEY_ROTATIONS_HKEY,)):
       return self.__node_key_rotation_record(key, value)
     job_namespace = self.__namespace_for_key(key, ("DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS"))
     if job_namespace:
-      return self.__versioned_job_record(key, value, job_namespace)
+      # With the caller's registry memo, if any.
+      return self.__versioned_job_record(key, value, job_namespace, memo)
     namespace = self.__namespace_for_key(key, ("DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS"))
     if namespace is None:
       return True
@@ -1573,7 +1699,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     try:
       if not self.bc.verify(value, return_full_info=True).valid:
         return False
-      if namespace == "DEEPLOY_OPERATIONS" and not self.__registry_member(principal):
+      # The coordinator's membership, through the caller's memo: a merge reads each registry once, not once per record.
+      if namespace == "DEEPLOY_OPERATIONS" and not self.__registry_member(principal, memo=memo):
         return False
       local = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
       if isinstance(local, dict) and local.get("sequence", -1) > value["sequence"]:
@@ -2134,6 +2261,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     is the one whose index (``__hset_index``) ``hkey`` has, the prefix the
     records are selected by.
 
+    The registries this check and the signed-record rule ask are read at
+    most once per merge, each at the first copy that needs it
+    (``__registry_member`` with a memo), and a read that fails is not made
+    again for that merge: the copies whose rule needs that registry are
+    skipped, as each was before after a failing read of its own.
+
+    Cost, under the persistence lock for the whole answer, measured on the
+    node image's interpreter under a 0.35 CPU limit with real signature
+    checks, for one answer of 1,000 signed operations (2.7 MB of JSON): 1.1
+    to 1.8 s of CPU and 3 to 5 s of wall time when the replica lacks them
+    all (one signature check per record); 0.07 to 0.15 s of CPU and 0.2 to
+    0.5 s of wall time when it holds them all, with or without the same
+    stamps (no signature check).
+
     A record whose stored value carries an int ``cs_rev`` (``__stale_revision``)
     is replaced only by a copy with a higher or equal ``cs_rev``: an older or
     unversioned copy is skipped and not counted in the result.
@@ -2213,8 +2354,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     order = self.__cs_modes["order"]
     if not isinstance(snapshot, dict):
       return 0
+    # The registries as this merge reads them: each at most once, at its first use, for all the copies of the answer.
+    # Before, each signed copy the replica lacks read them again, under the lock below: with the block engine's copy
+    # expired and the remote call failing, one failing call per copy (about 20 s each for a call that hangs).
+    memo = {}
     # The dAuth rule applies to the namespace of the index hkey has, the prefix the records are selected by below.
-    if self.__secret_namespace(self.__hset_index(hkey)) and not self.__registry_member(self.ee_addr, dauth_only=True):
+    if self.__secret_namespace(self.__hset_index(hkey)) and not self.__registry_member(
+        self.ee_addr, dauth_only=True, memo=memo):
       return 0
 
     index = self.__hset_index(hkey)
@@ -2254,7 +2400,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # One that would be stored is checked below, before the store. Only a dict counts as equal: the namespace
         # rules below read the value's fields, and a held value that is not a dict (from before the rule) raised there.
         same = isinstance(value, dict) and held.get(self.CS_VALUE) == value
-        if (value is None and ver is None) or not (same or self.__versioned_record(key, value)):
+        # The rule, with this merge's registry memo.
+        if (value is None and ver is None) or not (same or self.__versioned_record(key, value, memo)):
           continue
         if self.__stale_revision(key, value, snapshot=True):
           # The peer's copy is older than ours, or unversioned over a versioned record: a restart sync must not
@@ -2326,7 +2473,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           # Older than the held record by the order rule (or a future, unstamped or losing copy): skipped in 'on'; in
           # 'report' only counted, and applied below as in the previous release.
           continue
-        if same and not self.__versioned_record(key, value):
+        if same and not self.__versioned_record(key, value, memo):
           # An equal copy that is about to be stored (its owner, readonly mark or token differ from the held ones) was
           # not checked above: the signed-record rule runs now, on what would be stored, and a copy it refuses is
           # skipped. Before, such a copy was stored unchecked: a value equal for Python and of another text (5.0 for
@@ -2741,8 +2888,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     thread in between owns the key's entry). Other threads hold that lock for
     whole-store walks: a namespace sync's merge holds it for its whole answer,
     with one signature check per signed record whose value is not the one
-    held (about 3 ms each at 0.35 core, so 3 s for 1,000 records a replica
-    lacks), and the save holds it while it copies the replica;
+    held (3 to 4 ms each at 0.35 core: 3 to 5 s measured for 1,000 records a
+    replica lacks), and the save holds it while it copies the replica;
     a ``wait=False`` write waits for them as any write does.
 
     A write that leaves the replica as it was does not mark it for a save: a
@@ -2824,7 +2971,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (order switch 'on', or a re-send). An overwrite, a delete, a key of a
     protected namespace, a replication peer's store and a registry
     member's are never refused by it. The registries are read only for
-    such a store from a sender outside the replication peers.
+    such a store from a sender outside the replication peers: one
+    membership question per store, asked under the persistence lock. While
+    the block engine's copy of a registry has expired and its remote call
+    hangs, each such store holds the lock for that call (about 20 s), and
+    the sender counts as outside the registries.
 
     The order rule (``CSTORE_ORDER``, read once at start), after the
     namespace rules and before the token and readonly checks. 'off': no

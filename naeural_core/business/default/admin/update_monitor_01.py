@@ -187,7 +187,29 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     return False
 
   def __maybe_config_supervisor_restart_offset(self):
-    """Configures the restart offset for the supervisor node"""
+    """
+    Draw the running time after which a supervisor node restarts itself, and log it.
+
+    Only on a supervisor node. The offset is 36 hours plus a random number of seconds below 36 hours, so
+    supervisors that started together do not restart together. When the restart would fall within 30 minutes
+    of the end of the current epoch (compared by time of day), 3 hours are added. The offset is kept for
+    ``needs_forced_restart`` and logged in one line.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The line is logged at every start with the offset in force, shift included. Before, it was logged only
+    when the shift applied, so the offsets of a fleet could not be compared from the logs.
+
+    Examples
+    --------
+    >>> self.__maybe_config_supervisor_restart_offset()   # on_init()
+    >>> 36 * 3600 <= self.__restart_offset < 75 * 3600
+    True
+    """
     if not self.is_supervisor_node:
       return
     self.__restart_offset = 36 * 3600 + self.np.random.randint(0, 36 * 3600)  # 36 hours + random
@@ -199,8 +221,10 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
 
     if restart_time_normalized < upper_bound_normalized and restart_time_normalized > lower_bound_normalized:
       self.__restart_offset += 3 * 3600  # add 3 hours to the offset
-      self.P("Supervisor node restart offset configured to {} seconds".format(self.__restart_offset))
     # endif restart time is within the epoch bounds
+    # At every start and after the shift, so the logged value is the one that decides the restart; before,
+    # only a shifted offset was logged.
+    self.P("Supervisor node restart offset configured to {} seconds".format(self.__restart_offset))
     return
 
   def __get_config_startup_as_base64(

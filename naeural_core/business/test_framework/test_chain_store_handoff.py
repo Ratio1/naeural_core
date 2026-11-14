@@ -82,7 +82,7 @@ def sweep(store, at):
   store : _ChainStoreRuntimeHarness
     The writer.
   at : float
-    Seconds after ``NOW``; two sweeps must be at least ``CS_HANDOFF_INTERVAL`` apart.
+    Seconds after ``NOW``; a sweep less than ``CS_HANDOFF_INTERVAL`` after the last one does not run.
 
   Returns
   -------
@@ -267,8 +267,9 @@ class TestResends(unittest.TestCase):
     self.assertEqual((first, second), ([(["peer2"], KEY)], [(["peer1"], other)]))
 
   def test_the_window_per_peer_and_the_budget_per_sweep(self):
-    """At most 8 re-sends wait per peer (window_full counted for the others), 1 for a writer in neither registry, and
-    at most 32 re-sends go per sweep."""
+    """In 'on' at most 8 re-sends wait per peer (window_full counted for the others), 1 for a writer in neither
+    registry, and at most 32 re-sends go per sweep; a sweep 1 s after another does not run, and a re-send whose next
+    due time came leaves the window and goes again."""
     # An oracle writer with one peer and a worker writer with one peer, ten unconfirmed records each.
     for oracle, sent in ((True, 8), (False, 1)):
       # One sub-test each.
@@ -283,6 +284,14 @@ class TestResends(unittest.TestCase):
         # window, the others counted as held back.
         self.assertEqual((len(sweep(store, 310)), handoff_counts(store)),
                          (sent, {"handoff/send/peer1": sent, "handoff/window_full/peer1": 10 - sent}))
+        if oracle:
+          # 1 s later the sweep does not run: nothing sent, no count changes.
+          self.assertEqual((len(sweep(store, 311)), handoff_counts(store)),
+                           (0, {"handoff/send/peer1": 8, "handoff/window_full/peer1": 2}))
+          # At 610 s the 8 re-sends reached their next due time, so they leave the window and go again; the 2 held
+          # pairs still wait (the walk reaches records 0-7 first).
+          self.assertEqual((len(sweep(store, 610)), handoff_counts(store)),
+                           (8, {"handoff/send/peer1": 8, "handoff/resend/peer1": 8, "handoff/window_full/peer1": 4}))
     # An oracle writer with five peers and ten unconfirmed records: 50 pairs, 40 within the windows.
     store = writer("on", peers=tuple("peer" + str(n) for n in range(5)))
     # Ten writes.
@@ -293,6 +302,62 @@ class TestResends(unittest.TestCase):
     sweep(store, 310)
     # 32 first re-sends.
     self.assertEqual(sum(n for label, n in handoff_counts(store).items() if "/send/" in label), 32)
+
+  def test_report_counts_each_due_pair_without_a_window(self):
+    """In 'report', where nothing is answered, the window is not applied: ten due pairs to one peer are all counted
+    as first re-sends at their due time, none as window_full, and nothing is sent."""
+    # An oracle writer in 'report' with one peer.
+    store = writer("report", peers=("peer1",))
+    # Ten writes.
+    for n in range(10):
+      # Each unconfirmed.
+      local_write(store, _hset_key("players", str(n)), n)
+    # The sweep at 310 s, when all ten are due.
+    self.assertEqual((sweep(store, 310), handoff_counts(store)), ([], {"handoff/send/peer1": 10}))
+
+  def test_the_registry_is_read_only_for_a_due_pair_in_on(self):
+    """The window's registry read happens only in 'on', once per sweep, when a due pair reaches the window: a sweep
+    with nothing due reads no registry, and neither does any sweep in 'report'."""
+    # Per mode, the registry reads after each sweep.
+    reads = {}
+    # Each mode.
+    for mode in ("on", "report"):
+      # The writer.
+      store = writer(mode)
+      # Its oracle registry reads.
+      calls = []
+      # The oracle registry, counting each read.
+      store.bc.get_eth_oracles = lambda: calls.append(1) or ["node", "peer1", "peer2"]
+      # Its write, unconfirmed.
+      local_write(store, KEY, "v")
+      # A sweep with nothing due (15 s), then one with both pairs due (300 s).
+      for at in (15, 300):
+        # The sweep.
+        sweep(store, at)
+        # The reads so far.
+        reads.setdefault(mode, []).append(len(calls))
+    # 'on' read once, at the sweep with due pairs; 'report' never.
+    self.assertEqual(reads, {"on": [0, 1], "report": [0, 0]})
+
+  def test_report_counts_answered_only_for_a_confirmation_after_the_pair_fell_due(self):
+    """In 'report' a confirmation that arrives after a sweep saw the pair but before it fell due is not counted
+    answered; one that arrives after the pair fell due (a re-send 'on' would have wasted) is counted once."""
+    # The writer in 'report'.
+    store = writer("report")
+    # Its write, unconfirmed.
+    local_write(store, KEY, "v")
+    # A sweep at 15 s tracks both pairs, not yet due.
+    sweep(store, 15)
+    # peer1 confirms then, by stamp.
+    confirm(store, KEY, "peer1", ver=[NOW_MS, "node"])
+    # Nothing counted yet.
+    early = getattr(store, STATS).get(BUCKET + "/handoff/answered")
+    # At 300 s peer2's pair falls due ('report' sends nothing).
+    sweep(store, 300)
+    # peer2 confirms then, by stamp.
+    confirm(store, KEY, "peer2", ver=[NOW_MS, "node"])
+    # Only peer2's late confirmation is counted.
+    self.assertEqual((early, getattr(store, STATS).get(BUCKET + "/handoff/answered")), (None, 1))
 
   def test_a_confirmation_and_a_refusal_answer_each_settle_a_pair(self):
     """After the first re-send, peer1's confirmation (counted answered) and peer2's refusal answer each end their

@@ -519,8 +519,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     - a due pair of a dAuth secret record is skipped unless this node is a registry member and the peer a
       dAuth registry member, as the write itself requires;
     - a due pair that had ``CS_HANDOFF_MAX_SENDS`` (6) re-sends is given up (``handoff/gave_up/<peer>``);
-    - at most ``CSTORE_HANDOFF_WINDOW`` (8) re-sends wait for their next due time per peer (1 when this node
-      is in neither registry, a worker); a due pair beyond it waits (``handoff/window_full/<peer>``);
+    - in 'on' only, at most ``CSTORE_HANDOFF_WINDOW`` (8) re-sends wait for their next due time per peer (1 when
+      this node is in neither registry, a worker); a due pair beyond it waits (``handoff/window_full/<peer>``,
+      counted for each pair held back, at each sweep). The registry is read for it once per sweep, only when a due
+      pair of a reachable peer reaches this check, so a sweep with nothing to re-send reads no registry;
     - at most ``CS_HANDOFF_BUDGET`` (32) re-sends per sweep.
 
     A re-send counts ``handoff/send/<peer>`` (the first of its pair) or ``handoff/resend/<peer>``. A peer that
@@ -530,9 +532,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (re-confirm), as their copy may have died with it.
 
     - ``'off'``: nothing runs and nothing is kept.
-    - ``'report'``: everything above runs on an in-memory table only: no store is sent, no stored record
-      changes (a give-up, a widening and a re-confirm live in the table), so the counts are what 'on' would do
-      if no re-send were ever answered.
+    - ``'report'``: everything above but the window runs on an in-memory table only: no store is sent, no
+      stored record changes (a give-up, a widening and a re-confirm live in the table). No re-send is answered
+      here, and in 'on' a healthy peer frees its window within seconds, so each due pair is counted at its due
+      time, limited only by the budget per sweep, and a late real confirmation of a counted pair is
+      ``answered``.
     - ``'on'``: each record goes as one store to its due peers, with the record's own stamp (never a new one)
       and ``resend`` set; widening and re-confirm change the record's ``target_peers`` and
       ``confirmed_peers``, and a give-up adds the peer to ``confirmed_peers``.
@@ -578,9 +582,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The re-sends in flight per peer: pairs re-sent whose next due time has not come.
     flight = Counter(peer for _, pairs in table.values() for peer, (sends, due) in pairs.items()
                      if sends and due is not None and due > now)
-    # A writer in neither registry (a worker) keeps one re-send in flight per peer: some 50 workers with 8 each would
-    # land on an oracle as it restarts.
-    window = self.__handoff_window if self.__registry_member(self.ee_addr) else 1
+    # The re-send window per peer, read from the registry only when a due pair reaches its check in 'on' below, so a
+    # sweep with nothing to re-send reads no registry (with the registry cache expired, a hung RPC holds each read).
+    window = None
     # Peers checked this sweep (address -> may be sent to), the re-sends left to it, and the pairs left pending.
     reachable, budget, pending = {}, self.CS_HANDOFF_BUDGET, 0
     # Each record of a copy of the replica's items, read without the lock.
@@ -645,10 +649,17 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # In 'report' settled in the table only.
             pair[1] = None
           continue
-        if flight[peer] >= window:
-          # The window of this peer is full, counted per peer: it names a slow or deaf peer.
-          self.__cs_count("handoff/window_full/" + peer)
-          continue
+        if mode == "on":
+          if window is None:
+            # A writer in neither registry (a worker) keeps one re-send in flight per peer: some 50 workers with 8
+            # each would land on an oracle as it restarts. Read once per sweep, at the first pair that needs it.
+            window = self.__handoff_window if self.__registry_member(self.ee_addr) else 1
+          if flight[peer] >= window:
+            # The window of this peer is full, counted per peer: it names a slow or deaf peer. Only in 'on', where a
+            # healthy peer answers a re-send within seconds; in 'report' nothing is answered, so a window would hold
+            # a healthy peer's first sends back for hours.
+            self.__cs_count("handoff/window_full/" + peer)
+            continue
         if not budget:
           continue
         # One more re-send; the next is due after CSTORE_HANDOFF_FIRST_S doubled per earlier re-send, at most

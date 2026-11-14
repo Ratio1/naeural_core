@@ -432,16 +432,20 @@ answer, or the writer gave up; `confirmed_peers` holds the settled targets.
   node started, or when it left the replication peers since its last such message (it
   may come back on the previous release). A dAuth secret goes only to a target still in
   the dAuth registry.
-- At most `CSTORE_HANDOFF_WINDOW` (8) re-sends wait per peer (1 on a node in neither
-  registry, a worker), at most 32 re-sends per sweep.
+- In `on`, at most `CSTORE_HANDOFF_WINDOW` (8) re-sends wait per peer (1 on a node in
+  neither registry, a worker); the registry is read for it only when a due pair reaches
+  this check, so a sweep with nothing to re-send reads none. At most 32 re-sends per
+  sweep in both modes.
 - A peer that joins becomes a target of the own records meant for every default peer
   (not of secret records); a peer the refresh dropped as `LOST STATUS` and that comes
   back is unsettled on the records written at most 300 s before it was dropped. An
   orderly stop re-opens nothing.
 - `on`: each record goes as one `SSTORE` to its due peers with its own stamp and
   `resend: true`; widening, re-confirm and give-up change `target_peers` and
-  `confirmed_peers`. `report`: the same bookkeeping in memory only; nothing is sent and
-  no record changes. `off`: nothing runs. `on` needs `CSTORE_ORDER` `on` and
+  `confirmed_peers`. `report`: the same bookkeeping in memory only, without the window
+  (nothing is answered there, while in `on` a healthy peer frees its window within
+  seconds), so each due pair is counted at its due time; nothing is sent and no record
+  changes. `off`: nothing runs. `on` needs `CSTORE_ORDER` `on` and
   `CSTORE_TOMBSTONE_DAYS` above 0; otherwise the plugin does not start.
 
 A receiver admits a store that carries `resend` by the order rule of `on` in `report`
@@ -528,7 +532,7 @@ Labels in `counts`:
 - `<bucket>/<origin>/perm_readonly`, `<bucket>/<origin>/delete_foreign` (`CSTORE_ORDER` `report` or `on`): the write-permission count (above); counts only.
 - `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
-- `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and due pairs held back by the window, per target peer (in `report`, what `on` would do if no re-send were answered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
+- `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.

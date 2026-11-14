@@ -568,9 +568,14 @@ CSTORE_CENSUS {"hs:<hash>:":[<records>,<unstamped>,<tombstones>,<readonly>,<size
 - `digest`: 8 hex digits, the XOR over the live records of a 4-byte BLAKE2b hash of the
   key and the value's canonical JSON (for a record with a token, or in
   `DAUTH_JOB_SECRETS` or `DAUTH_JOB_SECRET_REVISIONS`, of the key and the stamp instead,
-  so no such value is hashed into the log). Replicas that hold the same live records
-  show the same digest whatever order the records arrived in; tombstones and the
-  bookkeeping fields (confirmations, peer lists, owner) are left out.
+  so no such value is hashed into the log; other values are, the tunnel secrets
+  included). Replicas that hold the same live records show the same digest whatever
+  order the records arrived in; tombstones and the bookkeeping fields (confirmations,
+  peer lists, owner) are left out. For records with a token and in the two dAuth secret
+  namespaces the digest compares keys and stamps only: two unstamped records (or two
+  with one stamp) show the same digest whatever their values, only `size` still reflects
+  the values, and an equal value whose stamp was raised on one replica shows a different
+  digest. Read digest and size together there.
 - `unencodable`: live records whose value cannot be put in canonical form (a type or a
   dict key no encoder takes, which the wire could not send either, as an old own record
   can hold); they are left out of `size` and `digest`, and the line is still written.

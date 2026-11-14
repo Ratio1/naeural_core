@@ -716,8 +716,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       wire's encoder and back first (numpy and datetime values, int dict keys), so a writer and its receivers
       give equal records the same text;
     - ``digest``: 8 hex digits, the XOR of a 4-byte BLAKE2b hash of each live record: of its key and its
-      value's canonical JSON, or, for a record with a token or in a dAuth secret namespace, of its key and its
-      stamp, so no value that needs a token or holds a secret is hashed into a log line;
+      value's canonical JSON, or, for a record with a token or in ``DAUTH_JOB_SECRETS`` or
+      ``DAUTH_JOB_SECRET_REVISIONS``, of its key and its stamp, so no value of those records is hashed into a log
+      line (other values are, the tunnel secrets included). For those records the digest compares keys and
+      stamps only: two unstamped records, or two with the same stamp, give the same digest whatever their
+      values (only ``size`` still reflects the values), and an equal value whose stamp was raised on one
+      replica gives a different digest;
     - ``unencodable``: live records whose value cannot be put in canonical form (a type or a dict key no encoder
       takes, which the wire could not send either, as an old own record can hold): counted here and left out of
       ``size`` and ``digest``, so the line is still written.
@@ -787,7 +791,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         continue
       # Its size.
       row[4] += len(text)
-      # The hashed text: the key and the value, or the key and the stamp for a record behind a token or a secret.
+      # The hashed text: the key and the value, or the key and the stamp for a record with a token or in a dAuth
+      # secret namespace.
       hashed = name + "\0" + (
         # The token read through its getter, as an older record shape has none.
         str(record.get(self.CS_VER)) if self.__get_key_token(key) is not None or name[:14] in secrets else text)

@@ -102,30 +102,44 @@ class TestCensus(unittest.TestCase):
                      (True, two["plain"], two[PLAYERS][:5]))
 
   def test_the_line_shows_no_key_and_no_value_and_hashes_no_secret_or_token_value(self):
-    """The line holds no key, field name or value; the digest of a dAuth secret record and of a record with a token
-    does not change with the value (it hashes the key and the stamp), while that of an ordinary record does."""
-    # A dAuth secret, a record with a token, and an ordinary record, each with a recognisable value.
+    """The line holds no key, field name or value; the digest of a record in either dAuth secret namespace and of a
+    record with a token does not change with the value but changes with the stamp (it hashes the key and the
+    stamp), while that of an ordinary record changes with the value."""
+    # A dAuth secret, a secret revision, a record with a token, and an ordinary record, each with a recognisable value.
     secret, ordinary = _hset_key("DAUTH_JOB_SECRETS", "7"), _hset_key("players", "visible-field")
+    # A dAuth secret revision, whose value must not be hashed either.
+    revision = _hset_key("DAUTH_JOB_SECRET_REVISIONS", "7|1")
     # The replica.
     store = make("report", storage={
       secret: record(secret, {"job_secrets": {"TOKEN": "super-secret"}}, "oracle", [NOW_MS, "oracle"]),
+      revision: record(revision, {"job_secrets": {"TOKEN": "rev-secret"}}, "oracle", [NOW_MS, "oracle"]),
       "tok-key": {**record("tok-key", "token-guarded", "peer1", [NOW_MS, "peer1"]), "token": "t"},
       ordinary: record(ordinary, "plain-visible", "peer1", [NOW_MS, "peer1"]),
     })
     # The line.
     rows, line = census(store)
     # None of the keys, decoded field names or values appears in it.
-    self.assertEqual([text for text in (secret, "tok-key", ordinary, "visible-field", "super-secret", "token-guarded",
-                                        "plain-visible", "TOKEN") if text in line], [])
+    self.assertEqual([text for text in (secret, revision, "tok-key", ordinary, "visible-field", "super-secret",
+                                        "rev-secret", "token-guarded", "plain-visible", "TOKEN") if text in line], [])
     # Every value changed, the stamps kept.
-    for key, value in ((secret, {"job_secrets": {"TOKEN": "other"}}), ("tok-key", "other"), (ordinary, "other")):
+    for key, value in ((secret, {"job_secrets": {"TOKEN": "other"}}), (revision, {"job_secrets": {"TOKEN": "other"}}),
+                       ("tok-key", "other"), (ordinary, "other")):
       # The new value.
       store.storage[key]["value"] = value
     # The new rows.
     again = census(store)[0]
-    # The secret's and the token record's digests kept; the ordinary record's changed.
-    self.assertEqual([rows[bucket][5] == again[bucket][5] for bucket in (secret[:14], "plain", ordinary[:14])],
-                     [True, True, False])
+    # The secrets' and the token record's digests kept; the ordinary record's changed.
+    self.assertEqual([rows[bucket][5] == again[bucket][5]
+                      for bucket in (secret[:14], revision[:14], "plain", ordinary[:14])], [True, True, True, False])
+    # Then the stamps of the secrets and the token record raised, their values kept.
+    for key in (secret, revision, "tok-key"):
+      # A newer stamp.
+      store.storage[key]["ver"] = [NOW_MS + 5, "oracle"]
+    # The rows after it.
+    third = census(store)[0]
+    # Their digests change: the stamp is hashed.
+    self.assertEqual([again[bucket][5] != third[bucket][5] for bucket in (secret[:14], revision[:14], "plain")],
+                     [True, True, True])
 
   def test_a_writer_and_its_receivers_give_equal_records_the_same_row(self):
     """A writer's own values with int dict keys, mixed int and str keys, numpy numbers or a datetime give the same

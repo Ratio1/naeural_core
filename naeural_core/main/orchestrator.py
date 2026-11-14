@@ -77,6 +77,9 @@ CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle ch
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
 RUNTIME_SECRET_RESOLVER_POLL_SECONDS = 0.25
 RUNTIME_SECRET_RETRY_MAX_SECONDS = 30
+# Longest wait, in seconds, before a pipeline's dAuth secret request is sent again after a ValueError: dAuth
+# refused it for good, or its answer or bundle cannot be accepted as it is. Any other failure keeps the 30 s above.
+RUNTIME_SECRET_REFUSED_RETRY_MAX_SECONDS = 300
 RUNTIME_SECRET_REQUEST_TIMEOUT = (5, 20)
 RUNTIME_SECRET_REQUEST_DEADLINE_SECONDS = 25
 RUNTIME_SECRET_SHUTDOWN_JOIN_SECONDS = 2
@@ -1210,6 +1213,16 @@ class Orchestrator(DecentrAIObject,
     ``EE_*`` variable changed at runtime is picked up by the next full pass (a pipeline change or pending
     work), not within 0.25 s.
 
+    The retry wait doubles from 1 s. It stops at ``RUNTIME_SECRET_RETRY_MAX_SECONDS`` (30 s) for a failure
+    that can pass by itself (an unavailable service, a timeout) and at
+    ``RUNTIME_SECRET_REFUSED_RETRY_MAX_SECONDS`` (300 s) for a ``ValueError``. That is a request dAuth refused
+    as not retryable, and also every answer that cannot be used as it is: an HTTP 401 or 403, a text that is
+    not valid JSON, a signature that is not valid or not a registered oracle's, a nonce that does not match, a
+    refusal without retryability information, or a bundle that does not fit the pipeline. Before, such a
+    request was sent again every 30 s for good, per withheld pipeline. A changed pipeline or a node restart
+    asks again at once; a pipeline whose refusal came from a passing fault on the answering side recovers
+    at most 300 s after the fault ends.
+
     Examples
     --------
     >>> eng._resolve_runtime_streams_once()   # new dict holding one pipeline whose secrets resolve
@@ -1287,8 +1300,14 @@ class Orchestrator(DecentrAIObject,
           if current_pipeline != pipeline_config:
             continue
           attempt = retry_state.get("attempt", 0) + 1
-          exponent = min(attempt - 1, 5)
-          delay = min(2 ** exponent, RUNTIME_SECRET_RETRY_MAX_SECONDS)
+          # A ValueError is a refusal dAuth marked as not retryable, an answer that is not authorized or not
+          # valid, or a bundle that does not fit the pipeline: the same request gets the same result, so its
+          # wait keeps doubling up to 300 s. Before, it was sent again every 30 s for good.
+          refused = isinstance(exc, ValueError)
+          # Doubling up to 2**10 s, above both limits; it was 2**5, just above the 30 s limit.
+          exponent = min(attempt - 1, 10)
+          # 1, 2, 4 ... s up to the limit of the failure's kind: 300 s after a refusal, 30 s after any other.
+          delay = min(2 ** exponent, RUNTIME_SECRET_REFUSED_RETRY_MAX_SECONDS if refused else RUNTIME_SECRET_RETRY_MAX_SECONDS)
           failure_time = now if fixed_now else time()
           self._runtime_secret_retry_state[cache_key] = {
             "attempt": attempt,
@@ -1304,6 +1323,9 @@ class Orchestrator(DecentrAIObject,
           if isinstance(exc, RuntimeSecretResolutionError)
           else type(exc).__name__
         )
+        if refused:
+          # The line says why this pipeline's retries slow down: the type name alone does not.
+          error_detail += " (refused by dAuth, or an answer that cannot be used)"
         self.P(
           "Withholding pipeline '{}' while dAuth secrets are unresolved "
           "(job {}, retry in {}s): {}".format(

@@ -401,6 +401,12 @@ class NetMon01Plugin(
     SerializationManager, which runs it on a thread kept for this save alone, every ``SAVE_NMON_SECONDS``
     on an oracle (300 s on any other node) and once more at the start of a clean stop's close. One save used to
     stop this thread for 1.5-1.9 s on an idle node and 6.1-6.3 s on a busy one (20 MB at 0.7 CPU).
+
+    Examples
+    --------
+    >>> payload = self._process()   # the plugin's loop, at each iteration
+    >>> payload is None             # the sending period has not passed, or this node does not send
+    True
     """
     payload = None
     self.netmon.epoch_manager.maybe_update_cached_data()

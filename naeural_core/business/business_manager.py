@@ -1,5 +1,4 @@
 import json
-import gc
 import os
 import sys
 
@@ -7,7 +6,8 @@ import traceback
 
 from collections import OrderedDict
 
-from time import time, sleep, perf_counter
+# No sleep any more: its one use was the pause after each plugin stop.
+from time import time, perf_counter
 from threading import Event, Lock, Thread
 from queue import Queue, Empty, Full
 from copy import deepcopy
@@ -1025,6 +1025,20 @@ class BusinessManager(Manager):
     -------
     bool
         True only when this instance can be removed from runtime tracking.
+
+    Notes
+    -----
+    Nothing follows the removal. Before, each stop ended with a 0.1 s sleep and a full ``gc.collect()``. The
+    collection held the interpreter for one to several seconds on a node with a large heap, for every thread
+    of the node, and it could not free the plugin it followed, which the caller still holds; at a close that
+    stops 15-20 plugins these pauses added up to most of the close (read from the gaps in the close log; the
+    collection itself was not timed). The automatic collector reclaims the stopped plugin's cycles later, as
+    it does for every other object.
+
+    Examples
+    --------
+    >>> self._stop_plugin(instance_hash)   # forced stop: thread joined, instance removed
+    True
     """
     plugin = self._dct_current_instances[instance_hash]
 
@@ -1044,9 +1058,6 @@ class BusinessManager(Manager):
     plugin = self._dct_current_instances.pop(instance_hash)
     self._dct_stop_timings.pop(instance_hash, None)
     del plugin
-  
-    sleep(0.1)
-    gc.collect()
     return True
 
   def maybe_stop_finished_plugins(self):

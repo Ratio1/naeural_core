@@ -2,6 +2,8 @@
 
 # The plugins' input queues, the heartbeat queue and the graceful-stop counters.
 from collections import defaultdict, deque
+# The collector, whose full collection is watched.
+import gc
 # The helper thread that plays the heartbeat communicator.
 import threading
 # Timing of the wait.
@@ -15,7 +17,7 @@ from unittest import mock
 
 # The admin pipeline's name and the communicator names.
 from naeural_core import constants as ct
-# The module whose sleep is watched, and the manager under test.
+# The module of the manager under test.
 from naeural_core.business import business_manager as business_manager_module
 # The manager that owns the heartbeat communicator.
 from naeural_core.comm.communication_manager import CommunicationManager
@@ -146,14 +148,36 @@ class TestPluginCloseOrder(unittest.TestCase):
     ])
     # The special instance the manager already stops before every other one.
     manager._BusinessManager__dauth_hash = 'dauth'
-    # The per-stop pause of the manager is not part of this test.
-    with mock.patch.object(business_manager_module, "sleep"):
-      # The orderly close of all plugins.
-      manager.close()
+    # The orderly close of all plugins.
+    manager.close()
     # dAuth first as before, then the two instances outside the admin pipeline, then the admin plugins.
     self.assertEqual(stopped, ['dauth', 'app1', 'app2', 'adm1', 'adm2'])
     # Every instance was removed.
     self.assertEqual(manager._dct_current_instances, {})
+
+  def test_a_plugin_stop_runs_no_full_collection_and_no_pause(self):
+    """Stopping plugins, at the close or one at a time while the node runs, calls no gc.collect() and does not sleep."""
+    # Ten admin plugins, about the number a node closes.
+    manager, stopped = _manager([('adm%d' % index, ct.CONST_ADMIN_PIPELINE_NAME) for index in range(10)])
+    # No special instance in this test.
+    manager._BusinessManager__dauth_hash = None
+    # Watch the collector for the whole test.
+    with mock.patch.object(gc, "collect") as collect:
+      # Time the stops: the pause that followed each one was 0.1 s, so ten took at least a second.
+      started = time.time()
+      # One plugin stopped while the node runs (its pipeline was removed).
+      manager._send_stop_signal_to_plugin('adm0', forced=True)
+      # The other nine at the node's close.
+      manager.close()
+      # Seconds all ten stops needed.
+      elapsed = time.time() - started
+    # All ten were stopped.
+    self.assertEqual(len(stopped), 10)
+    # No full collection after a stop: it froze every thread of the node for seconds and freed nothing of the
+    # plugin just stopped, which its caller still holds.
+    collect.assert_not_called()
+    # No fixed pause after a stop either.
+    self.assertLess(elapsed, 0.5)
 
 
 class TestShutdownHeartbeatWait(unittest.TestCase):

@@ -293,6 +293,44 @@ class TestSizeCap(unittest.TestCase):
         self.assertEqual((getattr(store, MERGE)("players", {KEY: record(KEY, "x" * 600_000, "peer1")}),
                           getattr(store, STATS)), (0, {}))
 
+  def test_a_peers_store_is_measured_as_the_record_it_would_be_stored_as(self):
+    """A signed operation whose store names an owner of 600,000 characters is stored and confirmed, in every mode:
+    the namespace rule stores the coordinator as its owner, and the record is measured with the owner, readonly
+    mark and token it is stored with, not with those its sender gave."""
+    # Each mode: the cap has no switch.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A replica whose peers hold the coordinator "oracle", an oracle registry member.
+        store = node(mode, peers=("peer1", "oracle"), signed=True)
+        # A signed operation, as its coordinator stores it.
+        key, held = operation("x", 1)
+        # Its store, naming an owner over the cap: applied and confirmed.
+        self.assertEqual(answers(deliver(store, key, held["value"], "oracle", None if mode == "off" else [NOW_MS, "oracle"],
+                                         owner="o" * 600_000)), ["confirm"])
+        # Stored with the coordinator as owner, and nothing refused.
+        self.assertEqual((store.storage[key]["owner"], [label for label in getattr(store, STATS) if "refused" in label]),
+                         ("oracle", []))
+
+  def test_a_hand_off_re_send_over_the_cap_is_refused(self):
+    """A store that carries the hand-off's re-send mark and a record over the cap is not stored, in every mode;
+    where stamps are read ('report' and 'on') it is answered with the word too_large, as any refused re-send."""
+    # Each mode.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A replica.
+        store = node(mode)
+        # A stamped re-send of a record over the cap, as the payload handler passes it.
+        store._ChainStoreBasePlugin__exec_store({"key": KEY, "value": "x" * 600_000, "owner": "peer1",
+                                                 "ver": [NOW_MS, "peer1"], "resend": True}, peers="peer1")
+        # Not stored; answered to its sender with the word, except in 'off', which reads no stamp.
+        self.assertEqual((KEY in store.storage, answers([sent["data"][store.CS_DATA] for sent in store.sent_payloads])),
+                         (False, [] if mode == "off" else ["too_large"]))
+        # Counted once under its word.
+        self.assertEqual(getattr(store, STATS), {BUCKET + "/remote/refused_too_large": 1})
+
+
 class TestUnencodable(unittest.TestCase):
   """A record the wire's encoder or UTF-8 cannot take is refused wherever a record is stored, under its own word."""
 
@@ -383,9 +421,10 @@ class TestNewKeysPerSender(unittest.TestCase):
         self.assertEqual((len(deliver(store, KEY, "v", "peer2", stamp("peer2"))), reads), (1, []))
         # A registry member outside the replication peers creates a key: applied, not counted.
         self.assertEqual(len(deliver(store, _hset_key("players", "o"), "v", "oracle", stamp("oracle"))), 1)
-        # A sender outside both creates two keys: applied.
-        self.assertEqual([len(deliver(store, _hset_key("players", name), "v", "worker", stamp("worker")))
-                          for name in ("w1", "w2")], [1, 1])
+        # A sender outside both creates two keys: applied. Its stores name another owner, a replication peer: the
+        # count below goes by the verified sender, not by a field the sender chooses.
+        self.assertEqual([len(deliver(store, _hset_key("players", name), "v", "worker", stamp("worker"),
+                                      owner="peer2")) for name in ("w1", "w2")], [1, 1])
         # It overwrites one, deletes it, sends a record over the cap to a new key and deletes a key not held: none is
         # a new key stored.
         for name, value, ms in (("w1", "w", 1), ("w1", None, 2), ("w3", "x" * 600_000, 3), ("w4", None, 4)):

@@ -305,6 +305,12 @@ class TestResyncRequests(unittest.TestCase):
         lap(store, 0)
         # The next one is due after the stretched gap.
         self.assertAlmostEqual(getattr(store, NEXT) - NOW, wait, places=3)
+        # The turn of the round's last namespace.
+        setattr(store, TURN, 4)
+        # Its request, at the lap it is due: the round ends.
+        lap(store, wait)
+        # The pause to the next round is stretched by the same factor: 30 gaps long, so 30 times that wait.
+        self.assertAlmostEqual(getattr(store, NEXT) - NOW - wait, 30 * wait, places=3)
 
   def test_a_request_is_a_plain_sync_request_to_two_members_picked_among_the_peers(self):
     """The request is the namespace sync's own message (op, request id, hkey) sent to exactly two registry members
@@ -314,8 +320,15 @@ class TestResyncRequests(unittest.TestCase):
     store = oracle("report", peers=("peer1", "oracle", "oracle2", "oracle3", "peer2"))
     # Two more oracles in the registry.
     store.bc.get_eth_oracles = lambda: ["oracle", "oracle2", "oracle3"]
-    # The first lap's requests.
-    sent = lap(store, 5)
+    # The picks asked of the random sampler: whom among, and how many.
+    picks = []
+    # A sampler that records what it is asked and picks the last ones, so not simply the first two.
+    with mock.patch.dict(GLOBALS, {"sample": lambda members, count: picks.append((list(members), count))
+                                   or members[-count:]}):
+      # The first lap's requests.
+      sent = lap(store, 5)
+    # Two are picked among the four members, and the request goes to the ones picked.
+    self.assertEqual((picks, sent[0][0]), ([(["peer1", "oracle", "oracle2", "oracle3"], 2)], ["oracle2", "oracle3"]))
     # One message, to two distinct members, none of them the outsider.
     self.assertEqual((len(sent), len(set(sent[0][0])), set(sent[0][0]) <= {"peer1", "oracle", "oracle2", "oracle3"}),
                      (1, 2, True))
@@ -476,6 +489,35 @@ class TestResyncAnswers(unittest.TestCase):
                          ["DEEPLOY_DEPLOYED_JOBS"])
         # Job 7 arrived; job 8 did not come back; job 9 is still held.
         self.assertEqual(sorted(store.storage), sorted([job7, job9]))
+
+  def test_a_record_of_the_job_secrets_without_its_signed_revision_is_not_taken(self):
+    """From a resync answer of DAUTH_JOB_SECRETS a record signed with a deployment revision is merged; a record of
+    the old form, without one, that the node does not hold is not taken, although the merge's own rule would take
+    it while nothing versioned is held."""
+    # The secrets of job 7 (old form) and of job 8 (versioned).
+    old_form, versioned = (_hset_key("DAUTH_JOB_SECRETS", name) for name in ("7", "8"))
+    # Each mode in which a store resyncs with stamps read.
+    for mode in ("report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A network that delivers at once.
+        network = _FakeNetwork()
+        # "peer1", a dAuth member, holds both: the versioned one signed by the coordinator "oracle" and published
+        # by "peer1" itself.
+        oracle(mode, "peer1", ("node",), {
+          old_form: record(old_form, {"job_id": "7", "secrets": "old form"}, "peer1"),
+          versioned: record(versioned, {"job_id": "8", "deployment_revision": 1, "operation_id": "op",
+                                        "coordinator": "oracle", "EE_SENDER": "peer1", "EE_SIGN": "valid"}, "oracle"),
+        }, network)
+        # The node, a dAuth member too, holds neither.
+        store = oracle(mode, peers=("peer1",), network=network)
+        # The fourth namespace's turn.
+        setattr(store, TURN, 3)
+        # Its request, answered within the lap.
+        self.assertEqual([body["hkey"] for _, body in lap(store, 0) if body["op"] == "SHSYNC_REQ"],
+                         ["DAUTH_JOB_SECRETS"])
+        # Only the versioned record arrived.
+        self.assertEqual(sorted(store.storage), [versioned])
 
   def test_the_key_rotations_which_carry_no_signed_field_are_merged_under_their_own_rule(self):
     """A resync answer of NODE_KEY_ROTATIONS, whose values have no sequence or revision, is not filtered by a signed
@@ -721,7 +763,18 @@ class TestResyncStart(unittest.TestCase):
   """on_init leaves the resync ready for the first lap that finds a peer."""
 
   def setUp(self):
-    """Give the test an empty data folder and a SerializationManager that takes the registration."""
+    """
+    Give the test an empty data folder and a SerializationManager that takes the registration.
+
+    The real ``on_init`` reads the replica from a cache folder under the node's data folder and registers its
+    periodic save with ``SerializationManager.instance``. This makes a temporary data folder with the store's
+    cache folder in it, kept as ``self.data_folder``, and puts a manager in place that takes the registration
+    and runs nothing. Both are undone after the test.
+
+    Returns
+    -------
+    None
+    """
     # A data folder removed after the test.
     folder = tempfile.TemporaryDirectory()
     # Removed after the test.
@@ -738,7 +791,9 @@ class TestResyncStart(unittest.TestCase):
     self.addCleanup(setattr, SerializationManager, "instance", previous)
 
   def test_a_started_oracle_asks_at_the_first_lap_that_finds_a_peer(self):
-    """After on_init the first process() lap whose peer refresh finds a registry member sends the first request."""
+    """After on_init a process() lap with no peer yet asks nothing, and the first lap whose peer refresh finds a
+    registry member, one minute after the start, sends the first request at once: the start leaves the resync
+    due, not one or two gaps away."""
     # A store started by the real on_init, with the signed store's registry and a whitelist of one dAuth member.
     store = _StartHarness(self.data_folder)
     # The registry of the signed store, and the whitelist the peer refresh reads.
@@ -746,21 +801,19 @@ class TestResyncStart(unittest.TestCase):
       node_address_to_eth_address=lambda address: address, get_eth_dauth_oracles=lambda: ["node", "peer1"],
       get_eth_oracles=lambda: ["oracle"], get_whitelist=_WhitelistBlockEngine(["node", "peer1"]).get_whitelist,
     )
-    # NetMon reports no peer running yet.
-    store.netmon = _SummaryControlNetmon(online_for_control=set())
-    # The start: its refresh finds no peer.
+    # NetMon reports the peer running.
+    store.netmon = _SummaryControlNetmon(online_for_control={"peer1"})
+    # The start: no peer refresh is due yet, so the store has no peer.
     store.on_init()
-    # A first lap, 61 s later (a refresh is due): still no peer, nothing asked.
-    store._now = 61
+    # A first lap, 30 s later: still before the first refresh, no peer, nothing asked.
+    store._now = 30
     # That lap.
     store.process()
     # Nothing sent.
     self.assertEqual(store.sent_payloads, [])
-    # The peer is reported running; the next refresh, a minute later, finds it.
-    store.netmon = _SummaryControlNetmon(online_for_control={"peer1"})
-    # The lap of that refresh.
-    store._now = 122
-    # It asks.
+    # The lap of the first refresh, 61 s after the start, which finds the peer.
+    store._now = 61
+    # It asks at once.
     store.process()
     # The first namespace, of that peer.
     self.assertEqual([(sent["node_addr"], sent["data"]["CHAIN_STORE_DATA"]["hkey"]) for sent in store.sent_payloads],

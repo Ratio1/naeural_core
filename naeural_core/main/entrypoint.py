@@ -521,7 +521,9 @@ def main(additional_packages: list = None):
   Orchestrator. With the lock held it runs the main loop; without it (another local node with the same id
   is running) it forces a shutdown. The Orchestrator is published to the SIGTERM handler as soon as it
   exists, so a SIGTERM from then on asks the node to stop (the normal SHUTDOWN path; during start-up the
-  dAuth wait ends and the main loop is not entered) instead of raising ``KeyboardInterrupt``.
+  dAuth wait ends and the main loop is not entered) instead of raising ``KeyboardInterrupt``. Before it
+  returns, on the normal and on the exception path, it has the logger write out the lines it still holds
+  in memory.
 
   Parameters
   ----------
@@ -546,6 +548,14 @@ def main(additional_packages: list = None):
     swallow it, as it would a Ctrl+C.
   ValueError
     When called outside the main thread: ``stop_on_sigterm`` cannot install the SIGTERM handler there.
+
+  Notes
+  -----
+  The logger writes on a background thread and hands it ordinary lines only after a quiet second or a
+  hundred lines; its drain at exit is an exit hook. The node's launcher ends the process with ``os._exit``
+  right after this function returns, which runs no exit hook, so the closing lines of every orderly exit
+  (the timers, the "main loop exits" line) and the traceback of a start that raised never reached the log
+  file. The drain here waits for the writer for at most 5 s.
 
   Examples
   --------
@@ -653,5 +663,8 @@ def main(additional_packages: list = None):
     l.P("Execution Engine exiting with post-exception code: {}".format(ct.CODE_EXCEPTION), color='r')
     exit_code = ct.CODE_EXCEPTION
   #endtry main loop startup
+  # Write out the log lines still held in memory, on both paths above: the caller ends the process with
+  # os._exit, which skips the logger's exit hook, and the closing lines were lost at every exit.
+  l._shutdown_log_writer()
   return exit_code, eng
   

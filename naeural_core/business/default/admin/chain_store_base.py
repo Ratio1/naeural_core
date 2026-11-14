@@ -707,15 +707,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     One line, one JSON object with sorted keys, a row per bucket (the first 14 characters of an ``hs:`` key, the
     prefix of one hash namespace, or ``plain``)::
 
-      CSTORE_CENSUS {"hs:<hash>:":[records,unstamped,tombstones,readonly,size,"digest"],"plain":[...]}
+      CSTORE_CENSUS {"hs:<hash>:":[records,unstamped,tombstones,readonly,size,"digest",unencodable],"plain":[...]}
 
     - ``records``: live records (a tombstone is not one); ``unstamped``: those without a stamp (written before
       stamps, or by a node of the previous release); ``readonly``: those marked readonly;
     - ``tombstones``: the tombstones of deleted keys, counted in the bucket of the key they deleted;
-    - ``size``: the characters of the live values' canonical JSON (sorted keys);
+    - ``size``: the characters of the live values' canonical JSON (sorted keys), made from each value as the
+      wire delivers it: a copy from a peer is already in that form, and this node's own record goes through the
+      wire's encoder and back first (numpy and datetime values, int dict keys), so a writer and its receivers
+      give equal records the same text;
     - ``digest``: 8 hex digits, the XOR of a 4-byte BLAKE2b hash of each live record: of its key and its
       value's canonical JSON, or, for a record with a token or in a dAuth secret namespace, of its key and its
-      stamp, so no value that needs a token or holds a secret is hashed into a log line.
+      stamp, so no value that needs a token or holds a secret is hashed into a log line;
+    - ``unencodable``: live records whose value cannot be put in canonical form (a type or a dict key no encoder
+      takes, which the wire could not send either, as an old own record can hold): counted here and left out of
+      ``size`` and ``digest``, so the line is still written.
 
     Two replicas that hold the same live records give the same row whatever order the records arrived in and
     whatever their bookkeeping fields (confirmations, peer lists, owner); tombstones, which each node sweeps on
@@ -726,26 +732,28 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -------
     None
 
-    Raises
-    ------
-    TypeError
-      When a value cannot be encoded as JSON (only that hour's line is lost: the plugin loop logs the raise).
-
     Notes
     -----
     Runs on the plugin thread from ``process``, after the first ``CSTORE_STATS`` line and every
     ``CS_CENSUS_EVERY``-th one. It walks a list copy of the replica's items without the persistence lock: records
     are replaced, not changed in value, so each one read is a whole record. The line holds counts, sizes and
-    digests only: no key and no value. Cost: one JSON encoding and one hash per live record, once an hour.
+    digests only: no key and no value. Cost: one JSON encoding and one hash per live record, and the wire
+    encoder's round trip for each own record, once an hour.
+
+    It does not raise on what a replica can hold: a record of an older shape (no ``readonly`` or ``token``
+    field) is read through the record getters, a key decoded from a JSON escape that holds a lone surrogate is
+    hashed as it is, and a value that cannot be encoded is counted as ``unencodable``. Before, any of these
+    raised out of ``process`` at every census, and the plugin loop's exception back-off grew with each raise.
 
     Examples
     --------
     >>> self.__log_census()
-    CSTORE_CENSUS {"hs:afc0d772a2:":[2,0,1,0,6,"5c1d02a9"],"plain":[1,1,0,0,3,"0e7f3b10"]}
+    CSTORE_CENSUS {"hs:afc0d772a2:":[2,0,1,0,6,"5c1d02a9",0],"plain":[1,1,0,0,3,"0e7f3b10",0]}
     """
     # The bucket prefixes of the two dAuth secret namespaces, whose values are not hashed.
     secrets = {self.__hset_index(name) for name in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS")}
-    # Per bucket: records, unstamped, tombstones, readonly, size, digest (an int).
+    # Per bucket: records, unstamped, tombstones, readonly, size, digest (an int), and the records left out of the size
+    # and the digest because their value cannot be put in canonical form.
     rows = {}
     # Each record of a copy of the replica's items, read without the lock.
     for key, record in list(self.__chain_storage.items()):
@@ -756,24 +764,39 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       if name.startswith("hs:") and name[13:14] != ":":
         continue
       # Its bucket's row.
-      row = rows.setdefault(name[:14] if name.startswith("hs:") else "plain", [0, 0, 0, 0, 0, 0])
+      row = rows.setdefault(name[:14] if name.startswith("hs:") else "plain", [0, 0, 0, 0, 0, 0, 0])
       if tomb:
         # One more tombstone; not in the digest.
         row[2] += 1
         continue
-      # The value's canonical JSON.
-      text = json.dumps(record[self.CS_VALUE], sort_keys=True)
-      # One more record, unstamped or not, readonly or not, and its size.
-      row[0], row[1], row[3], row[4] = (row[0] + 1, row[1] + (record.get(self.CS_VER) is None),
-                                        row[3] + bool(record[self.CS_READONLY]), row[4] + len(text))
+      # One more record, unstamped or not, readonly or not (read through the getters, as an older record shape has
+      # no readonly or token field).
+      row[0], row[1], row[3] = (row[0] + 1, row[1] + (record.get(self.CS_VER) is None),
+                                row[3] + bool(self.__get_key_readonly(key)))
+      try:
+        # The value's canonical JSON, made from the value as its receivers hold it: a copy from a peer (confirms -1)
+        # is already in the wire's form, and this node's own record goes through the wire's encoder (unsorted: the
+        # sort is done once, here) and back first (numpy and datetime values, int dict keys), so a writer and its
+        # receivers give equal records one text.
+        text = json.dumps(record[self.CS_VALUE] if self.__get_key_confirmations(key) == -1 else
+                          self.json_loads(self.json_dumps(record[self.CS_VALUE], sort_keys=False)), sort_keys=True)
+      except (TypeError, ValueError, RecursionError):
+        # A value of a type or with a dict key no encoder takes (the wire could not send it either), as an old own
+        # record can hold: counted in the last column and left out of the size and the digest; the line is written.
+        row[6] += 1
+        continue
+      # Its size.
+      row[4] += len(text)
       # The hashed text: the key and the value, or the key and the stamp for a record behind a token or a secret.
       hashed = name + "\0" + (
-        str(record.get(self.CS_VER)) if record[self.CS_TOKEN] is not None or name[:14] in secrets else text)
-      # XOR-ed into the digest, which makes it independent of the records' order.
-      row[5] ^= int.from_bytes(hashlib.blake2b(hashed.encode(), digest_size=4).digest(), "big")
-    # One line, sorted keys, the digest as 8 hex digits.
+        # The token read through its getter, as an older record shape has none.
+        str(record.get(self.CS_VER)) if self.__get_key_token(key) is not None or name[:14] in secrets else text)
+      # XOR-ed into the digest, which makes it independent of the records' order; a key decoded from a JSON escape
+      # can hold a lone surrogate, which strict UTF-8 refuses, so it is encoded as is (other keys give the same bytes).
+      row[5] ^= int.from_bytes(hashlib.blake2b(hashed.encode("utf-8", "surrogatepass"), digest_size=4).digest(), "big")
+    # One line, sorted keys, the digest as 8 hex digits, then the count of records left out of it.
     self.P("CSTORE_CENSUS " + self.json_dumps(
-      {bucket: row[:5] + ["{:08x}".format(row[5])] for bucket, row in rows.items()}, sort_keys=True))
+      {bucket: row[:5] + ["{:08x}".format(row[5]), row[6]] for bucket, row in rows.items()}, sort_keys=True))
 
 
   def __netmon_node_is_online_for_control(self, peer):

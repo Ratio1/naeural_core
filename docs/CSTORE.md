@@ -553,24 +553,34 @@ followed by one `CSTORE_CENSUS` line, a JSON object with sorted keys and one row
 bucket:
 
 ```text
-CSTORE_CENSUS {"hs:<hash>:":[<records>,<unstamped>,<tombstones>,<readonly>,<size>,"<digest>"],"plain":[...]}
+CSTORE_CENSUS {"hs:<hash>:":[<records>,<unstamped>,<tombstones>,<readonly>,<size>,"<digest>",<unencodable>],"plain":[...]}
 ```
 
 - `records`: live records; `unstamped`: those without a stamp (written before stamps or
   by a node of the previous release); `readonly`: those marked readonly.
 - `tombstones`: tombstones of deleted keys, in the bucket of the key they deleted.
-- `size`: characters of the live values' canonical JSON (sorted keys).
+- `size`: characters of the live values' canonical JSON (sorted keys), made from each
+  value as the wire delivers it: a copy from a peer already is, and the node's own record
+  goes through the wire's encoder and back first (numpy and datetime values, int dict
+  keys), so a writer and its receivers give equal records the same text.
 - `digest`: 8 hex digits, the XOR over the live records of a 4-byte BLAKE2b hash of the
   key and the value's canonical JSON (for a record with a token, or in
   `DAUTH_JOB_SECRETS` or `DAUTH_JOB_SECRET_REVISIONS`, of the key and the stamp instead,
   so no such value is hashed into the log). Replicas that hold the same live records
   show the same digest whatever order the records arrived in; tombstones and the
   bookkeeping fields (confirmations, peer lists, owner) are left out.
+- `unencodable`: live records whose value cannot be put in canonical form (a type or a
+  dict key no encoder takes, which the wire could not send either, as an old own record
+  can hold); they are left out of `size` and `digest`, and the line is still written.
+  The census does not raise on what a replica holds: records of an older shape (no
+  `readonly` or `token`) and keys holding a lone surrogate are counted too.
 
 The line holds no key and no value. Keys under `hs:` whose 14th character is not `:`
 (a namespace's keys start with `hs:`, 10 hex digits and `:`) are left out. The walk runs on the plugin
-thread without the persistence lock; on a 5,700-record, 5.2 MB replica it took 125 ms of
-CPU and 0.38 s of wall time at 0.35 CPU.
+thread without the persistence lock. On a synthetic 5,700-record, 5.0 MB replica with
+float-heavy values, half of them own records, one census took about 320 ms of CPU on the
+node image's interpreter, about 200 ms before own records went through the wire's
+encoder; the wall time at 0.35 CPU is about three times the CPU time.
 
 To find the hash namespace of a bucket, compute its prefix: `"hs:"` followed by the
 first 10 hex digits of the SHA-256 of the namespace name, followed by `":"`, as

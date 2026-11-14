@@ -2,12 +2,19 @@
 Offline tests of the chain store's hourly CSTORE_CENSUS line: per namespace bucket, the records, unstamped records,
 tombstones, readonly records, size and a digest that two replicas holding the same records share.
 """
+# A datetime value, which the wire's encoder turns into text.
+import datetime
 # The census line's JSON.
 import json
 # The test framework.
 import unittest
 # The block engine and NetMon stand-ins of process().
 from types import SimpleNamespace
+
+# Numpy values, which the wire's encoder turns into plain numbers.
+import numpy as np
+# The encoder a node uses on the wire (the plugin's json_dumps).
+from ratio1.logging.logger_mixins.json_serialization_mixin import _JSONSerializationMixin
 
 # The composer of a hash key.
 from test_chain_store_hsync import _hset_key
@@ -119,6 +126,43 @@ class TestCensus(unittest.TestCase):
     # The secret's and the token record's digests kept; the ordinary record's changed.
     self.assertEqual([rows[bucket][5] == again[bucket][5] for bucket in (secret[:14], "plain", ordinary[:14])],
                      [True, True, False])
+
+  def test_a_writer_and_its_receivers_give_equal_records_the_same_row(self):
+    """A writer's own values with int dict keys, mixed int and str keys, numpy numbers or a datetime give the same
+    row as its receivers' copies, which hold them as the wire delivers them."""
+    # The writer's own values, as an old own record can hold them.
+    values = [{1: "a", 2: "b", 10: "c"}, {1: "a", "b": 2}, {"n": np.int64(5), "x": np.float32(1.5)},
+              {"at": datetime.datetime(2026, 1, 1)}]
+    # The keys they are held under.
+    keys = [_hset_key("players", str(n)) for n in range(len(values))]
+    # The writer, holding them as own records (confirms 0).
+    writer = make("report", storage={key: {**record(key, value, "node", [NOW_MS, "node"]), "confirms": 0}
+                                     for key, value in zip(keys, values)})
+    # A receiver, holding each as the wire delivered it.
+    receiver = make("report", "peer1", storage={
+      key: record(key, json.loads(_JSONSerializationMixin.safe_json_dumps(value)), "node", [NOW_MS, "node"])
+      for key, value in zip(keys, values)})
+    # Both encode as a node does.
+    for store in (writer, receiver):
+      # The plugin's json_dumps.
+      store.json_dumps = _JSONSerializationMixin.safe_json_dumps
+    # The same rows.
+    self.assertEqual(census(writer)[0], census(receiver)[0])
+
+  def test_the_census_does_not_raise_on_what_a_replica_can_hold(self):
+    """A key that holds a lone surrogate (decoded from a JSON escape), a record of an older shape without readonly
+    and token, and an own value no encoder takes still give a line: the last is counted as unencodable and left out
+    of the size and the digest."""
+    # A key decoded from a JSON escape, a record of an older shape, and an own value of a type JSON has not.
+    surrogate, odd = json.loads('"plain\\ud800k"'), {**record("odd", {1, 2}, "node"), "confirms": 0}
+    # The replica, and the same without the unencodable record.
+    store, without = (make("report", storage={
+      surrogate: record(surrogate, "v", "peer1"), "legacy": {"key": "legacy", "value": "old", "owner": "peer1"},
+      **extra}) for extra in ({"odd": odd}, {}))
+    # The two lines' plain rows.
+    row, other = census(store)[0]["plain"], census(without)[0]["plain"]
+    # Three records, all unstamped, sizes of "v" and "old" only, one unencodable; the same digest as without it.
+    self.assertEqual((row[:5], row[6], row[5]), ([3, 3, 0, 0, len('"v"') + len('"old"')], 1, other[5]))
 
   def test_the_census_follows_the_first_stats_line_and_every_twelfth(self):
     """Over 25 CSTORE_STATS lines the census line follows the 1st, the 13th and the 25th, each right after it."""

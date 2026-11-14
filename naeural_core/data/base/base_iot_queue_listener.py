@@ -176,11 +176,34 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     """
     Initialize the wrapper used by the IoT queue listener.
 
+    Builds the connection config from the shared communication parameters and the stream's own settings,
+    logs it without the credentials, creates the MQTT or AMQP wrapper and connects.
+
+    Returns
+    -------
+    None
+
     Notes
     -----
     The listener reuses the shared communication parameters, injects both
     `EE_ID` and `EE_ADDR`, and can optionally disable addressed payload topic
     subscriptions during rollout or rollback.
+
+    Broker candidates: when the listener's broker is the primary dAuth allocated (``EE_MQTT_HOST``), its
+    config also gets the candidate list ``EE_MQTT_HOSTS``, so the wrapper moves to the next broker when the
+    primary is down. The rule is the communication manager's (``_prepare_comm_config_instance``) on the same
+    inputs: a value is read from the startup config's ``COMMUNICATION_ENVIRONMENT`` first and from the process
+    environment second, and a ``HOSTS`` entry in ``COMMUNICATION_ENVIRONMENT`` switches the list off. Before,
+    the listener had only its primary and retried it until it came back, while the node's communicators had
+    already moved to another broker; the node received no payloads in that time. A listener on any other
+    broker (a stream with its own ``HOST``) gets no list. An explicit ``HOSTS`` list in the communication
+    parameters or in a stream's settings is not read by the listener.
+
+    Examples
+    --------
+    >>> self._init()   # EE_MQTT_HOST is this listener's HOST and EE_MQTT_HOSTS is '["a", "b"]'
+    >>> self._comm_config["HOSTS"]
+    '["a", "b"]'
     """
     # use the parameters from the comm layer as default for this connection, if unspecified
     params = self.shmem['config_communication']['PARAMS']
@@ -199,6 +222,21 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
       ct.COMMS.QOS: self.__get_stream_config_metadata_property(ct.COMMS.QOS),
       ct.COMMS.SECURED: self.__get_stream_config_metadata_property(ct.COMMS.SECURED),
     }
+
+    # The startup config's COMMUNICATION_ENVIRONMENT, which the communication manager reads before the process
+    # environment.
+    comm_env = self.log.config_data.get('COMMUNICATION_ENVIRONMENT') or {}
+    # One lookup table in that order: the process environment, overridden by the startup config's values.
+    runtime = {**self.os_environ, **comm_env}
+    if (
+      "HOSTS" not in comm_env
+      and self._comm_config[ct.COMMS.HOST]
+      and self._comm_config[ct.COMMS.HOST] == runtime.get("EE_MQTT_HOST")
+      and runtime.get("EE_MQTT_HOSTS")
+    ):
+      # The dAuth broker candidates, as the node's communicators get them: with the primary alone this
+      # listener stayed on a broker that was down while they had moved on.
+      self._comm_config["HOSTS"] = runtime["EE_MQTT_HOSTS"]
 
     # never log the broker credentials in plaintext
     log_config = dict(self._comm_config)

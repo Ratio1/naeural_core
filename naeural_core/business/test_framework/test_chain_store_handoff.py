@@ -220,8 +220,8 @@ class TestResends(unittest.TestCase):
     self.assertEqual(handoff_counts(store), {"handoff/send/peer2": 1})
 
   def test_a_peer_that_sent_no_stamped_store_gets_no_resend(self):
-    """A re-send goes only to a peer whose last store to this node carried a stamp: none before such a store, one
-    after it, none again after an unstamped store (a node of the previous release)."""
+    """A re-send goes only to a peer whose last store (or confirmation) to this node carried a stamp: none before such
+    a store, one after it, none again after an unstamped store (a node of the previous release)."""
     # The writer in 'on', with no peer proven yet.
     store = writer("on", peers=("peer1",), stamped=())
     # Its write, unconfirmed.
@@ -236,6 +236,35 @@ class TestResends(unittest.TestCase):
     deliver(store, _hset_key("players", "p2"), "y", "peer1")
     # Its next re-send is due 300 s later, but peer1 is no longer proven.
     self.assertEqual(sweep(store, 615), [])
+
+  def test_a_worker_proves_its_oracles_by_their_stamped_confirmations(self):
+    """A worker, which gets no store from the oracles, re-sends a write to an oracle once that oracle confirmed one
+    of its writes with a stamp; a later confirmation without a stamp (the oracle back on the previous release)
+    withdraws the proof, and the write's next re-send does not go to it."""
+    # A worker with two oracles as peers, neither proven.
+    store = writer("on", oracle=False, stamped=())
+    # Its write, which peer1 confirms by stamp and peer2 misses.
+    local_write(store, KEY, "v")
+    # peer1's lean confirmation.
+    confirm(store, KEY, "peer1", ver=store.storage[KEY]["sent_ver"])
+    # A second write, which peer2 confirms by stamp.
+    other = _hset_key("players", "other")
+    # Written 0.2 s later.
+    local_write(store, other, "o")
+    # peer2's lean confirmation proves it.
+    confirm(store, other, "peer2", ver=store.storage[other]["sent_ver"])
+    # At 300 s KEY goes to peer2 (other is due only at 300.2 s).
+    first = [(peers, body["key"]) for peers, body in sweep(store, 300)]
+    # A third write, which peer2 confirms in the previous release's full form, without a stamp.
+    third = _hset_key("players", "third")
+    # Written.
+    local_write(store, third, "t")
+    # The confirmation without a stamp withdraws peer2's proof.
+    confirm(store, third, "peer2", value="t", owner="node")
+    # At 600 s KEY is due to peer2 again but not sent; other goes to peer1 (third waits: the worker's window is 1).
+    second = [(peers, body["key"]) for peers, body in sweep(store, 600)]
+    # KEY reached peer2 once, while it was proven.
+    self.assertEqual((first, second), ([(["peer2"], KEY)], [(["peer1"], other)]))
 
   def test_the_window_per_peer_and_the_budget_per_sweep(self):
     """At most 8 re-sends wait per peer (window_full counted for the others), 1 for a writer in neither registry, and
@@ -373,8 +402,9 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
                           {"handoff/send/peer2": 1}))
 
   def test_a_peer_back_after_being_lost_is_unsettled_on_its_recent_records_only(self):
-    """A peer dropped as LOST and back has its settlement re-opened on the records written at most 300 s before it
-    was dropped, not on older ones; a peer that stopped in order (SHUTDOWN) has none re-opened."""
+    """A peer dropped as LOST and back, once it proved again that it stamps its stores, has its settlement re-opened
+    on the records written at most 300 s before it was dropped, not on older ones; a peer that stopped in order
+    (SHUTDOWN) has none re-opened."""
     # Each way of leaving, and whether the recent record is re-sent.
     for status, reopened in (("LOST STATUS", True), ("SHUTDOWN", False)):
       # One sub-test each.
@@ -405,9 +435,52 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
         store._now = NOW + 800
         # Back.
         getattr(store, REFRESH)()
+        # It left, so it proves again with a stamped store (of a key the writer does not own).
+        deliver(store, _hset_key("players", "p"), "x", "peer1", [NOW_MS + 850_000, "peer1"])
         # The sweep at 900 s: only the recent record re-opened, re-sent to peer1, and unsettled in the record.
         self.assertEqual(([body["key"] for _, body in sweep(store, 900)], store.storage[KEY]["confirmed_peers"]),
                          ([KEY], []) if reopened else ([], ["peer1"]))
+
+  def test_a_peer_that_left_proves_again_before_a_resend(self):
+    """A proven peer that stops in order and comes back gets no re-send of a record written while it was away until
+    it proves again: a confirmation without a stamp (as the previous release sends) keeps it unproven, a stamped one
+    proves it and the record goes to it at the next sweep."""
+    # The writer in 'on' with peer1 and peer2, both proven.
+    store = writer("on")
+    # NetMon reports a peer that left as stopped in order.
+    store.netmon.network_node_simple_status = lambda peer, **kwargs: "ONLINE" if peer in store.online else "SHUTDOWN"
+    # peer1 stops.
+    store.online = {"peer2"}
+    # The refresh at 61 s.
+    store._now = NOW + 61
+    # It drops peer1.
+    getattr(store, REFRESH)()
+    # A write at 100 s.
+    store._now = NOW + 100
+    # Sent to peer2 alone.
+    local_write(store, KEY, "v")
+    # peer2 confirms it by stamp.
+    confirm(store, KEY, "peer2", ver=store.storage[KEY]["sent_ver"])
+    # peer1 back at 400 s, having sent nothing.
+    store.online = {"peer1", "peer2"}
+    # The refresh at 400 s.
+    store._now = NOW + 400
+    # It adds peer1 back.
+    getattr(store, REFRESH)()
+    # The key of another write, which peer1's confirmations name.
+    other = _hset_key("players", "other")
+    # KEY is due for peer1 (widened to it), which is not proven: nothing goes.
+    first = sweep(store, 415)
+    # peer1 confirms in the full form without a stamp.
+    confirm(store, other, "peer1", value="o", owner="node")
+    # Still nothing.
+    second = sweep(store, 430)
+    # peer1 confirms with a stamp.
+    confirm(store, other, "peer1", ver=[NOW_MS, "node"])
+    # KEY goes to peer1 now.
+    third = [(peers, body["key"]) for peers, body in sweep(store, 445)]
+    # Nothing until the stamped confirmation, then the record.
+    self.assertEqual((first, second, third), ([], [], [(["peer1"], KEY)]))
 
 
 class TestReceiverOfAResend(unittest.TestCase):

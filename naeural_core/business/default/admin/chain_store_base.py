@@ -241,7 +241,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     The hand-off's state starts empty, in memory only: its side table, its first sweep
     ``CSTORE_HANDOFF_FIRST_S`` after this start, the peers dropped as lost or back, and the peers proven to
-    stamp their stores (none until each sends a stamped store).
+    stamp their stores (none until each sends a stamped store or a stamped confirmation).
 
     The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
     and the plugin does not start, where it used to start empty and fail at its first save. A file that
@@ -387,8 +387,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # Peers dropped from the replication peers as lost (address -> when), and peers that joined or came back since the
     # last sweep (address -> when they were dropped as lost, or None); the first refresh below makes every peer join.
     self.__peer_left, self.__peer_back = {}, {}
-    # The peers whose last store carried a stamp (nodes of this release with the order switch not 'off'): the only
-    # ones a re-send goes to.
+    # The peers whose last store or confirmation carried a stamp since they last joined the replication peers (nodes
+    # of this release with the order switch not 'off'): the only ones a re-send goes to.
     self.__stamped_peers = set()
     self.__last_chain_peers_refresh = 0
     self.__chain_peers = []
@@ -512,8 +512,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     - it is first due ``CSTORE_HANDOFF_FIRST_S`` after the write, then after a gap that doubles from
       ``CSTORE_HANDOFF_FIRST_S`` up to ``CS_HANDOFF_MAX_GAP`` (3600 s): with the defaults the re-sends go at the
       record's age of 300, 600, 1200, 2400, 4800 and 8400 s;
-    - a due pair whose peer is offline, or has not sent this node a stamped store since its start (or sent an
-      unstamped one since), is skipped and uses nothing: an oracle away for any length gets it once back;
+    - a due pair whose peer is offline, or is not proven to stamp its stores, is skipped and uses nothing: an
+      oracle away for any length gets it once back. A peer is proven by its last store or confirmation to this
+      node carrying a well-formed stamp, and loses the proof when it leaves the replication peers (it may come
+      back on the previous release);
     - a due pair of a dAuth secret record is skipped unless this node is a registry member and the peer a
       dAuth registry member, as the write itself requires;
     - a due pair that had ``CS_HANDOFF_MAX_SENDS`` (6) re-sends is given up (``handoff/gave_up/<peer>``);
@@ -852,6 +854,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     off the whitelist is not recorded as lost: it lost nothing, so its settlements are not re-opened. A peer
     that comes back within one refresh interval is seen neither leaving nor joining.
 
+    Every peer that left, lost or not, also loses its proof that it stamps its stores: it may come back on the
+    previous release, which applies a re-sent delete in arrival order, so the hand-off re-sends nothing to it
+    until its next stamped store or stamped confirmation. A peer that comes back within one refresh interval
+    keeps its proof until it sends a store or confirmation without a stamp.
+
     Examples
     --------
     >>> self.__maybe_refresh_chain_peers()   # whitelist [self, peer-1, peer-2], both peers running
@@ -869,6 +876,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # in the list a seed holding only itself waited 3 x 10 s per write.
         peer for peer in _chain_peers if peer != self.ee_addr and self.__netmon_node_is_online_for_control(peer)
       ]
+      # A peer that left loses its proof that it stamps its stores, whatever the reason it left: it may come back on
+      # the previous release (a rollback), so it proves it again before the hand-off re-sends anything to it.
+      self.__stamped_peers.difference_update(set(old) - set(self.__chain_peers))
       # Each peer of the list before the refresh.
       for peer in old:
         # A peer dropped because NetMon reports it lost (a crash or a cut, not an orderly stop or a whitelist change),
@@ -3200,6 +3210,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     'on' would have re-sent) is counted as ``<bucket>/handoff/answered``. A remote record, which has no peer
     lists, is left as it is (before, a confirmation of it added an empty settled list).
 
+    Every message here, whatever key it names, also proves or withdraws its sender as a peer the hand-off may
+    re-send to: one that carries a well-formed stamp (a lean confirmation, a full one from a receiver with the
+    lean switch 'report', a refusal answer) comes only from a node of this release whose order switch is not
+    'off', which admits a re-send by the order rule; one without a stamp withdraws it. A peer of the previous
+    release, or one with the order or lean switch 'off', therefore gets no re-send.
+
     Parameters
     ----------
     data : dict
@@ -3224,6 +3240,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     if self.cfg_chain_store_debug:
       self.P(f" === LOCAL: Received {op} from {confirm_by} for  {key}={value}, owner{owner}")
+    # A confirmation or refusal answer that echoes a well-formed stamp proves its sender stamps its stores, as a
+    # stamped store does (oracles send a worker few stores, so a worker's oracles are proven this way); one without a
+    # stamp (the previous release, or the order or lean switch 'off') withdraws the proof.
+    (self.__stamped_peers.add if self.__ver_valid(data.get(self.CS_VER)) is not None
+     else self.__stamped_peers.discard)(sender)
     if self.CS_REFUSED in data:
       # A refusal answer: it carries no value, so the confirmation rule below never matches it.
       with self.__persistence_lock:

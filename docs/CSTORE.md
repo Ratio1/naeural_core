@@ -423,10 +423,15 @@ answer, or the writer gave up; `confirmed_peers` holds the settled targets.
 - A pair is first due `CSTORE_HANDOFF_FIRST_S` (300 s) after the write, then after a gap
   that doubles up to 3600 s: re-sends at the record's age of 300, 600, 1200, 2400, 4800
   and 8400 s, at most 6, then the pair is given up.
-- A target that is offline, or whose last store to this node carried no stamp (a node of
-  the previous release, or with `CSTORE_ORDER` `off`, or one that sent nothing since this
-  node started), is skipped and uses none of the 6: an oracle away for any length gets
-  the record once back. A dAuth secret goes only to a target still in the dAuth registry.
+- A target that is offline, or not proven to stamp its stores, is skipped and uses none
+  of the 6: an oracle away for any length gets the record once back. A peer is proven
+  when its last store or confirmation to this node carried a well-formed stamp (so a
+  worker, which gets few stores from oracles, proves its oracles by their confirmations).
+  It is not proven when that message carried no stamp (a node of the previous release,
+  or with `CSTORE_ORDER` or `CSTORE_LEAN_CONFIRM` `off`), when it sent nothing since this
+  node started, or when it left the replication peers since its last such message (it
+  may come back on the previous release). A dAuth secret goes only to a target still in
+  the dAuth registry.
 - At most `CSTORE_HANDOFF_WINDOW` (8) re-sends wait per peer (1 on a node in neither
   registry, a worker), at most 32 re-sends per sweep.
 - A peer that joins becomes a target of the own records meant for every default peer
@@ -442,7 +447,9 @@ answer, or the writer gave up; `confirmed_peers` holds the settled targets.
 A receiver admits a store that carries `resend` by the order rule of `on` in `report`
 too (signed field, `cs_rev`, then the stamp; a stamped re-send replaces an unstamped
 copy), and answers a refused one. A node of the previous release would apply it in
-arrival order, which is why re-sends go only to peers that stamp their stores.
+arrival order, which is why re-sends go only to peers proven to stamp their stores. A
+peer that restarts within one peer refresh (60 s) is never seen leaving, so it keeps its
+proof until its first store or confirmation without a stamp.
 
 Records: an own record also carries `default_peers`; a remote record carries
 `confirms` -1 and `min_confirms` 0 and no peer lists (the previous release gave it

@@ -414,6 +414,7 @@ class _BasePluginAPIMixin:
     timeout=None,
     max_retries=None,
     result_info=None,
+    wait=True,
   ):
     """
     Set data in the R1 Chain Storage.
@@ -499,14 +500,24 @@ class _BasePluginAPIMixin:
       ``refused_older``, ``refused_older_than_delete``, ``refused_future``, ``refused_origin``,
       ``refused_unstamped``, ``refused_collision``); ``unconfirmed``, ``overwritten`` or ``refused_by_peers``
       (every peer settled, one at least by a refusal answer) for a write applied here whose wait failed;
-      ``error`` when the call raised (a value that is not JSON, a bad timeout, and so on).
+      ``error`` when the call raised (a value that is not JSON, a bad timeout, ``wait=False`` in a protected
+      namespace, and so on); ``queued`` for a ``wait=False`` write stored here and queued; ``not_ready`` for a
+      ``wait=False`` call made before the chain store started.
+
+    wait : bool, optional
+      True (the default) waits for the chain store to start and for the confirmations, as before. False runs
+      every check and the local apply of a blocking write, queues the same store and returns at once: True when
+      the write was stored here and queued (the store re-sends it while it is unconfirmed, as the blocking wait
+      would), False on a refusal, as a blocking write. It never waits for the store to start: before the store
+      started it returns False with outcome ``not_ready``. Refused (``error``) in the protected namespaces,
+      whose callers rely on the confirmation.
 
     Returns
     -------
     bool
       True if the value was successfully stored and confirmed by peers,
       False if the operation failed (timeout, no confirmations, etc.)
-      The same with and without ``result_info``.
+      The same with and without ``result_info``. With ``wait=False``, True means stored and queued.
 
     Notes
     -----
@@ -529,12 +540,16 @@ class _BasePluginAPIMixin:
     False
     >>> info
     {'outcome': 'unconfirmed'}
+    >>> self.chainstore_set("my_key", {"a": 2}, wait=False, result_info=info), info   # stored here and queued
+    (True, {'outcome': 'queued'})
     """
     self.start_timer("chainstore_set")
     memory = self.__chainstorage_memory()
     result = False
     try:
-      self.__maybe_wait_for_chain_state_init()
+      if wait:
+        # A blocking call waits for the store's setter, with no timeout, as before; a non-blocking one never waits.
+        self.__maybe_wait_for_chain_state_init()
       func = memory.get('__chain_storage_set')
 
       # JSON normalization: ensure deterministic storage by normalizing through JSON.
@@ -564,6 +579,8 @@ class _BasePluginAPIMixin:
           debug=debug,
           # The caller's dict, filled by the store with the word of how the write ended.
           result_info=result_info,
+          # Whether the store waits for the confirmations.
+          wait=wait,
         )
         elapsed = self.end_timer("chainstore_set")        
         if debug:
@@ -572,6 +589,9 @@ class _BasePluginAPIMixin:
         elapsed = self.end_timer("chainstore_set")
         if debug:
           self.P("No chain storage set function found in {:.4f}s".format(elapsed), color="red")
+        if result_info is not None:
+          # Only a wait=False call gets here (a blocking one waited for the setter): the store has not started.
+          result_info["outcome"] = "not_ready"
     except Exception as ex:
       elapsed = self.end_timer("chainstore_set")
       msg = "Error in chainstore_set: {} after {:.4f}s".format(ex, elapsed)
@@ -665,6 +685,7 @@ class _BasePluginAPIMixin:
     timeout=None,
     max_retries=None,
     result_info=None,
+    wait=True,
   ):
     """
     Store one field of a hash-like namespace in chain storage.
@@ -707,6 +728,9 @@ class _BasePluginAPIMixin:
     result_info : dict, optional
       Opt-in dict whose ``"outcome"`` is set to the word of how the write ended, as in
       ``chainstore_set``. Default is None, which changes nothing.
+    wait : bool, optional
+      True (the default) waits for the confirmations; False returns at once once the write is stored here and
+      queued, as in ``chainstore_set``.
 
     Returns
     -------
@@ -715,7 +739,7 @@ class _BasePluginAPIMixin:
 
     Notes
     -----
-    ``result_info`` is passed to ``chainstore_set`` as it is.
+    ``result_info`` and ``wait`` are passed to ``chainstore_set`` as they are.
 
     See Also
     --------
@@ -747,6 +771,8 @@ class _BasePluginAPIMixin:
       max_retries=max_retries,
       # The caller's dict, filled by chainstore_set.
       result_info=result_info,
+      # Whether the write waits for its confirmations.
+      wait=wait,
     )
     elapsed_2 = self.time() - start_2
     if debug:

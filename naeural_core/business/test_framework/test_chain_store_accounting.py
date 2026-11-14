@@ -296,7 +296,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  # The hand-off's numbers and state, and the peers dropped as lost, back, or proven to stamp.
                  "handoff_first", "handoff_window", "handoff", "handoff_next", "handoff_pending", "peer_left",
                  # The peers back since the last sweep and those proven to stamp their stores.
-                 "peer_back", "stamped_peers"):
+                 "peer_back", "stamped_peers",
+                 # The writes made with wait=False owed a re-send.
+                 "unwaited"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"

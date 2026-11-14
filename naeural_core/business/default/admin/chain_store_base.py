@@ -230,6 +230,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     'on' (receivers refuse an older re-send) and tombstones kept (a re-sent older value cannot bring back a key
     deleted meanwhile).
 
+    The table of the writes made with ``wait=False`` still owed a re-send starts empty, in memory only, before
+    the setter that fills it is published.
+
     The hand-off's state starts empty, in memory only: its side table, its first sweep
     ``CSTORE_HANDOFF_FIRST_S`` after this start, the peers dropped as lost or back, and the peers proven to
     stamp their stores (none until each sends a stamped store).
@@ -258,6 +261,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__chainstore_identity = "CS_MSG_{}".format(self.uuid(7))
     
     self.__ops = self.deque()
+    # The local writes made with wait=False still owed a re-send (key -> [store, next re-send time, re-sends left]),
+    # in memory only; created before the setter is published, as the setter fills it.
+    self.__unwaited = {}
     self.__persistence_lock = RLock()
     self.__chain_storage_dirty = False
     # Changes held in memory without a dirty mark (a newer stamp on an unchanged value): no periodic save is made for
@@ -2140,6 +2146,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ver=None,
     sender=None,
     resend=False,
+    wait=True,
   ):
     """
     Set a value in chain storage and optionally wait for confirmations.
@@ -2191,6 +2198,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       For a remote write only: True for a hand-off re-send (a store that carries ``resend``), which the order
       rule refuses on its word as in 'on' whatever this node's order switch (except 'off', which reads no
       stamp). Only ``__exec_store`` passes it. Default is False.
+    wait : bool, optional
+      True (the default) waits for the confirmations as before. False, for a
+      local write: every check and the local apply run as for a blocking
+      write, the same store is queued, and the call returns True at once
+      (``result_info`` outcome ``queued``) without waiting; the plugin thread
+      re-sends a value while it is unconfirmed (``__maybe_resend_unwaited``).
+      Not allowed in the protected namespaces (``CS_PROTECTED_NAMESPACES``).
 
     Returns
     -------
@@ -2198,18 +2212,30 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       True if the desired state was stored successfully or was already present.
       False if the write was rejected or timed out after the allowed retries.
       The bool is the same, on every path, as before ``result_info`` existed.
+      With ``wait=False``, True means stored here and queued, not confirmed.
 
     Raises
     ------
     ValueError
       If ``key`` is invalid (not a str, empty, or starting with ``"dl:"``,
       the prefix of the tombstones), if ``timeout`` or ``max_retries`` fail
-      validation, or if the underlying storage/update flow raises an error.
+      validation, if ``wait`` is False for a key of a protected namespace
+      (counted ``error``), or if the underlying storage/update flow raises an
+      error.
 
     Notes
     -----
     This method blocks the caller thread while waiting for confirmations on
-    local-originated writes.
+    local-originated writes, unless ``wait`` is False. A non-blocking write
+    is refused exactly as a blocking one (the same words) and leaves the same
+    record; its store is sent at once, and a value is queued again after
+    each ``timeout`` while unconfirmed, up to ``max_retries`` times, by the
+    plugin thread, whose later wait end (``unconfirmed``, ``overwritten``,
+    ``refused_by_peers``) is counted as a blocking write's. Its own call
+    counts the wait end ``queued``. A delete is queued once, as a blocking
+    delete, which does not wait either. The caller's thread holds the
+    persistence lock for the checks and the apply, as for any write, and once
+    more for the one dict operation that registers the re-sends.
 
     A write that leaves the replica as it was does not mark it for a save: a
     delete of a key this replica does not hold, and a local write whose value
@@ -2330,6 +2356,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         max_retries < 0
       ):
         raise ValueError("max_retries must be a non-negative integer or None.")
+      if not wait and self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES):
+        # The callers of the protected namespaces rely on the confirmation: wait=False is a caller's mistake there.
+        raise ValueError(f"wait=False is not allowed in the protected namespace of key {key}.")
       if timeout is None:
         timeout = 10
       if max_retries is None:
@@ -2530,6 +2559,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               **({self.CS_VER: ver} if ver is not None else {}),
           }
           self.__ops.append(op)
+          if not wait:
+            if value is not None:
+              # A value is re-sent by the plugin thread (__maybe_resend_unwaited) on the schedule of the wait below,
+              # while unconfirmed; a newer write of the key replaces the entry. The lock is held for this one dict
+              # operation only (the plugin thread walks the dict under it).
+              with self.__persistence_lock:
+                # First re-send after one timeout, then max_retries of them.
+                self.__unwaited[key] = [op, self.time() + timeout, max_retries]
+            # Counted in addition to the outcome: stored here and queued, not confirmed.
+            wait_end = "queued"
+            # At once, without waiting for any confirmation.
+            return True
           if debug:
             self.P(f" === {where} key {key} locally stored for {owner}. Now waiting for confirmations...")
           # at this point we can wait until we have enough confirmations
@@ -2798,6 +2839,81 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         include_default_peers=include_default_peers,
       )
     return
+
+
+  def __maybe_resend_unwaited(self):
+    """
+    Re-send the local writes made with ``wait=False`` that are still unconfirmed, on the schedule of a blocking wait.
+
+    For each entry of the table ``_set_value`` fills for a non-blocking write of a value, the checks of the blocking
+    wait loop, once per lap instead of every 100 ms:
+
+    - the key no longer holds the write's owner and value: dropped, counted ``<bucket>/local/overwritten``;
+    - enough confirmations: dropped, nothing counted (a confirmed blocking write counts nothing either);
+    - an own record whose every target settled, one at least by a refusal answer, with too few confirmations:
+      dropped, counted ``<bucket>/local/refused_by_peers``;
+    - before the entry's re-send time: kept;
+    - re-sends left: the same store queued again, the next re-send one timeout later;
+    - none left: dropped, counted ``<bucket>/local/unconfirmed``.
+
+    With the defaults (timeout 10 s, 2 retries) the store goes at 0, 10 and 20 s and the entry ends unconfirmed at
+    30 s, as a blocking write; after that the hand-off (``__maybe_handoff``) re-sends to targets that never settled,
+    as for any own record.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Runs on the plugin thread from ``process``, before the queued stores are sent. The walk holds the persistence
+    lock, under which ``_set_value`` adds or replaces an entry from the caller's thread, so an entry replaced by a
+    newer write is never dropped or re-sent in its place. The table is empty unless a caller uses ``wait=False``
+    (one entry per key in flight), so a lap pays one emptiness check.
+
+    Examples
+    --------
+    >>> self.__maybe_resend_unwaited()   # 10 s after a wait=False write no peer confirmed: queued again
+    """
+    if not self.__unwaited:
+      return
+    # The wall clock the re-send times are on.
+    now = self.time()
+    # The walk under the lock the caller's thread adds entries under.
+    with self.__persistence_lock:
+      # Each entry, over a copy, so one can be dropped.
+      for key, entry in list(self.__unwaited.items()):
+        # The write's store, its next re-send time and the re-sends left.
+        op, due, retries = entry
+        # The record the write left, if it is still held.
+        record = self.__chain_storage.get(key, {})
+        # Its confirmations and how many peers settled it, read as the blocking wait reads them.
+        confirms, settled = record.get(self.CS_CONFIRMATIONS, 0), len(record.get("confirmed_peers", []))
+        if record.get(self.CS_OWNER) != op[self.CS_OWNER] or record.get(self.CS_VALUE) != op[self.CS_VALUE]:
+          # Another write replaced it: its own confirmations never establish this one.
+          end = "overwritten"
+        elif confirms >= record.get(self.CS_MIN_CONFIRMATIONS, 0):
+          # Confirmed by enough peers.
+          end = None
+        elif 0 <= confirms < settled >= len(record["target_peers"]):
+          # An own record every target settled, one at least by a refusal answer: no confirmation can come.
+          end = "refused_by_peers"
+        elif now < due:
+          continue
+        elif retries:
+          # Re-sent: the same store queued again, the next re-send one timeout later.
+          self.__ops.append(op)
+          # In place, so the entry stays the same object.
+          entry[1:] = [now + op[self.CS_TIMEOUT], retries - 1]
+          continue
+        else:
+          # Too few confirmations after the re-sends.
+          end = "unconfirmed"
+        # Done with this write.
+        del self.__unwaited[key]
+        if end is not None:
+          # Counted as a blocking write's wait end is.
+          self.__cs_count(end, key, "local")
 
 
   def __exec_store(self, data, peers=None):
@@ -3300,7 +3416,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   def process(self):
     """
     Run one plugin lap: refresh the replication peers when due, run the hand-off's sweep when due
-    (``__maybe_handoff``) and send the queued writes.
+    (``__maybe_handoff``), queue the due re-sends of writes made with ``wait=False``
+    (``__maybe_resend_unwaited``) and send the queued writes.
 
     Saving is not part of the lap any more: the SerializationManager calls
     ``__maybe_flush_chain_storage`` on its own thread every ``CS_SAVE_INTERVAL`` seconds. This thread used
@@ -3342,6 +3459,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__maybe_refresh_chain_peers()
     # The hand-off's sweep, when due, before the queued stores go out, so its re-sends leave on this lap.
     self.__maybe_handoff()
+    # The re-sends of the writes made with wait=False, when due, on this lap too.
+    self.__maybe_resend_unwaited()
     self.__maybe_broadcast()
     # Keep the largest input queue seen since the last CSTORE_STATS line; before, it was not kept.
     self.__cs_stats_queue_peak = max(self.__cs_stats_queue_peak, self.input_queue_size)

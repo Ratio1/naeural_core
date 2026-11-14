@@ -27,6 +27,8 @@ HARNESS_METHODS = (
   "_reject_expired_request",
   "_process_incoming_request",
   "_start_request_monitor_thread",
+  # The monitor's hook, which the monitor calls on each turn (the base web app's no-op).
+  "on_request_monitor_tick",
 )
 
 
@@ -163,6 +165,67 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     time.sleep(0.05)
     self.plugin._stop_request_monitor.set()
     self.plugin._request_monitor_thread.join(timeout=2)
+
+  def test_monitor_runs_its_hook_while_idle_and_after_each_request_even_when_the_hook_raises(self):
+    """The request monitor calls on_request_monitor_tick before each read of the server queue, so also while idle
+    (about every 0.25 s) and after a request; a hook that raises is logged in red and the request is still queued."""
+    # A hook that counts its calls, then one that also raises.
+    for raising in (False, True):
+      # One sub-test each.
+      with self.subTest(raising=raising):
+        # The calls of the hook.
+        ticks = []
+
+        def tick():
+          """
+          Stand for a web app's hook: count the call, and raise in the sub-test of a raising hook.
+
+          Returns
+          -------
+          None
+
+          Raises
+          ------
+          RuntimeError
+            In the sub-test of a raising hook.
+          """
+          # Counted.
+          ticks.append(1)
+          if raising:
+            # The hook's error, which the monitor must log and survive.
+            raise RuntimeError("hook")
+        # The plugin's hook, for this sub-test (the compiled one is the base web app's no-op).
+        self.plugin.on_request_monitor_tick = tick
+        # Nothing queued, a fresh monitor.
+        self.plugin._incoming_requests.clear()
+        # Its stop flag.
+        self.plugin._stop_request_monitor = threading.Event()
+        # No thread yet.
+        self.plugin._request_monitor_thread = None
+        # Started with an empty server queue.
+        self.plugin._start_request_monitor_thread()
+        # Idle for 0.6 s: reads time out every 0.25 s.
+        time.sleep(0.6)
+        # The calls while idle.
+        idle = len(ticks)
+        # One request arrives.
+        self.plugin._server_queue.put(self._request(waited_s=0, request_id="r1"))
+        # Until it is queued, at most 5 s.
+        deadline = time.time() + 5
+        # Polled until queued or the deadline.
+        while not self.plugin._incoming_requests and time.time() < deadline:
+          # Polled.
+          time.sleep(0.01)
+        # One more turn of the loop.
+        time.sleep(0.05)
+        # Stopped.
+        self.plugin._stop_request_monitor.set()
+        # Its thread ends.
+        self.plugin._request_monitor_thread.join(timeout=2)
+        # Called at least twice while idle and again after the request; the request queued; the raise logged.
+        self.assertEqual((idle >= 2, len(ticks) > idle, [request["id"] for request in self.plugin._incoming_requests],
+                          any("Exception in on_request_monitor_tick" in msg for msg in self.plugin.logged)),
+                         (True, True, ["r1"], raising))
 
   def test_monitor_refuses_at_once_while_the_oldest_queued_request_has_expired(self):
     self.plugin._incoming_requests.extend([self._request(waited_s=100, request_id="old"), {"id": "q1"}])

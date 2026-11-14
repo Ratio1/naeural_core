@@ -569,6 +569,30 @@ class FastApiWebAppPlugin(BasePlugin):
     """
     return
 
+  def on_request_monitor_tick(self):
+    """
+    Hook called on the request monitor thread at each turn of its loop; it does nothing here.
+
+    The monitor calls it before each read of the server queue: about every 0.25 s while no request comes (the
+    read's timeout) and right after each request was queued or refused. A web app overrides it for short work
+    that must not wait for the plugin thread, which an endpoint that hangs can hold: for example a write to the
+    chain store with ``wait=False``.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    An exception raised here is logged in red and the monitor goes on admitting requests, as for ``on_request``.
+    The work must stay short: requests wait at the door while it runs.
+
+    Examples
+    --------
+    >>> self.on_request_monitor_tick()   # the base web app: nothing happens
+    """
+    return
+
   def get_request_client_ip(self):
     """
     Address of the HTTP client whose request is being handled.
@@ -627,8 +651,9 @@ class FastApiWebAppPlugin(BasePlugin):
       """
       Request monitor loop: admit each server request to the incoming queue or refuse it at once.
 
-      For each request read from ``_server_queue`` (a blocking read with a 0.25 s timeout, so the stop
-      flag is re-checked while no request comes) it runs the ``on_request`` hook (not for timing
+      Before each read it runs the ``on_request_monitor_tick`` hook (an exception there is logged in red
+      and the loop goes on). For each request read from ``_server_queue`` (a blocking read with a 0.25 s
+      timeout, so the stop flag is re-checked while no request comes) it runs the ``on_request`` hook (not for timing
       reports) and warns when the hook outlasts ``REQUEST_TIMEOUT``. It then queues the request and wakes
       the plugin loop, or refuses it with a 503 when the queue already holds ``MAX_INCOMING_REQUESTS`` or
       its oldest entry (a request or a timing report) has already waited longer than the queue-wait limit
@@ -652,6 +677,12 @@ class FastApiWebAppPlugin(BasePlugin):
       """
       try:
         while not self._stop_request_monitor.is_set():
+          try:
+            # The web app's own work on this thread, before each read: about every 0.25 s while idle and after each
+            # request; before, nothing ran here between requests.
+            self.on_request_monitor_tick()
+          except Exception:
+            self.P(f"Exception in on_request_monitor_tick:\n{self.get_exception()}", color='r')
           try:
             request = self._server_queue.get(True, 0.25)
           except queue.Empty:

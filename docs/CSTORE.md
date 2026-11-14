@@ -449,6 +449,28 @@ Records: an own record also carries `default_peers`; a remote record carries
 this node's lists, which nothing read). A `False` from a blocking write with the
 hand-off `on` means "not confirmed yet": the store keeps delivering it.
 
+### Non-blocking write (`wait=False`)
+
+`chainstore_set(..., wait=False)` and `chainstore_hset(..., wait=False)` (no switch; a
+caller that does not pass `wait` sees no change) run every check and the local apply of
+a blocking write, queue the same `SSTORE` and return at once: `True` with the outcome
+`queued` when the write was stored here and queued (not confirmed), `False` with the
+blocking write's refusal word otherwise. The plugin thread re-sends a value while it is
+unconfirmed on the blocking wait's schedule (with the defaults at 10 s and 20 s) and
+counts how it ended as a blocking write does (`unconfirmed`, `overwritten`,
+`refused_by_peers`; nothing when confirmed); a newer write of the key replaces the
+pending re-sends; a delete is queued once. It is refused (`error`) in the protected
+namespaces (the signed ones and `DAUTH_JOB_SECRET_REVISIONS`), whose callers rely on the
+confirmation. It never waits for the chain store to start: before the store started it
+returns `False` with the outcome `not_ready`. The record and the message are those of a
+blocking write.
+
+Web apps get a hook, `on_request_monitor_tick()`, run on the request monitor thread
+before each read of the server queue (about every 0.25 s while idle, and after each
+request); it does nothing in the base web app, and an exception in it is logged and does
+not stop the admission of requests. A non-blocking chain-store write from it does not
+depend on the plugin thread, which a hung endpoint can hold.
+
 ## Cost line in the node log (`CSTORE_STATS`)
 
 Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
@@ -491,7 +513,8 @@ Labels in `counts`:
     - `refused_readonly`: the stored record is readonly for another owner.
     - with `CSTORE_ORDER` `on` (or `report`, for a hand-off re-send) only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).
-- `<bucket>/local/unconfirmed`, `<bucket>/local/overwritten` and `<bucket>/local/refused_by_peers`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, another write replaced the key during the wait, or every target settled with at least one refusal answer and too few confirmations.
+- `<bucket>/local/unconfirmed`, `<bucket>/local/overwritten` and `<bucket>/local/refused_by_peers`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, another write replaced the key during the wait, or every target settled with at least one refusal answer and too few confirmations. For a `wait=False` write they are counted later, by the plugin thread's re-sends.
+- `<bucket>/local/queued`: counted in addition to the outcome for a `wait=False` write stored here and queued.
 - `<bucket>/<origin>/ver_<word>` (`CSTORE_ORDER` `report` or `on`): a write or copy the order rule gives a word (`future`, `origin`, `older`, `older_than_delete`, `unstamped`, `collision`), counted whether or not it is refused; `<origin>` is `local`, `remote` or `hsync` (a record of a sync answer). `ver_invalid`: a stamp that is not `[int, str]`, treated as none. `<bucket>/hsync/ver_copy_delete`: a tombstone copy that removes (`on`) or would remove (`report`) a value held.
 - `<bucket>/<origin>/tombstone_new`: a delete that left a new tombstone; `<origin>` also `hsync` in `on`.
 - `<bucket>/confirm/disagree_own`, `<bucket>/confirm/disagree_other` (`CSTORE_LEAN_CONFIRM` `report` on the receivers): a full confirmation with a stamp that the value rule and the stamp rule judge apart (above).
@@ -504,7 +527,7 @@ Labels in `counts`:
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.
 - `save_cpu_ms` (save back-off `report` or `on`): CPU milliseconds the periodic saves took on the save thread.
 
-A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to read the same word as `result_info["outcome"]` (the wait end when there is one, `error` when the call raised); the returned bool is unchanged.
+A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to read the same word as `result_info["outcome"]` (the wait end when there is one, `queued` for a `wait=False` write, `not_ready` for a `wait=False` call before the store started, `error` when the call raised); the returned bool is unchanged.
 
 To find the hash namespace of a bucket, compute its prefix: `"hs:"` followed by the
 first 10 hex digits of the SHA-256 of the namespace name, followed by `":"`, as

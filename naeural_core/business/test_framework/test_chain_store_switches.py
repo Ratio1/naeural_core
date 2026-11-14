@@ -97,6 +97,31 @@ class TestSwitches(unittest.TestCase):
         self.assertEqual((store._ChainStoreBasePlugin__cs_modes, store.CS_SETTER in store.plugins_shmem),
                          (dict.fromkeys(SWITCHES.values(), mode), True))
 
+  def test_the_stamp_bound_and_the_tombstone_life_take_a_numeric_str_and_refuse_a_word(self):
+    """CSTORE_VER_MAX_AHEAD "60" and CSTORE_TOMBSTONE_DAYS "7" start as 60 s and 7 days, in ms (a str was repeated
+    by the multiplication instead of converted); a str that is no number stops the start on the conversion."""
+    # Each number: its config attribute, a numeric str for it, the state on_init keeps it in, and its value in ms.
+    for attribute, text, state, ms in (("cfg_cstore_ver_max_ahead", "60", "ver_ahead", 60_000),
+                                       ("cfg_cstore_tombstone_days", "7", "tomb_ms", 604_800_000)):
+      # One sub-test each.
+      with self.subTest(attribute=attribute):
+        # A store whose other numbers are the harness's.
+        store = _StartHarness(self.data_folder)
+        # This one as a str.
+        setattr(store, attribute, text)
+        # The real on_init: it starts.
+        store.on_init()
+        # Converted to a number first, then to milliseconds.
+        self.assertEqual(getattr(store, "_ChainStoreBasePlugin__" + state), ms)
+        # A second store, for a word in its place.
+        store = _StartHarness(self.data_folder)
+        # Not a number.
+        setattr(store, attribute, "soon")
+        # The start stops on the conversion, saying so.
+        with self.assertRaisesRegex(ValueError, "could not convert string to float"):
+          # The real on_init.
+          store.on_init()
+
 
 class TestCountingHelper(unittest.TestCase):
   """The one counting helper labels a count by bucket, origin and event, or by the event alone."""

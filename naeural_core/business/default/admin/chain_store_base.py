@@ -242,8 +242,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     TypeError
       When ``CSTORE_SAVE_MAX_GAP`` is not a number nor a str (``None``, a list); the start stops the same way.
       A str that is not a number raises ValueError instead; a numeric str such as ``"30"`` is taken. The same
-      holds for the hand-off's numbers (``float`` and ``int``). ``CSTORE_VER_MAX_AHEAD`` must be a number:
-      ``None`` raises TypeError, and a str is not checked.
+      holds for the hand-off's numbers (``float`` and ``int``) and for ``CSTORE_VER_MAX_AHEAD`` and
+      ``CSTORE_TOMBSTONE_DAYS`` (``float``, then milliseconds as an int): ``"60"`` and ``"7"`` are taken as 60 and
+      7, ``"soon"`` raises ValueError and ``None`` TypeError.
 
     Notes
     -----
@@ -331,10 +332,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # before the setter is published below.
     self.__save_max_gap = float(self.cfg_cstore_save_max_gap)
     # How far a stamp may run ahead of the wall clock, in ms, read once like the switches (not a number: the start
-    # stops here). The largest lead of a stamp seen since the last CSTORE_STATS line, in ms.
-    self.__ver_ahead, self.__ver_lead = int(1000 * self.cfg_cstore_ver_max_ahead), 0
-    # The life of a tombstone in ms and the most tombstones held, read once as well.
-    self.__tomb_ms = int(86_400_000 * self.cfg_cstore_tombstone_days)
+    # stops here). Converted with float() first, as the other numbers are: a config value that is a str was repeated
+    # 1000 times by the multiplication ("60" gave a bound of 2,000 digits) instead of converted or refused. The
+    # largest lead of a stamp seen since the last CSTORE_STATS line, in ms.
+    self.__ver_ahead, self.__ver_lead = int(1000 * float(self.cfg_cstore_ver_max_ahead)), 0
+    # The life of a tombstone in ms, read once as well, with the same conversion ("7" built a string of 86 million
+    # characters before the start failed on it).
+    self.__tomb_ms = int(86_400_000 * float(self.cfg_cstore_tombstone_days))
     # The cap, a count a later release can set.
     self.__tomb_cap = int(self.cfg_cstore_tombstone_cap)
     # The hand-off's first re-send delay in seconds and its window (re-sends in flight per peer), read once as well.

@@ -292,7 +292,11 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  # flag of changes held without a dirty mark.
                  "save_resume", "ver_ahead", "ver_lead", "ver_clock", "chain_storage_unmarked",
                  # The tombstone life, the cap and the horizon.
-                 "tomb_ms", "tomb_cap", "tomb_horizon"):
+                 "tomb_ms", "tomb_cap", "tomb_horizon",
+                 # The hand-off's numbers and state, and the peers dropped as lost, back, or proven to stamp.
+                 "handoff_first", "handoff_window", "handoff", "handoff_next", "handoff_pending", "peer_left",
+                 # The peers back since the last sweep and those proven to stamp their stores.
+                 "peer_back", "stamped_peers"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"
@@ -602,6 +606,8 @@ class TestCounters(unittest.TestCase):
       "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 7, "lost_inputs": 4, "modes": modes(),
       # No stamp led the clock (the write was unstamped).
       "stamp_lead_max_s": 0.0,
+      # No hand-off pair pending: the store holds no own stamped record.
+      "handoff_pending": 0,
     })
     # The counters start again.
     self.assertEqual(getattr(store, STATS), {})
@@ -617,6 +623,8 @@ class TestCounters(unittest.TestCase):
     self.assertEqual(json.loads(lines[1][len("CSTORE_STATS "):]), {
       # The modes again: they are in every line.
       "period_s": 300, "counts": {}, "queue_peak": 3, "lost_inputs": 0, "modes": modes(), "stamp_lead_max_s": 0.0,
+      # No hand-off pair pending: the store holds no own stamped record.
+      "handoff_pending": 0,
     })
 
 
@@ -1262,6 +1270,8 @@ class TestStart(unittest.TestCase):
       "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 0, "lost_inputs": 0, "modes": modes(),
       # The unstamped write gave no stamp lead.
       "stamp_lead_max_s": 0.0,
+      # No hand-off pair pending: the store holds no own stamped record.
+      "handoff_pending": 0,
     })
 
   def test_a_save_of_a_restarted_instance_waits_for_a_save_of_the_closed_one(self):

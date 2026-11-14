@@ -56,7 +56,9 @@ Current write propagation is push-based:
 
 This solves live replication for writes seen by currently running peers.
 It does not, by itself, replay older writes to a late joiner or a restarted
-peer that was offline while other peers kept accepting writes.
+peer that was offline while other peers kept accepting writes. The hand-off
+(below, `CSTORE_HANDOFF`) re-sends a writer's own writes to such peers once it
+is `on`.
 
 ## Read Behavior
 
@@ -88,6 +90,8 @@ Merge rules:
 - remote fields that overlap local state overwrite the local field
 - local fields absent from the remote snapshot are preserved
 - delete pruning is out of scope
+- each exported record carries only `key`, `value`, `owner`, `readonly` and, when
+  stamped, `ver` (the fields a merge reads); a record with a token is never exported
 
 Result rules:
 
@@ -362,7 +366,7 @@ echoed, the refusal word without its `refused_` prefix (`older`, `older_than_del
 `secret_rule`, `token`, `readonly`) and its own stamp for the key, never the value. A
 `future` stamp is counted and not answered, so the writer can deliver it once the clocks
 agree. Unstamped stores and stores dropped for their sender's membership or a `dl:` key
-are never answered. In `report` nothing is sent.
+are never answered. In `report` nothing is sent, except for a refused hand-off re-send.
 
 The writer handles answers in every mode: an answer that echoes the stamp of its own
 record, from a target not yet settled, adds the sender to the record's
@@ -406,13 +410,52 @@ token. It only counts, in `report` and `on` alike, and never refuses:
 The node that wrote a record is the address in its stamp: the verified sender for a
 live store, unverified for a sync copy. A record without a stamp is judged by its owner.
 
+### Hand-off (`CSTORE_HANDOFF`)
+
+Switch `CSTORE_HANDOFF` (`off`, `report` or `on`, read once at start; `report` by
+default). The writer finishes its own writes: every 15 s (the first sweep
+`CSTORE_HANDOFF_FIRST_S` after start) a sweep on the plugin thread walks the replica for
+the node's own records whose stamp is still its own last store's (`ver` equal to
+`sent_ver`; tombstones of local deletes included, re-sent as a store of value `None`). A
+pair (record, target) is settled when the target confirmed it, refused it with an
+answer, or the writer gave up; `confirmed_peers` holds the settled targets.
+
+- A pair is first due `CSTORE_HANDOFF_FIRST_S` (300 s) after the write, then after a gap
+  that doubles up to 3600 s: re-sends at the record's age of 300, 600, 1200, 2400, 4800
+  and 8400 s, at most 6, then the pair is given up.
+- A target that is offline, or whose last store to this node carried no stamp (a node of
+  the previous release, or with `CSTORE_ORDER` `off`, or one that sent nothing since this
+  node started), is skipped and uses none of the 6: an oracle away for any length gets
+  the record once back. A dAuth secret goes only to a target still in the dAuth registry.
+- At most `CSTORE_HANDOFF_WINDOW` (8) re-sends wait per peer (1 on a node in neither
+  registry, a worker), at most 32 re-sends per sweep.
+- A peer that joins becomes a target of the own records meant for every default peer
+  (not of secret records); a peer the refresh dropped as `LOST STATUS` and that comes
+  back is unsettled on the records written at most 300 s before it was dropped. An
+  orderly stop re-opens nothing.
+- `on`: each record goes as one `SSTORE` to its due peers with its own stamp and
+  `resend: true`; widening, re-confirm and give-up change `target_peers` and
+  `confirmed_peers`. `report`: the same bookkeeping in memory only; nothing is sent and
+  no record changes. `off`: nothing runs. `on` needs `CSTORE_ORDER` `on` and
+  `CSTORE_TOMBSTONE_DAYS` above 0; otherwise the plugin does not start.
+
+A receiver admits a store that carries `resend` by the order rule of `on` in `report`
+too (signed field, `cs_rev`, then the stamp; a stamped re-send replaces an unstamped
+copy), and answers a refused one. A node of the previous release would apply it in
+arrival order, which is why re-sends go only to peers that stamp their stores.
+
+Records: an own record also carries `default_peers`; a remote record carries
+`confirms` -1 and `min_confirms` 0 and no peer lists (the previous release gave it
+this node's lists, which nothing read). A `False` from a blocking write with the
+hand-off `on` means "not confirmed yet": the store keeps delivering it.
+
 ## Cost line in the node log (`CSTORE_STATS`)
 
 Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
 the node log, one JSON object with sorted keys:
 
 ```text
-CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"lost_inputs":<n>,"modes":{"handoff":"report","lean_confirm":"report","order":"report","save_backoff":"report"},"period_s":300,"queue_peak":<n>,"stamp_lead_max_s":<s>}
+CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"handoff_pending":<n>,"lost_inputs":<n>,"modes":{"handoff":"report","lean_confirm":"report","order":"report","save_backoff":"report"},"period_s":300,"queue_peak":<n>,"stamp_lead_max_s":<s>}
 ```
 
 The line is written also when nothing was counted, so a missing line means the
@@ -427,6 +470,7 @@ Fields:
 - `lost_inputs`: how much the plugin's `lost_inputs_count` grew: inputs that arrived while the input queue was full, when the queue drops its oldest input.
 - `modes`: the mode of each wave 03 switch of the plugin config (`CSTORE_ORDER`, `CSTORE_LEAN_CONFIRM`, `CSTORE_HANDOFF`, `CSTORE_SAVE_BACKOFF`), read once at start: `off` (wave 02 behaviour), `report` (the rule runs and is counted, nothing acts on it) or `on` (the rule acts). Any other value stops the plugin's start. The same table is in every line until the next start.
 - `stamp_lead_max_s`: the largest lead over this node's wall clock, in seconds, of a version stamp the order rule took in the period (a peer's clock ahead of this one, plus transit); 0 when none led, and always with `CSTORE_ORDER` `off`.
+- `handoff_pending`: the hand-off's pairs (own record, target) not settled at its last sweep; 0 with `CSTORE_HANDOFF` `off`.
 
 Labels in `counts`:
 
@@ -445,7 +489,7 @@ Labels in `counts`:
     - `refused_secret_rule`: a revocation marker emptied or changed, or a payload for a revoked secret revision.
     - `refused_token`: the stored record has another token.
     - `refused_readonly`: the stored record is readonly for another owner.
-    - with `CSTORE_ORDER` `on` only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
+    - with `CSTORE_ORDER` `on` (or `report`, for a hand-off re-send) only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).
 - `<bucket>/local/unconfirmed`, `<bucket>/local/overwritten` and `<bucket>/local/refused_by_peers`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, another write replaced the key during the wait, or every target settled with at least one refusal answer and too few confirmations.
 - `<bucket>/<origin>/ver_<word>` (`CSTORE_ORDER` `report` or `on`): a write or copy the order rule gives a word (`future`, `origin`, `older`, `older_than_delete`, `unstamped`, `collision`), counted whether or not it is refused; `<origin>` is `local`, `remote` or `hsync` (a record of a sync answer). `ver_invalid`: a stamp that is not `[int, str]`, treated as none. `<bucket>/hsync/ver_copy_delete`: a tombstone copy that removes (`on`) or would remove (`report`) a value held.
@@ -454,6 +498,7 @@ Labels in `counts`:
 - `<bucket>/<origin>/perm_readonly`, `<bucket>/<origin>/delete_foreign` (`CSTORE_ORDER` `report` or `on`): the write-permission count (above); counts only.
 - `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
+- `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and due pairs held back by the window, per target peer (in `report`, what `on` would do if no re-send were answered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.

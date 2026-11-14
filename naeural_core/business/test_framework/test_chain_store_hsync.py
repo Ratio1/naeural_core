@@ -312,6 +312,19 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__tomb_ms, self._ChainStoreBasePlugin__tomb_cap = 7 * 86_400_000, 570
     # No tombstone removed yet.
     self._ChainStoreBasePlugin__tomb_horizon = 0
+    # The hand-off's numbers as the config gives them (first re-send after 300 s, 8 in flight per peer) and as on_init
+    # reads them.
+    self.cfg_cstore_handoff_first_s, self.cfg_cstore_handoff_window = 300, 8
+    # As on_init reads them.
+    self._ChainStoreBasePlugin__handoff_first, self._ChainStoreBasePlugin__handoff_window = 300.0, 8
+    # The hand-off's state as on_init leaves it at time 0: an empty table, the first sweep at 300 s, nothing pending.
+    self._ChainStoreBasePlugin__handoff, self._ChainStoreBasePlugin__handoff_next = {}, 300.0
+    # Nothing pending.
+    self._ChainStoreBasePlugin__handoff_pending = 0
+    # No peer dropped as lost or back yet, and no peer proven to stamp its stores.
+    self._ChainStoreBasePlugin__peer_left, self._ChainStoreBasePlugin__peer_back = {}, {}
+    # No stamped store received yet.
+    self._ChainStoreBasePlugin__stamped_peers = set()
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

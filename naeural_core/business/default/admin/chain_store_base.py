@@ -27,6 +27,8 @@ TODO:
 
 # Used at start-up to keep a replica file that gave no records under another name.
 import os
+# The hand-off's count of re-sends in flight per peer.
+from collections import Counter
 # Keeps one copy of each writer address that stamps carry, so the stamps of one writer share it in memory and in the
 # replica file.
 from sys import intern
@@ -85,6 +87,11 @@ _CONFIG = {
   "CSTORE_LEAN_CONFIRM" : "report",
   # The writer re-sends its own unconfirmed writes.
   "CSTORE_HANDOFF" : "report",
+  # Seconds from a write to its first re-send (also the first gap of the doubling back-off), and how many re-sends
+  # may wait for an answer per peer: numbers the defaults-only release can retune from the report counts.
+  "CSTORE_HANDOFF_FIRST_S" : 300,
+  # The re-sends in flight per peer.
+  "CSTORE_HANDOFF_WINDOW" : 8,
   # Saves spaced out after a slow save.
   "CSTORE_SAVE_BACKOFF" : "report",
   # The longest pause, in seconds, the save back-off puts between two save starts (0 makes it pause nothing).
@@ -137,6 +144,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_REFUSED, CS_HELD_VER = "refused", "held_ver"
   # On this node's own records: the stamp of its last own store, which confirmations and refusal answers echo.
   CS_SENT_VER = "sent_ver"
+  # On this node's own records: True when the write was meant for every default peer (not a secret record), so a
+  # peer that joins later is added to its targets.
+  CS_DEFAULT_PEERS = "default_peers"
+  # The field that marks a store as a re-send of the hand-off: its receiver applies the order rule as in 'on'.
+  CS_RESEND = "resend"
+  # The fields of a record a namespace-sync answer carries (the merge reads no other; the confirmation fields stay).
+  CS_EXPORT_FIELDS = (CS_KEY, CS_VALUE, CS_OWNER, CS_READONLY, CS_VER)
+  # The hand-off: seconds between two sweeps, re-sends per sweep, re-sends per record and peer before giving up,
+  # the longest gap of the back-off, and how long before a lost peer was dropped its settlements are re-opened.
+  CS_HANDOFF_INTERVAL, CS_HANDOFF_BUDGET, CS_HANDOFF_MAX_SENDS, CS_HANDOFF_MAX_GAP = 15, 32, 6, 3600
+  # The look-back of a re-confirm, in seconds.
+  CS_HANDOFF_LOOKBACK = 300
   # The namespaces with write rules of their own (the signed ones and the dAuth secret revisions): the write-permission
   # count leaves them out.
   CS_PROTECTED_NAMESPACES = (
@@ -175,8 +194,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The replica is read from this plugin's cache file (an empty store when there is none or it cannot be
     read). Then the counters of the ``CSTORE_STATS`` line start, the wave 03 switches (``CSTORE_ORDER``,
     ``CSTORE_LEAN_CONFIRM``, ``CSTORE_HANDOFF``, ``CSTORE_SAVE_BACKOFF``) are read once into the mode table
-    every later step reads, the save back-off's ceiling ``CSTORE_SAVE_MAX_GAP`` and the stamp bound
-    ``CSTORE_VER_MAX_AHEAD`` are read once too, and the flush of a changed replica is registered with the
+    every later step reads, the save back-off's ceiling ``CSTORE_SAVE_MAX_GAP``, the stamp bound
+    ``CSTORE_VER_MAX_AHEAD`` and the hand-off's numbers ``CSTORE_HANDOFF_FIRST_S`` and ``CSTORE_HANDOFF_WINDOW``
+    are read once too, and the flush of a changed replica is registered with the
     SerializationManager, which runs it on a thread kept for this save every ``CS_SAVE_INTERVAL`` seconds, so
     this plugin's thread no longer runs the save. A switch set
     to anything but ``'off'``, ``'report'`` or ``'on'`` stops the start. When the store this instance will
@@ -193,19 +213,26 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ------
     ValueError
       When a switch is not exactly ``'off'``, ``'report'`` or ``'on'`` (``'ON'``, ``True`` and ``None`` are
-      refused too); the message names each such config key and its value. The plugin then does not start:
+      refused too); the message names each such config key and its value. Also when ``CSTORE_HANDOFF`` is
+      'on' while ``CSTORE_ORDER`` is not 'on' or ``CSTORE_TOMBSTONE_DAYS`` is 0. The plugin then does not start:
       its setter is never published, so a blocking ``chainstore_set``, ``chainstore_get`` or
       ``chainstore_hlist`` on this node waits for it with no timeout.
     TypeError
       When ``CSTORE_SAVE_MAX_GAP`` is not a number nor a str (``None``, a list); the start stops the same way.
       A str that is not a number raises ValueError instead; a numeric str such as ``"30"`` is taken.
-      ``CSTORE_VER_MAX_AHEAD`` must be a number (a str raises TypeError).
+      ``CSTORE_VER_MAX_AHEAD`` must be a number (a str raises TypeError), and so must the hand-off's numbers.
 
     Notes
     -----
     The registration comes after the load, so a save can never run before the stored replica is in memory,
     and before the steps that can fail, so ``on_close`` always finds the registration it removes. The switch
-    check is one of those steps. Nothing checks one switch against another yet.
+    checks are among those steps. The one check of a switch against others: hand-off 'on' needs the order rule
+    'on' (receivers refuse an older re-send) and tombstones kept (a re-sent older value cannot bring back a key
+    deleted meanwhile).
+
+    The hand-off's state starts empty, in memory only: its side table, its first sweep
+    ``CSTORE_HANDOFF_FIRST_S`` after this start, the peers dropped as lost or back, and the peers proven to
+    stamp their stores (none until each sends a stamped store).
 
     The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
     and the plugin does not start, where it used to start empty and fail at its first save. A file that
@@ -273,6 +300,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__tomb_ms = int(86_400_000 * self.cfg_cstore_tombstone_days)
     # The cap, a count the defaults-only release can set.
     self.__tomb_cap = int(self.cfg_cstore_tombstone_cap)
+    # The hand-off's first re-send delay in seconds and its window (re-sends in flight per peer), read once as well.
+    self.__handoff_first = float(self.cfg_cstore_handoff_first_s)
+    # The window.
+    self.__handoff_window = int(self.cfg_cstore_handoff_window)
     # The newest stamp of a tombstone this node removed (expired or past the cap), at most CSTORE_VER_MAX_AHEAD ahead
     # of the wall clock: no record stamped below it may come back by a later catch-up. 0 until the first removal.
     self.__tomb_horizon = 0
@@ -284,6 +315,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if bad_modes:
       # Fail loudly: the store does not start (one START FAILURE line) rather than run a rule in a mode nobody chose.
       raise ValueError(f"Chain-store switches must be 'off', 'report' or 'on', got: {bad_modes}")
+    if self.__cs_modes["handoff"] == "on" and (self.__cs_modes["order"] != "on" or not self.__tomb_ms):
+      # Fail loudly as well: re-sends are safe only while receivers refuse an older one (order 'on') and deletes leave
+      # tombstones (a re-sent older value cannot bring a deleted key back).
+      raise ValueError(
+        "Chain-store switch CSTORE_HANDOFF 'on' needs CSTORE_ORDER 'on' and CSTORE_TOMBSTONE_DAYS above 0")
       
     memory = self.plugins_shmem
       
@@ -330,6 +366,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     memory[self.CS_SETTER] = self._set_value
     memory[self.CS_HSYNC] = self._hsync
     
+    # The hand-off's side table (storage key -> (record, {peer: [re-sends, next due time or None once given up]}),
+    # memory only), the time of its first sweep (CSTORE_HANDOFF_FIRST_S after start, so a booting node sends no burst)
+    # and the pairs left pending by the last sweep.
+    self.__handoff, self.__handoff_next, self.__handoff_pending = {}, self.time() + self.__handoff_first, 0
+    # Peers dropped from the replication peers as lost (address -> when), and peers that joined or came back since the
+    # last sweep (address -> when they were dropped as lost, or None); the first refresh below makes every peer join.
+    self.__peer_left, self.__peer_back = {}, {}
+    # The peers whose last store carried a stamp (nodes of this release with the order switch not 'off'): the only
+    # ones a re-send goes to.
+    self.__stamped_peers = set()
     self.__last_chain_peers_refresh = 0
     self.__chain_peers = []
     self.__pending_hsync = {}
@@ -439,6 +485,182 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.__cs_count("tombstones_held", n=len(tombs) - cut)
 
 
+  def __maybe_handoff(self):
+    """
+    The hand-off: re-send this node's own writes to the target peers that have not settled them, when due.
+
+    Every ``CS_HANDOFF_INTERVAL`` (15) seconds, the first time ``CSTORE_HANDOFF_FIRST_S`` after start, the sweep
+    walks the replica for this node's own records whose stamp is still the one of their last own store
+    (``ver`` equal to ``sent_ver``; the tombstones of local deletes included). A pair is one such record and
+    one of its targets; it is settled when the peer confirmed it or refused it with an answer (the peer is in
+    ``confirmed_peers``) or when the sweep gave up on it. For each pair not settled:
+
+    - it is first due ``CSTORE_HANDOFF_FIRST_S`` after the write, then after a gap that doubles from
+      ``CSTORE_HANDOFF_FIRST_S`` up to ``CS_HANDOFF_MAX_GAP`` (3600 s): with the defaults the re-sends go at the
+      record's age of 300, 600, 1200, 2400, 4800 and 8400 s;
+    - a due pair whose peer is offline, or has not sent this node a stamped store since its start (or sent an
+      unstamped one since), is skipped and uses nothing: an oracle away for any length gets it once back;
+    - a due pair of a dAuth secret record is skipped unless this node is a registry member and the peer a
+      dAuth registry member, as the write itself requires;
+    - a due pair that had ``CS_HANDOFF_MAX_SENDS`` (6) re-sends is given up (``handoff/gave_up/<peer>``);
+    - at most ``CSTORE_HANDOFF_WINDOW`` (8) re-sends wait for their next due time per peer (1 when this node
+      is in neither registry, a worker); a due pair beyond it waits (``handoff/window_full/<peer>``);
+    - at most ``CS_HANDOFF_BUDGET`` (32) re-sends per sweep.
+
+    A re-send counts ``handoff/send/<peer>`` (the first of its pair) or ``handoff/resend/<peer>``. A peer that
+    joined since the last sweep becomes a target of every own record meant for all default peers that does
+    not target it (widening); a peer that comes back after the peer refresh dropped it as lost is unsettled
+    on the records it settled that were written at most ``CS_HANDOFF_LOOKBACK`` (300 s) before it was dropped
+    (re-confirm), as their copy may have died with it.
+
+    - ``'off'``: nothing runs and nothing is kept.
+    - ``'report'``: everything above runs on an in-memory table only: no store is sent, no stored record
+      changes (a give-up, a widening and a re-confirm live in the table), so the counts are what 'on' would do
+      if no re-send were ever answered.
+    - ``'on'``: each record goes as one store to its due peers, with the record's own stamp (never a new one)
+      and ``resend`` set; widening and re-confirm change the record's ``target_peers`` and
+      ``confirmed_peers``, and a give-up adds the peer to ``confirmed_peers``.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Runs on the plugin thread from ``process``, before the queued stores are sent, so a re-send leaves on the
+    same lap. The walk reads a list of the replica's items without the persistence lock (a record is stored
+    whole, and its lists change only on this thread); the changes of stored lists in 'on' take the lock. The
+    table (storage key -> (record, {peer: [re-sends, next due time, or None once given up in 'report']})) is
+    used only on this thread, by this sweep and by ``__exec_received_confirm``, which ends a pair on its
+    answer; an entry whose record was replaced is dropped at the next sweep, so the table holds only pairs
+    of own records still held. Nothing here marks the replica for a save. The pairs left pending are kept for
+    the ``handoff_pending`` field of the next ``CSTORE_STATS`` line.
+
+    A record's age is read from its own stamp, which this node's clock keeps within ``CSTORE_VER_MAX_AHEAD`` of
+    its wall clock, so a re-send is never early and at most that much late. Cost: one dict read and one
+    comparison per record that is not an own record, two dict reads, a table lookup and two lengths more per
+    settled own record, and a few scans of its targets per own record with a pair pending; a sweep after a peer
+    joined or came back scans every own record's lists once.
+
+    Examples
+    --------
+    >>> self.__maybe_handoff()   # 'on', a record written 300 s ago and confirmed by peer1 only: re-sent to peer2
+    """
+    # The hand-off's mode, read once at start.
+    mode = self.__cs_modes["handoff"]
+    # The wall clock in seconds: the due times are on it.
+    now = self.time()
+    if mode == "off" or now < self.__handoff_next:
+      return
+    # The next sweep.
+    self.__handoff_next = now + self.CS_HANDOFF_INTERVAL
+    # The peers that joined or came back since the last sweep (with when they were dropped as lost, or None), for this
+    # sweep alone.
+    back, self.__peer_back = self.__peer_back, {}
+    # The last sweep's table; this sweep keeps the entries of the own records still held.
+    table, self.__handoff = self.__handoff, {}
+    # The re-sends in flight per peer: pairs re-sent whose next due time has not come.
+    flight = Counter(peer for _, pairs in table.values() for peer, (sends, due) in pairs.items()
+                     if sends and due is not None and due > now)
+    # A writer in neither registry (a worker) keeps one re-send in flight per peer: some 50 workers with 8 each would
+    # land on an oracle as it restarts.
+    window = self.__handoff_window if self.__registry_member(self.ee_addr) else 1
+    # Peers checked this sweep (address -> may be sent to), the re-sends left to it, and the pairs left pending.
+    reachable, budget, pending = {}, self.CS_HANDOFF_BUDGET, 0
+    # Each record of a copy of the replica's items, read without the lock.
+    for key, record in list(self.__chain_storage.items()):
+      # Only an own record whose stamp is its last own store's: a remote record or copy has no sent_ver, a legacy one
+      # no stamp, and a peer's identical write that raised the stamp is delivered by that peer.
+      if record.get(self.CS_SENT_VER) is None or record.get(self.CS_VER) != record[self.CS_SENT_VER]:
+        continue
+      # Its targets and the peers that settled it (stored lists, changed here only in 'on').
+      targets, settled = record["target_peers"], record["confirmed_peers"]
+      # Its entry from the last sweep, kept only for the same record (a rewrite starts afresh).
+      owner_record, pairs = table.get(key, (None, {}))
+      # Its pairs.
+      pairs = pairs if owner_record is record else {}
+      # The common case, at the cost of two lengths: a record every target settled (the settled peers are always
+      # among the targets), with no pair in the table and no peer that joined or came back.
+      if not (pairs or back) and len(settled) >= len(targets):
+        continue
+      # When it was written, in seconds, from its stamp.
+      sent_at = record[self.CS_SENT_VER][0] / 1000
+      # Widening and re-confirm: a joined peer the record meant for every default peer does not target, and a peer
+      # back after being lost that settled the record written at most CS_HANDOFF_LOOKBACK before it was dropped.
+      opened = [peer for peer, left in back.items() if (record[self.CS_DEFAULT_PEERS] and peer not in targets) or (
+        left is not None and peer in settled and sent_at >= left - self.CS_HANDOFF_LOOKBACK)]
+      if opened and mode == "on":
+        # The stored lists change only in 'on', under the lock the saves copy them under.
+        with self.__persistence_lock:
+          # A joined peer becomes a target (its confirmation then counts).
+          targets.extend(peer for peer in opened if peer not in targets)
+          # A returned peer is unsettled.
+          settled[:] = [peer for peer in settled if peer not in opened]
+      # Each peer of a pair not settled: a target not settled, or a peer just opened.
+      for peer in [peer for peer in targets if peer not in settled] + opened:
+        # Each pair not settled, first due CSTORE_HANDOFF_FIRST_S after the write (in 'report' the opened ones live
+        # only here).
+        pairs.setdefault(peer, [0, sent_at + self.__handoff_first])
+      # The peers this sweep re-sends the record to.
+      due_peers = []
+      # Each pair, over a copy, so a give-up in 'on' can drop it.
+      for peer, pair in list(pairs.items()):
+        if pair[1] is None or pair[1] > now:
+          continue
+        if peer not in reachable:
+          # Proven to stamp its stores, and online: in the replication peers, or as NetMon reports another target.
+          reachable[peer] = peer in self.__stamped_peers and (
+            peer in self.__chain_peers or self.__netmon_node_is_online_for_control(peer))
+        # A dAuth secret goes only from a registry member to a dAuth registry member, checked again before each re-send.
+        if not reachable[peer] or (self.__secret_namespace(record[self.CS_KEY]) and not (
+            self.__registry_member(self.ee_addr) and self.__registry_member(peer, dauth_only=True))):
+          continue
+        if pair[0] >= self.CS_HANDOFF_MAX_SENDS:
+          # Given up once its last re-send's wait is over and the peer is reachable, counted per peer.
+          self.__cs_count("handoff/gave_up/" + peer)
+          if mode == "on":
+            # Settled in the record, under the lock.
+            with self.__persistence_lock:
+              # The peer settled by the give-up.
+              settled.append(peer)
+            # The table forgets it.
+            del pairs[peer]
+          else:
+            # In 'report' settled in the table only.
+            pair[1] = None
+          continue
+        if flight[peer] >= window:
+          # The window of this peer is full, counted per peer: it names a slow or deaf peer.
+          self.__cs_count("handoff/window_full/" + peer)
+          continue
+        if not budget:
+          continue
+        # One more re-send; the next is due after CSTORE_HANDOFF_FIRST_S doubled per earlier re-send, at most
+        # CS_HANDOFF_MAX_GAP.
+        pair[0], pair[1] = pair[0] + 1, now + min(self.__handoff_first * 2 ** pair[0], self.CS_HANDOFF_MAX_GAP)
+        # In flight now, and one re-send less for this sweep.
+        flight[peer], budget = flight[peer] + 1, budget - 1
+        # Sent with the record's store.
+        due_peers.append(peer)
+        # Counted per peer: the first re-send of a pair, or a later one.
+        self.__cs_count(("handoff/send/" if pair[0] == 1 else "handoff/resend/") + peer)
+      if due_peers and mode == "on":
+        # One store to the due peers alone, as the record holds it, with its own stamp and the re-send mark.
+        self.__ops.append({
+          self.CS_OP: self.CS_STORE, self.CS_KEY: record[self.CS_KEY], self.CS_VALUE: record[self.CS_VALUE],
+          self.CS_OWNER: record[self.CS_OWNER], self.CS_TOKEN: record[self.CS_TOKEN],
+          self.CS_READONLY: record[self.CS_READONLY], self.CS_PEERS: due_peers, self.CS_INCLUDE_DEFAULT_PEERS: False,
+          self.CS_VER: record[self.CS_SENT_VER], self.CS_RESEND: True,
+        })
+      if pairs:
+        # Kept for the next sweep.
+        self.__handoff[key] = (record, pairs)
+        # Its pairs not given up.
+        pending += sum(pair[1] is not None for pair in pairs.values())
+    # For the next CSTORE_STATS line.
+    self.__handoff_pending = pending
+
+
   def __netmon_node_is_online_for_control(self, peer):
     """
     Tell whether ``peer`` is running and should receive records.
@@ -520,6 +742,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     confirmed. A seed whose whitelist holds only itself therefore has no default peer, and its writes fail at
     once (``refused_no_peers``) instead of waiting 3 x 10 s for a confirmation that never comes.
 
+    For the hand-off (``__maybe_handoff``), each refresh also notes which peers left and which joined: a peer
+    that left while NetMon reports it ``LOST STATUS`` is recorded with the time it was dropped, and a peer that
+    joins (every peer at the first refresh after start) or comes back is queued for the next sweep with that
+    time, or None when it was not dropped as lost.
+
     Returns
     -------
     None
@@ -530,6 +757,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ``on_init``). The own address is compared before NetMon is asked, so NetMon is never asked about this
     node; both sides carry the address prefix (``get_whitelist(with_prefix=True)`` and ``ee_addr``). On an
     oracle, whose whitelist holds itself, a write is no longer sent to itself either.
+
+    NetMon is asked once more only for a peer that left. An orderly stop (status ``SHUTDOWN``) or a peer taken
+    off the whitelist is not recorded as lost: it lost nothing, so its settlements are not re-opened. A peer
+    that comes back within one refresh interval is seen neither leaving nor joining.
 
     Examples
     --------
@@ -542,11 +773,26 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # ChainStore routing is not consensus evidence; on normal nodes the
       # control liveness check may use fresh oracle summaries when peer
       # heartbeats are intentionally not received.
-      self.__chain_peers = [
+      # The list before this refresh, to see which peers left and which joined.
+      old, self.__chain_peers = self.__chain_peers, [
         # The node itself is left out first, before NetMon is asked: it never confirms its own writes, so with it
         # in the list a seed holding only itself waited 3 x 10 s per write.
         peer for peer in _chain_peers if peer != self.ee_addr and self.__netmon_node_is_online_for_control(peer)
       ]
+      # Each peer of the list before the refresh.
+      for peer in old:
+        # A peer dropped because NetMon reports it lost (a crash or a cut, not an orderly stop or a whitelist change),
+        # asked only for the peers that left: when it comes back, the hand-off re-opens its recent settlements.
+        if peer not in self.__chain_peers and self.netmon.network_node_simple_status(
+            peer, last_exception_check_time_minutes=0) == "LOST STATUS":
+          # When it was dropped.
+          self.__peer_left[peer] = self.time()
+      # Each peer of the new list.
+      for peer in self.__chain_peers:
+        if peer not in old:
+          # A peer that joined or came back, for the next hand-off sweep, with the time it was dropped as lost (None
+          # when it was not).
+          self.__peer_back[peer] = self.__peer_left.pop(peer, None)
       self.__last_chain_peers_refresh = self.time()
     return
   
@@ -1422,10 +1668,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Returns
     -------
     dict
-      Deep-copied chain-store records keyed by their composed storage key.
+      Deep copies of the records' ``CS_EXPORT_FIELDS`` (key, value, owner, readonly and, when present, the
+      stamp ``ver``), keyed by their composed storage key.
 
     Notes
     -----
+    Only the fields a merge reads are sent (the previous release's merge reads owner, value, readonly and
+    token, and a record with a token is never exported): the confirmation fields, the peer lists, ``sent_ver``
+    and ``default_peers`` stay on this node.
+
     The export freezes ``self.__chain_storage.items()`` into a list before
     filtering. That keeps snapshot generation stable even if another local
     write mutates the dictionary while the snapshot is being assembled.
@@ -1469,10 +1720,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         continue
       # A tombstone travels under the key it deleted, with value None and its stamp.
       name = key[len(self.CS_DEL):] if key.startswith(self.CS_DEL) else key
-      # A copy of the record.
-      snapshot[name] = self.deepcopy(record)
-      # Without its token.
-      snapshot[name].pop(self.CS_TOKEN, None)
+      # A copy of the five fields a merge reads (the stamp only when there is one): before, the whole record went,
+      # with its confirmation fields and peer lists and a token None, about 1,082 B a record against 461 B now.
+      snapshot[name] = self.deepcopy({field: record[field] for field in self.CS_EXPORT_FIELDS if field in record})
     return snapshot
 
 
@@ -1690,12 +1940,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   def __reset_confirmations(self, key, peers=None, include_default_peers=True):
     """
-    Reset confirmation counters for a stored key.
+    Give the confirmation fields of a new own record: no confirmation yet, its targets and how many must confirm.
 
     Parameters
     ----------
     key : str
-      Chain-store key whose counters are reset.
+      Chain-store key of the write (the deleted key for a delete's tombstone), whose namespace decides whether
+      a peer that joins later is added to the record's targets.
     peers : str or list, optional
       Explicit peers requested for the write associated with ``key``.
     include_default_peers : bool, optional
@@ -1704,26 +1955,40 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Returns
     -------
-    None
+    dict
+      ``confirms`` 0, ``confirmed_peers`` (an empty list: the peers that settled the record, by a confirmation,
+      a refusal answer or the hand-off giving up), ``target_peers``, ``min_confirms``, and ``default_peers``:
+      True when the write is meant for every default peer and is not a dAuth secret, so the hand-off adds a peer
+      that joins later to its targets.
+
+    Notes
+    -----
+    Before, this set the fields on the stored record one after the other; the caller now builds the record with
+    them, so the hand-off's walk, which reads records without the persistence lock, never sees a record with
+    ``confirms`` and without its lists. A remote record no longer gets these fields (``__set_key_value``).
+
+    Examples
+    --------
+    >>> self.__reset_confirmations("key")   # default peers peer1 and peer2
+    {'confirms': 0, 'confirmed_peers': [], 'target_peers': ['peer1', 'peer2'], 'min_confirms': 2, 'default_peers': True}
     """
-    self.__chain_storage[key][self.CS_CONFIRMATIONS] = 0
-    self.__chain_storage[key]["confirmed_peers"] = []
-    self.__chain_storage[key]["target_peers"] = self.__get_target_peers(
-      peers=peers, include_default_peers=include_default_peers,
-    )
-    self.__chain_storage[key][self.CS_MIN_CONFIRMATIONS] = self.__get_min_peer_confirmations(
-      peers=peers,
-      include_default_peers=include_default_peers,
-    )
-    return
+    # The fields, built before the record is stored.
+    return {
+      self.CS_CONFIRMATIONS: 0, "confirmed_peers": [],
+      # The targets as the peers are now, and the confirmations needed from them.
+      "target_peers": self.__get_target_peers(peers=peers, include_default_peers=include_default_peers),
+      # The confirmations needed.
+      self.CS_MIN_CONFIRMATIONS: self.__get_min_peer_confirmations(
+        peers=peers,
+        include_default_peers=include_default_peers,
+      ),
+      # A peer that joins later is added to the targets of a write meant for every default peer, never of a secret.
+      self.CS_DEFAULT_PEERS: include_default_peers and not self.__secret_namespace(key),
+    }
 
 
   def __increment_confirmations(self, key):
     self.__chain_storage[key][self.CS_CONFIRMATIONS] += 1
-    return
-  
-  def __set_confirmations(self, key, confirmations):
-    self.__chain_storage[key][self.CS_CONFIRMATIONS] = confirmations
     return
 
 
@@ -1780,6 +2045,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Notes
     -----
+    The record is built whole before it is stored. A local record gets the
+    confirmation fields of ``__reset_confirmations`` (its targets,
+    ``default_peers`` among them); a remote record gets only ``confirms`` -1
+    and ``min_confirms`` 0, as a sync copy, and no peer lists (the previous
+    release gave it this node's lists, which nothing read).
+
     When ``value`` is ``None``, the key is deleted locally. The existing
     delete semantics and related trade-offs described below are preserved.
     A stamped delete (``ver`` given, ``CSTORE_TOMBSTONE_DAYS`` above 0) also
@@ -1843,16 +2114,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # A local write's stamp again, as the one its store carried: a peer's identical write can raise the record's
       # stamp later, and the confirmations and refusal answers of this store still echo this one.
       **({self.CS_SENT_VER: ver} if ver is not None and not local_sync_storage_op else {}),
+      # A remote record: -1 (synced from a peer) and no peer lists, as a sync copy has; before, it also carried this
+      # node's peer lists, which nothing read. A local record (or a local delete's tombstone): its confirmation fields.
+      **({self.CS_CONFIRMATIONS: -1, self.CS_MIN_CONFIRMATIONS: 0} if local_sync_storage_op else
+         # The local record's fields, for the write's own key (the deleted key for a tombstone).
+         self.__reset_confirmations(key, peers=peers, include_default_peers=include_default_peers)),
     }
-    self.__reset_confirmations(
-      # The record's own key: the tombstone's for a delete, so a confirmation of a local delete has a record to land on.
-      chain_key,
-      peers=peers,
-      include_default_peers=include_default_peers,
-    )
-    if local_sync_storage_op:
-      # set the confirmations to -1 to indicate that the key is remote synced on this node
-      self.__set_confirmations(chain_key, -1) # set to -1 to indicate that the key is remote synced on this node
     return
 
 
@@ -1872,6 +2139,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     result_info=None,
     ver=None,
     sender=None,
+    resend=False,
   ):
     """
     Set a value in chain storage and optionally wait for confirmations.
@@ -1919,6 +2187,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     sender : str, optional
       For a remote write only, the verified address of the node that sent it, which the stamp must name.
       Only ``__exec_store`` passes it. Default is None.
+    resend : bool, optional
+      For a remote write only: True for a hand-off re-send (a store that carries ``resend``), which the order
+      rule refuses on its word as in 'on' whatever this node's order switch (except 'off', which reads no
+      stamp). Only ``__exec_store`` passes it. Default is False.
 
     Returns
     -------
@@ -1978,7 +2250,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       payload for a revoked secret revision;
     - ``refused_token``: the stored record has another token;
     - ``refused_readonly``: the stored record is readonly for another owner;
-    - with the order switch ``CSTORE_ORDER`` 'on' only, the order rule's
+    - with the order switch ``CSTORE_ORDER`` 'on' (or 'report', for a
+      hand-off re-send) only, the order rule's
       words (``__ver_admit``): ``refused_older``, ``refused_future``,
       ``refused_origin``, ``refused_unstamped``, ``refused_collision`` and
       ``refused_older_than_delete``.
@@ -1989,7 +2262,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     local write takes a fresh stamp (``__ver_tick``) and a remote one's is
     checked for form; the record keeps the stamp, the store message carries
     it, and ``__ver_admit`` counts each rule as ``ver_<word>``. Only 'on'
-    refuses on its word; 'report' writes as the previous release. A remote
+    refuses on its word; 'report' writes as the previous release, except a
+    hand-off re-send (``resend``), refused on its word in 'report' too, so a
+    re-send never replaces a newer copy during a switch to 'on'. A remote
     write of the value held is identical in every mode; it raises the held
     stamp to its own when that is newer, in memory without a dirty mark, as
     an identical local write's fresh stamp is.
@@ -2146,7 +2421,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           ver = self.__ver_valid(ver, key, "remote") if local_sync_storage_op else self.__ver_tick()
           # The order rule's word for this write (each counted as ver_<word>), None when admitted.
           reason = self.__ver_admit(key, value, ver, sender, "remote" if local_sync_storage_op else "local")
-          if reason is not None and order == "on":
+          # A hand-off re-send is refused on the rule's word in 'report' too, as the live-write steps of 'on'.
+          if reason is not None and (order == "on" or resend):
             # Refused by the order rule: not stored, and from a peer not confirmed. In 'report' only counted.
             outcome = "refused_" + reason
             # Before the token and readonly checks, which an older or forged write does not reach.
@@ -2563,20 +2839,26 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     dAuth namespaces. The writes ``_set_value`` refuses are counted there, under their own words.
 
     The store's version stamp and its verified sender go to ``_set_value``, whose order rule reads them
-    (switch ``CSTORE_ORDER``; with it 'off' the stamp is dropped there).
+    (switch ``CSTORE_ORDER``; with it 'off' the stamp is dropped there). A store that carries ``resend`` (a
+    hand-off re-send) goes there as one, and is refused on the order rule's word in 'report' as in 'on'.
+
+    The sender of a stamped store (order switch not 'off' here) becomes a peer the hand-off may re-send to; the
+    sender of an unstamped one stops being one: a node of the previous release applies a re-sent delete in
+    arrival order and could remove a newer value.
 
     Confirmation form (switch ``CSTORE_LEAN_CONFIRM``, read once at start): a stamped store (order switch not
     'off') is confirmed with ``{op, key, ver}`` when the switch is 'on', and with the previous release's full
     form plus ``ver`` when it is 'report'; an unstamped store, and every store with the switch 'off', get the
     previous release's full form.
 
-    Refusal answer (order switch ``CSTORE_ORDER`` 'on' only): a stamped store that ``_set_value`` refuses is
-    answered to its sender with one confirmation message ``{op, key, ver, refused, held_ver}``: the store's
+    Refusal answer (order switch ``CSTORE_ORDER`` 'on', or a re-send in 'report'): a stamped store that
+    ``_set_value`` refuses is answered to its sender with one confirmation message
+    ``{op, key, ver, refused, held_ver}``: the store's
     stamp echoed, the refusal word without its ``refused_`` prefix, and this node's stamp for the key (None
     when unstamped or not held), never the value. A refused ``future`` stamp, an unstamped store, and the
     stores dropped before ``_set_value`` (membership, oracle-only, ``"dl:"`` keys) are not answered. In
-    'report' nothing is sent and nothing more is counted. A writer of the previous release never gets one:
-    it sends no stamp.
+    'report' nothing is sent for a live store and nothing more is counted. A writer of the previous release
+    never gets one: it sends no stamp.
 
     A store whose key starts with ``"dl:"``, the prefix of the tombstones, is dropped unconfirmed and counted
     as ``<bucket>/remote/refused_invalid_key`` under the bucket of the key after the prefix; ``_set_value``
@@ -2634,6 +2916,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The store's stamp when it is well formed (counted once, by _set_value, when it is not); none with the order
     # switch 'off'. Only a stamped store is answered when refused.
     ver = None if self.__cs_modes["order"] == "off" else self.__ver_valid(data.get(self.CS_VER))
+    # The sender joins the peers a hand-off re-send may go to when its store is stamped, and leaves them when it is
+    # not: a node of the previous release (or with the order switch 'off') would apply a re-sent delete in arrival
+    # order over a newer value.
+    (self.__stamped_peers.add if ver is not None else self.__stamped_peers.discard)(peers)
+    # A hand-off re-send, which the order rule refuses on its word in every mode but 'off'.
+    resend = bool(data.get(self.CS_RESEND))
     # The word _set_value ends with: the refusal word of a refused store.
     info = {}
     result = self._set_value(
@@ -2643,8 +2931,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # The store's stamp as received (checked there, and read only when the order switch is not 'off'), and the
       # verified sender its stamp must name.
       ver=data.get(self.CS_VER), sender=peers,
-      # How it ended.
-      result_info=info,
+      # How it ended; and whether it is a re-send.
+      result_info=info, resend=resend,
     )
     if result:
       # now send confirmation of the storage execution
@@ -2669,10 +2957,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # A stamped store with the lean switch 'on': confirmed by key and stamp, without echoing the value.
         data = {self.CS_DATA: {self.CS_OP: self.CS_CONFIRM, self.CS_KEY: key, self.CS_VER: ver}}
       self.__send_data_to_chain_peers(data, peers=peers, include_default_peers=False)
-    elif ver is not None and self.__cs_modes["order"] == "on" and info["outcome"] != "refused_future":
-      # A refused stamped store, with the order switch 'on': answered to its sender in a confirmation message that
-      # carries the refusal word and this node's stamp for the key instead of the value, so the writer stops waiting
-      # for it. A future stamp is not answered: refused now, it can be taken once the clocks agree.
+    elif ver is not None and (self.__cs_modes["order"] == "on" or resend) and info["outcome"] != "refused_future":
+      # A refused stamped store, with the order switch 'on' (or a re-send, refused in 'report' too): answered to its
+      # sender in a confirmation message that carries the refusal word and this node's stamp for the key instead of
+      # the value, so the writer stops waiting for it (or re-sending it). A future stamp is not answered: refused
+      # now, it can be taken once the clocks agree.
       held = self.__chain_storage.get(key) or self.__chain_storage.get(self.CS_DEL + key)
       # The answer, to the sender only.
       self.__send_data_to_chain_peers({self.CS_DATA: {
@@ -2705,6 +2994,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ``disagree_other``. The record is the key's, or, when the key is not held,
     the tombstone a stamped delete left under ``"dl:" + key`` (none with the order switch 'off'), so a delete's
     confirmation (value None) now lands on the tombstone of a local delete instead of being dropped.
+
+    A counted confirmation or a settling refusal answer also ends the hand-off's pair of that record and sender
+    (``__maybe_handoff``), when its table tracks it; a confirmation of a pair already re-sent (in 'report', one
+    'on' would have re-sent) is counted as ``<bucket>/handoff/answered``. A remote record, which has no peer
+    lists, is left as it is (before, a confirmation of it added an empty settled list).
 
     Parameters
     ----------
@@ -2741,6 +3035,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           return
         # Settled by the refusal: no confirmation will come from it for this stamp.
         record["confirmed_peers"].append(sender)
+        # The hand-off's entry of the record, when it tracks it (the record's storage key: the key's, else the
+        # tombstone's), so the settled pair leaves it.
+        owner_record, pairs = self.__handoff.get(key if key in self.__chain_storage else f"{self.CS_DEL}{key}", (None, {}))
+        if owner_record is record:
+          # The hand-off re-sends it no more to this peer.
+          pairs.pop(sender, None)
         # The receiver's stamp for the key, checked for form.
         held_ver = self.__ver_valid(data.get(self.CS_HELD_VER))
         if held_ver is not None and held_ver[0] <= int(1000 * self.time()) + self.__ver_ahead:
@@ -2776,12 +3076,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # value, as the previous release; a lean one, without a value, by its stamp.
         # The record confirmed.
         record = self.__chain_storage.get(target, {})
-        confirmed = record.setdefault("confirmed_peers", [])
-        if sender not in record.get("target_peers", []) or sender in confirmed:
+        # Only a target that has not settled yet counts. The target list is read first, so a remote record, which has
+        # no peer lists, is not given an empty settled list (before, setdefault added one).
+        if sender not in record.get("target_peers", []) or sender in record["confirmed_peers"]:
           return
-        confirmed.append(sender)
+        # Settled by its confirmation.
+        record["confirmed_peers"].append(sender)
         # Counted on the record confirmed: the tombstone's own counter for a delete.
         self.__increment_confirmations(target)
+        # The hand-off's entry of the record, when it tracks it.
+        owner_record, pairs = self.__handoff.get(target, (None, {}))
+        if owner_record is record and (pairs.pop(sender, None) or [0])[0]:
+          # The pair leaves it; one already re-sent (in 'report': that 'on' would have re-sent, so the re-send was
+          # wasted) counts as answered, the reading the first re-send delay is tuned by.
+          self.__cs_count("answered", target.removeprefix(self.CS_DEL), "handoff")
         if self.cfg_chain_store_debug:
           self.P(f" === LOCAL: Key {key} confirmed by {confirm_by}")
     return
@@ -2991,7 +3299,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   def process(self):
     """
-    Run one plugin lap: refresh the replication peers when due and send the queued writes.
+    Run one plugin lap: refresh the replication peers when due, run the hand-off's sweep when due
+    (``__maybe_handoff``) and send the queued writes.
 
     Saving is not part of the lap any more: the SerializationManager calls
     ``__maybe_flush_chain_storage`` on its own thread every ``CS_SAVE_INTERVAL`` seconds. This thread used
@@ -3002,12 +3311,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Every ``CS_STATS_INTERVAL`` seconds the lap also writes one ``CSTORE_STATS`` line: the counters taken
     (and reset) under the persistence lock, then logged outside it as one JSON object with sorted keys::
 
-      CSTORE_STATS {"counts":{...},"lost_inputs":0,"modes":{"handoff":"report","lean_confirm":"report",
-                    "order":"report","save_backoff":"report"},"period_s":300,"queue_peak":0,"stamp_lead_max_s":0.0}
+      CSTORE_STATS {"counts":{...},"handoff_pending":0,"lost_inputs":0,"modes":{"handoff":"report",
+                    "lean_confirm":"report","order":"report","save_backoff":"report"},"period_s":300,
+                    "queue_peak":0,"stamp_lead_max_s":0.0}
 
     (one line in the log). ``modes`` is the table of the wave 03 switches read once by ``on_init``.
     ``stamp_lead_max_s`` is the largest lead over this node's wall clock, in seconds, of a version stamp the
     order rule took in the period (a peer's clock ahead of this one, plus the transit time); 0 when none led.
+    ``handoff_pending`` is the number of the hand-off's pairs (an own record and a target) not settled at its
+    last sweep.
     Before the counters are taken, the lap sweeps the tombstones (``__sweep_tombstones``).
 
     Returns
@@ -3028,6 +3340,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     >>> self.process()   # one lap of the plugin loop; every 300 s it also logs the CSTORE_STATS line
     """
     self.__maybe_refresh_chain_peers()
+    # The hand-off's sweep, when due, before the queued stores go out, so its re-sends leave on this lap.
+    self.__maybe_handoff()
     self.__maybe_broadcast()
     # Keep the largest input queue seen since the last CSTORE_STATS line; before, it was not kept.
     self.__cs_stats_queue_peak = max(self.__cs_stats_queue_peak, self.input_queue_size)
@@ -3049,6 +3363,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         "queue_peak": self.__cs_stats_queue_peak, "lost_inputs": lost - self.__cs_stats_lost,
         # In seconds, 0 when no stamp taken led the wall clock (always with the order switch 'off').
         "stamp_lead_max_s": round(lead / 1000, 1),
+        # The hand-off's pairs left pending by its last sweep (0 with it 'off'): the size of its in-memory table.
+        "handoff_pending": self.__handoff_pending,
       }, sort_keys=True))
       # The next line is measured from here.
       self.__cs_stats_last, self.__cs_stats_queue_peak, self.__cs_stats_lost = now, 0, lost

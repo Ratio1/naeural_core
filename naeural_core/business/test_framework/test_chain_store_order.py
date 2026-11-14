@@ -42,6 +42,8 @@ DIRTY, UNMARKED = "_ChainStoreBasePlugin__chain_storage_dirty", "_ChainStoreBase
 CLOCK, TICK = "_ChainStoreBasePlugin__ver_clock", "_ChainStoreBasePlugin__ver_tick"
 # The merge of a sync answer and the export that answers a sync request.
 MERGE, EXPORT = "_ChainStoreBasePlugin__merge_hset_snapshot", "_ChainStoreBasePlugin__export_hset_snapshot"
+# The hand-off's sweep.
+SWEEP = "_ChainStoreBasePlugin__maybe_handoff"
 # The namespace and the field most tests write.
 KEY = _hset_key("players", "alpha")
 # Its bucket, the 14-character "hs:" prefix the counters use.
@@ -850,10 +852,11 @@ class TestTombstones(unittest.TestCase):
                                     "dl:" + other: record("dl:" + other, "x", "api")})
         # Its answer.
         snapshot = getattr(store, EXPORT)("players")
-        # The tombstone under KEY with value None and its stamp (without its token, as every exported record), or
+        # The tombstone under KEY with value None and its stamp (the five fields every exported record carries), or
         # nothing.
         self.assertEqual(snapshot, {KEY: {field: item for field, item in tombstone(KEY, "peer1", [NOW_MS, "peer1"])
-                                          .items() if field != "token"}} if sent else {})
+                                          # Its exported fields only.
+                                          .items() if field in store.CS_EXPORT_FIELDS}} if sent else {})
 
   def test_a_tombstone_copy_is_applied_in_on_and_only_counted_in_report(self):
     """A sync copy of a delete removes the held value and stores the tombstone in 'on' (counted ver_copy_delete and
@@ -1467,15 +1470,17 @@ class _QueuedNetwork(_FakeNetwork):
     _FakeNetwork.dispatch(self, sender, target, decoded)
 
 
-def run_history(seed, mode, steps=40):
+def run_history(seed, mode, steps=40, rest="sync"):
   """
   Run one seeded random history on three replicas and bring them to rest.
 
   Each step is one of: a local write of a random key on a random replica, a value or a delete; the delivery of a
   random held message; a second delivery of one (a re-delivery); the loss of one; a sync of one replica from
   another (export, then merge). The replicas' wall clocks differ by up to 20 s. At rest every held message is
-  delivered in a random order, then every replica syncs from every other one, the syncs in a random order: under
-  arrival order the last sync of a replica would decide what it keeps, so equal contents prove the order rule.
+  delivered in a random order, then (``rest`` "sync") every replica syncs from every other one, the syncs in a
+  random order: under arrival order the last sync of a replica would decide what it keeps, so equal contents prove
+  the order rule. With ``rest`` "handoff" there is no final sync: the clocks move on by 600 s eight times, and each
+  time every replica runs its hand-off sweep and every message it sends is delivered, in a random order.
 
   Parameters
   ----------
@@ -1485,6 +1490,8 @@ def run_history(seed, mode, steps=40):
     The mode of every switch of the three replicas.
   steps : int, optional
     Number of steps before the rest. Default is 40.
+  rest : str, optional
+    ``"sync"`` (the default) for the final syncs, ``"handoff"`` for the hand-off's sweeps instead.
 
   Returns
   -------
@@ -1550,19 +1557,75 @@ def run_history(seed, mode, steps=40):
   while network.pending:
     # One of them.
     network.deliver(rng.randrange(len(network.pending)))
-  # Then every replica syncs from every other one, in a random order.
-  pairs = [(target, source) for target in fleet for source in fleet if target is not source]
-  # Shuffled by the history's seed.
-  rng.shuffle(pairs)
-  # Each sync.
-  for target, source in pairs:
-    # Its merged count.
-    trace.append(("sync", target.ee_addr, source.ee_addr, getattr(target, MERGE)("ns", getattr(source, EXPORT)("ns"))))
+  if rest == "handoff":
+    # Each replica.
+    for store in fleet:
+      # Each replica takes the others as nodes that stamp their stores (each sends many stamped stores a minute in
+      # production; here a peer's every store to it may have been lost), so its sweeps may re-send to both.
+      store._ChainStoreBasePlugin__stamped_peers.update(names)
+    # Eight rounds, 600 s apart, so every pair of a lost message falls due and is answered.
+    for _ in range(8):
+      # Time passes.
+      now += 600
+      # Each replica sweeps at its own clock and sends what it queued.
+      for store, skew in zip(fleet, skews):
+        # Its clock.
+        store._now = now + skew
+        # Its sweep.
+        getattr(store, SWEEP)()
+        # Its re-sends go out.
+        store._ChainStoreBasePlugin__maybe_broadcast()
+      # Every message held delivered, the answers included, in a random order.
+      while network.pending:
+        # One of them.
+        index = rng.randrange(len(network.pending))
+        # Recorded without its stamp, as the deliveries of the steps.
+        trace.append(("deliver",) + network.pending[index][:2] + (
+          {field: item for field, item in network.pending[index][2]["CHAIN_STORE_DATA"].items() if field != "ver"},))
+        # Delivered.
+        network.deliver(index)
+  else:
+    # Every replica syncs from every other one, in a random order.
+    pairs = [(target, source) for target in fleet for source in fleet if target is not source]
+    # Shuffled by the history's seed.
+    rng.shuffle(pairs)
+    # Each sync.
+    for target, source in pairs:
+      # Its merged count.
+      trace.append(("sync", target.ee_addr, source.ee_addr,
+                    getattr(target, MERGE)("ns", getattr(source, EXPORT)("ns"))))
   # The value of each key each replica holds, tombstones left out.
   contents = [{key: rec["value"] for key, rec in store.storage.items() if not key.startswith("dl:")}
               for store in fleet]
   # Both.
   return contents, trace
+
+
+def split(mode, seeds, rest="sync"):
+  """
+  Give the seeds whose replicas end with different contents.
+
+  Parameters
+  ----------
+  mode : str
+    The mode of every switch.
+  seeds : range
+    The histories run.
+  rest : str, optional
+    How the histories come to rest: ``"sync"`` (the default) or ``"handoff"`` (see ``run_history``).
+
+  Returns
+  -------
+  list of int
+    The seeds of the split histories.
+
+  Examples
+  --------
+  >>> split("on", range(10))
+  []
+  """
+  # A history splits when its three contents are not one.
+  return [seed for seed in seeds if len({repr(sorted(c.items())) for c in run_history(seed, mode, rest=rest)[0]}) > 1]
 
 
 class TestConvergence(unittest.TestCase):
@@ -1573,24 +1636,6 @@ class TestConvergence(unittest.TestCase):
     lost and synced end with the same value of every key on the three replicas, a deleted key absent on all; the
     same harness with the switch 'off' (arrival order) leaves some of the first 500 split, so it can tell."""
 
-    def split(mode, seeds):
-      """
-      Give the seeds whose replicas end with different contents.
-
-      Parameters
-      ----------
-      mode : str
-        The mode of every switch.
-      seeds : range
-        The histories run.
-
-      Returns
-      -------
-      list of int
-        The seeds of the split histories.
-      """
-      # A history splits when its three contents are not one.
-      return [seed for seed in seeds if len({repr(sorted(c.items())) for c in run_history(seed, mode)[0]}) > 1]
     # None in 'on'; some in 'off'.
     self.assertEqual((split("on", range(2000)), split("off", range(500)) != []), ([], True))
 
@@ -1599,6 +1644,23 @@ class TestConvergence(unittest.TestCase):
     messages apart from their stamps, the same sync counts and the same values at rest (tombstones left out)."""
     # The histories whose two runs differ.
     differ = [seed for seed in range(1000) if run_history(seed, "off") != run_history(seed, "report")]
+    # None.
+    self.assertEqual(differ, [])
+
+  def test_handoff_brings_replicas_equal_without_a_final_sync(self):
+    """With every switch 'on', 2,000 seeded histories with lost messages and no final sync end with the same value of
+    every key on the three replicas once the hand-off's sweeps have run; the same histories in 'off' leave some of
+    the first 500 split."""
+    # None in 'on'; some in 'off'.
+    self.assertEqual((split("on", range(2000), "handoff"), split("off", range(500), "handoff") != []), ([], True))
+
+  def test_report_handoff_sends_what_off_sends(self):
+    """1,000 seeded histories with the hand-off's sweeps and no final sync give the same returns, the same messages
+    apart from their stamps and the same values at rest in 'report' as in 'off': report sends no re-send, so it ends
+    split where 'off' does."""
+    # The histories whose two runs differ.
+    differ = [seed for seed in range(1000)
+              if run_history(seed, "off", rest="handoff") != run_history(seed, "report", rest="handoff")]
     # None.
     self.assertEqual(differ, [])
 

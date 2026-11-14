@@ -2276,7 +2276,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               min_confirm = self.__get_key_min_confirmations(key)
               # The peers settled on the record: those that confirmed it and those that refused it with an answer.
               settled = len(self.__chain_storage.get(key, {}).get("confirmed_peers", []))
-              if recv_confirm < min_confirm and recv_confirm < settled >= len(
+              # Only for this node's own record (a count from 0 up): a sync copy that took its place during the wait
+              # counts -1 and has no target list, so it is left to the timeout below, as in the previous release.
+              if 0 <= recv_confirm < min_confirm and recv_confirm < settled >= len(
                 self.__chain_storage[key]["target_peers"]
               ):
                 # Every target settled, one at least by a refusal answer, and too few confirmed: no confirmation can

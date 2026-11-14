@@ -504,7 +504,7 @@ class TestOrderOfLiveWrites(unittest.TestCase):
                      ("c", 1))
 
   def test_a_versioned_value_beats_an_unversioned_one_whatever_their_stamps(self):
-    """The council's split history: an oracle that missed a signed pointer and then wrote an unversioned one with a
+    """A split history found in review: an oracle that missed a signed pointer and then wrote an unversioned one with a
     newer stamp takes the signed pointer live, as a re-sent store and from a sync answer ('on'); a value with cs_rev
     beats one without it, and in 'on' a live write without cs_rev over one with it is refused (applied in 'report',
     by the cs_rev rule of every mode)."""
@@ -844,7 +844,7 @@ class TestTombstones(unittest.TestCase):
                                                                           **applied})
 
   def test_a_deleted_key_does_not_come_back_on_a_replica_that_held_a_legacy_copy(self):
-    """The council's split history ('on'): a key written before stamps existed is deleted while one replica is away;
+    """A split history found in review ('on'): a key written before stamps existed is deleted while one replica is away;
     the delete, sent again with its own stamp, removes the legacy copy there; afterwards neither a sync from a peer
     that still holds the legacy copy nor one from a peer holding an older stamped copy brings the key back."""
     # The replica that was away, still holding the legacy unstamped value.
@@ -1188,6 +1188,42 @@ class TestRefusalAnswers(unittest.TestCase):
         self.assertFalse(writer._set_value(KEY, "a", owner="node", timeout=10, max_retries=0, result_info=info))
         # How it ended and how long it waited (fake clock): at once when both refused, the whole timeout otherwise.
         self.assertEqual((info["outcome"], writer._now - NOW < 1), (end, not silent))
+
+  def test_a_sync_copy_that_replaces_the_record_during_the_wait_leaves_it_to_the_timeout(self):
+    """A sync copy of the same owner and value but readonly, merged while a local write waits, puts a remote record
+    (no target list, a count of -1) in its place: the wait runs to its timeout and ends unconfirmed, it does not
+    raise."""
+    # A writer in 'on' with two peers that never answer.
+    writer = make("on")
+    # The wait loop's own sleep, which moves the fake clock.
+    sleep = writer.sleep
+
+    def sleep_and_merge(seconds):
+      """
+      Stand for the wait loop's sleep: a sync answer is merged meanwhile.
+
+      Parameters
+      ----------
+      seconds : float
+        The sleep asked for.
+
+      Returns
+      -------
+      None
+      """
+      # A peer's copy of the writer's own record, stamped 1 s later and readonly: applied over the record.
+      getattr(writer, MERGE)("players", {KEY: {**record(KEY, "a", "node", [NOW_MS + 1000, "peer1"]), "readonly": True}})
+      # Then the sleep itself.
+      sleep(seconds)
+    # Used by the wait loop.
+    writer.sleep = sleep_and_merge
+    # The caller's dict.
+    info = {}
+    # The write, with a 10 s timeout and no retry: False after the whole timeout.
+    self.assertFalse(writer._set_value(KEY, "a", owner="node", timeout=10, max_retries=0, result_info=info))
+    # The record is the copy's (remote, no target list), and the wait ended by its timeout.
+    self.assertEqual((writer.storage[KEY]["confirms"], "target_peers" in writer.storage[KEY], info["outcome"],
+                      writer._now - NOW >= 10), (-1, False, "unconfirmed", True))
 
 
 def confirm(store, key, sender, **fields):

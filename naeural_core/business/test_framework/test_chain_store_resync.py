@@ -30,8 +30,8 @@ from test_chain_store_accounting import STATS, SIGNED_POINTER, _StartHarness
 # The harness, its fake network, the block engine and NetMon stand-ins of a peer refresh, and the key composers.
 from test_chain_store_hsync import (_ChainStoreRuntimeHarness, _FakeNetwork, _SummaryControlNetmon,
                                     _WhitelistBlockEngine, _hset_index, _hset_key)
-# The order tests' store builder, record builder, constants and the merge's private name.
-from test_chain_store_order import MERGE, NOW, NOW_MS, make, record
+# The order tests' store builder, record builder, constants and the private names of the merge and the dirty mark.
+from test_chain_store_order import DIRTY, MERGE, NOW, NOW_MS, make, record
 
 # The resync step, the time of its next request and the turn of its namespaces, by their private names.
 RESYNC, NEXT, TURN = ("_ChainStoreBasePlugin__maybe_resync", "_ChainStoreBasePlugin__resync_next",
@@ -106,6 +106,39 @@ def text_signed(value):
   body = {name: item for name, item in value.items() if name != "EE_SIGN"}
   # The digest of its canonical text as the signature.
   return {**body, "EE_SIGN": hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()}
+
+
+def copy_or_fail(value):
+  """
+  Copy a value as the store does, and fail for the one marked bad: a merge that raises at one of its records.
+
+  A test gives it to a store as its ``deepcopy``, which the merge calls first for each copy of an answer.
+
+  Parameters
+  ----------
+  value : any
+    The value to copy.
+
+  Returns
+  -------
+  any
+    A deep copy of ``value``.
+
+  Raises
+  ------
+  RuntimeError
+    For a dict whose ``note`` is ``"bad"``.
+
+  Examples
+  --------
+  >>> copy_or_fail({"note": "a"})
+  {'note': 'a'}
+  """
+  if isinstance(value, dict) and value.get("note") == "bad":
+    # The failure, whatever its cause in a node.
+    raise RuntimeError("copy failed")
+  # Any other value, copied as the harness copies.
+  return copy.deepcopy(value)
 
 
 def oracle(mode, address="node", peers=("peer1", "oracle"), storage=None, network=None):
@@ -379,6 +412,44 @@ class TestResyncAnswers(unittest.TestCase):
     # Still only x, from one counted answer.
     self.assertEqual((sorted(store.storage), resync_counts(store)[OPS_BUCKET + "/resync/answered"]),
                      ([operation("x", 1)[0]], 1))
+
+  def test_an_answer_whose_merge_raises_leaves_what_it_merged_marked_for_the_save_and_counted(self):
+    """When the merge of a resync answer raises at its second record, the first record is held and the replica is
+    marked for the save, the answer is counted, and the peer is off the request, so the same answer is not taken
+    again; the exception still leaves the handler."""
+    # An oracle whose messages are only recorded.
+    store = oracle("report")
+    # Its first request, to both peers.
+    lap(store, 0)
+    # The store's copy of a value, which the merge calls first for each record: it fails for the one marked bad.
+    store.deepcopy = copy_or_fail
+    # An answer with a good record, then the one whose copy fails: the exception leaves the handler.
+    with self.assertRaises(RuntimeError):
+      # Through the payload handler, as the network delivers it.
+      answer(store, "r1", "peer1", "DEEPLOY_OPERATIONS", [operation("x", 1), operation("y", 1, note="bad")])
+    # The good record is held and the replica is marked for the save, although the merge did not end.
+    self.assertEqual((sorted(store.storage), getattr(store, DIRTY)), ([operation("x", 1)[0]], True))
+    # The request and the answer are counted; the peer that answered is off the request.
+    self.assertEqual((resync_counts(store), store.pending_hsync["r1"][store.CS_PEERS]),
+                     ({OPS_BUCKET + "/resync/asked": 1, OPS_BUCKET + "/resync/answered": 1}, ["oracle"]))
+
+  def test_a_merge_that_raises_after_removing_a_revoked_payload_leaves_the_replica_marked_for_the_save(self):
+    """A caller's merge that removes the payload of a revoked secret revision and then raises at a later copy has
+    marked the replica for the save: the removal is a change like a stored copy."""
+    # The payload of revision 1 of job 7, its revocation marker, and another field of the namespace.
+    payload, marker, other = (_hset_key("DAUTH_JOB_SECRET_REVISIONS", field) for field in ("7|1", "7|1|revoked", "8|1"))
+    # A dAuth member that holds the marker and, still, the payload it revokes.
+    store = oracle("report", storage={payload: record(payload, {"secret": "s"}, "peer1"),
+                                      marker: record(marker, {"job_id": "7", "revision": 1}, "peer1")})
+    # The copy of a value fails for the one marked bad.
+    store.deepcopy = copy_or_fail
+    # An answer with the payload as a peer still holds it, then a copy at which the merge raises.
+    with self.assertRaises(RuntimeError):
+      # The merge a caller's sync runs.
+      getattr(store, MERGE)("DAUTH_JOB_SECRET_REVISIONS", {
+        payload: record(payload, {"secret": "s"}, "peer1"), other: record(other, {"note": "bad"}, "peer1")})
+    # The revoked payload is gone, and the replica is marked for the save.
+    self.assertEqual((sorted(store.storage), getattr(store, DIRTY)), ([marker], True))
 
   def test_only_values_that_carry_the_signed_field_are_taken(self):
     """From a resync answer of DEEPLOY_DEPLOYED_JOBS a pointer signed with a revision is merged; an old-style

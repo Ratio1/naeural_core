@@ -2200,6 +2200,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     switch not 'off', also goes through the write-permission count
     (``__perm_count``), which counts and never refuses.
 
+    Each change marks the replica for a save when it is made, under the
+    persistence lock. A merge that an exception ends at one copy has stored
+    and marked the copies before it; the copies after it are not read.
+
     Examples
     --------
     >>> self.__merge_hset_snapshot("players", {key: record})
@@ -2215,7 +2219,6 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     index = self.__hset_index(hkey)
     merged_fields = 0
-    changed = False
     with self.__persistence_lock:
       for key, record in snapshot.items():
         if not isinstance(key, str) or not key.startswith(index):
@@ -2266,7 +2269,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           field = self.base64_to_str(key[len(prefix):], url_safe=True)
           if not field.endswith("|revoked") and not self.__erased_secret(key, value, snapshot):
             self.__chain_storage.pop(key, None)
-            changed = True
+            # Marked for the save here, where the change is made (see the store below).
+            self.__chain_storage_dirty = True
             continue
           existing_marker = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
           if field.endswith("|revoked") and existing_marker:
@@ -2360,11 +2364,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           **({self.CS_VER: ver} if ver is not None else {}),
         }
         merged_fields += 1
-        changed = True
-
-    if changed:
-      # Saved by the SerializationManager's next flush (every CS_SAVE_INTERVAL s).
-      self.__chain_storage_dirty = True
+        # Marked for the save by the SerializationManager's next flush (every CS_SAVE_INTERVAL s) as soon as the record
+        # is in the store, under the lock the save copies and clears the mark under. Before, the mark was set once
+        # after the last copy, so an exception at a later copy left the records already merged unsaved until another
+        # write marked the replica.
+        self.__chain_storage_dirty = True
     return merged_fields
   
   ## START setter-getter methods
@@ -3938,10 +3942,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (``CS_SIGNED_FIELDS``: a sequence or a revision; every record for the key rotations, which have none and
     whose merge checks each proof) are merged: a pointer of the old form, a plain CID without a revision, that
     was removed here is not brought back, and a delete copy is never applied. The answering peer is taken off
-    the request's peers, so it is not merged twice. Each merged answer counts ``<bucket>/resync/answered`` and
-    adds the records it inserted or replaced to ``<bucket>/resync/merged`` (the label is present with 0 when it
-    changed nothing), under the namespace's bucket. An answer that comes after the wait finds no entry and is
-    dropped like any answer to an unknown request.
+    the request's peers, so it is not merged twice. Each answer taken counts ``<bucket>/resync/answered``, before
+    its merge, and its merge adds the records it inserted or replaced to ``<bucket>/resync/merged`` (the label is
+    present with 0 when it changed nothing), under the namespace's bucket. An answer whose merge raises is counted
+    as answered and its peer stays off the request; the records it stored before the exception are marked for the
+    save (the merge marks each change as it makes it) and are not in ``merged``. An answer that comes after the
+    wait finds no entry and is dropped like any answer to an unknown request.
 
     An answer whose ``request_id`` is not a str (a number, a list, a dict), which no node of this release sends,
     is dropped and counted as ``plain/hsync/refused_malformed``; an id that cannot be hashed raised here before.
@@ -4013,6 +4019,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       allowed_peers.remove(sender)
       # The signed sequence or revision the namespace's values carry (none for the key rotations).
       field = self.CS_SIGNED_FIELDS.get(hkey)
+      # The answer, counted under the namespace's bucket before its merge: it is taken (its peer is off the request)
+      # whatever the merge does. Before, it was counted after the merge, so an answer whose merge raised was not.
+      self.__cs_count("answered", index, "resync")
       # Merged now, on the plugin thread, as no caller waits: every asked peer's answer, not only the first. Only
       # the records whose value carries the signed field are taken, so a pointer of the old form (a plain CID, with
       # no revision) that was removed here is not brought back, and no delete is applied.
@@ -4020,9 +4029,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         key: record for key, record in snapshot.items()
         if isinstance(record, dict) and (field is None or self.__rev_order(None, record.get(self.CS_VALUE), field))
       })
-      # Counted under the namespace's bucket: the answer, and the records it inserted or replaced.
-      self.__cs_count("answered", index, "resync")
-      # The records.
+      # The records it inserted or replaced.
       self.__cs_count("merged", index, "resync", n=merged)
       return
     # Accept only one response from the precomputed peer set so an unrelated

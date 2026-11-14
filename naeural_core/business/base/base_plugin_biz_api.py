@@ -502,15 +502,16 @@ class _BasePluginAPIMixin:
       (every peer settled, one at least by a refusal answer) for a write applied here whose wait failed;
       ``error`` when the call raised (a value that is not JSON, a bad timeout, ``wait=False`` in a protected
       namespace, and so on); ``queued`` for a ``wait=False`` write stored here and queued; ``not_ready`` for a
-      ``wait=False`` call made before the chain store started.
+      ``wait=False`` call made before the chain store started, or after its plugin loop ended.
 
     wait : bool, optional
       True (the default) waits for the chain store to start and for the confirmations, as before. False runs
       every check and the local apply of a blocking write, queues the same store and returns at once: True when
       the write was stored here and queued (the store re-sends it while it is unconfirmed, as the blocking wait
       would), False on a refusal, as a blocking write. It never waits for the store to start: before the store
-      started it returns False with outcome ``not_ready``. Refused (``error``) in the protected namespaces,
-      whose callers rely on the confirmation.
+      started, and after the chain-store plugin's loop ended (a stop, or a restart before the next instance
+      starts), it returns False with outcome ``not_ready`` and stores nothing. Refused (``error``) in the
+      protected namespaces, whose callers rely on the confirmation.
 
     Returns
     -------
@@ -521,7 +522,10 @@ class _BasePluginAPIMixin:
 
     Notes
     -----
-    ``result_info`` is filled when the chain store's setter ran or the call raised. The ``refused_<reason>``
+    ``result_info`` is filled when the chain store's setter ran, when the call raised, or with ``not_ready`` for a
+    ``wait=False`` call while no chain store runs. A blocking write made after the chain-store plugin's loop ended
+    is still applied to the shared store but not sent, and returns False when its wait runs out, as before.
+    The ``refused_<reason>``
     words are this node's own refusals and end the call at once; a write with no peer to send it to
     (``refused_no_peers``, for example on a seed whose only whitelisted node is itself) no longer waits for
     confirmations first. A peer that refuses the write answers only when its order switch is 'on' and the write

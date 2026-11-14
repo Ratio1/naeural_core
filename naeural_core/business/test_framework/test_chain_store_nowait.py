@@ -232,6 +232,17 @@ class TestNonBlockingWrite(unittest.TestCase):
     # No re-send at 10 s, counted refused_by_peers.
     self.assertEqual((lap(store, 10), getattr(store, STATS).get(BUCKET + "/local/refused_by_peers")), (0, 1))
 
+  def test_after_the_plugin_loop_ended_a_non_blocking_write_is_not_ready(self):
+    """Once the store's plugin loop ended (a stop, or a restart before the next instance starts), a wait=False write
+    through its setter returns False with the outcome not_ready, and stores, queues and owes nothing."""
+    # A writer whose plugin loop was told to stop.
+    store = make("report")
+    # As stop_thread sets it.
+    store.done_loop = True
+    # False, not ready, nothing sent; nothing stored or owed.
+    self.assertEqual((write(store, KEY, "v"), KEY in store.storage, getattr(store, UNWAITED)),
+                     ((False, "not_ready", 0), False, {}))
+
   def test_a_delete_is_queued_once_and_owes_no_resend(self):
     """A wait=False delete returns True, queued, sends one store and owes no re-send."""
     # A writer holding KEY.

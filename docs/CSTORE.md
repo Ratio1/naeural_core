@@ -473,9 +473,10 @@ counts how it ended as a blocking write does (`unconfirmed`, `overwritten`,
 `refused_by_peers`; nothing when confirmed); a newer write of the key replaces the
 pending re-sends; a delete is queued once. It is refused (`error`) in the protected
 namespaces (the signed ones and `DAUTH_JOB_SECRET_REVISIONS`), whose callers rely on the
-confirmation. It never waits for the chain store to start: before the store started it
-returns `False` with the outcome `not_ready`. The record and the message are those of a
-blocking write.
+confirmation. It never waits for the chain store to start: before the store started, and
+after the chain-store plugin's loop ended (a stop, or a restart before the next instance
+publishes its setter), it stores nothing and returns `False` with the outcome
+`not_ready`. The record and the message are those of a blocking write.
 
 Web apps get a hook, `on_request_monitor_tick()`, run on the request monitor thread
 before each read of the server queue (about every 0.25 s while idle, and after each
@@ -539,7 +540,7 @@ Labels in `counts`:
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.
 - `save_cpu_ms` (save back-off `report` or `on`): CPU milliseconds the periodic saves took on the save thread.
 
-A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to read the same word as `result_info["outcome"]` (the wait end when there is one, `queued` for a `wait=False` write, `not_ready` for a `wait=False` call before the store started, `error` when the call raised); the returned bool is unchanged.
+A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to read the same word as `result_info["outcome"]` (the wait end when there is one, `queued` for a `wait=False` write, `not_ready` for a `wait=False` call before the store started or after its loop ended, `error` when the call raised); the returned bool is unchanged.
 
 ## Census line in the node log (`CSTORE_CENSUS`)
 

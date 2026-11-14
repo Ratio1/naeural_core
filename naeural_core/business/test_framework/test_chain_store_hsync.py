@@ -327,6 +327,8 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__stamped_peers = set()
     # No write made with wait=False owed a re-send.
     self._ChainStoreBasePlugin__unwaited = {}
+    # The plugin loop runs (the base plugin sets this when its loop is told to stop).
+    self.done_loop = False
     # No CSTORE_STATS line written yet.
     self._ChainStoreBasePlugin__cs_stats_lines = 0
 

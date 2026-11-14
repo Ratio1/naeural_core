@@ -2322,6 +2322,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       (``result_info`` outcome ``queued``) without waiting; the plugin thread
       re-sends a value while it is unconfirmed (``__maybe_resend_unwaited``).
       Not allowed in the protected namespaces (``CS_PROTECTED_NAMESPACES``).
+      Once this instance's plugin loop has ended (``done_loop``: a stop, or a
+      restart before the next instance publishes its setter) it applies
+      nothing and returns False with the outcome ``not_ready``.
 
     Returns
     -------
@@ -2373,8 +2376,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     line, by the label ``<bucket>/<origin>/<outcome>``: the bucket is the
     first 14 characters of an ``hs:`` key (the prefix of its hash namespace)
     or ``plain``, the origin is ``local`` or ``remote``, and the outcome is
-    ``changed``, ``identical``, ``absent_delete``, a refusal word or
-    ``error``. ``changed`` says what happened to this replica: a local write
+    ``changed``, ``identical``, ``absent_delete``, a refusal word,
+    ``error``, or ``not_ready`` (a ``wait=False`` write after the plugin
+    loop ended, whose count no later line carries). ``changed`` says what happened to this replica: a local write
     that changed it and then was not confirmed, or raised while waiting, is
     still counted as ``changed``.
 
@@ -2478,6 +2482,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       if not wait and self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES):
         # The callers of the protected namespaces rely on the confirmation: wait=False is a caller's mistake there.
         raise ValueError(f"wait=False is not allowed in the protected namespace of key {key}.")
+      if not wait and self.done_loop:
+        # This instance's plugin loop has ended (a stop, or an in-process restart before the next instance publishes
+        # its setter), so no lap would send the store or its re-sends: nothing is applied, as before a start.
+        outcome = "not_ready"
+        # The caller retries later, as it does for a store that has not started.
+        return False
       if timeout is None:
         timeout = 10
       if max_retries is None:

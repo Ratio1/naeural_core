@@ -287,13 +287,51 @@ Manager namespaces the oracle-only sender rule is checked first. A node on older
 code applies these writes by arrival, so replicas can differ until every oracle
 runs this rule.
 
+## Version stamps and the order rule (`CSTORE_ORDER`)
+
+Switch `CSTORE_ORDER` (`off`, `report` or `on`, read once at start; `report` by
+default). With it `off` no stamp is made or read, as in the previous release.
+
+- **Stamp** (`ver`): `[time in ms, address of the writing node]`, a JSON list. Every
+  local write takes a fresh one, identical rewrites included, from a clock that is the
+  wall clock or one ms above the last stamp the node made or took, held within
+  `CSTORE_VER_MAX_AHEAD` (60 s) of the wall clock. At start the clock begins at the
+  newest stored stamp that is not more than 60 s ahead. The record keeps the stamp,
+  the `SSTORE` message carries it, and the records of an hsync answer carry it as
+  stored. A node of the previous release ignores the field and drops it when it
+  rewrites the record.
+- **Order rule**, for every local write, live store and hsync copy, after the
+  signed-record rule and the `cs_rev` rule; the first step that decides wins:
+  1. a stamp more than 60 s ahead of the wall clock: `future`;
+  2. a live store stamped with another address than its verified sender: `origin`;
+  3. nothing held, or a live write of the value held (an identical write): admitted;
+  4. the signed sequence or revision of the namespace (`sequence` in the two Deeploy
+     operation namespaces, `revision` in `DEEPLOY_DEPLOYED_JOBS`, `deployment_revision`
+     in `DAUTH_JOB_SECRETS`), then `cs_rev`: a value that carries the integer field
+     beats one that lacks it, else the higher wins (`older` for the loser);
+  5. a held record without a stamp, or stamped more than 60 s ahead: the last arrival
+     wins, as before;
+  6. an unstamped write over a stamp: `unstamped`; an older stamp: `older`;
+  7. an equal stamp with another value: the side with the smaller canonical JSON
+     (a delete beats a value) loses as `collision`, so every replica keeps the same one.
+- **Modes**: `report` counts each word as `<bucket>/<origin>/ver_<word>` and writes as
+  the previous release (no write is refused or answered differently); `on` refuses a
+  write on its word (`refused_<word>`, not confirmed) and skips such an hsync copy.
+- A live write of the value held raises the held stamp when its own is newer; an hsync
+  copy equal in value, owner, readonly and token does the same when the rule admits
+  it. These stamp-only changes are not marked for the periodic save; the save at an
+  orderly stop writes them.
+- What this does not cover: the last writer by wall clock wins within the 60 s bound,
+  and the losing write is gone except in the counters; a record written before stamps
+  existed keeps arrival order until it is rewritten.
+
 ## Cost line in the node log (`CSTORE_STATS`)
 
 Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
 the node log, one JSON object with sorted keys:
 
 ```text
-CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"lost_inputs":<n>,"modes":{"handoff":"report","lean_confirm":"report","order":"report","save_backoff":"report"},"period_s":300,"queue_peak":<n>}
+CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"lost_inputs":<n>,"modes":{"handoff":"report","lean_confirm":"report","order":"report","save_backoff":"report"},"period_s":300,"queue_peak":<n>,"stamp_lead_max_s":<s>}
 ```
 
 The line is written also when nothing was counted, so a missing line means the
@@ -307,6 +345,7 @@ Fields:
 - `queue_peak`: the largest number of inputs still waiting in the plugin's input queue when a loop lap reached the chain-store step in the period. The lap has taken its inputs by then, so a queue that filled up shows in `lost_inputs`, not here.
 - `lost_inputs`: how much the plugin's `lost_inputs_count` grew: inputs that arrived while the input queue was full, when the queue drops its oldest input.
 - `modes`: the mode of each wave 03 switch of the plugin config (`CSTORE_ORDER`, `CSTORE_LEAN_CONFIRM`, `CSTORE_HANDOFF`, `CSTORE_SAVE_BACKOFF`), read once at start: `off` (wave 02 behaviour), `report` (the rule runs and is counted, nothing acts on it) or `on` (the rule acts). Any other value stops the plugin's start. The same table is in every line until the next start.
+- `stamp_lead_max_s`: the largest lead over this node's wall clock, in seconds, of a version stamp the order rule took in the period (a peer's clock ahead of this one, plus transit); 0 when none led, and always with `CSTORE_ORDER` `off`.
 
 Labels in `counts`:
 
@@ -325,8 +364,10 @@ Labels in `counts`:
     - `refused_secret_rule`: a revocation marker emptied or changed, or a payload for a revoked secret revision.
     - `refused_token`: the stored record has another token.
     - `refused_readonly`: the stored record is readonly for another owner.
+    - with `CSTORE_ORDER` `on` only: `refused_future`, `refused_origin`, `refused_older`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).
 - `<bucket>/local/unconfirmed` and `<bucket>/local/overwritten`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, or another write replaced the key during the wait.
+- `<bucket>/<origin>/ver_<word>` (`CSTORE_ORDER` `report` or `on`): a write or copy the order rule gives a word (`future`, `origin`, `older`, `unstamped`, `collision`), counted whether or not it is refused; `<origin>` is `local`, `remote` or `hsync` (a record of a sync answer). `ver_invalid`: a stamp that is not `[int, str]`, treated as none.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.

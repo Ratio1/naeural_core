@@ -27,6 +27,9 @@ TODO:
 
 # Used at start-up to keep a replica file that gave no records under another name.
 import os
+# Keeps one copy of each writer address that stamps carry, so the stamps of one writer share it in memory and in the
+# replica file.
+from sys import intern
 from threading import Lock, RLock
 # Times each periodic save for the save back-off: its wall time on a clock no wall-clock step moves, and the CPU
 # time of the save thread.
@@ -70,6 +73,9 @@ _CONFIG = {
   # on any other value; wave 03 ships all four in 'report', and a later release changes only these defaults.
   # Ordering of writes (version stamps and deletes that stick).
   "CSTORE_ORDER" : "report",
+  # How far, in seconds, a stamp may run ahead of this node's wall clock: a stamp further ahead is a future one, and
+  # the node's own stamp clock is held within it.
+  "CSTORE_VER_MAX_AHEAD" : 60,
   # Confirmations by key and stamp instead of echoing the value.
   "CSTORE_LEAN_CONFIRM" : "report",
   # The writer re-sends its own unconfirmed writes.
@@ -118,6 +124,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SNAPSHOT = "snapshot"
   CS_RESPONSE = "response"
   CS_SENDER = "sender"
+  # A record's and a store's version stamp: [time in ms, address of the node that wrote it].
+  CS_VER = "ver"
+  # The signed sequence or revision each signed namespace carries in its values: the first step of the order rule.
+  CS_SIGNED_FIELDS = {
+    "DEEPLOY_OPERATIONS": "sequence", "DEEPLOY_NODE_OPERATIONS": "sequence", "DEEPLOY_DEPLOYED_JOBS": "revision",
+    "DAUTH_JOB_SECRETS": "deployment_revision",
+  }
   # Seconds between two saves of a changed chain storage. The SerializationManager runs them at this cadence
   # on a thread of their own; one full-store save covers every write accepted since the previous one. That
   # thread checks once a second, so an accepted write reaches the disk after up to this cadence, plus up to
@@ -145,9 +158,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The replica is read from this plugin's cache file (an empty store when there is none or it cannot be
     read). Then the counters of the ``CSTORE_STATS`` line start, the wave 03 switches (``CSTORE_ORDER``,
     ``CSTORE_LEAN_CONFIRM``, ``CSTORE_HANDOFF``, ``CSTORE_SAVE_BACKOFF``) are read once into the mode table
-    every later step reads, the save back-off's ceiling ``CSTORE_SAVE_MAX_GAP`` is read once too, and the
-    flush of a changed replica is registered with the SerializationManager, which runs it on a thread kept for
-    this save every ``CS_SAVE_INTERVAL`` seconds, so this plugin's thread no longer runs the save. A switch set
+    every later step reads, the save back-off's ceiling ``CSTORE_SAVE_MAX_GAP`` and the stamp bound
+    ``CSTORE_VER_MAX_AHEAD`` are read once too, and the flush of a changed replica is registered with the
+    SerializationManager, which runs it on a thread kept for this save every ``CS_SAVE_INTERVAL`` seconds, so
+    this plugin's thread no longer runs the save. A switch set
     to anything but ``'off'``, ``'report'`` or ``'on'`` stops the start. When the store this instance will
     use is empty although the replica file exists, the file is renamed to
     ``object.pickle.unreadable-<UTC YYYYmmddHHMMSS>`` and a red line says so, so the first save does not
@@ -168,6 +182,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     TypeError
       When ``CSTORE_SAVE_MAX_GAP`` is not a number nor a str (``None``, a list); the start stops the same way.
       A str that is not a number raises ValueError instead; a numeric str such as ``"30"`` is taken.
+      ``CSTORE_VER_MAX_AHEAD`` must be a number (a str raises TypeError).
 
     Notes
     -----
@@ -180,6 +195,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     held a legitimately empty store is renamed too; that loses nothing. A store that is empty because there
     is no file renames nothing and logs nothing new. A store taken over from a previous instance of this
     plugin in the same process is used as it is; the file is renamed only when that store is empty too.
+
+    With the order switch not 'off', the stamp clock starts at the newest stamp held that is at most
+    ``CSTORE_VER_MAX_AHEAD`` ahead of the wall clock (one walk of the replica at start), so a write after a
+    restart is stamped above this node's writes from before it; with the switch 'off' it is not read.
 
     Examples
     --------
@@ -197,6 +216,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__ops = self.deque()
     self.__persistence_lock = RLock()
     self.__chain_storage_dirty = False
+    # Changes held in memory without a dirty mark (a newer stamp on an unchanged value): no periodic save is made for
+    # them alone, the save at an orderly stop is. Set before the registration, so on_close can read it.
+    self.__chain_storage_unmarked = False
     
     try:
       self.__chain_storage = self.cacheapi_load_pickle(default={}, verbose=True)
@@ -227,6 +249,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # after the registration, so on_close still finds it. No save reads it before: the store is not changed
     # before the setter is published below.
     self.__save_max_gap = float(self.cfg_cstore_save_max_gap)
+    # How far a stamp may run ahead of the wall clock, in ms, read once like the switches (not a number: the start
+    # stops here). The largest lead of a stamp seen since the last CSTORE_STATS line, in ms.
+    self.__ver_ahead, self.__ver_lead = int(1000 * self.cfg_cstore_ver_max_ahead), 0
     # The switches set to anything but the three modes, by config key; checked after the registration, so the
     # on_close that follows a failed start still finds the registration it removes.
     bad_modes = {
@@ -258,6 +283,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # write is accepted before the setter is published below.
       os.rename(replica_file, kept_file)
       self.P(f" === Chain storage replica file gave no records; kept it as {kept_file}, the store starts empty", color='r')
+
+    # The newest stored stamp that is not a future one (more than CSTORE_VER_MAX_AHEAD ahead of the wall clock).
+    limit = int(1000 * self.time()) + self.__ver_ahead
+    # The node's stamp clock, in ms, changed only under the persistence lock. With the order switch 'off' no stamp is
+    # read or made; else it starts at that stamp, so a write after a restart is stamped above the node's own writes
+    # made before it, also when its clock had been pushed ahead by a peer's stamp.
+    self.__ver_clock = 0 if self.__cs_modes["order"] == "off" else max([
+      record[self.CS_VER][0] for record in self.__chain_storage.values()
+      if isinstance(record, dict) and record.get(self.CS_VER) is not None and record[self.CS_VER][0] <= limit
+    ] or [0])
 
     memory[self.CS_STORAGE_MEM] = self.__chain_storage
     memory[self.CS_GETTER] = self._get_value
@@ -595,7 +630,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           } if isinstance(record, dict) else record
           for key, record in self.__chain_storage.items()
         }
-        self.__chain_storage_dirty = False
+        # The copy holds every change made so far, those held without a dirty mark (newer stamps) included.
+        self.__chain_storage_dirty = self.__chain_storage_unmarked = False
         # Count this save for the CSTORE_STATS line, through the one counting helper (the lock it takes is the
         # one already held here, and it is re-entrant).
         self.__cs_count("saves")
@@ -948,6 +984,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     write without ``cs_rev`` and is applied; a snapshot never carries a delete (the merge skips None). The
     cost per write is two dict reads and a few type checks.
 
+    The comparison is ``__rev_order``'s, the one the order rule (``__ver_admit``) reads ``cs_rev`` with too.
+    With the order switch 'on' that rule goes one step further for a live write: a value without ``cs_rev``
+    over one that carries it is refused there as ``older``.
+
     Examples
     --------
     >>> self.__stale_revision(key, {"token": "old", "cs_rev": 100})   # the stored value has cs_rev 200
@@ -957,20 +997,246 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     >>> self.__stale_revision(key, {"token": "legacy"}, snapshot=True)
     True
     """
-    # The stored value of the key, if any.
-    stored = self.__chain_storage.get(key, {}).get(self.CS_VALUE)
-    # Its revision: the "cs_rev" of a dict value, else none.
-    stored = stored.get("cs_rev") if isinstance(stored, dict) else None
-    if type(stored) is not int:
-      # A record without an int revision is not ordered: the last arrival wins, as before.
-      return False
-    # The incoming value's revision, the same way.
-    incoming = value.get("cs_rev") if isinstance(value, dict) else None
-    if type(incoming) is not int:
-      # An unversioned copy: a live write still wins (its writer does not version yet), a snapshot never does.
-      return snapshot
-    # Only a lower revision loses; an equal one (a retry of the same update) is applied as before.
-    return incoming < stored
+    # How the incoming value's cs_rev compares with the stored value's, read as the order rule reads it.
+    order = self.__rev_order(self.__chain_storage.get(key, {}).get(self.CS_VALUE), value, "cs_rev")
+    # A lower revision loses; an unversioned copy over a versioned record loses only as a snapshot (a live write still
+    # wins: its writer does not version yet). An equal one (a retry of the same update) is applied as before.
+    return order == "older" or (snapshot and order == "lacks")
+
+  def __rev_order(self, held, value, field):
+    """
+    Compare an incoming value with the held one by one integer field: a signed sequence or revision, or ``cs_rev``.
+
+    A value is versioned by ``field`` when it is a dict whose ``field`` is an int (a bool is not taken as one).
+    The incoming value is newer when it carries a higher one, or carries one the held value lacks; it is older
+    when both carry one and its own is lower; it lacks it when only the held value carries one. Equal fields,
+    or neither side carrying one, do not decide.
+
+    Parameters
+    ----------
+    held : any
+      The value this replica holds; None for an absent key or a deleted one.
+    value : any
+      The incoming value; None for a delete.
+    field : str or None
+      The field read, for example ``"cs_rev"``; None (a namespace without a signed field) never decides.
+
+    Returns
+    -------
+    str or None
+      ``"newer"``, ``"older"``, ``"lacks"`` or None when the field does not decide.
+
+    Notes
+    -----
+    The one reading of a revision: ``__stale_revision`` (the ``cs_rev`` rule that acts in every mode) and step
+    5 of the order rule (``__ver_admit``) both call it. The cost is two dict reads and two type checks per side.
+
+    Examples
+    --------
+    >>> self.__rev_order({"cs_rev": 200}, {"cs_rev": 100}, "cs_rev")
+    'older'
+    >>> self.__rev_order("cid", {"revision": 1}, "revision")      # a versioned pointer over an unversioned one
+    'newer'
+    >>> self.__rev_order({"cs_rev": 200}, {"token": "t"}, "cs_rev")
+    'lacks'
+    """
+    # The int field of each side, else None: a side without it is not versioned by this field.
+    new, old = [side.get(field) if isinstance(side, dict) and type(side.get(field)) is int else None
+                for side in (value, held)]
+    if new == old:
+      # Equal, or neither side versioned: the field does not decide.
+      return None
+    # Only the held value carries it; else the incoming one wins when it carries a higher one or one the held lacks.
+    return "lacks" if new is None else ("newer" if old is None or new > old else "older")
+
+  def __ver_valid(self, ver, key=None, origin=None):
+    """
+    Check the form of a version stamp from the network: a list ``[int ms, str address]``.
+
+    A stamp of any other form (a tuple, a bool or a float for the time, a third item) is malformed; every rule
+    then treats it as no stamp, and it is never stored or echoed.
+
+    Parameters
+    ----------
+    ver : any
+      The stamp as received in a store or an hsync record; None for an unstamped one.
+    key : str, optional
+      The composed key it came with. When given, a malformed stamp is counted as ``ver_invalid`` under its
+      bucket; None (the default) counts nothing, for a second look at a stamp already counted.
+    origin : str, optional
+      ``"remote"`` or ``"hsync"``: where the stamp came from, for that count.
+
+    Returns
+    -------
+    list or None
+      The same list, its address interned; None for an unstamped or malformed stamp.
+
+    Notes
+    -----
+    The address is interned in place, so the stamps of one writer share one string in memory and in the
+    replica file (the pickle stores a shared string once): about 16 B per stamped record instead of about 70.
+
+    Examples
+    --------
+    >>> self.__ver_valid([1700000000000, "0xai_peer"], key, "remote")
+    [1700000000000, '0xai_peer']
+    >>> self.__ver_valid([1.7e12, "0xai_peer"], key, "remote")   # counted as ver_invalid
+    """
+    if type(ver) is list and len(ver) == 2 and type(ver[0]) is int and type(ver[1]) is str:
+      # One string per writer address, in place in the received list.
+      ver[1] = intern(ver[1])
+      # The stamp, well formed.
+      return ver
+    if ver is not None and key is not None:
+      # A malformed stamp, counted once under its key's bucket and treated as none.
+      self.__cs_count("ver_invalid", key, origin)
+    # No stamp, or a malformed one: unstamped for every rule.
+    return None
+
+  def __ver_tick(self):
+    """
+    Make the stamp of one local write: ``[time in ms, this node's address]``, above every stamp made or taken.
+
+    The clock is a hybrid one: the wall clock in ms, or one ms above the last stamp this node made or took from a
+    peer when that is later. It is held within ``CSTORE_VER_MAX_AHEAD`` of the wall clock: at or past that bound
+    (the wall clock was set back, or stamps taken near the bound) it starts again from the wall clock.
+
+    Returns
+    -------
+    list
+      A new list ``[ms, self.ee_addr]``.
+
+    Notes
+    -----
+    Called under the persistence lock, as every change of the clock. Each call takes a new ms: two writes in one
+    ms get ms and ms + 1, and an identical rewrite gets a newer stamp than the write it repeats, so a value
+    written, replaced and written again is ordered by its last write. After a restart from the bound this node's
+    stamps can be lower than its earlier ones, so its next writes of those keys are older than its own earlier
+    writes for up to that bound. The cost is one clock read, one comparison and one ``max``.
+
+    Examples
+    --------
+    >>> self.__ver_tick()
+    [1700000000000, '0xai_self']
+    >>> self.__ver_tick()   # in the same ms
+    [1700000000001, '0xai_self']
+    """
+    # The wall clock in ms.
+    now = int(1000 * self.time())
+    # One ms above the last stamp made or taken, or the wall clock when later; at the bound, the wall clock again.
+    self.__ver_clock = now if self.__ver_clock >= now + self.__ver_ahead else max(now, self.__ver_clock + 1)
+    # A new list each time, so a record and a message never share one.
+    return [self.__ver_clock, self.ee_addr]
+
+  def __ver_admit(self, key, value, ver, sender, origin):
+    """
+    The order rule: tell whether a write or an hsync copy is older than what this replica holds for its key.
+
+    The steps, in order; the first that decides gives the answer:
+
+    1. a stamp more than ``CSTORE_VER_MAX_AHEAD`` ahead of the wall clock: ``future``;
+    2. a live remote write stamped with another address than its verified sender: ``origin``;
+    3. nothing held under the key: admitted;
+    4. a live write (local or remote) of the value held: admitted (an identical write);
+    5. the namespace's signed sequence or revision (``CS_SIGNED_FIELDS``), then ``cs_rev``, read by
+       ``__rev_order``: a side that carries the field beats a side that lacks it, else the higher wins; the
+       incoming side admitted when it wins, ``older`` when it loses;
+    6. a held record without a stamp, or with one more than ``CSTORE_VER_MAX_AHEAD`` ahead (not trusted):
+       admitted, the last arrival wins as in the previous release;
+    7. an unstamped arrival over a trusted stamp: ``unstamped``;
+    8. an older stamp: ``older``;
+    9. an equal stamp with another value: ``collision`` for the side that loses one fixed comparison (a delete
+       beats a value, else the larger canonical JSON), so every replica keeps the same one; the winner is
+       admitted.
+
+    A stamp past steps 1 and 2 moves this node's clock up to it (so its next write is stamped above it) and
+    raises the period's largest stamp lead. Each word is counted as ``<bucket>/<origin>/ver_<word>``.
+
+    Parameters
+    ----------
+    key : str
+      Composed key of the write or the copy.
+    value : any
+      The incoming value; None for a delete.
+    ver : list or None
+      Its stamp, checked by ``__ver_valid`` (or made by ``__ver_tick``); None for an unstamped one.
+    sender : str or None
+      The verified address of the node that sent a live remote write; not read for other origins.
+    origin : str
+      ``"local"``, ``"remote"`` (a live store from a peer) or ``"hsync"`` (a record of a peer's sync answer).
+
+    Returns
+    -------
+    str or None
+      The word: ``future``, ``origin``, ``older``, ``unstamped`` or ``collision``; None when admitted. With the
+      order switch 'on' the caller refuses the write (or skips the copy) on a word; in 'report' it only counts.
+
+    Notes
+    -----
+    Called under the persistence lock, after the signed-record rule (``__versioned_record``) and the ``cs_rev``
+    rule (``__stale_revision``), which act in every mode. It changes nothing but the clock, the lead and the
+    counters, so its answer is the 'on' answer in every mode. "The value held" in step 4 is equality of the
+    values only, as an identical write is decided in the previous release; an hsync copy of the same value
+    skips step 5 (its fields are the held ones) and goes on to the stamp steps, so it is admitted only with a
+    stamp at least the held one: an equal copy never lowers a held stamp. The cost per call: a clock read and a
+    dict read, and when the held value differs, the namespace lookup (four key hashes) and a few comparisons;
+    the canonical JSON only for equal stamps with different values.
+
+    Examples
+    --------
+    >>> self.__ver_admit(key, "v2", [1700000000000, "0xai_peer"], "0xai_peer", "remote")   # held at a later stamp
+    'older'
+    >>> self.__ver_admit(key, "v2", [1700000000000, "0xai_other"], "0xai_peer", "remote")
+    'origin'
+    """
+    # The wall clock in ms, against which a stamp is a future one.
+    now = int(1000 * self.time())
+    # The record held under the key, if any.
+    held = self.__chain_storage.get(key)
+    if ver is not None and ver[0] > now + self.__ver_ahead:
+      # Step 1: further ahead than any trusted clock; not taken, and the clock does not move.
+      reason = "future"
+    elif ver is not None and origin == "remote" and ver[1] != sender:
+      # Step 2: a live write stamped as another node's write; not taken.
+      reason = "origin"
+    else:
+      if ver is not None:
+        # A stamp taken: the clock moves up to it, and the lead of the stamp over the wall clock is kept for the line.
+        self.__ver_clock, self.__ver_lead = max(self.__ver_clock, ver[0]), max(self.__ver_lead, ver[0] - now)
+      if held is None or (origin != "hsync" and held[self.CS_VALUE] == value):
+        # Steps 3 and 4: nothing held, or an identical write.
+        return None
+      # Step 5: the namespace's signed field first (none outside the signed namespaces), then cs_rev; a copy of the
+      # held value carries the same fields, so it is not read for one (False) and goes on to the stamp.
+      order = held[self.CS_VALUE] != value and (self.__rev_order(
+        held[self.CS_VALUE], value, self.CS_SIGNED_FIELDS.get(self.__namespace_for_key(key, self.CS_SIGNED_FIELDS)),
+      ) or self.__rev_order(held[self.CS_VALUE], value, "cs_rev"))
+      # The held stamp, if any.
+      held_ver = held.get(self.CS_VER)
+      if order:
+        # Decided by a field: admitted when the incoming side wins, older when it loses or lacks it.
+        reason = None if order == "newer" else "older"
+      elif held_ver is None or held_ver[0] > now + self.__ver_ahead:
+        # Step 6: no trusted stamp held; the last arrival wins.
+        reason = None
+      elif ver is None:
+        # Step 7: an unstamped write over a stamped record.
+        reason = "unstamped"
+      elif ver < held_ver:
+        # Step 8: an older stamp.
+        reason = "older"
+      else:
+        # Step 9: the loser of an equal stamp with another value (order None: the values differ) is the side lower by
+        # (is a delete, canonical JSON); an equal stamp of the same value, a sync's steady state, builds no JSON.
+        reason = "collision" if ver == held_ver and order is None and (
+          (value is None, self.json_dumps(value, sort_keys=True))
+          < (held[self.CS_VALUE] is None, self.json_dumps(held[self.CS_VALUE], sort_keys=True))
+        ) else None
+    if reason is not None:
+      # Counted in 'report' and 'on' alike, under the key's bucket and the write's origin.
+      self.__cs_count("ver_" + reason, key, origin)
+    # The word the caller acts on in 'on', or None.
+    return reason
 
   def __hset_index(self, hkey):
     """
@@ -1071,11 +1337,25 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     is replaced only by a copy with a higher or equal ``cs_rev``: an older or
     unversioned copy is skipped and not counted in the result.
 
+    The order rule (switch ``CSTORE_ORDER``, read once at start): with the switch
+    'off' the stamp of a copy is not read. Else a copy equal to the held record
+    in value, owner, readonly and token only raises the held stamp to the copy's
+    when that one is newer (held in memory without a dirty mark: see
+    ``on_close``), and any other copy is skipped in 'on' when ``__ver_admit``
+    gives it a word (older, future, unstamped over a trusted stamp, or the losing
+    side of a collision) and not counted in the result; in 'report' it is applied
+    as in the previous release. Every copy goes through ``__ver_admit``, which
+    counts its word as ``<bucket>/hsync/ver_<word>`` and moves the stamp clock up
+    to a stamp it takes; an equal copy raises the held stamp only when it gives
+    no word. An applied copy keeps its stamp.
+
     Examples
     --------
     >>> self.__merge_hset_snapshot("players", {key: record})
     1
     """
+    # The order switch, read once at start.
+    order = self.__cs_modes["order"]
     if not isinstance(snapshot, dict):
       return 0
     # The dAuth rule applies to the namespace of the index hkey has, the prefix the records are selected by below.
@@ -1129,6 +1409,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           record[self.CS_OWNER] = value["coordinator"]
           readonly = False
           token = None
+        # The copy's stamp, checked for form (a malformed one counts ver_invalid and is unstamped); none is read
+        # with the order switch 'off'.
+        ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, "hsync")
+        # The order rule's word for the copy (counted as ver_<word>; it also moves the clock up to a stamp taken),
+        # None when admitted or with the order switch 'off'.
+        reason = None if order == "off" else self.__ver_admit(key, value, ver, None, "hsync")
         local_record = self.__chain_storage.get(key)
         if isinstance(local_record, dict):
           same_owner = local_record.get(self.CS_OWNER) == record.get(self.CS_OWNER)
@@ -1136,7 +1422,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           same_readonly = local_record.get(self.CS_READONLY, False) == readonly
           same_token = local_record.get(self.CS_TOKEN, None) == token
           if same_owner and same_value and same_readonly and same_token:
+            if reason is None and ver is not None and ver > (local_record.get(self.CS_VER) or []):
+              # The same record with a newer stamp the rule admits: the stamp is raised in place, with no dirty mark
+              # (nothing is saved for an equal copy), so it reaches the file with the next save or the save of an
+              # orderly stop.
+              local_record[self.CS_VER], self.__chain_storage_unmarked = ver, True
             continue
+        if reason is not None and order == "on":
+          # Older than the held record by the order rule (or a future, unstamped or losing copy): skipped in 'on'; in
+          # 'report' only counted, and applied below as in the previous release.
+          continue
 
         # Apply the peer record only to the local replica. HSync intentionally
         # does not enqueue a broadcast because this node is catching up to peer
@@ -1149,6 +1444,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           self.CS_TOKEN: token,
           self.CS_CONFIRMATIONS: -1,
           self.CS_MIN_CONFIRMATIONS: 0,
+          # The copy's stamp, when it has one; with the order switch 'off' none, as in the previous release.
+          **({self.CS_VER: ver} if ver is not None else {}),
         }
         merged_fields += 1
         changed = True
@@ -1233,11 +1530,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     local_sync_storage_op=False,
     peers=None,
     include_default_peers=True,
+    ver=None,
   ):
     """
     Set a key-value pair in the local chain-store replica.
 
-    This method is called to set a key-value pair in the chain storage.
+    This method is called to set a key-value pair in the chain storage. The record keeps the write's version
+    stamp when it has one.
 
     Parameters
     ----------
@@ -1264,6 +1563,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     include_default_peers : bool, optional
       If True, include the default chain peer set when deriving confirmation
       thresholds. Default is True.
+    ver : list, optional
+      The write's version stamp ``[ms, address]``, stored as the record's ``ver``; None (the default, and
+      always with the order switch 'off') stores no ``ver`` field, as the previous release.
 
     Returns
     -------
@@ -1277,6 +1579,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     the chain storage dirty when the call changed the replica (``_set_value``
     does not mark it for a delete of a key not held or for a write of what
     was already stored).
+
+    Examples
+    --------
+    >>> self.__set_key_value("key", "v", "node", ver=[1700000000000, "0xai_self"])   # record with its stamp
+    >>> self.__set_key_value("key", None, "node")                                    # deleted
     """
     # key should be composed of the chainstore app identity and the actual key
     # so if two chainstore apps are running on the same node, they will not overwrite each other
@@ -1299,6 +1606,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.CS_OWNER     : owner,
       self.CS_READONLY  : readonly,
       self.CS_TOKEN     : token,
+      # The write's stamp, when it has one; a record of the previous release's form otherwise.
+      **({self.CS_VER: ver} if ver is not None else {}),
     }
     self.__reset_confirmations(
       key,
@@ -1325,6 +1634,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     max_retries=None,
     debug=False, 
     result_info=None,
+    ver=None,
+    sender=None,
   ):
     """
     Set a value in chain storage and optionally wait for confirmations.
@@ -1366,6 +1677,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     result_info : dict, optional
       A dict the caller passes to learn how the call ended: its ``"outcome"`` is set to the word of the
       way out (below), also when the call raises. None (the default) sets nothing.
+    ver : any, optional
+      For a remote write only, the version stamp the store carried, as received (checked here); a local
+      write takes a fresh one. Only ``__exec_store`` passes it. Default is None (unstamped).
+    sender : str, optional
+      For a remote write only, the verified address of the node that sent it, which the stamp must name.
+      Only ``__exec_store`` passes it. Default is None.
 
     Returns
     -------
@@ -1423,7 +1740,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     - ``refused_secret_rule``: a changed or empty revocation marker, or a
       payload for a revoked secret revision;
     - ``refused_token``: the stored record has another token;
-    - ``refused_readonly``: the stored record is readonly for another owner.
+    - ``refused_readonly``: the stored record is readonly for another owner;
+    - with the order switch ``CSTORE_ORDER`` 'on' only, the order rule's
+      words (``__ver_admit``): ``refused_older``, ``refused_future``,
+      ``refused_origin``, ``refused_unstamped`` and ``refused_collision``.
+
+    The order rule (``CSTORE_ORDER``, read once at start), after the
+    namespace rules and before the token and readonly checks. 'off': no
+    stamp is made or read, as in the previous release. 'report' and 'on': a
+    local write takes a fresh stamp (``__ver_tick``) and a remote one's is
+    checked for form; the record keeps the stamp, the store message carries
+    it, and ``__ver_admit`` counts each rule as ``ver_<word>``. Only 'on'
+    refuses on its word; 'report' writes as the previous release. A remote
+    write of the value held is identical in every mode; it raises the held
+    stamp to its own when that is newer, in memory without a dirty mark, as
+    an identical local write's fresh stamp is.
 
     ``error`` is a call that raised before it changed the replica (a bad
     ``timeout`` or ``max_retries``, for example). A local write that changed
@@ -1551,6 +1882,22 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # A revoked revision takes only its redacted tombstone.
             outcome = "refused_secret_rule"
             return False
+        # The order switch, read once at start.
+        order = self.__cs_modes["order"]
+        if order == "off":
+          # No stamp is made or read: a stamp a peer sent is dropped here, and the record and the message keep the
+          # previous release's form.
+          ver = None
+        else:
+          # A local write takes a fresh stamp; a remote one's is checked for form (malformed: ver_invalid, unstamped).
+          ver = self.__ver_valid(ver, key, "remote") if local_sync_storage_op else self.__ver_tick()
+          # The order rule's word for this write (each counted as ver_<word>), None when admitted.
+          reason = self.__ver_admit(key, value, ver, sender, "remote" if local_sync_storage_op else "local")
+          if reason is not None and order == "on":
+            # Refused by the order rule: not stored, and from a peer not confirmed. In 'report' only counted.
+            outcome = "refused_" + reason
+            # Before the token and readonly checks, which an older or forged write does not reach.
+            return False
         need_store = True
         existing_owner = None
         existing_value = None
@@ -1582,6 +1929,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             if local_sync_storage_op:
               # Counted as identical: the value was already stored. Before, this way out was not counted.
               outcome = "identical"
+              if ver is not None and ver > (self.__chain_storage[key].get(self.CS_VER) or []):
+                # A newer stamp of the same value: kept in place, with no dirty mark (nothing a reader sees changed),
+                # so it reaches the file with the next save or the save of an orderly stop.
+                self.__chain_storage[key][self.CS_VER], self.__chain_storage_unmarked = ver, True
               return True
             # A previous timeout may have left only the local copy. Re-publish
             # and collect distinct peer confirmations instead of claiming success.
@@ -1612,6 +1963,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             readonly=readonly, token=token,
             peers=peers,
             include_default_peers=include_default_peers,
+            # The stamp the record keeps; None with the order switch 'off'.
+            ver=ver,
           )
           # The outcome counted for this call: a delete of a key not held, a write of what was already stored,
           # or a change of the replica. Before, nothing was counted.
@@ -1623,6 +1976,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           # the change is in the store, so a concurrent snapshot that clears it
           # either contains this write or is followed by another flush.
           self.__chain_storage_dirty = True
+        elif ver is not None:
+          # An identical write still stores its fresh stamp: held in memory without a dirty mark, saved with the next
+          # save or the save of an orderly stop.
+          self.__chain_storage_unmarked = True
         if not local_sync_storage_op:
           # now send set-value (including confirmation request) to all
           op = {
@@ -1636,6 +1993,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               self.CS_INCLUDE_DEFAULT_PEERS : include_default_peers,
               self.CS_TIMEOUT   : timeout,
               self.CS_MAX_RETRIES : max_retries,
+              # The write's stamp, for the receivers' order rule; absent with the order switch 'off' (a receiver of
+              # the previous release reads only the fields above and ignores it).
+              **({self.CS_VER: ver} if ver is not None else {}),
           }
           self.__ops.append(op)
           if debug:
@@ -1934,6 +2294,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     the registries cannot be read, ``__registry_member`` answers False and the store is refused, as for the
     dAuth namespaces. The writes ``_set_value`` refuses are counted there, under their own words.
 
+    The store's version stamp and its verified sender go to ``_set_value``, whose order rule reads them
+    (switch ``CSTORE_ORDER``; with it 'off' the stamp is dropped there).
+
     A refused delete is not reported back to its sender: the sender does not wait for the confirmations of a
     delete, so it treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
     ``_set_value`` reads 0 confirmations of 0 required for a key it no longer holds and returns True, and
@@ -1982,6 +2345,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       key, value, owner=owner, 
       token=token, readonly=readonly,
       local_sync_storage_op=True,
+      # The store's stamp as received (checked there, and read only when the order switch is not 'off'), and the
+      # verified sender its stamp must name.
+      ver=data.get(self.CS_VER), sender=peers,
     )
     if result:
       # now send confirmation of the storage execution
@@ -2260,9 +2626,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (and reset) under the persistence lock, then logged outside it as one JSON object with sorted keys::
 
       CSTORE_STATS {"counts":{...},"lost_inputs":0,"modes":{"handoff":"report","lean_confirm":"report",
-                    "order":"report","save_backoff":"report"},"period_s":300,"queue_peak":0}
+                    "order":"report","save_backoff":"report"},"period_s":300,"queue_peak":0,"stamp_lead_max_s":0.0}
 
     (one line in the log). ``modes`` is the table of the wave 03 switches read once by ``on_init``.
+    ``stamp_lead_max_s`` is the largest lead over this node's wall clock, in seconds, of a version stamp the
+    order rule took in the period (a peer's clock ahead of this one, plus the transit time); 0 when none led.
 
     Returns
     -------
@@ -2288,8 +2656,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if self.time() - self.__cs_stats_last >= self.CS_STATS_INTERVAL:
       # Take the counters and start new ones, under the lock the counts are made under.
       with self.__persistence_lock:
-        # The counts go to the new dict from here; the old one is only read below.
-        counts, self.__cs_stats = self.__cs_stats, {}
+        # The counts go to the new dict from here; the old one is only read below. The same for the largest lead of
+        # a stamp taken over the wall clock, kept by the order rule under this lock.
+        counts, self.__cs_stats, lead, self.__ver_lead = self.__cs_stats, {}, self.__ver_lead, 0
       # The clock and the plugin's count of lost inputs, read once: for this line and as the start of the next one.
       now, lost = self.time(), self.lost_inputs_count
       # One JSON object with sorted keys on one line, built and logged outside the lock.
@@ -2298,6 +2667,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.P("CSTORE_STATS " + self.json_dumps({
         "period_s": round(now - self.__cs_stats_last), "counts": counts, "modes": self.__cs_modes,
         "queue_peak": self.__cs_stats_queue_peak, "lost_inputs": lost - self.__cs_stats_lost,
+        # In seconds, 0 when no stamp taken led the wall clock (always with the order switch 'off').
+        "stamp_lead_max_s": round(lead / 1000, 1),
       }, sort_keys=True))
       # The next line is measured from here.
       self.__cs_stats_last, self.__cs_stats_queue_peak, self.__cs_stats_lost = now, 0, lost
@@ -2330,7 +2701,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Notes
     -----
-    The final save runs on the closing plugin's own thread, as before.
+    The final save runs on the closing plugin's own thread, as before. It is made when the replica is marked
+    changed, and also when it holds changes kept without a dirty mark (a newer stamp on an unchanged value),
+    which no periodic save writes on their own: without it they were lost at every orderly stop, and the
+    restarted replica could take an older write over them.
+
+    Examples
+    --------
+    >>> self.on_close()   # at an orderly stop: the registration removed, pending changes saved
     """
     # Stop the periodic save of this instance first: its thread ends at its next check, and a restarted
     # instance registers its own save. A save that thread already picked can still run once after this
@@ -2341,7 +2719,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # again, and the check below must see it, or the changes since the last good save would stay unsaved.
     with self.__save_lock:
       pass
-    if self.__chain_storage_dirty:
+    if self.__chain_storage_dirty or self.__chain_storage_unmarked:
+      # Also changes held without a dirty mark (a newer stamp on an unchanged value), which no periodic save writes
+      # alone: lost at a stop otherwise, so a restarted replica would take an older write over them.
       self.__save_chain_storage()
     super().on_close()
     return

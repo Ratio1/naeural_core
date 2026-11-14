@@ -50,6 +50,32 @@ def modes():
   return dict.fromkeys(("order", "lean_confirm", "handoff", "save_backoff"), _ChainStoreRuntimeHarness.CSTORE_MODE)
 
 
+def reported(counts):
+  """
+  Give the counts the order rule adds in report mode, so one expectation serves the run in 'off' and in 'report'.
+
+  The order rule counts what 'on' would refuse (``ver_<word>``) and changes nothing else in 'report'; with the
+  switches 'off' (the harness default) it counts nothing. A test that compares the whole counter dict adds these.
+
+  Parameters
+  ----------
+  counts : dict
+    The labels and counts the order rule adds for the test's writes in 'report'.
+
+  Returns
+  -------
+  dict
+    ``counts`` when the harness runs in 'report', else an empty dict.
+
+  Examples
+  --------
+  >>> {"plain/remote/changed": 1, **reported({"plain/remote/ver_unstamped": 1})}   # in 'off'
+  {'plain/remote/changed': 1}
+  """
+  # Read at call time: the report-mode run sets the harness's mode for each test.
+  return counts if _ChainStoreRuntimeHarness.CSTORE_MODE == "report" else {}
+
+
 def make_store():
   store = _ChainStoreRuntimeHarness("node", default_peers=["peer1", "peer2"])
   setattr(store, OPS, collections.deque())
@@ -262,7 +288,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
     # on_init must create the counter state, the mode table and the save back-off state itself: drop what the shared
     # harness prepared.
     for name in ("cs_stats", "cs_stats_last", "cs_stats_queue_peak", "cs_stats_lost", "cs_modes", "save_max_gap",
-                 "save_resume"):
+                 # The save back-off's pause, the stamp bound, the period's largest stamp lead, the stamp clock and the
+                 # flag of changes held without a dirty mark.
+                 "save_resume", "ver_ahead", "ver_lead", "ver_clock", "chain_storage_unmarked"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"
@@ -443,6 +471,8 @@ class TestCounters(unittest.TestCase):
       "plain/local/absent_delete": 1, "plain/remote/absent_delete": 1, "plain/remote/refused_token": 1,
       # The local write with no target peer.
       "plain/local/refused_no_peers": 1,
+      # In 'report', the order rule's count of the unstamped remote write over the stamped local record.
+      **reported({"plain/remote/ver_unstamped": 1}),
     })
 
   def test_a_write_that_raises_is_counted_once_by_what_it_did_to_the_replica(self):
@@ -551,6 +581,8 @@ class TestCounters(unittest.TestCase):
     self.assertEqual(stats, {
       # The counts, queue peak and lost inputs as before, and the mode of each switch (all in the harness's mode).
       "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 7, "lost_inputs": 4, "modes": modes(),
+      # No stamp led the clock (the write was unstamped).
+      "stamp_lead_max_s": 0.0,
     })
     # The counters start again.
     self.assertEqual(getattr(store, STATS), {})
@@ -565,7 +597,7 @@ class TestCounters(unittest.TestCase):
     # The second line's fields.
     self.assertEqual(json.loads(lines[1][len("CSTORE_STATS "):]), {
       # The modes again: they are in every line.
-      "period_s": 300, "counts": {}, "queue_peak": 3, "lost_inputs": 0, "modes": modes(),
+      "period_s": 300, "counts": {}, "queue_peak": 3, "lost_inputs": 0, "modes": modes(), "stamp_lead_max_s": 0.0,
     })
 
 
@@ -1015,7 +1047,9 @@ class TestRefusalReasons(unittest.TestCase):
     # Its word and labels, and the peer's write.
     self.assertEqual((info, getattr(store, STATS)), ({"outcome": "overwritten"}, {
       # The local write and how its wait ended, and the peer's write.
-      "plain/local/changed": 1, "plain/local/overwritten": 1, "plain/remote/changed": 1}))
+      "plain/local/changed": 1, "plain/local/overwritten": 1, "plain/remote/changed": 1,
+      # In 'report', the order rule's count of that unstamped write over the stamped local record.
+      **reported({"plain/remote/ver_unstamped": 1})}))
 
   def test_the_api_gives_the_word_and_the_same_bool(self):
     """chainstore_set and chainstore_hset fill result_info only when asked, and return the same bool either way."""
@@ -1205,8 +1239,10 @@ class TestStart(unittest.TestCase):
     lines = [msg for msg, _ in store.lines if msg.startswith("CSTORE_STATS ")]
     # The first line's fields.
     self.assertEqual(json.loads(lines[0][len("CSTORE_STATS "):]), {
-      # With the modes on_init read from the harness's switches.
+      # With the modes on_init read from the harness's switches, and no stamp lead.
       "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 0, "lost_inputs": 0, "modes": modes(),
+      # The unstamped write gave no stamp lead.
+      "stamp_lead_max_s": 0.0,
     })
 
   def test_a_save_of_a_restarted_instance_waits_for_a_save_of_the_closed_one(self):

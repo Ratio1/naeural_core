@@ -495,7 +495,9 @@ class _BasePluginAPIMixin:
       The words: ``changed``, ``identical`` and ``absent_delete`` for a write this node applied; one
       ``refused_<reason>`` per refusal (``refused_no_peers``, ``refused_oracle_only``,
       ``refused_not_member``, ``refused_versioned``, ``refused_cs_rev``, ``refused_secret_rule``,
-      ``refused_token``, ``refused_readonly``); ``unconfirmed`` or ``overwritten`` for a write applied here
+      ``refused_token``, ``refused_readonly``, and with the store's order switch ``CSTORE_ORDER`` 'on'
+      ``refused_older``, ``refused_future``, ``refused_origin``, ``refused_unstamped``,
+      ``refused_collision``); ``unconfirmed`` or ``overwritten`` for a write applied here
       whose wait failed;
       ``error`` when the call raised (a value that is not JSON, a bad timeout, and so on).
 

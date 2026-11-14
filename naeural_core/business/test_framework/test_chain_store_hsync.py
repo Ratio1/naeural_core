@@ -300,6 +300,12 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self.cfg_cstore_save_max_gap, self._ChainStoreBasePlugin__save_max_gap = 30, 30.0
     # No save yet, so no pause: the first save is immediate, as after on_init.
     self._ChainStoreBasePlugin__save_resume = 0.0
+    # The stamp bound as the config gives it (60 s) and as on_init reads it (ms); no stamp taken yet, a clock at 0.
+    self.cfg_cstore_ver_max_ahead, self._ChainStoreBasePlugin__ver_ahead = 60, 60000
+    # The largest stamp lead of the period and the stamp clock, as on_init starts them on an empty store.
+    self._ChainStoreBasePlugin__ver_lead = self._ChainStoreBasePlugin__ver_clock = 0
+    # Nothing held without a dirty mark.
+    self._ChainStoreBasePlugin__chain_storage_unmarked = False
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

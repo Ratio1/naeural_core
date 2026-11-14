@@ -1929,7 +1929,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     the key's value (counted ``ver_copy_delete``) and stores the tombstone
     under ``"dl:" + key`` (``tombstone_new`` when there was none), so a
     replica that missed the delete does not keep the key. A value copy
-    removes the key's tombstone. A copy that is applied, with the order
+    removes the key's tombstone (``__held_tombstone``: not another record
+    under ``"dl:"``, and none with the order switch 'off'). A copy that is
+    applied, with the order
     switch not 'off', also goes through the write-permission count
     (``__perm_count``), which counts and never refuses.
 
@@ -2039,8 +2041,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if value is None and name not in self.__chain_storage:
           # A new tombstone, counted per bucket as a live delete's is.
           self.__cs_count("tombstone_new", key, "hsync")
-        # Dropped: the value a delete removes, or the tombstone a value replaces.
-        self.__chain_storage.pop(other, None)
+        if value is None or self.__held_tombstone(key):
+          # Dropped: the value a delete removes, or the tombstone a value replaces (only a tombstone, and not with
+          # the order switch 'off'; another record under "dl:" stays).
+          self.__chain_storage.pop(other, None)
         # Apply the peer record only to the local replica. HSync intentionally
         # does not enqueue a broadcast because this node is catching up to peer
         # state rather than originating a new write.
@@ -2143,6 +2147,38 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return
 
 
+  def __held_tombstone(self, key):
+    """
+    Tell whether a value written to ``key`` replaces a tombstone held under ``"dl:" + key``.
+
+    A tombstone is the record a stamped delete leaves under ``"dl:" + key``: value None and a well-formed stamp.
+    Any other record there (one a caller of an older release could write under that prefix, holding a value) is
+    not one and is never replaced by a write of ``key``. With the order switch 'off' nothing there is replaced, as
+    in the previous release; the tombstone sweep removes every tombstone at the next ``CSTORE_STATS`` line then.
+
+    Parameters
+    ----------
+    key : str
+      The key a value is written to.
+
+    Returns
+    -------
+    bool
+      True when the order switch is not 'off' and the record held under ``"dl:" + key`` is a tombstone.
+
+    Examples
+    --------
+    >>> self.__held_tombstone("key")   # order switch 'report', after a stamped delete of "key"
+    True
+    >>> self.__held_tombstone("job1")  # "dl:job1" holds {"progress": 5}, written by an older release's caller
+    False
+    """
+    # The record held under the tombstones' prefix and the key, if any.
+    held = self.__chain_storage.get(self.CS_DEL + key)
+    # A tombstone (value None, a well-formed stamp), and the order switch not 'off'.
+    return (self.__cs_modes["order"] != "off" and held is not None and held[self.CS_VALUE] is None
+            and self.__ver_valid(held.get(self.CS_VER)) is not None)
+
   def __set_key_value(
     self,
     key,
@@ -2214,7 +2250,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     it is; an older one is replaced (a stamp-only change: ``_set_value``
     does not mark it for a save). A new tombstone is counted as
     ``<bucket>/<origin>/tombstone_new``. Storing a value removes the key's
-    tombstone, so a key and its tombstone are never both held.
+    tombstone (``__held_tombstone``), so a key and its tombstone are never
+    both held; with the order switch 'off' the tombstone stays until the
+    next sweep, and a record under ``"dl:" + key`` that is not a tombstone
+    (a value an older release's caller wrote there) always stays.
     The caller must hold the persistence lock and, after releasing it, mark
     the chain storage dirty when the call changed the replica (``_set_value``
     does not mark it for a delete of a key not held or for a write of what
@@ -2251,9 +2290,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         self.__cs_count("tombstone_new", key, "remote" if local_sync_storage_op else "local")
       # The delete leaves a tombstone under "dl:" and the key: the record below, with value None and the stamp.
       chain_key = self.CS_DEL + key
-    else:
-      # A value replaces the key's tombstone, if any: a key and its tombstone are never both held.
-      self.__chain_storage.pop(self.CS_DEL + key, None)
+    elif self.__held_tombstone(key):
+      # A value replaces the key's tombstone (only a tombstone, and not with the order switch 'off'): a key and its
+      # tombstone are then never both held.
+      self.__chain_storage.pop(self.CS_DEL + key)
     self.__chain_storage[chain_key] = {
       self.CS_KEY       : key,
       self.CS_VALUE     : value,

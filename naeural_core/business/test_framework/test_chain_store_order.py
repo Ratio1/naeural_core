@@ -825,6 +825,38 @@ class TestTombstones(unittest.TestCase):
     self.assertEqual((store.storage[KEY]["value"], store.storage[KEY]["token"], store.storage[KEY]["readonly"],
                       TOMB in store.storage), ("new", "t", True, False))
 
+  def test_a_value_write_removes_only_a_tombstone_and_none_in_off(self):
+    """A value written to a key, by a peer's store, locally or by a sync copy, removes the tombstone held for it with
+    the order switch 'report' or 'on' but not 'off', and never removes a "dl:" record that holds a value (one a caller
+    of the previous release could write there)."""
+    # The "dl:" + KEY records: a tombstone of KEY, and a value a caller of the previous release wrote there.
+    held = {"tombstone": tombstone(KEY, "peer1", [NOW_MS - 5000, "peer1"]), "app": record(TOMB, {"progress": 5}, "app")}
+    # Per mode, held record and way of writing: the value of KEY then, and whether the "dl:" record is still held.
+    results = {}
+    # Each mode.
+    for mode in ("off", "report", "on"):
+      # Each held record.
+      for name, held_record in held.items():
+        # Each way of writing.
+        for way in ("remote", "local", "sync"):
+          # A replica holding the "dl:" record.
+          store = make(mode, storage={TOMB: held_record})
+          if way == "remote":
+            # A peer's store of KEY, stamped after the tombstone.
+            deliver(store, KEY, "v", "peer2", [NOW_MS, "peer2"])
+          elif way == "local":
+            # A local write of KEY.
+            local_write(store, KEY, "v")
+          else:
+            # A sync copy of KEY, stamped after the tombstone.
+            getattr(store, MERGE)("players", {KEY: record(KEY, "v", "peer2", [NOW_MS, "peer2"])})
+          # The value written, and whether the "dl:" record stayed.
+          results[(mode, name, way)] = (store.storage[KEY]["value"], TOMB in store.storage)
+    # Written every time; the tombstone removed except in 'off', the other record never.
+    self.assertEqual(results, {
+      (mode, name, way): ("v", name == "app" or mode == "off")
+      for mode in ("off", "report", "on") for name in held for way in ("remote", "local", "sync")})
+
   def test_no_write_names_a_tombstone_key(self):
     """A local write to a "dl:" key raises; a store for one from a peer is dropped unconfirmed and counted
     refused_invalid_key, without raising."""

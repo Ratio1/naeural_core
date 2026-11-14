@@ -333,7 +333,11 @@ default). With it `off` no stamp is made or read, as in the previous release.
 
 With `CSTORE_ORDER` not `off`, a stamped delete leaves a **tombstone**: a record under
 `dl:` plus the deleted key, with value `None`, the delete's owner and its stamp. A key
-and its tombstone are never both held (storing a value removes the tombstone).
+and its tombstone are never both held (storing a value, live or from a sync answer,
+removes the tombstone; with `CSTORE_ORDER` `off` it stays until the next sweep). A `dl:`
+record that holds a value (one a caller of the previous release could write, as that
+release's API did not refuse the prefix) is not a tombstone: a write of the key never
+removes it.
 
 - Reads never see it: `get` and `hget` of the key return `None`; `hlist`, `hkeys` and
   `hgetall` match only `hs:` keys. No write may name a `dl:` key: a local one raises, a
@@ -466,9 +470,9 @@ hand-off `on` means "not confirmed yet": the store keeps delivering it.
 `chainstore_set(..., wait=False)` and `chainstore_hset(..., wait=False)` (no switch; a
 caller that does not pass `wait` sees no change) run every check and the local apply of
 a blocking write, queue the same `SSTORE` and return without waiting for any
-confirmation: `True` with the write's
-own outcome (`changed`, `identical` or `absent_delete`) when it was stored here and
-queued (not confirmed), `False` with the blocking write's refusal word otherwise. The plugin thread re-sends a value while it is
+confirmation: `True` with the write's own outcome (`changed`, `identical` or
+`absent_delete`) when it was stored here and queued (not confirmed), `False` with the
+blocking write's refusal word otherwise. The plugin thread re-sends a value while it is
 unconfirmed on the blocking wait's schedule (with the defaults at 10 s and 20 s) and
 counts how it ended as a blocking write does (`unconfirmed`, `overwritten`,
 `refused_by_peers`; nothing when confirmed); a newer write of the key replaces the

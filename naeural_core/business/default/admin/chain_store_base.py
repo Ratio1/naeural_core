@@ -3528,7 +3528,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     A store whose key starts with ``"dl:"``, the prefix of the tombstones, is dropped unconfirmed and counted
     as ``<bucket>/remote/refused_invalid_key`` under the bucket of the key after the prefix; ``_set_value``
-    would raise for it, and a raise here would stall the plugin loop.
+    would raise for it, and a raise here would stall the plugin loop. So is a store or a delete whose key is
+    not a non-empty str (a number, a list, a dict, a missing or empty key), which no node of this release
+    sends: counted as ``plain/remote/refused_invalid_key``.
 
     A refused delete is not reported back to its sender: the sender does not wait for the confirmations of a
     delete, so it treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
@@ -3555,10 +3557,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       with self.__persistence_lock:
         # A plain increment of one counter; one label per bucket.
         self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
-    if isinstance(key, str) and key.startswith(self.CS_DEL):
-      # A key reserved for tombstones: dropped unconfirmed and counted under the bucket of the key it names. Not raised:
-      # a raise leaves the plugin loop, which then sleeps, so one such store would stall every write here.
-      self.__cs_count("refused_invalid_key", key[len(self.CS_DEL):], "remote")
+    if not isinstance(key, str) or not key or key.startswith(self.CS_DEL):
+      # A key no store may name: one that is not a non-empty str (a number, a list, a missing key), or one reserved for
+      # tombstones. _set_value raises for each, and a raise here leaves the plugin loop, which then sleeps, so one such
+      # store would stall every write here: it is dropped unconfirmed and counted, under the bucket of the key after
+      # the tombstones' prefix, or under "plain" for a key that is not a str.
+      self.__cs_count("refused_invalid_key", key.removeprefix(self.CS_DEL) if isinstance(key, str) else "", "remote")
       return
     if self.__secret_namespace(key):
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
@@ -3677,6 +3681,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     re-send; a peer with the lean switch 'off' loses its proof at each confirmation, which is why the hand-off
     'on' does not start with that switch 'off'.
 
+    A confirmation or refusal answer whose key is not a str (a number, a list, a dict, none), which no node of
+    this release sends, is dropped before any of the above and counted as ``plain/confirm/refused_invalid_key``;
+    a key that cannot be hashed raised here before.
+
     Parameters
     ----------
     data : dict
@@ -3698,7 +3706,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     owner = data.get(self.CS_OWNER, None)
     confirm_by = data.get(self.CS_CONFIRM_BY, None)
     op = data.get(self.CS_OP, None)
-    
+    if not isinstance(key, str):
+      # A key that is not a str names no record, and one that cannot be hashed (a list, a dict) raised at the lookups
+      # below: the message is dropped whole and counted, and proves or withdraws nothing about its sender.
+      self.__cs_count("refused_invalid_key", "", "confirm")
+      return
+
     if self.cfg_chain_store_debug:
       self.P(f" === LOCAL: Received {op} from {confirm_by} for  {key}={value}, owner{owner}")
     # A confirmation or refusal answer that echoes a well-formed stamp proves its sender stamps its stores, as a
@@ -3804,6 +3817,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (``__hset_index``) its ``hkey`` has, the prefix the export selects
     records by.
 
+    A request whose ``hkey`` holds a surrogate code point (U+D800 to
+    U+DFFF, which UTF-8 does not encode and the hash of the name raised
+    for) is dropped unanswered and counted as
+    ``plain/hsync/refused_invalid_key``. A request without a str
+    ``request_id`` or ``hkey`` is dropped uncounted, as before.
+
     Examples
     --------
     >>> self.__exec_hsync_request({"request_id": "r1", "hkey": "players"}, peers="0xai_any")  # answered
@@ -3814,6 +3833,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if not isinstance(request_id, str) or len(request_id) == 0:
       return
     if not isinstance(hkey, str) or len(hkey) == 0:
+      return
+    if any("\ud800" <= char <= "\udfff" for char in hkey):
+      # A namespace name that holds a surrogate code point (a lone one: a JSON escape in a peer's message decodes to
+      # it, and a pair is decoded to one character) cannot be hashed into an index, as UTF-8 does not encode it, and
+      # the hash raised here: no node can hold such a namespace, so the request is dropped unanswered and counted.
+      self.__cs_count("refused_invalid_key", "", "hsync")
       return
 
     # The index hkey has: the export selects the records by it, so the namespace rules below are applied to it.
@@ -3883,6 +3908,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     changed nothing), under the namespace's bucket. An answer that comes after the wait finds no entry and is
     dropped like any answer to an unknown request.
 
+    An answer whose ``request_id`` is not a str (a number, a list, a dict), which no node of this release sends,
+    is dropped and counted as ``plain/hsync/refused_malformed``; an id that cannot be hashed raised here before.
+
     An answer for a Tunnels Manager namespace is taken only from an oracle
     registry member (either registry); another sender's answer is dropped and
     the sync keeps waiting. From the answer of a sender outside the registries
@@ -3899,6 +3927,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     '0xai_peer'
     """
     request_id = data.get(self.CS_REQUEST_ID, None)
+    if not isinstance(request_id, str):
+      # An id that is not a str is no request's id, and one that cannot be hashed (a list, a dict) raised at the
+      # lookup below: the answer is dropped and counted.
+      self.__cs_count("refused_malformed", "", "hsync")
+      return
     pending = self.__pending_hsync.get(request_id, None)
     if pending is None or pending.get(self.CS_RESPONSE, None) is not None:
       return
@@ -3967,6 +4000,37 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   @NetworkProcessorPlugin.payload_handler()
   def default_handler(self, payload):
+    """
+    Handle one chain-store payload from the network: decrypt it and run the operation it names.
+
+    The payload's ``CHAIN_STORE_DATA`` names one operation in ``op``: a store (``SSTORE``, a delete included), a
+    confirmation or refusal answer (``SCONFIRM``), a namespace-sync request (``SHSYNC_REQ``) or its answer
+    (``SHSYNC_RESP``). Each goes to its own method with the payload's verified sender. A payload that is not
+    addressed to this node, cannot be decrypted, or names no known operation is ignored.
+
+    Parameters
+    ----------
+    payload : dict
+      The received payload, signature already verified by the network processor; its fields are those of
+      ``const.PAYLOAD_DATA`` (sender, destination, the encrypted data).
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Runs on the plugin thread, inside the lap that takes the queued inputs. An exception that leaves this method
+    ends that lap: the inputs not yet taken wait for the next one and the plugin loop sleeps first, so every
+    input a peer can send must end here without one. What a peer controls is checked where it is read: a
+    ``CHAIN_STORE_DATA`` that is not a dict is dropped here and counted as ``plain/remote/refused_malformed``
+    (reading its operation raised before); keys, namespace names and request ids are checked by the operations'
+    methods.
+
+    Examples
+    --------
+    >>> self.default_handler(payload)   # a store from a replication peer: applied and confirmed
+    """
     sender = payload.get(self.const.PAYLOAD_DATA.EE_SENDER, None)
     alias = payload.get(self.const.PAYLOAD_DATA.EE_ID, None)
     destination = payload.get(self.const.PAYLOAD_DATA.EE_DESTINATION, None)
@@ -3993,6 +4057,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # END DEBUG AREA    
     # get the data and call the appropriate operation method
     data = decrypted_data.get(self.CS_DATA, {})
+    if not isinstance(data, dict):
+      # The operation's fields must be a dict: any other JSON value (a list, a str, a number) names no operation, and
+      # reading one from it raised. Dropped and counted.
+      self.__cs_count("refused_malformed", "", "remote")
+      return
     operation = data.get(self.CS_OP, None)
     owner = data.get(self.CS_OWNER, None)
     if self.cfg_chain_store_debug:

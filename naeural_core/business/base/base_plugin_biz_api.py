@@ -532,6 +532,10 @@ class _BasePluginAPIMixin:
     carries a stamp; then the caller sees ``refused_by_peers`` as soon as every peer settled. Otherwise it does not
     answer, and the caller sees ``unconfirmed`` after the wait, as it saw False before.
 
+    A ``wait=False`` call is timed under its own timer name, ``chainstore_set_nowait``: it may run on another thread
+    (the request monitor) while this plugin's thread is inside a blocking call, and the plugin's timers of one name
+    are shared by its threads (one start overwrote the other's, so the blocking call's elapsed time was wrong).
+
     See Also
     --------
     chainstore_get : Retrieve a value from chain storage
@@ -547,7 +551,11 @@ class _BasePluginAPIMixin:
     >>> self.chainstore_set("my_key", {"a": 2}, wait=False, result_info=info), info   # stored here and queued
     (True, {'outcome': 'queued'})
     """
-    self.start_timer("chainstore_set")
+    # A wait=False call may run on another thread (the request monitor) while this plugin's thread is inside a
+    # blocking one: its own timer name keeps the two from sharing one timer of this plugin's section.
+    timer = "chainstore_set" if wait else "chainstore_set_nowait"
+    # Timed under that name.
+    self.start_timer(timer)
     memory = self.__chainstorage_memory()
     result = False
     try:
@@ -586,18 +594,21 @@ class _BasePluginAPIMixin:
           # Whether the store waits for the confirmations.
           wait=wait,
         )
-        elapsed = self.end_timer("chainstore_set")        
+        # The timer of this call's form.
+        elapsed = self.end_timer(timer)
         if debug:
           self.P(" ====> `chainstore_set`in {:.4f}s".format(elapsed), color="green")
       else:
-        elapsed = self.end_timer("chainstore_set")
+        # The timer of this call's form.
+        elapsed = self.end_timer(timer)
         if debug:
           self.P("No chain storage set function found in {:.4f}s".format(elapsed), color="red")
         if result_info is not None:
           # Only a wait=False call gets here (a blocking one waited for the setter): the store has not started.
           result_info["outcome"] = "not_ready"
     except Exception as ex:
-      elapsed = self.end_timer("chainstore_set")
+      # The timer of this call's form.
+      elapsed = self.end_timer(timer)
       msg = "Error in chainstore_set: {} after {:.4f}s".format(ex, elapsed)
       self.P(msg, color="red")      
       if result_info is not None:

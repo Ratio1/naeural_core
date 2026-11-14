@@ -300,6 +300,26 @@ class TestPluginApi(unittest.TestCase):
                      (3, [(True, True), (False, True)]))
 
 
+  def test_a_non_blocking_call_is_timed_under_its_own_timer_name(self):
+    """chainstore_set times a wait=False call as chainstore_set_nowait and a blocking one as chainstore_set, so a call
+    on the request monitor's thread never shares the timer of a blocking call on the plugin's thread."""
+    # The plugin API with the store's setter published.
+    api = _PeerSelectionHarness()
+    # The timer calls, in order.
+    timers = []
+    # Each start, recorded.
+    api.start_timer = lambda name: timers.append(("start", name))
+    # Each end, recorded, with an elapsed time.
+    api.end_timer = lambda name: timers.append(("end", name)) or 0.0
+    # A non-blocking call, then a blocking one.
+    api.chainstore_set("k", 1, wait=False)
+    # The blocking one.
+    api.chainstore_set("k", 2)
+    # Each timed under its own name.
+    self.assertEqual(timers, [("start", "chainstore_set_nowait"), ("end", "chainstore_set_nowait"),
+                              ("start", "chainstore_set"), ("end", "chainstore_set")])
+
+
 if __name__ == "__main__":
   # Run this module alone.
   unittest.main()

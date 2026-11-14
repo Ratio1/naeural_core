@@ -44,7 +44,7 @@ def write(store, key, value, wait=False, **kwargs):
   Examples
   --------
   >>> write(make("report"), KEY, "v")
-  (True, 'queued', 1)
+  (True, 'changed', 1)
   """
   # The caller's dict.
   info = {}
@@ -96,18 +96,18 @@ class TestNonBlockingWrite(unittest.TestCase):
   """wait=False checks and applies as a blocking write, returns at once and leaves the re-sends to the plugin."""
 
   def test_a_non_blocking_write_returns_at_once_stored_and_queued(self):
-    """A wait=False write returns True with the outcome queued without moving the clock (no wait), stores the same
-    record a blocking write stores, sends one store, and counts changed and queued."""
+    """A wait=False write returns True with its own outcome (changed) without moving the clock (no wait), stores the
+    same record a blocking write stores, sends one store, and counts changed only."""
     # A writer in 'report' with two peers that never answer.
     store = make("report")
-    # The write: True at once, queued, one store sent.
-    self.assertEqual(write(store, KEY, "v"), (True, "queued", 1))
+    # The write: True at once, changed, one store sent.
+    self.assertEqual(write(store, KEY, "v"), (True, "changed", 1))
     # No time passed (a wait sleeps 0.1 s per round on the fake clock), and the record is an own record.
     self.assertEqual((store._now, store.storage[KEY]["confirms"], store.storage[KEY]["target_peers"],
                       store.storage[KEY]["ver"]), (NOW, 0, ["peer1", "peer2"], [NOW_MS, "node"]))
-    # Counted as a change and as queued; one entry owed a re-send.
+    # Counted as a change; one entry owed a re-send.
     self.assertEqual((getattr(store, STATS), list(getattr(store, UNWAITED))),
-                     ({BUCKET + "/local/changed": 1, BUCKET + "/local/queued": 1}, [KEY]))
+                     ({BUCKET + "/local/changed": 1}, [KEY]))
 
   def test_refusals_are_those_of_a_blocking_write(self):
     """A write with no target peer, and one over a record with another token, are refused by wait=False with the
@@ -166,7 +166,7 @@ class TestNonBlockingWrite(unittest.TestCase):
     confirm(store, KEY, "peer1", value="v", owner="node")
     # No re-send at 10 s; nothing owed, nothing counted beyond the write.
     self.assertEqual((lap(store, 10), getattr(store, UNWAITED), getattr(store, STATS)),
-                     (0, {}, {BUCKET + "/local/changed": 1, BUCKET + "/local/queued": 1}))
+                     (0, {}, {BUCKET + "/local/changed": 1}))
 
   def test_a_newer_write_replaces_the_entry_and_an_overwritten_write_stops(self):
     """A second wait=False write of the key replaces the owed store; a peer's write that replaces the value then ends
@@ -244,11 +244,11 @@ class TestNonBlockingWrite(unittest.TestCase):
                      ((False, "not_ready", 0), False, {}))
 
   def test_a_delete_is_queued_once_and_owes_no_resend(self):
-    """A wait=False delete returns True, queued, sends one store and owes no re-send."""
+    """A wait=False delete returns True with its outcome (changed), sends one store and owes no re-send."""
     # A writer holding KEY.
     store = make("report", storage={KEY: record(KEY, "v", "node")})
     # The delete.
-    self.assertEqual((write(store, KEY, None), getattr(store, UNWAITED)), ((True, "queued", 1), {}))
+    self.assertEqual((write(store, KEY, None), getattr(store, UNWAITED)), ((True, "changed", 1), {}))
 
 
 class TestPluginApi(unittest.TestCase):

@@ -2319,7 +2319,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       True (the default) waits for the confirmations as before. False, for a
       local write: every check and the local apply run as for a blocking
       write, the same store is queued, and the call returns True at once
-      (``result_info`` outcome ``queued``) without waiting; the plugin thread
+      (``result_info`` outcome: the write's own, ``changed``, ``identical`` or
+      ``absent_delete``) without waiting; the plugin thread
       re-sends a value while it is unconfirmed (``__maybe_resend_unwaited``).
       Not allowed in the protected namespaces (``CS_PROTECTED_NAMESPACES``).
       Once this instance's plugin loop has ended (``done_loop``: a stop, or a
@@ -2351,8 +2352,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     record; its store is sent at once, and a value is queued again after
     each ``timeout`` while unconfirmed, up to ``max_retries`` times, by the
     plugin thread, whose later wait end (``unconfirmed``, ``overwritten``,
-    ``refused_by_peers``) is counted as a blocking write's. Its own call
-    counts the wait end ``queued``. A delete is queued once, as a blocking
+    ``refused_by_peers``) is counted as a blocking write's. A delete is
+    queued once, as a blocking
     delete, which does not wait either. The caller's thread holds the
     persistence lock for the checks and the apply, as for any write, and once
     more to register the re-sends, which it does only while the key still
@@ -2700,8 +2701,6 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                   # Registered only while the key holds this write's record: a newer write applied since this one's
                   # apply (another thread) registered its own entry, which an older write must not replace.
                   self.__unwaited[key] = [op, self.time() + timeout, max_retries]
-            # Counted in addition to the outcome: stored here and queued, not confirmed.
-            wait_end = "queued"
             # At once, without waiting for any confirmation.
             return True
           if debug:

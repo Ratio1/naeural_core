@@ -501,7 +501,7 @@ class _BasePluginAPIMixin:
       ``refused_unstamped``, ``refused_collision``); ``unconfirmed``, ``overwritten`` or ``refused_by_peers``
       (every peer settled, one at least by a refusal answer) for a write applied here whose wait failed;
       ``error`` when the call raised (a value that is not JSON, a bad timeout, ``wait=False`` in a protected
-      namespace, and so on); ``queued`` for a ``wait=False`` write stored here and queued; ``not_ready`` for a
+      namespace, and so on); ``not_ready`` for a
       ``wait=False`` call made before the chain store started, or after its plugin loop ended.
 
     wait : bool, optional
@@ -549,7 +549,7 @@ class _BasePluginAPIMixin:
     >>> info
     {'outcome': 'unconfirmed'}
     >>> self.chainstore_set("my_key", {"a": 2}, wait=False, result_info=info), info   # stored here and queued
-    (True, {'outcome': 'queued'})
+    (True, {'outcome': 'changed'})
     """
     # A wait=False call may run on another thread (the request monitor) while this plugin's thread is inside a
     # blocking one: its own timer name keeps the two from sharing one timer of this plugin's section.

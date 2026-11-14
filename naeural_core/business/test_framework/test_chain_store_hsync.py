@@ -327,6 +327,8 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__stamped_peers = set()
     # No write made with wait=False owed a re-send.
     self._ChainStoreBasePlugin__unwaited = {}
+    # No CSTORE_STATS line written yet.
+    self._ChainStoreBasePlugin__cs_stats_lines = 0
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

@@ -25,6 +25,10 @@ TODO:
 """
 
 
+# The census line's digest of each record.
+import hashlib
+# The canonical JSON of each value the census line hashes.
+import json
 # Used at start-up to keep a replica file that gave no records under another name.
 import os
 # The hand-off's count of re-sends in flight per peer.
@@ -178,6 +182,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SAVE_INTERVAL = 5
   # Seconds between two CSTORE_STATS lines in the node log (written from process()); new, there was no such line.
   CS_STATS_INTERVAL = 300
+  # A CSTORE_CENSUS line follows the first CSTORE_STATS line after start and every 12th after it (hourly).
+  CS_CENSUS_EVERY = 12
   # One lock for every save of the replica file in this process. Before, each plugin instance created its own:
   # the last save of an instance that is closing and the first save of the instance that replaces it run on
   # two threads, and without a common lock the older snapshot could be the one left in the file. With one
@@ -282,6 +288,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__cs_stats_last, self.__cs_stats_queue_peak = self.time(), 0
     # The plugin's own count of lost inputs at start, so the first line reports only what was lost after it.
     self.__cs_stats_lost = self.lost_inputs_count
+    # The CSTORE_STATS lines written since start, which time the CSTORE_CENSUS line.
+    self.__cs_stats_lines = 0
     # The wave 03 switches, read once here so the code never reads them from the config again: a config change
     # acts at the next start, where it is checked again. Each CSTORE_STATS line carries this table as "modes".
     self.__cs_modes = {
@@ -665,6 +673,82 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         pending += sum(pair[1] is not None for pair in pairs.values())
     # For the next CSTORE_STATS line.
     self.__handoff_pending = pending
+
+
+  def __log_census(self):
+    """
+    Write the hourly ``CSTORE_CENSUS`` line: per namespace bucket, what the replica holds and a digest of it.
+
+    One line, one JSON object with sorted keys, a row per bucket (the first 14 characters of an ``hs:`` key, the
+    prefix of one hash namespace, or ``plain``)::
+
+      CSTORE_CENSUS {"hs:<hash>:":[records,unstamped,tombstones,readonly,size,"digest"],"plain":[...]}
+
+    - ``records``: live records (a tombstone is not one); ``unstamped``: those without a stamp (written before
+      stamps, or by a node of the previous release); ``readonly``: those marked readonly;
+    - ``tombstones``: the tombstones of deleted keys, counted in the bucket of the key they deleted;
+    - ``size``: the characters of the live values' canonical JSON (sorted keys);
+    - ``digest``: 8 hex digits, the XOR of a 4-byte BLAKE2b hash of each live record: of its key and its
+      value's canonical JSON, or, for a record with a token or in a dAuth secret namespace, of its key and its
+      stamp, so no value that needs a token or holds a secret is hashed into a log line.
+
+    Two replicas that hold the same live records give the same row whatever order the records arrived in and
+    whatever their bookkeeping fields (confirmations, peer lists, owner); tombstones, which each node sweeps on
+    its own schedule, are left out of the digest. A key under ``hs:`` whose 14th character is not ``:`` (a
+    namespace's keys start with ``hs:``, 10 hex digits and ``:``) belongs to no namespace that syncs and is left out.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    TypeError
+      When a value cannot be encoded as JSON (only that hour's line is lost: the plugin loop logs the raise).
+
+    Notes
+    -----
+    Runs on the plugin thread from ``process``, after the first ``CSTORE_STATS`` line and every
+    ``CS_CENSUS_EVERY``-th one. It walks a list copy of the replica's items without the persistence lock: records
+    are replaced, not changed in value, so each one read is a whole record. The line holds counts, sizes and
+    digests only: no key and no value. Cost: one JSON encoding and one hash per live record, once an hour.
+
+    Examples
+    --------
+    >>> self.__log_census()
+    CSTORE_CENSUS {"hs:afc0d772a2:":[2,0,1,0,6,"5c1d02a9"],"plain":[1,1,0,0,3,"0e7f3b10"]}
+    """
+    # The bucket prefixes of the two dAuth secret namespaces, whose values are not hashed.
+    secrets = {self.__hset_index(name) for name in ("DAUTH_JOB_SECRETS", "DAUTH_JOB_SECRET_REVISIONS")}
+    # Per bucket: records, unstamped, tombstones, readonly, size, digest (an int).
+    rows = {}
+    # Each record of a copy of the replica's items, read without the lock.
+    for key, record in list(self.__chain_storage.items()):
+      # A tombstone, counted under the key it deleted.
+      tomb = key.startswith(self.CS_DEL) and record[self.CS_VALUE] is None
+      # The key the record is counted under.
+      name = key[len(self.CS_DEL):] if tomb else key
+      if name.startswith("hs:") and name[13:14] != ":":
+        continue
+      # Its bucket's row.
+      row = rows.setdefault(name[:14] if name.startswith("hs:") else "plain", [0, 0, 0, 0, 0, 0])
+      if tomb:
+        # One more tombstone; not in the digest.
+        row[2] += 1
+        continue
+      # The value's canonical JSON.
+      text = json.dumps(record[self.CS_VALUE], sort_keys=True)
+      # One more record, unstamped or not, readonly or not, and its size.
+      row[0], row[1], row[3], row[4] = (row[0] + 1, row[1] + (record.get(self.CS_VER) is None),
+                                        row[3] + bool(record[self.CS_READONLY]), row[4] + len(text))
+      # The hashed text: the key and the value, or the key and the stamp for a record behind a token or a secret.
+      hashed = name + "\0" + (
+        str(record.get(self.CS_VER)) if record[self.CS_TOKEN] is not None or name[:14] in secrets else text)
+      # XOR-ed into the digest, which makes it independent of the records' order.
+      row[5] ^= int.from_bytes(hashlib.blake2b(hashed.encode(), digest_size=4).digest(), "big")
+    # One line, sorted keys, the digest as 8 hex digits.
+    self.P("CSTORE_CENSUS " + self.json_dumps(
+      {bucket: row[:5] + ["{:08x}".format(row[5])] for bucket, row in rows.items()}, sort_keys=True))
 
 
   def __netmon_node_is_online_for_control(self, peer):
@@ -3437,7 +3521,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     order rule took in the period (a peer's clock ahead of this one, plus the transit time); 0 when none led.
     ``handoff_pending`` is the number of the hand-off's pairs (an own record and a target) not settled at its
     last sweep.
-    Before the counters are taken, the lap sweeps the tombstones (``__sweep_tombstones``).
+    Before the counters are taken, the lap sweeps the tombstones (``__sweep_tombstones``). The first line
+    after start, and every ``CS_CENSUS_EVERY``-th (12th) after it, is followed by one ``CSTORE_CENSUS`` line
+    (``__log_census``), so about hourly.
 
     Returns
     -------
@@ -3487,6 +3573,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       }, sort_keys=True))
       # The next line is measured from here.
       self.__cs_stats_last, self.__cs_stats_queue_peak, self.__cs_stats_lost = now, 0, lost
+      # One more line written.
+      self.__cs_stats_lines += 1
+      if self.__cs_stats_lines % self.CS_CENSUS_EVERY == 1:
+        # The first line after start and every 12th after it is followed by the census line.
+        self.__log_census()
     return
 
 

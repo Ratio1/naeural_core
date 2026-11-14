@@ -529,6 +529,32 @@ Labels in `counts`:
 
 A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to read the same word as `result_info["outcome"]` (the wait end when there is one, `queued` for a `wait=False` write, `not_ready` for a `wait=False` call before the store started, `error` when the call raised); the returned bool is unchanged.
 
+## Census line in the node log (`CSTORE_CENSUS`)
+
+The first `CSTORE_STATS` line after start, and every 12th after it (about hourly), is
+followed by one `CSTORE_CENSUS` line, a JSON object with sorted keys and one row per
+bucket:
+
+```text
+CSTORE_CENSUS {"hs:<hash>:":[<records>,<unstamped>,<tombstones>,<readonly>,<size>,"<digest>"],"plain":[...]}
+```
+
+- `records`: live records; `unstamped`: those without a stamp (written before stamps or
+  by a node of the previous release); `readonly`: those marked readonly.
+- `tombstones`: tombstones of deleted keys, in the bucket of the key they deleted.
+- `size`: characters of the live values' canonical JSON (sorted keys).
+- `digest`: 8 hex digits, the XOR over the live records of a 4-byte BLAKE2b hash of the
+  key and the value's canonical JSON (for a record with a token, or in
+  `DAUTH_JOB_SECRETS` or `DAUTH_JOB_SECRET_REVISIONS`, of the key and the stamp instead,
+  so no such value is hashed into the log). Replicas that hold the same live records
+  show the same digest whatever order the records arrived in; tombstones and the
+  bookkeeping fields (confirmations, peer lists, owner) are left out.
+
+The line holds no key and no value. Keys under `hs:` whose 14th character is not `:`
+(a namespace's keys start with `hs:`, 10 hex digits and `:`) are left out. The walk runs on the plugin
+thread without the persistence lock; on a 5,700-record, 5.2 MB replica it took 125 ms of
+CPU and 0.38 s of wall time at 0.35 CPU.
+
 To find the hash namespace of a bucket, compute its prefix: `"hs:"` followed by the
 first 10 hex digits of the SHA-256 of the namespace name, followed by `":"`, as
 `__hset_index` does. For example, in Python:

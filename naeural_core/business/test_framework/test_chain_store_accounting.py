@@ -297,8 +297,8 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  "handoff_first", "handoff_window", "handoff", "handoff_next", "handoff_pending", "peer_left",
                  # The peers back since the last sweep and those proven to stamp their stores.
                  "peer_back", "stamped_peers",
-                 # The writes made with wait=False owed a re-send, and the count of stats lines.
-                 "unwaited", "cs_stats_lines"):
+                 # The writes made with wait=False owed a re-send, and the hour of the last census line.
+                 "unwaited", "census_hour"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"
@@ -1249,7 +1249,8 @@ class TestStart(unittest.TestCase):
     self.assertEqual([msg for msg, _ in store.lines if "unreadable" in msg], [])
 
   def test_a_started_store_counts_its_writes_and_writes_its_line(self):
-    """A store started by on_init counts its writes and logs its line with the modes on_init read."""
+    """A store started by on_init counts its writes and logs its line with the modes on_init read, and writes no
+    census line before the first full hour after its start."""
     # The counter state comes from on_init here, not from the test harness.
     store = self.start()
     # One remote write, applied.
@@ -1275,6 +1276,8 @@ class TestStart(unittest.TestCase):
       # No hand-off pair pending: the store holds no own stamped record.
       "handoff_pending": 0,
     })
+    # No census line: the start's hour has not ended.
+    self.assertEqual([msg for msg, _ in store.lines if msg.startswith("CSTORE_CENSUS ")], [])
 
   def test_a_save_of_a_restarted_instance_waits_for_a_save_of_the_closed_one(self):
     # Two started instances write the same file, each save on its own thread. The older snapshot must not

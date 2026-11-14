@@ -164,27 +164,36 @@ class TestCensus(unittest.TestCase):
     # Three records, all unstamped, sizes of "v" and "old" only, one unencodable; the same digest as without it.
     self.assertEqual((row[:5], row[6], row[5]), ([3, 3, 0, 0, len('"v"') + len('"old"')], 1, other[5]))
 
-  def test_the_census_follows_the_first_stats_line_and_every_twelfth(self):
-    """Over 25 CSTORE_STATS lines the census line follows the 1st, the 13th and the 25th, each right after it."""
-    # A replica with one record.
-    store = make("report", storage={ALPHA: record(ALPHA, "v", "peer1", [NOW_MS, "peer1"])})
-    # Its whitelist and NetMon for the peer refresh of process().
-    store.bc = SimpleNamespace(get_whitelist=lambda with_prefix=False: ["peer1", "peer2"])
-    # Both peers running.
-    store.netmon = SimpleNamespace(network_node_simple_status=lambda peer, **kwargs: "ONLINE")
-    # The interval of the stats line.
-    interval = store.CS_STATS_INTERVAL
-    # 25 intervals, each ended by a lap.
-    for n in range(1, 26):
-      # The interval ends.
-      store._now = NOW + n * interval
-      # The lap that writes the line.
-      store.process()
-    # The kinds of line in order, numbered by stats line.
-    kinds = [msg.split(" ", 1)[0] for msg in store.messages if msg.startswith(("CSTORE_STATS", "CSTORE_CENSUS"))]
-    # The stats lines each census line follows.
-    self.assertEqual([kinds[:index].count("CSTORE_STATS") for index, kind in enumerate(kinds)
-                      if kind == "CSTORE_CENSUS"], [1, 13, 25])
+  def test_the_census_runs_at_the_first_lap_after_each_full_hour(self):
+    """Two replicas started 31.5 min apart (their stats lines 90 s out of step) write the census line at the same
+    moments, their first lap after each full UTC hour, and none before the first full hour after their start."""
+    # Per start, the times of the laps that wrote a census line.
+    times = {}
+    # Each start.
+    for start in (NOW, NOW + 1890):
+      # A replica with one record.
+      store = make("report", storage={ALPHA: record(ALPHA, "v", "peer1", [NOW_MS, "peer1"])})
+      # Its whitelist and NetMon for the peer refresh of process().
+      store.bc = SimpleNamespace(get_whitelist=lambda with_prefix=False: ["peer1", "peer2"])
+      # Both peers running.
+      store.netmon = SimpleNamespace(network_node_simple_status=lambda peer, **kwargs: "ONLINE")
+      # As on_init leaves them at this start: the stats line and the census hour counted from it.
+      store._ChainStoreBasePlugin__cs_stats_last, store._ChainStoreBasePlugin__census_hour = start, int(start // 3600)
+      # Its census laps.
+      times[start] = []
+      # A lap every 10 s until 3 h after NOW.
+      for at in range(int(start), int(NOW) + 3 * 3600, 10):
+        # The lap's clock.
+        store._now = at
+        # The messages before it.
+        before = len(store.messages)
+        # The lap.
+        store.process()
+        if any(msg.startswith("CSTORE_CENSUS") for msg in store.messages[before:]):
+          # A census lap.
+          times[start].append(at - NOW)
+    # The full hours after NOW fall 2,800 s, 6,400 s and 10,000 s after it: both replicas take the census there.
+    self.assertEqual(times, {NOW: [2800, 6400, 10000], NOW + 1890: [2800, 6400, 10000]})
 
 
 if __name__ == "__main__":

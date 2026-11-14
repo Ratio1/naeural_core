@@ -548,9 +548,11 @@ A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to r
 
 ## Census line in the node log (`CSTORE_CENSUS`)
 
-The first `CSTORE_STATS` line after start, and every 12th after it (about hourly), is
-followed by one `CSTORE_CENSUS` line, a JSON object with sorted keys and one row per
-bucket:
+The first plugin lap after each full UTC hour of the wall clock writes one
+`CSTORE_CENSUS` line (none before the first full hour after start), so every node takes
+its census within a lap of the same moment whenever it started, and the digests compare
+one moment's state, except for writes still in transit then. The line is a JSON object with sorted keys
+and one row per bucket:
 
 ```text
 CSTORE_CENSUS {"hs:<hash>:":[<records>,<unstamped>,<tombstones>,<readonly>,<size>,"<digest>",<unencodable>],"plain":[...]}

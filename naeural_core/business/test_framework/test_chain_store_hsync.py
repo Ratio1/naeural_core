@@ -329,8 +329,8 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__unwaited = {}
     # The plugin loop runs (the base plugin sets this when its loop is told to stop).
     self.done_loop = False
-    # No CSTORE_STATS line written yet.
-    self._ChainStoreBasePlugin__cs_stats_lines = 0
+    # The UTC hour of the start (time 0), as on_init sets it: no CSTORE_CENSUS line before the next full hour.
+    self._ChainStoreBasePlugin__census_hour = 0
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

@@ -182,8 +182,6 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SAVE_INTERVAL = 5
   # Seconds between two CSTORE_STATS lines in the node log (written from process()); new, there was no such line.
   CS_STATS_INTERVAL = 300
-  # A CSTORE_CENSUS line follows the first CSTORE_STATS line after start and every 12th after it (hourly).
-  CS_CENSUS_EVERY = 12
   # One lock for every save of the replica file in this process. Before, each plugin instance created its own:
   # the last save of an instance that is closing and the first save of the instance that replaces it run on
   # two threads, and without a common lock the older snapshot could be the one left in the file. With one
@@ -288,8 +286,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__cs_stats_last, self.__cs_stats_queue_peak = self.time(), 0
     # The plugin's own count of lost inputs at start, so the first line reports only what was lost after it.
     self.__cs_stats_lost = self.lost_inputs_count
-    # The CSTORE_STATS lines written since start, which time the CSTORE_CENSUS line.
-    self.__cs_stats_lines = 0
+    # The UTC hour of the last CSTORE_CENSUS line, the start's hour at first: the census runs at the first lap after
+    # each full hour, not right after start.
+    self.__census_hour = int(self.time() // 3600)
     # The wave 03 switches, read once here so the code never reads them from the config again: a config change
     # acts at the next start, where it is checked again. Each CSTORE_STATS line carries this table as "modes".
     self.__cs_modes = {
@@ -734,8 +733,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Notes
     -----
-    Runs on the plugin thread from ``process``, after the first ``CSTORE_STATS`` line and every
-    ``CS_CENSUS_EVERY``-th one. It walks a list copy of the replica's items without the persistence lock: records
+    Runs on the plugin thread from ``process``, at the first lap after each full UTC hour, so every node takes it
+    within a lap of the same moment and the digests compare one moment's state, except for writes still in
+    transit then. It walks a list copy of the replica's items without the persistence lock: records
     are replaced, not changed in value, so each one read is a whole record. The line holds counts, sizes and
     digests only: no key and no value. Cost: one JSON encoding and one hash per live record, and the wire
     encoder's round trip for each own record, once an hour.
@@ -3608,9 +3608,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     order rule took in the period (a peer's clock ahead of this one, plus the transit time); 0 when none led.
     ``handoff_pending`` is the number of the hand-off's pairs (an own record and a target) not settled at its
     last sweep.
-    Before the counters are taken, the lap sweeps the tombstones (``__sweep_tombstones``). The first line
-    after start, and every ``CS_CENSUS_EVERY``-th (12th) after it, is followed by one ``CSTORE_CENSUS`` line
-    (``__log_census``), so about hourly.
+    Before the counters are taken, the lap sweeps the tombstones (``__sweep_tombstones``). The first lap after
+    each full UTC hour of the wall clock (none before the first full hour after start) writes one
+    ``CSTORE_CENSUS`` line (``__log_census``), after the stats line when both fall on that lap, so every node
+    takes its census within a lap of the same moment, whenever it started.
 
     Returns
     -------
@@ -3660,11 +3661,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       }, sort_keys=True))
       # The next line is measured from here.
       self.__cs_stats_last, self.__cs_stats_queue_peak, self.__cs_stats_lost = now, 0, lost
-      # One more line written.
-      self.__cs_stats_lines += 1
-      if self.__cs_stats_lines % self.CS_CENSUS_EVERY == 1:
-        # The first line after start and every 12th after it is followed by the census line.
-        self.__log_census()
+    # The UTC hour of the wall clock.
+    hour = int(self.time() // 3600)
+    if hour != self.__census_hour:
+      # The first lap after each full hour, on every node alike (before, every 12th stats line counted from each
+      # node's own start, up to an hour apart between nodes), so the oracles' digests are taken together.
+      self.__census_hour = hour
+      # The census line.
+      self.__log_census()
     return
 
 

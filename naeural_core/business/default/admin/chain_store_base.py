@@ -517,7 +517,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       node carrying a well-formed stamp, and loses the proof when it leaves the replication peers (it may come
       back on the previous release);
     - a due pair of a dAuth secret record is skipped unless this node is a registry member and the peer a
-      dAuth registry member, as the write itself requires;
+      dAuth registry member, as the write itself requires; so is a due pair of a secret revision's payload once
+      this node holds the revision's revocation marker (the write rule takes only the redacted erasure then),
+      while the marker and the erasure are still re-sent;
     - a due pair that had ``CS_HANDOFF_MAX_SENDS`` (6) re-sends is given up (``handoff/gave_up/<peer>``);
     - in 'on' only, at most ``CSTORE_HANDOFF_WINDOW`` (8) re-sends wait for their next due time per peer (1 when
       this node is in neither registry, a worker); a due pair beyond it waits (``handoff/window_full/<peer>``,
@@ -637,6 +639,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # A dAuth secret goes only from a registry member to a dAuth registry member, checked again before each re-send.
         if not reachable[peer] or (self.__secret_namespace(record[self.CS_KEY]) and not (
             self.__registry_member(self.ee_addr) and self.__registry_member(peer, dauth_only=True))):
+          continue
+        # As the write rule: a secret revision's payload (not its marker, not its redacted erasure) is not re-sent once
+        # this node holds the revision's revocation marker; the pair stays pending, and the marker and erasure still go.
+        if record[self.CS_VALUE] is not None and self.__revoked_secret(record[self.CS_KEY]) and not (
+            self.__erased_secret(record[self.CS_KEY], record[self.CS_VALUE]) or self.base64_to_str(
+              record[self.CS_KEY][len(self.__hset_index("DAUTH_JOB_SECRET_REVISIONS")):], url_safe=True
+            ).endswith("|revoked")):
           continue
         if pair[0] >= self.CS_HANDOFF_MAX_SENDS:
           # Given up once its last re-send's wait is over and the peer is reachable, counted per peer.

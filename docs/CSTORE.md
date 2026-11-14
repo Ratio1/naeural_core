@@ -431,7 +431,8 @@ answer, or the writer gave up; `confirmed_peers` holds the settled targets.
   or with `CSTORE_ORDER` or `CSTORE_LEAN_CONFIRM` `off`), when it sent nothing since this
   node started, or when it left the replication peers since its last such message (it
   may come back on the previous release). A dAuth secret goes only to a target still in
-  the dAuth registry.
+  the dAuth registry, and the payload of a secret revision is not re-sent once the writer
+  holds the revision's revocation marker (its marker and redacted erasure still are).
 - In `on`, at most `CSTORE_HANDOFF_WINDOW` (8) re-sends wait per peer (1 on a node in
   neither registry, a worker); the registry is read for it only when a due pair reaches
   this check, so a sweep with nothing to re-send reads none. At most 32 re-sends per

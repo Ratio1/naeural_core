@@ -425,6 +425,29 @@ class TestResends(unittest.TestCase):
     self.assertEqual(([peers for peers, _ in sweep(store, 300)], store.storage[key]["target_peers"]),
                      ([["peer1"]], ["peer1", "peer2"]))
 
+  def test_a_revoked_secret_payload_is_not_resent_but_a_marker_and_an_erasure_are(self):
+    """Once this node holds a secret revision's revocation marker it does not re-send its own plaintext payload of
+    that revision, while its own marker and redacted erasure of another revision are still re-sent."""
+    # The signed store "node" in 'on', with peer1 and peer2 in the dAuth registry and proven.
+    store = make("on", signed=True)
+    # The dAuth registry.
+    store.bc.get_eth_dauth_oracles = lambda: ["node", "peer1", "peer2"]
+    # Both peers proven.
+    store._ChainStoreBasePlugin__stamped_peers.update(("peer1", "peer2"))
+    # Revision 1 of job 7 and its marker; revision 2, its marker and its redacted erasure's key.
+    payload, marker, payload2, marker2 = (_hset_key("DAUTH_JOB_SECRET_REVISIONS", field)
+                                          for field in ("7|1", "7|1|revoked", "7|2", "7|2|revoked"))
+    # The node's plaintext payload of revision 1, unconfirmed.
+    local_write(store, payload, {"job_id": "7", "secret": "s"})
+    # peer1 revokes revision 1: the node gets the marker (and misses the erasure).
+    deliver(store, marker, {"job_id": "7", "revision": 1}, "peer1", [NOW_MS + 1000, "peer1"])
+    # The node revokes revision 2 itself: its marker, then its redacted erasure, both unconfirmed.
+    local_write(store, marker2, {"job_id": "7", "revision": 2})
+    # The erasure.
+    local_write(store, payload2, {"job_id": "7", "revision": 2, "revoked": True})
+    # At 315 s every own record is due: the marker and the erasure go, the revoked plaintext does not.
+    self.assertEqual([body["key"] for _, body in sweep(store, 315)], [marker2, payload2])
+
   def test_off_keeps_no_state_and_counts_nothing(self):
     """With the switch 'off' the sweep sends nothing, keeps no table and counts nothing."""
     # The writer in 'off'.

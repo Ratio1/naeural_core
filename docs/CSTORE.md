@@ -92,6 +92,8 @@ Merge rules:
 - delete pruning is out of scope
 - each exported record carries only `key`, `value`, `owner`, `readonly` and, when
   stamped, `ver` (the fields a merge reads); a record with a token is never exported
+- a copy that takes more than 256 KiB on the wire, or that no message could carry, is
+  skipped and counted (see "Record size cap")
 
 Result rules:
 
@@ -291,6 +293,65 @@ Manager namespaces the oracle-only sender rule is checked first. A node on older
 code applies these writes by arrival, so replicas can differ until every oracle
 runs this rule.
 
+## Record size cap
+
+No switch: it acts in every mode. One record may take at most `CS_MAX_RECORD_BYTES`
+(262,144 bytes, 256 KiB) on the wire, counted as a namespace-sync answer carries it plus
+the token a store carries: `{key: {key, value, owner, readonly, token, ver}}` as compact
+JSON with non-ASCII characters as themselves, in UTF-8 bytes. Every field a store or a
+sync answer can fill counts, not only the value. The record is measured with the owner,
+readonly mark, token and stamp it would be stored with, so a writer and its receivers
+measure the same bytes, on every path that stores a record:
+
+- a local write returns `False` at once with `refused_too_large`; nothing is stored or
+  sent;
+- a store from a peer (a hand-off re-send included) is not applied and not confirmed
+  (`refused_too_large`); with `CSTORE_ORDER` `on` a stamped one gets the refusal answer
+  `too_large`;
+- a copy in a sync answer is skipped and counted `<bucket>/hsync/refused_too_large`; the
+  other copies of the answer are merged.
+
+The same paths refuse a record no message can carry, as `refused_unencodable`: a key,
+value, owner, readonly mark, token or stamp that holds a string UTF-8 cannot encode (a
+lone surrogate, which a JSON escape in a peer's message or a local caller can deliver), a
+value of a type or with a dict key the wire's encoder does not take, a circular or too
+deeply nested value. One such record made every sync answer of its namespace fail to be
+prepared for sending. A refused store of this kind is never answered: the answer would
+echo the key and the stamp. Values the encoder converts (numpy numbers and arrays,
+datetimes) are stored as before.
+
+A delete is a record with value `None`, so a key that holds a larger record, written
+before the cap existed, can still be deleted. Such a record is not removed by the cap; a
+sync answer or a hand-off re-send that carries it is refused by its receivers. The
+largest record found on the production network when the cap was set took 125 KB.
+
+A node of the previous release has no cap: it applies and confirms a larger record, and a
+sync answer from it can carry one (skipped here). Its own larger store is refused here
+without an answer, as it carries no stamp, so its write returns `False` after its retries
+unless enough of its other peers confirm it.
+
+Cost: one JSON encoding of the record per write call, under the persistence lock. On the
+node image's interpreter under a 0.35 CPU limit, in wall time with the limit's throttling:
+0.05 to 0.11 ms for a 0.4 KB value, 3.9 to 5.0 ms for a 122 KB record of nested
+configuration (the kind the largest production value is; about what the receiver spends
+parsing the same value out of its message), about 8 ms for one at the cap or for 125 KB of
+small nested dicts, 20 ms for 125 KB of floats. At full speed: 0.01 ms, 0.85 ms and 1.7 ms.
+A sync answer costs one comparison per copy that is the record held field for field, which
+is not measured (nothing of it is stored), and one encoding per copy that differs: merging
+1,000 records of 2.1 MB that all equal the held ones took 6 to 7 % more CPU (89 to 96 ms at
+0.35 CPU).
+
+### New keys per sender
+
+Count only, no switch. A store from a peer that creates a key this replica did not hold,
+outside the protected namespaces (the five signed ones and `DAUTH_JOB_SECRET_REVISIONS`),
+counts `new_keys/<sender>` when its verified sender is neither one of this node's
+replication peers nor in an oracle registry. The write is applied as before; an
+overwrite, a delete and a refused store count nothing. The registries are read only for
+such a store from a sender outside the replication peers. The per-sender counts of a
+period show how many keys a node outside the oracles adds, which is what a later limit
+would be set from.
+
 ## Version stamps and the order rule (`CSTORE_ORDER`)
 
 Switch `CSTORE_ORDER` (`off`, `report` or `on`, read once at start; `report` by
@@ -367,10 +428,11 @@ as the previous release removes it; a sync answer's delete copy of the key is sk
 With `CSTORE_ORDER` `on`, a receiver that refuses a stamped store answers its sender
 with one `SCONFIRM` message `{op, key, ver, refused, held_ver}`: the store's stamp
 echoed, the refusal word without its `refused_` prefix (`older`, `older_than_delete`,
-`origin`, `collision`, or a rule of the previous release: `versioned`, `cs_rev`,
-`secret_rule`, `token`, `readonly`) and its own stamp for the key, never the value. A
-`future` stamp is counted and not answered, so the writer can deliver it once the clocks
-agree. Unstamped stores and stores dropped for their sender's membership or a `dl:` key
+`origin`, `collision`, `too_large`, or a rule of the previous release: `versioned`,
+`cs_rev`, `secret_rule`, `token`, `readonly`) and its own stamp for the key, never the
+value. A `future` stamp is counted and not answered, so the writer can deliver it once the
+clocks agree; a record that is not encodable (`unencodable`) is not answered either.
+Unstamped stores and stores dropped for their sender's membership or a `dl:` key
 are never answered. In `report` nothing is sent, except for a refused hand-off re-send.
 
 The writer handles answers in every mode: an answer that echoes the stamp of its own
@@ -541,6 +603,7 @@ Labels in `counts`:
     - `refused_secret_rule`: a revocation marker emptied or changed, or a payload for a revoked secret revision.
     - `refused_token`: the stored record has another token.
     - `refused_readonly`: the stored record is readonly for another owner.
+    - `refused_too_large`: a record over the size cap of 256 KiB on the wire (above); `refused_unencodable`: a record no message can carry (above). A copy of a sync answer skipped for either is counted under the same words with the origin `hsync`.
     - with `CSTORE_ORDER` `on` (or `report`, for a hand-off re-send) only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).
 - `<bucket>/local/unconfirmed`, `<bucket>/local/overwritten` and `<bucket>/local/refused_by_peers`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, another write replaced the key during the wait, or every target settled with at least one refusal answer and too few confirmations. For a `wait=False` write they are counted later, by the plugin thread's re-sends.
@@ -552,6 +615,7 @@ Labels in `counts`:
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
+- `new_keys/<sender>`: keys this replica did not hold, created outside the protected namespaces by stores from a verified sender that is neither a replication peer nor in an oracle registry (above); counts only.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.
 - `save_cpu_ms` (save back-off `report` or `on`): CPU milliseconds the periodic saves took on the save thread.

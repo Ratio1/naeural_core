@@ -155,6 +155,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_RESEND = "resend"
   # The fields of a record a namespace-sync answer carries (the merge reads no other; the confirmation fields stay).
   CS_EXPORT_FIELDS = (CS_KEY, CS_VALUE, CS_OWNER, CS_READONLY, CS_VER)
+  # The most bytes one record may take on the wire, counted as a namespace-sync answer carries it (its key twice, its
+  # value, owner, readonly mark and stamp) plus the token a store carries: 256 KiB, about twice the largest record
+  # found on the production network when the cap was set (125 KB). A larger record is refused on every path that
+  # stores one, so one record always fits one message, well below the broker's packet limit.
+  CS_MAX_RECORD_BYTES = 262_144
   # The hand-off: seconds between two sweeps, re-sends per sweep, re-sends per record and peer before giving up,
   # the longest gap of the back-off, and how long before a lost peer was dropped its settlements are re-opened.
   CS_HANDOFF_INTERVAL, CS_HANDOFF_BUDGET, CS_HANDOFF_MAX_SENDS, CS_HANDOFF_MAX_GAP = 15, 32, 6, 3600
@@ -1809,6 +1814,81 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # Counted under the key's bucket and the write's origin.
       self.__cs_count(event, key, origin)
 
+  def __wire_refusal(self, key, value, owner, readonly, token, ver):
+    """
+    Tell why a record must not be stored for what it is on the wire: too large, or not encodable at all.
+
+    The record is encoded once as a namespace-sync answer would carry it, ``{key: {key, value, owner, readonly,
+    token, ver}}``, with the encoder every message leaves with (``json_dumps``: compact, a non-ASCII character as
+    itself) and then as UTF-8, the bytes that travel. Every path that stores a record asks this first: a local
+    write and a store from a peer (``_set_value``, a hand-off re-send included) and each copy of a namespace-sync
+    answer (``__merge_hset_snapshot``).
+
+    Parameters
+    ----------
+    key : str
+      Composed key of the record.
+    value : any
+      Its value; None for a delete.
+    owner : any
+      Its owner, as it would be stored.
+    readonly : any
+      Its readonly mark, as it would be stored.
+    token : any
+      Its token, as it would be stored.
+    ver : list or None
+      Its stamp, as it would be stored; None for an unstamped record.
+
+    Returns
+    -------
+    str or None
+      ``"unencodable"`` when the encoder or UTF-8 cannot take the record (a string that holds a lone surrogate,
+      a value of a type or with a dict key no encoder takes, a circular or too deeply nested value);
+      ``"too_large"`` when it takes more than ``CS_MAX_RECORD_BYTES`` (262,144) bytes; None when it may be stored.
+
+    Notes
+    -----
+    Every field a store or a sync answer can fill counts, not only the value: a peer chooses the owner, the
+    readonly mark, the token and the address in the stamp as well. The size is the same on the writer and on
+    every receiver, as each measures the record with the owner, mark, token and stamp it would store. A record
+    that passes fits one message: a sync answer's entry for it is at most the size measured here.
+
+    One record UTF-8 cannot encode made every sync answer of its namespace fail to be prepared for sending, as
+    the answer carries every record of the namespace; a JSON escape in a peer's message, or a local caller, can
+    deliver such a string. A value the encoder turns into JSON (a numpy number or array, a datetime) is
+    encodable, and is measured as the JSON it becomes.
+
+    The cost is one JSON encoding of the record. Measured on the node image's interpreter under a 0.35 CPU
+    limit, in wall time with the limit's throttling: 0.05 to 0.11 ms for a 0.4 KB value, 3.9 to 5.0 ms for a
+    122 KB record of nested configuration (the kind the largest production value is; about what the receiver
+    spends parsing the same value out of its message), about 8 ms for one at the cap or for 125 KB of small
+    nested dicts, 20 ms for 125 KB of floats. At full speed: 0.01 ms, 0.85 ms and 1.7 ms.
+
+    Examples
+    --------
+    >>> self.__wire_refusal(key, {"a": 1}, "owner", False, None, [1700000000000, "0xai_self"])
+    >>> self.__wire_refusal(key, "x" * 300_000, "owner", False, None, None)
+    'too_large'
+    >>> self.__wire_refusal(key, {"name": "\\ud800"}, "owner", False, None, None)
+    'unencodable'
+    """
+    try:
+      # The bytes the record takes in a sync answer: one encoding with the wire's encoder (unsorted: the order of
+      # the keys does not change the length; without the encoder's own search for a circular value, which costs
+      # 13 to 31 % of the encoding and ends in the RecursionError below anyway), then as UTF-8, which is what the
+      # transport encrypts and sends.
+      size = len(self.json_dumps({key: {
+        self.CS_KEY: key, self.CS_VALUE: value, self.CS_OWNER: owner, self.CS_READONLY: readonly,
+        self.CS_TOKEN: token, self.CS_VER: ver,
+      }}, sort_keys=False, ensure_ascii=False, check_circular=False).encode("utf-8"))
+    except (TypeError, ValueError, RecursionError):
+      # No encoder takes it (TypeError: a type or a dict key; ValueError: a string UTF-8 cannot encode, or an integer
+      # too long to be written as text; RecursionError: a circular value, or one nested too deep): no message could
+      # carry this record to a peer.
+      return "unencodable"
+    # Larger than one record may be, or fine.
+    return "too_large" if size > self.CS_MAX_RECORD_BYTES else None
+
   def __hset_index(self, hkey):
     """
     Compute the composed-key prefix for one hash namespace.
@@ -1928,6 +2008,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     is replaced only by a copy with a higher or equal ``cs_rev``: an older or
     unversioned copy is skipped and not counted in the result.
 
+    A copy that takes more than ``CS_MAX_RECORD_BYTES`` on the wire, or that
+    no message could carry (``__wire_refusal``, asked with the copy's key,
+    value, owner, readonly mark, token and stamp as the peer sent them), is
+    skipped before any other rule reads it and counted as
+    ``<bucket>/hsync/refused_too_large`` or ``refused_unencodable``; the
+    other copies of the answer are merged. In every mode. A copy that is the
+    record held under its key field for field (key, value, owner, readonly
+    mark, stamp and token) is not measured, as nothing of it is stored: a
+    periodic sync between replicas that agree pays one comparison per copy,
+    and one JSON encoding only for each copy that differs, under the
+    persistence lock.
+
     The order rule (switch ``CSTORE_ORDER``, read once at start): with the switch
     'off' the stamp of a copy is not read. Else a copy equal to the held record
     in value, owner, readonly and token only raises the held stamp to the copy's
@@ -1987,6 +2079,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # The copy's stamp, checked for form (a malformed one counts ver_invalid and is unstamped); none is read
         # with the order switch 'off'.
         ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, "hsync")
+        # The record held under the key, to tell a copy that is this record field for field (most copies of a periodic
+        # sync between replicas that agree): nothing of such a copy is stored, so it is not measured.
+        held = self.__chain_storage.get(key, {})
+        if any(held.get(field) != record.get(field) for field in self.CS_EXPORT_FIELDS + (self.CS_TOKEN,)):
+          # Why the copy must not be stored for its wire form, if so (too large, or not encodable), from the fields
+          # as the peer sent them and before any rule reads them.
+          word = self.__wire_refusal(key, value, record.get(self.CS_OWNER), record.get(self.CS_READONLY, False),
+                                     record.get(self.CS_TOKEN), ver)
+          if word is not None:
+            # Skipped and counted as a refused write is, under the key's bucket; the rest of the answer is merged.
+            self.__cs_count("refused_" + word, key, "hsync")
+            continue
         if value is None and self.__chain_storage.get(self.CS_DEL + key, {}).get(self.CS_VALUE) is not None:
           # A delete copy of a key whose "dl:" record holds a value (an older release's caller wrote it there; it is
           # no tombstone): skipped in every mode, as the previous release skips every delete copy, so the tombstone
@@ -2508,11 +2612,33 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       payload for a revoked secret revision;
     - ``refused_token``: the stored record has another token;
     - ``refused_readonly``: the stored record is readonly for another owner;
+    - ``refused_unencodable``: a record no message can carry: the wire's
+      encoder, or UTF-8, cannot take its key, value, owner, readonly mark,
+      token or stamp (``__wire_refusal``);
+    - ``refused_too_large``: a record that takes more than
+      ``CS_MAX_RECORD_BYTES`` (256 KiB) on the wire, all those fields
+      counted (``__wire_refusal``);
     - with the order switch ``CSTORE_ORDER`` 'on' (or 'report', for a
       hand-off re-send) only, the order rule's
       words (``__ver_admit``): ``refused_older``, ``refused_future``,
       ``refused_origin``, ``refused_unstamped``, ``refused_collision`` and
       ``refused_older_than_delete``.
+
+    The size cap has no switch and acts in every mode. After the namespace
+    rules and the stamp, and before the order rule, the record is measured
+    as it would be stored (``__wire_refusal``) and refused on a word:
+    nothing is stored or sent for a local write, and a peer's store is not
+    confirmed. A delete is a record with value None, so the delete of a key
+    that holds a larger record, written before the cap existed, is taken.
+    The check costs one JSON encoding of the record per call (the numbers
+    are in ``__wire_refusal``).
+
+    A peer's store that creates a key this replica did not hold, outside
+    the protected namespaces (``CS_PROTECTED_NAMESPACES``), is counted as
+    ``new_keys/<sender>`` when its verified sender is neither among this
+    node's replication peers nor in an oracle registry. It only counts:
+    the write is applied. The registries are read only for such a store
+    from a sender outside the replication peers.
 
     The order rule (``CSTORE_ORDER``, read once at start), after the
     namespace rules and before the token and readonly checks. 'off': no
@@ -2686,6 +2812,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         else:
           # A local write takes a fresh stamp; a remote one's is checked for form (malformed: ver_invalid, unstamped).
           ver = self.__ver_valid(ver, key, "remote") if local_sync_storage_op else self.__ver_tick()
+        # Why the record must not be stored for its wire form, if so: larger than CS_MAX_RECORD_BYTES, or not
+        # encodable. Asked with the owner, readonly mark, token and stamp the record would be stored with, so the
+        # writer and every receiver measure the same record, in every mode of the order switch.
+        word = self.__wire_refusal(key, value, owner, readonly, token, ver)
+        if word is not None:
+          # Refused: not stored, and from a peer not confirmed.
+          outcome = "refused_" + word
+          # Before the order rule, which then neither counts nor takes the stamp of a record refused here.
+          return False
+        if order != "off":
           # The order rule's word for this write (each counted as ver_<word>), None when admitted.
           reason = self.__ver_admit(key, value, ver, sender, "remote" if local_sync_storage_op else "local")
           # A hand-off re-send is refused on the rule's word in 'report' too, as the live-write steps of 'on'.
@@ -2756,6 +2892,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # with debug off.
             debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
             self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
+          if (local_sync_storage_op and value is not None and key not in self.__chain_storage
+              and sender not in self.__chain_peers
+              and not self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES)
+              and not self.__registry_member(sender)):
+            # A key this replica did not hold, created outside the protected namespaces by a peer's store whose
+            # verified sender is in neither oracle registry: counted per sender, never refused. A sender among the
+            # replication peers is not counted, so the registries are read only for the other senders' new keys.
+            self.__cs_count(f"new_keys/{sender}")
           self.__set_key_value(
             key=key, value=value, owner=owner,
             local_sync_storage_op=local_sync_storage_op,
@@ -3216,8 +3360,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ``_set_value`` refuses is answered to its sender with one confirmation message
     ``{op, key, ver, refused, held_ver}``: the store's
     stamp echoed, the refusal word without its ``refused_`` prefix, and this node's stamp for the key (None
-    when unstamped or not held), never the value. A refused ``future`` stamp, an unstamped store, and the
-    stores dropped before ``_set_value`` (membership, oracle-only, ``"dl:"`` keys) are not answered. In
+    when unstamped or not held), never the value. A refused ``future`` stamp, a record that is not encodable
+    (``unencodable``: the answer would echo its key and stamp, which may hold the string no message can carry),
+    an unstamped store, and the stores dropped before ``_set_value`` (membership, oracle-only, ``"dl:"`` keys) are
+    not answered. A record over the size cap (``too_large``) is answered like any other refusal. In
     'report' nothing is sent for a live store and nothing more is counted. A writer of the previous release
     never gets one: it sends no stamp.
 
@@ -3318,11 +3464,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # A stamped store with the lean switch 'on': confirmed by key and stamp, without echoing the value.
         data = {self.CS_DATA: {self.CS_OP: self.CS_CONFIRM, self.CS_KEY: key, self.CS_VER: ver}}
       self.__send_data_to_chain_peers(data, peers=peers, include_default_peers=False)
-    elif ver is not None and (self.__cs_modes["order"] == "on" or resend) and info["outcome"] != "refused_future":
+    elif ver is not None and (self.__cs_modes["order"] == "on" or resend) and info["outcome"] not in (
+        "refused_future", "refused_unencodable"):
       # A refused stamped store, with the order switch 'on' (or a re-send, refused in 'report' too): answered to its
       # sender in a confirmation message that carries the refusal word and this node's stamp for the key instead of
       # the value, so the writer stops waiting for it (or re-sending it). A future stamp is not answered: refused
-      # now, it can be taken once the clocks agree.
+      # now, it can be taken once the clocks agree. Nor is a record that is not encodable: the answer would echo its
+      # key and stamp, which may hold the string no message can carry, and a node of this release never sends such a
+      # store (its own write refuses it first).
       held = self.__chain_storage.get(key) or self.__chain_storage.get(self.CS_DEL + key)
       # The answer, to the sender only.
       self.__send_data_to_chain_peers({self.CS_DATA: {

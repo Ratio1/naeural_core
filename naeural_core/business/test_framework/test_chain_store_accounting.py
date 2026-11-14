@@ -219,8 +219,25 @@ def seed(store, key, value, owner="node", readonly=False):
   }
 
 
-class _CountedStr:
-  """A value that counts how often it is turned into a string."""
+class _CountedStr(str):
+  """
+  A value that counts how often it is turned into a string.
+
+  It is a ``str`` (an empty one), so the wire's encoder takes it as it takes any text, without calling
+  ``__str__``: the store measures every record's wire form before it stores it, and refuses a value no encoder
+  takes.
+
+  Returns
+  -------
+  _CountedStr
+    The value; ``calls`` is how often ``str()`` was called on it.
+
+  Examples
+  --------
+  >>> value = _CountedStr()
+  >>> str(value), value.calls
+  ('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 1)
+  """
 
   def __init__(self):
     self.calls = 0
@@ -470,8 +487,9 @@ class TestCounters(unittest.TestCase):
     store = make_store()
     # A field of the "players" hash namespace, in the BUCKET bucket.
     hkey = _hset_key("players", "alpha")
-    # A remote write that changes the replica.
-    self.assertTrue(store._set_value(hkey, "v", owner="peer1", local_sync_storage_op=True))
+    # A remote write that changes the replica, from a replication peer (a new key from another sender would also
+    # count new_keys/<sender>).
+    self.assertTrue(store._set_value(hkey, "v", owner="peer1", local_sync_storage_op=True, sender="peer1"))
     # The same remote write again: identical.
     self.assertTrue(store._set_value(hkey, "v", owner="peer1", local_sync_storage_op=True))
     # A local write, unconfirmed.
@@ -572,8 +590,8 @@ class TestCounters(unittest.TestCase):
     store.bc = _WhitelistBlockEngine(["peer1", "peer2"])
     # Both peers running.
     store.netmon = _SummaryControlNetmon(online_for_control={"peer1", "peer2"})
-    # One remote write to count.
-    store._set_value("key", "v", owner="peer1", local_sync_storage_op=True)
+    # One remote write to count, from a replication peer.
+    store._set_value("key", "v", owner="peer1", local_sync_storage_op=True, sender="peer1")
     # A lap at 100 s finds 7 inputs queued.
     store.input_queue_size, store._now = 7, 100
     # That lap.
@@ -1253,10 +1271,11 @@ class TestStart(unittest.TestCase):
     census line before the first full hour after its start."""
     # The counter state comes from on_init here, not from the test harness.
     store = self.start()
-    # One remote write, applied.
-    self.assertTrue(store._set_value("key", "v", owner="peer1", local_sync_storage_op=True))
-    # Counted.
-    self.assertEqual(getattr(store, STATS), {"plain/remote/changed": 1})
+    # One remote write, applied; its sender is no replication peer (no refresh has run yet) and the registries
+    # cannot be read here, which counts as outside them.
+    self.assertTrue(store._set_value("key", "v", owner="peer1", local_sync_storage_op=True, sender="peer1"))
+    # Counted, and as a new key of that sender.
+    self.assertEqual(getattr(store, STATS), {"plain/remote/changed": 1, "new_keys/peer1": 1})
     # A whitelist for the peer refresh process() makes.
     store.bc = _WhitelistBlockEngine(["peer1"])
     # Its peer running.
@@ -1270,7 +1289,9 @@ class TestStart(unittest.TestCase):
     # The first line's fields.
     self.assertEqual(json.loads(lines[0][len("CSTORE_STATS "):]), {
       # With the modes on_init read from the harness's switches, and no stamp lead.
-      "period_s": 300, "counts": {"plain/remote/changed": 1}, "queue_peak": 0, "lost_inputs": 0, "modes": modes(),
+      "period_s": 300, "counts": {"plain/remote/changed": 1, "new_keys/peer1": 1}, "queue_peak": 0, "lost_inputs": 0,
+      # The switches as on_init read them.
+      "modes": modes(),
       # The unstamped write gave no stamp lead.
       "stamp_lead_max_s": 0.0,
       # No hand-off pair pending: the store holds no own stamped record.

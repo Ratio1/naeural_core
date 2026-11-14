@@ -218,7 +218,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ValueError
       When a switch is not exactly ``'off'``, ``'report'`` or ``'on'`` (``'ON'``, ``True`` and ``None`` are
       refused too); the message names each such config key and its value. Also when ``CSTORE_HANDOFF`` is
-      'on' while ``CSTORE_ORDER`` is not 'on' or ``CSTORE_TOMBSTONE_DAYS`` is 0. The plugin then does not start:
+      'on' while ``CSTORE_ORDER`` is not 'on', ``CSTORE_TOMBSTONE_DAYS`` or ``CSTORE_TOMBSTONE_CAP`` is 0, or
+      ``CSTORE_LEAN_CONFIRM`` is 'off'. The plugin then does not start:
       its setter is never published, so a blocking ``chainstore_set``, ``chainstore_get`` or
       ``chainstore_hlist`` on this node waits for it with no timeout.
     TypeError
@@ -231,8 +232,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The registration comes after the load, so a save can never run before the stored replica is in memory,
     and before the steps that can fail, so ``on_close`` always finds the registration it removes. The switch
     checks are among those steps. The one check of a switch against others: hand-off 'on' needs the order rule
-    'on' (receivers refuse an older re-send) and tombstones kept (a re-sent older value cannot bring back a key
-    deleted meanwhile).
+    'on' (receivers refuse an older re-send), tombstones kept past a sweep (days and cap above 0: a re-sent older
+    value cannot bring back a key deleted meanwhile) and the lean switch not 'off' (confirmations that carry a
+    stamp, which prove their senders: with the same defaults on every node, lean 'off' would withdraw each peer's
+    proof at its next confirmation).
 
     The table of the writes made with ``wait=False`` still owed a re-send starts empty, in memory only, before
     the setter that fills it is published.
@@ -328,11 +331,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if bad_modes:
       # Fail loudly: the store does not start (one START FAILURE line) rather than run a rule in a mode nobody chose.
       raise ValueError(f"Chain-store switches must be 'off', 'report' or 'on', got: {bad_modes}")
-    if self.__cs_modes["handoff"] == "on" and (self.__cs_modes["order"] != "on" or not self.__tomb_ms):
+    if self.__cs_modes["handoff"] == "on" and (self.__cs_modes["order"] != "on" or not self.__tomb_ms
+                                               or not self.__tomb_cap or self.__cs_modes["lean_confirm"] == "off"):
       # Fail loudly as well: re-sends are safe only while receivers refuse an older one (order 'on') and deletes leave
-      # tombstones (a re-sent older value cannot bring a deleted key back).
-      raise ValueError(
-        "Chain-store switch CSTORE_HANDOFF 'on' needs CSTORE_ORDER 'on' and CSTORE_TOMBSTONE_DAYS above 0")
+      # tombstones that outlive a sweep (a re-sent older value cannot bring a deleted key back; a cap of 0 drops them
+      # all at each sweep), and they reach only peers whose confirmations carry a stamp (lean not 'off': with the
+      # fleet's lean switch 'off' every confirmation withdraws its sender's proof, and the hand-off re-sends almost
+      # nothing).
+      raise ValueError("Chain-store switch CSTORE_HANDOFF 'on' needs CSTORE_ORDER 'on', CSTORE_TOMBSTONE_DAYS and "
+                       "CSTORE_TOMBSTONE_CAP above 0, and CSTORE_LEAN_CONFIRM not 'off'")
       
     memory = self.plugins_shmem
       
@@ -3335,8 +3342,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Every message here, whatever key it names, also proves or withdraws its sender as a peer the hand-off may
     re-send to: one that carries a well-formed stamp (a lean confirmation, a full one from a receiver with the
     lean switch 'report', a refusal answer) comes only from a node of this release whose order switch is not
-    'off', which admits a re-send by the order rule; one without a stamp withdraws it. A peer of the previous
-    release, or one with the order or lean switch 'off', therefore gets no re-send.
+    'off', which admits a re-send by the order rule; one without a stamp withdraws it. A peer whose last store or
+    confirmation to this node carried no stamp (the previous release, or the order or lean switch 'off') gets no
+    re-send; a peer with the lean switch 'off' loses its proof at each confirmation, which is why the hand-off
+    'on' does not start with that switch 'off'.
 
     Parameters
     ----------

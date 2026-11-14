@@ -450,8 +450,9 @@ answer, or the writer gave up; `confirmed_peers` holds the settled targets.
   `confirmed_peers`. `report`: the same bookkeeping in memory only, without the window
   (nothing is answered there, while in `on` a healthy peer frees its window within
   seconds), so each due pair is counted at its due time; nothing is sent and no record
-  changes. `off`: nothing runs. `on` needs `CSTORE_ORDER` `on` and
-  `CSTORE_TOMBSTONE_DAYS` above 0; otherwise the plugin does not start.
+  changes. `off`: nothing runs. `on` needs `CSTORE_ORDER` `on`, `CSTORE_TOMBSTONE_DAYS`
+  and `CSTORE_TOMBSTONE_CAP` above 0, and `CSTORE_LEAN_CONFIRM` not `off` (a confirmation
+  without a stamp withdraws its sender's proof); otherwise the plugin does not start.
 
 A receiver admits a store that carries `resend` by the order rule of `on` in `report`
 too (signed field, `cs_rev`, then the stamp; a stamped re-send replaces an unstamped

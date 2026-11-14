@@ -703,9 +703,9 @@ class TestRecordsAndStart(unittest.TestCase):
     # One record changed per answered record.
     self.assertEqual(getattr(other, MERGE)("players", getattr(store, EXPORT)("players")), 2)
 
-  def test_handoff_on_needs_order_on_and_tombstones(self):
-    """on_init stops with hand-off 'on' while the order switch is 'report' or tombstone days are 0, and starts with
-    every switch 'on'."""
+  def test_handoff_on_needs_order_on_tombstones_and_stamped_confirmations(self):
+    """on_init stops with hand-off 'on' while the order switch is 'report', tombstone days or the tombstone cap are 0,
+    or the lean switch is 'off'; it starts with every switch 'on', and with the lean switch 'report'."""
     # A data folder with a cache folder, removed after the test.
     folder = tempfile.TemporaryDirectory()
     # Removed after the test.
@@ -716,16 +716,18 @@ class TestRecordsAndStart(unittest.TestCase):
     self.addCleanup(setattr, SerializationManager, "instance", SerializationManager.instance)
     # A manager that takes the registration.
     SerializationManager.instance = SimpleNamespace(register=lambda save, every: None)
-    # Each start: the order switch, the tombstone days, and whether it starts.
-    for order, days, starts in (("report", 7, False), ("on", 0, False), ("on", 7, True)):
+    # Each start: the order switch, the tombstone days and cap, the lean switch, and whether it starts.
+    for order, days, cap, lean, starts in (("report", 7, 570, "on", False), ("on", 0, 570, "on", False),
+                                           ("on", 7, 0, "on", False), ("on", 7, 570, "off", False),
+                                           ("on", 7, 570, "report", True), ("on", 7, 570, "on", True)):
       # One sub-test each.
-      with self.subTest(order=order, days=days):
-        # A store whose switches are 'on', its order switch and tombstone days as given.
+      with self.subTest(order=order, days=days, cap=cap, lean=lean):
+        # A store whose hand-off switch is 'on', its other switches and tombstone numbers as given.
         store = _StartHarness(folder.name)
         # The switches.
-        store.cfg_cstore_order, store.cfg_cstore_lean_confirm, store.cfg_cstore_handoff = order, "on", "on"
-        # The other two.
-        store.cfg_cstore_save_backoff, store.cfg_cstore_tombstone_days = "on", days
+        store.cfg_cstore_order, store.cfg_cstore_lean_confirm, store.cfg_cstore_handoff = order, lean, "on"
+        # The save back-off and the tombstone numbers.
+        store.cfg_cstore_save_backoff, store.cfg_cstore_tombstone_days, store.cfg_cstore_tombstone_cap = "on", days, cap
         # An empty whitelist for the refresh of on_init.
         store.bc = SimpleNamespace(get_whitelist=lambda with_prefix=False: [])
         if starts:

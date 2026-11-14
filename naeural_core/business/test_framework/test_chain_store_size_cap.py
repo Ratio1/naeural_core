@@ -31,7 +31,7 @@ from test_chain_store_hsync import _hset_key
 from test_chain_store_order import BUCKET, CLOCK, EXPORT, KEY, MERGE, NOW_MS, answers, deliver, make, record
 
 # The cap, in bytes of the record's wire form.
-CAP = 262_144
+CAP = 524_288
 # A second field of the namespace "players".
 OTHER = _hset_key("players", "beta")
 # The send queue of local writes, by its private name.
@@ -137,10 +137,10 @@ def filler(size, key, owner, ver=None):
 
 
 class TestSizeCap(unittest.TestCase):
-  """A record over 256 KiB on the wire is refused wherever a record is stored, in every mode, under its own word."""
+  """A record over 512 KiB on the wire is refused wherever a record is stored, in every mode, under its own word."""
 
   def test_a_record_at_the_cap_is_stored_and_one_byte_more_is_refused_on_every_path(self):
-    """A local write, a peer's store and a sync copy of exactly 262,144 bytes are stored; one byte more is refused
+    """A local write, a peer's store and a sync copy of exactly 524,288 bytes are stored; one byte more is refused
     as too_large (nothing stored, sent or confirmed, the order rule not run), with every switch 'off', 'report' or
     'on'; the writer and its receiver measure the same record, the stamp included; a delete of a record over the cap
     that a replica already holds is still taken."""
@@ -194,7 +194,7 @@ class TestSizeCap(unittest.TestCase):
         self.assertEqual((sorted(store.storage), getattr(store, STATS)),
                          ([KEY], {BUCKET + "/hsync/refused_too_large": 1}))
         # A value over the cap, as a replica can hold it from before the cap.
-        old = "x" * 300_000
+        old = "x" * 600_000
         # A replica holding two such records.
         store = node(mode, storage={KEY: record(KEY, old, "peer1"), OTHER: record(OTHER, old, "peer1")})
         # A delete is a small record: a local one (it does not wait) and a peer's are taken, the second confirmed.
@@ -204,21 +204,21 @@ class TestSizeCap(unittest.TestCase):
         self.assertEqual([key for key in (KEY, OTHER) if key in store.storage], [])
 
   def test_the_bytes_that_travel_are_counted_not_the_characters(self):
-    """A value of 140,000 two-byte characters (280,000 bytes of UTF-8, fewer characters than the cap) is refused."""
+    """A value of 280,000 two-byte characters (560,000 bytes of UTF-8, fewer characters than the cap) is refused."""
     # A replica.
     store = node("report")
     # Fewer characters than the cap, more bytes.
-    value = "\u00e9" * 140_000
+    value = "\u00e9" * 280_000
     # Refused from a peer.
     self.assertEqual((len(value) < CAP, deliver(store, KEY, value, "peer1"), KEY in store.storage),
                      (True, [], False))
 
   def test_every_field_a_peer_fills_counts_toward_the_cap(self):
-    """A small value with an owner, a readonly mark, a token or a stamp address of 300,000 characters is refused from
+    """A small value with an owner, a readonly mark, a token or a stamp address of 600,000 characters is refused from
     a peer and skipped in a sync answer; so is a sync copy that differs from the record held in one such field only
     (a copy equal to it field for field is the only one not measured)."""
     # More than the cap in one field.
-    big = "x" * 300_000
+    big = "x" * 600_000
     # Each field a store carries besides the key and the value.
     for field, value in (("owner", big), ("readonly", big), ("token", big), ("ver", [NOW_MS, big])):
       # One sub-test each.
@@ -311,7 +311,7 @@ class TestUnencodable(unittest.TestCase):
     # A stamped store whose key holds the string: nothing comes back.
     self.assertEqual(deliver(store, KEY + SURROGATE, "v", "peer1", [NOW_MS, "peer1"]), [])
     # A stamped store over the cap: answered with its word.
-    self.assertEqual(answers(deliver(store, KEY, "x" * 300_000, "peer1", [NOW_MS, "peer1"])), ["too_large"])
+    self.assertEqual(answers(deliver(store, KEY, "x" * 600_000, "peer1", [NOW_MS, "peer1"])), ["too_large"])
 
 
 class TestNewKeysPerSender(unittest.TestCase):
@@ -343,7 +343,7 @@ class TestNewKeysPerSender(unittest.TestCase):
                           for name in ("w1", "w2")], [1, 1])
         # It overwrites one, deletes it, sends a record over the cap to a new key and deletes a key not held: none is
         # a new key stored.
-        for name, value, ms in (("w1", "w", 1), ("w1", None, 2), ("w3", "x" * 300_000, 3), ("w4", None, 4)):
+        for name, value, ms in (("w1", "w", 1), ("w1", None, 2), ("w3", "x" * 600_000, 3), ("w4", None, 4)):
           # One store each.
           deliver(store, _hset_key("players", name), value, "worker", stamp("worker", ms))
         # A node operation it signed itself, in a protected namespace: applied, not counted.

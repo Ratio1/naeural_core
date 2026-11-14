@@ -92,7 +92,7 @@ Merge rules:
 - delete pruning is out of scope
 - each exported record carries only `key`, `value`, `owner`, `readonly` and, when
   stamped, `ver` (the fields a merge reads); a record with a token is never exported
-- a copy that takes more than 256 KiB on the wire, or that no message could carry, is
+- a copy that takes more than 512 KiB on the wire, or that no message could carry, is
   skipped and counted (see "Record size cap")
 
 Result rules:
@@ -349,7 +349,7 @@ runs this rule.
 ## Record size cap
 
 No switch: it acts in every mode. One record may take at most `CS_MAX_RECORD_BYTES`
-(262,144 bytes, 256 KiB) on the wire, counted as a namespace-sync answer carries it plus
+(524,288 bytes, 512 KiB) on the wire, counted as a namespace-sync answer carries it plus
 the token a store carries: `{key: {key, value, owner, readonly, token, ver}}` as compact
 JSON with non-ASCII characters as themselves, in UTF-8 bytes. Every field a store or a
 sync answer can fill counts, not only the value. The record is measured with the owner,
@@ -376,7 +376,16 @@ datetimes) are stored as before.
 A delete is a record with value `None`, so a key that holds a larger record, written
 before the cap existed, can still be deleted. Such a record is not removed by the cap; a
 sync answer or a hand-off re-send that carries it is refused by its receivers. The
-largest record found on the production network when the cap was set took 125 KB.
+largest record found on the production network when the cap was set took 125 KB, a
+quarter of the cap: that record holds one configuration per node of a deployment and
+grows with it, so the cap leaves room for a deployment four times that size.
+
+One record at the cap fits one message. Sent alone through the node's encryption for
+several receivers (compressed, encrypted, written as hex inside JSON, compressed again,
+base64), it filled 63 % of the broker's 1 MiB packet with a value of random printable
+ASCII, 72 % with content chosen to compress worst sent to 100 receivers, and stays under
+80 % for content that does not compress at all. A namespace-sync answer carries every
+record of its namespace and is not bounded by this cap.
 
 A node of the previous release has no cap: it applies and confirms a larger record, and a
 sync answer from it can carry one (skipped here). Its own larger store is refused here
@@ -387,8 +396,10 @@ Cost: one JSON encoding of the record per write call, under the persistence lock
 node image's interpreter under a 0.35 CPU limit, in wall time with the limit's throttling:
 0.05 to 0.11 ms for a 0.4 KB value, 3.9 to 5.0 ms for a 122 KB record of nested
 configuration (the kind the largest production value is; about what the receiver spends
-parsing the same value out of its message), about 8 ms for one at the cap or for 125 KB of
-small nested dicts, 20 ms for 125 KB of floats. At full speed: 0.01 ms, 0.85 ms and 1.7 ms.
+parsing the same value out of its message), 6 to 8 ms for 125 KB of small nested dicts,
+20 ms for 125 KB of floats, and 15 to 20 ms (5.7 ms of CPU) for a 511 KB record of nested
+configuration, just under the cap; a record of twice the cap is refused after 30 ms. At
+full speed: 0.01 ms, 0.7 to 0.85 ms for the 122 KB record and 2.8 ms for the one at the cap.
 A sync answer costs one comparison per copy that is the record held field for field, which
 is not measured (nothing of it is stored), and one encoding per copy that differs: merging
 1,000 records of 2.1 MB that all equal the held ones took 6 to 7 % more CPU (89 to 96 ms at
@@ -673,7 +684,7 @@ Labels in `counts`:
     - `refused_secret_rule`: a revocation marker emptied or changed, or a payload for a revoked secret revision.
     - `refused_token`: the stored record has another token.
     - `refused_readonly`: the stored record is readonly for another owner.
-    - `refused_too_large`: a record over the size cap of 256 KiB on the wire (above); `refused_unencodable`: a record no message can carry (above). A copy of a sync answer skipped for either is counted under the same words with the origin `hsync`.
+    - `refused_too_large`: a record over the size cap of 512 KiB on the wire (above); `refused_unencodable`: a record no message can carry (above). A copy of a sync answer skipped for either is counted under the same words with the origin `hsync`.
     - `refused_new_keys`: only with `CSTORE_NEW_KEYS_MAX` above 0, a peer's store that would create a key after its sender reached that number of new keys in the period (above).
     - with `CSTORE_ORDER` `on` (or `report`, for a hand-off re-send) only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).

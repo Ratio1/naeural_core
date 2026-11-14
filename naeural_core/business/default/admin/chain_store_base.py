@@ -164,10 +164,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   # The fields of a record a namespace-sync answer carries (the merge reads no other; the confirmation fields stay).
   CS_EXPORT_FIELDS = (CS_KEY, CS_VALUE, CS_OWNER, CS_READONLY, CS_VER)
   # The most bytes one record may take on the wire, counted as a namespace-sync answer carries it (its key twice, its
-  # value, owner, readonly mark and stamp) plus the token a store carries: 256 KiB, about twice the largest record
-  # found on the production network when the cap was set (125 KB). A larger record is refused on every path that
-  # stores one, so one record always fits one message, well below the broker's packet limit.
-  CS_MAX_RECORD_BYTES = 262_144
+  # value, owner, readonly mark and stamp) plus the token a store carries: 512 KiB, about four times the largest record
+  # found on the production network when the cap was set (125 KB; that record holds one configuration per node of a
+  # deployment and grows with it, so the cap leaves room for a deployment four times the size). A larger record is
+  # refused on every path that stores one, so one record always fits one message: sent alone, a record at the cap
+  # fills at most 80 % of the broker's 1 MiB packet (72 % measured for content chosen to compress worst, sent to 100
+  # receivers; 63 % for random printable ASCII).
+  CS_MAX_RECORD_BYTES = 524_288
   # The hand-off: seconds between two sweeps, re-sends per sweep, re-sends per record and peer before giving up,
   # the longest gap of the back-off, and how long before a lost peer was dropped its settlements are re-opened.
   CS_HANDOFF_INTERVAL, CS_HANDOFF_BUDGET, CS_HANDOFF_MAX_SENDS, CS_HANDOFF_MAX_GAP = 15, 32, 6, 3600
@@ -1967,7 +1970,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     str or None
       ``"unencodable"`` when the encoder or UTF-8 cannot take the record (a string that holds a lone surrogate,
       a value of a type or with a dict key no encoder takes, a circular or too deeply nested value);
-      ``"too_large"`` when it takes more than ``CS_MAX_RECORD_BYTES`` (262,144) bytes; None when it may be stored.
+      ``"too_large"`` when it takes more than ``CS_MAX_RECORD_BYTES`` (524,288) bytes; None when it may be stored.
 
     Notes
     -----
@@ -1984,13 +1987,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The cost is one JSON encoding of the record. Measured on the node image's interpreter under a 0.35 CPU
     limit, in wall time with the limit's throttling: 0.05 to 0.11 ms for a 0.4 KB value, 3.9 to 5.0 ms for a
     122 KB record of nested configuration (the kind the largest production value is; about what the receiver
-    spends parsing the same value out of its message), about 8 ms for one at the cap or for 125 KB of small
-    nested dicts, 20 ms for 125 KB of floats. At full speed: 0.01 ms, 0.85 ms and 1.7 ms.
+    spends parsing the same value out of its message), 6 to 8 ms for 125 KB of small nested dicts, 20 ms for
+    125 KB of floats, and 15 to 20 ms (5.7 ms of CPU) for a 511 KB record of nested configuration, just under
+    the cap; a record of twice the cap is refused after 30 ms. At full speed: 0.01 ms, 0.7 to 0.85 ms for the
+    122 KB record and 2.8 ms for the one at the cap.
 
     Examples
     --------
     >>> self.__wire_refusal(key, {"a": 1}, "owner", False, None, [1700000000000, "0xai_self"])
-    >>> self.__wire_refusal(key, "x" * 300_000, "owner", False, None, None)
+    >>> self.__wire_refusal(key, "x" * 600_000, "owner", False, None, None)
     'too_large'
     >>> self.__wire_refusal(key, {"name": "\\ud800"}, "owner", False, None, None)
     'unencodable'
@@ -2767,7 +2772,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       encoder, or UTF-8, cannot take its key, value, owner, readonly mark,
       token or stamp (``__wire_refusal``);
     - ``refused_too_large``: a record that takes more than
-      ``CS_MAX_RECORD_BYTES`` (256 KiB) on the wire, all those fields
+      ``CS_MAX_RECORD_BYTES`` (512 KiB) on the wire, all those fields
       counted (``__wire_refusal``);
     - ``refused_new_keys``: only with ``CSTORE_NEW_KEYS_MAX`` above 0, a
       peer's store that would create a key after its sender, outside the

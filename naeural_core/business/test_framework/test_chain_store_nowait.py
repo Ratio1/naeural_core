@@ -14,8 +14,8 @@ from test_chain_store_hsync import _ChainStoreRuntimeHarness, _PeerSelectionHarn
 # The order tests' store builder, deliveries, records, confirmation and refusal helpers and constants.
 from test_chain_store_order import BUCKET, KEY, NOW, NOW_MS, confirm, deliver, make, record, refusal
 
-# The table of the writes owed a re-send, and the plugin lap's re-send step, by their private names.
-UNWAITED, RESEND = "_ChainStoreBasePlugin__unwaited", "_ChainStoreBasePlugin__maybe_resend_unwaited"
+# The table of the writes owed a re-send, by its private name.
+UNWAITED = "_ChainStoreBasePlugin__unwaited"
 
 
 def write(store, key, value, wait=False, **kwargs):
@@ -61,7 +61,10 @@ def write(store, key, value, wait=False, **kwargs):
 
 def lap(store, at):
   """
-  Run the plugin lap's re-send step of ``store`` at ``at`` seconds after the tests' wall clock, then send.
+  Run one plugin lap (``process``) of ``store`` at ``at`` seconds after the tests' wall clock.
+
+  The lap runs the re-send step from ``process``, as the plugin loop does, then sends what it queued. The peer
+  refresh and the ``CSTORE_STATS`` line are timed from the tests' clock, so neither is due within the tests' 30 s.
 
   Parameters
   ----------
@@ -84,10 +87,10 @@ def lap(store, at):
   store._now = NOW + at
   # Only what this lap sends.
   before = len(store.sent_payloads)
-  # The re-send step.
-  getattr(store, RESEND)()
-  # The plugin loop sends what it queued.
-  store._ChainStoreBasePlugin__maybe_broadcast()
+  # The peer refresh and the CSTORE_STATS line counted from the tests' clock: neither runs within these tests.
+  store._ChainStoreBasePlugin__last_chain_peers_refresh = store._ChainStoreBasePlugin__cs_stats_last = NOW
+  # One plugin lap: the re-send step, then the send of what it queued.
+  store.process()
   # How many went.
   return len(store.sent_payloads) - before
 

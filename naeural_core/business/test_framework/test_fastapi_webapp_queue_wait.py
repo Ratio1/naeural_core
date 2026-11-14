@@ -167,18 +167,19 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     self.plugin._request_monitor_thread.join(timeout=2)
 
   def test_monitor_runs_its_hook_while_idle_and_after_each_request_even_when_the_hook_raises(self):
-    """The request monitor calls on_request_monitor_tick before each read of the server queue, so also while idle
-    (about every 0.25 s) and after a request; a hook that raises is logged in red and the request is still queued."""
-    # A hook that counts its calls, then one that also raises.
+    """The request monitor calls on_request_monitor_tick before each read of the server queue: right after each
+    request (with two requests queued before it starts, no read times out before both are admitted, yet the hook runs
+    with 0, 1 and 2 admitted) and while idle; a hook that raises is logged in red and the requests are still queued."""
+    # A hook that records each call, then one that also raises.
     for raising in (False, True):
       # One sub-test each.
       with self.subTest(raising=raising):
-        # The calls of the hook.
-        ticks = []
+        # How many requests were admitted at each call of the hook.
+        seen = []
 
         def tick():
           """
-          Stand for a web app's hook: count the call, and raise in the sub-test of a raising hook.
+          Stand for a web app's hook: record how many requests were admitted, and raise in the raising sub-test.
 
           Returns
           -------
@@ -189,43 +190,35 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
           RuntimeError
             In the sub-test of a raising hook.
           """
-          # Counted.
-          ticks.append(1)
+          # Recorded.
+          seen.append(len(self.plugin._incoming_requests))
           if raising:
             # The hook's error, which the monitor must log and survive.
             raise RuntimeError("hook")
         # The plugin's hook, for this sub-test (the compiled one is the base web app's no-op).
         self.plugin.on_request_monitor_tick = tick
-        # Nothing queued, a fresh monitor.
+        # Nothing admitted, a fresh monitor.
         self.plugin._incoming_requests.clear()
         # Its stop flag.
         self.plugin._stop_request_monitor = threading.Event()
         # No thread yet.
         self.plugin._request_monitor_thread = None
-        # Started with an empty server queue.
+        # Two requests queued before the monitor starts, so no read times out until both are admitted.
+        for request_id in ("r1", "r2"):
+          # Queued on the server side.
+          self.plugin._server_queue.put(self._request(waited_s=0, request_id=request_id))
+        # Started.
         self.plugin._start_request_monitor_thread()
-        # Idle for 0.6 s: reads time out every 0.25 s.
+        # Idle for 0.6 s after them: reads time out every 0.25 s.
         time.sleep(0.6)
-        # The calls while idle.
-        idle = len(ticks)
-        # One request arrives.
-        self.plugin._server_queue.put(self._request(waited_s=0, request_id="r1"))
-        # Until it is queued, at most 5 s.
-        deadline = time.time() + 5
-        # Polled until queued or the deadline.
-        while not self.plugin._incoming_requests and time.time() < deadline:
-          # Polled.
-          time.sleep(0.01)
-        # One more turn of the loop.
-        time.sleep(0.05)
         # Stopped.
         self.plugin._stop_request_monitor.set()
         # Its thread ends.
         self.plugin._request_monitor_thread.join(timeout=2)
-        # Called at least twice while idle and again after the request; the request queued; the raise logged.
-        self.assertEqual((idle >= 2, len(ticks) > idle, [request["id"] for request in self.plugin._incoming_requests],
+        # One call before each read (0, then 1, then 2 admitted), then the idle calls; both queued; the raise logged.
+        self.assertEqual((seen[:3], len(seen) > 3, [request["id"] for request in self.plugin._incoming_requests],
                           any("Exception in on_request_monitor_tick" in msg for msg in self.plugin.logged)),
-                         (True, True, ["r1"], raising))
+                         ([0, 1, 2], True, ["r1", "r2"], raising))
 
   def test_monitor_refuses_at_once_while_the_oldest_queued_request_has_expired(self):
     self.plugin._incoming_requests.extend([self._request(waited_s=100, request_id="old"), {"id": "q1"}])

@@ -306,6 +306,12 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__ver_lead = self._ChainStoreBasePlugin__ver_clock = 0
     # Nothing held without a dirty mark.
     self._ChainStoreBasePlugin__chain_storage_unmarked = False
+    # The tombstone life (7 days) and cap (570) as the config gives them and as on_init reads them; no horizon yet.
+    self.cfg_cstore_tombstone_days, self.cfg_cstore_tombstone_cap = 7, 570
+    # As on_init reads them: the life in ms, the cap, and the horizon of a store that removed no tombstone.
+    self._ChainStoreBasePlugin__tomb_ms, self._ChainStoreBasePlugin__tomb_cap = 7 * 86_400_000, 570
+    # No tombstone removed yet.
+    self._ChainStoreBasePlugin__tomb_horizon = 0
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

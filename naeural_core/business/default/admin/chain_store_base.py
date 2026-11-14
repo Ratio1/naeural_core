@@ -76,6 +76,11 @@ _CONFIG = {
   # How far, in seconds, a stamp may run ahead of this node's wall clock: a stamp further ahead is a future one, and
   # the node's own stamp clock is held within it.
   "CSTORE_VER_MAX_AHEAD" : 60,
+  # How many days the tombstone a delete leaves is kept (0: no tombstone is kept), and how many tombstones are held at
+  # most (the oldest go first): about 10 % of a production replica's records. Both apply with CSTORE_ORDER not 'off'.
+  "CSTORE_TOMBSTONE_DAYS" : 7,
+  # The cap, a count the defaults-only release can set from the measured rate of new tombstones.
+  "CSTORE_TOMBSTONE_CAP" : 570,
   # Confirmations by key and stamp instead of echoing the value.
   "CSTORE_LEAN_CONFIRM" : "report",
   # The writer re-sends its own unconfirmed writes.
@@ -126,6 +131,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_SENDER = "sender"
   # A record's and a store's version stamp: [time in ms, address of the node that wrote it].
   CS_VER = "ver"
+  # The prefix of the key a delete's tombstone is held under: "dl:" + the deleted key. No write may name such a key.
+  CS_DEL = "dl:"
   # The signed sequence or revision each signed namespace carries in its values: the first step of the order rule.
   CS_SIGNED_FIELDS = {
     "DEEPLOY_OPERATIONS": "sequence", "DEEPLOY_NODE_OPERATIONS": "sequence", "DEEPLOY_DEPLOYED_JOBS": "revision",
@@ -252,6 +259,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # How far a stamp may run ahead of the wall clock, in ms, read once like the switches (not a number: the start
     # stops here). The largest lead of a stamp seen since the last CSTORE_STATS line, in ms.
     self.__ver_ahead, self.__ver_lead = int(1000 * self.cfg_cstore_ver_max_ahead), 0
+    # The life of a tombstone in ms and the most tombstones held, read once as well.
+    self.__tomb_ms = int(86_400_000 * self.cfg_cstore_tombstone_days)
+    # The cap, a count the defaults-only release can set.
+    self.__tomb_cap = int(self.cfg_cstore_tombstone_cap)
+    # The newest stamp of a tombstone this node removed (expired or past the cap), at most CSTORE_VER_MAX_AHEAD ahead
+    # of the wall clock: no record stamped below it may come back by a later catch-up. 0 until the first removal.
+    self.__tomb_horizon = 0
     # The switches set to anything but the three modes, by config key; checked after the registration, so the
     # on_close that follows a failed start still finds the registration it removes.
     bad_modes = {
@@ -293,6 +307,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       record[self.CS_VER][0] for record in self.__chain_storage.values()
       if isinstance(record, dict) and record.get(self.CS_VER) is not None and record[self.CS_VER][0] <= limit
     ] or [0])
+    if self.__cs_modes["order"] != "off":
+      # A tombstone whose key is held again (rewritten while the node ran the previous release, which does not see
+      # tombstones) is dropped, so a key and its tombstone are never both held; it does not raise the horizon.
+      for key in [key for key, record in self.__chain_storage.items() if key.startswith(self.CS_DEL)
+                  and record.get(self.CS_VALUE) is None and key[len(self.CS_DEL):] in self.__chain_storage]:
+        # Removed from memory; the file keeps it until the next save, and the next start drops it again.
+        del self.__chain_storage[key]
 
     memory[self.CS_STORAGE_MEM] = self.__chain_storage
     memory[self.CS_GETTER] = self._get_value
@@ -350,6 +371,62 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     with self.__persistence_lock:
       # A plain increment of one counter of a small dict (one label per bucket, origin and event).
       self.__cs_stats[event] = self.__cs_stats.get(event, 0) + n
+
+
+  def __sweep_tombstones(self):
+    """
+    Remove the tombstones that expired or are past the cap, and count those held, once per ``CSTORE_STATS`` line.
+
+    A tombstone is a record under ``"dl:" + key`` with value None and a stamp (any other ``"dl:"`` record is
+    left alone). With the order switch 'off', or ``CSTORE_TOMBSTONE_DAYS`` 0, every tombstone is removed; else
+    those stamped more than ``CSTORE_TOMBSTONE_DAYS`` ago, and the oldest beyond ``CSTORE_TOMBSTONE_CAP``. Each
+    removal raises the horizon (the newest removed stamp that is at most ``CSTORE_VER_MAX_AHEAD`` ahead of the
+    wall clock) in the same hold of the persistence lock. The removed ones are counted as
+    ``tombstones_dropped`` and mark the replica for a save; those left as ``tombstones_held``.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Runs on the plugin thread from ``process``, every 300 s, in every mode, so a switch back to 'off' leaves no
+    tombstone after the next line. One walk of the replica and one sort of its tombstones under the lock (1.2 to
+    1.4 ms of CPU for 6,000 records with 570 tombstones, measured on the node image's interpreter). A removed
+    tombstone no longer stops an older copy of its key: a peer away longer than the tombstone's life, or past the
+    cap, can bring the key back.
+
+    Examples
+    --------
+    >>> self.__sweep_tombstones()   # 600 tombstones, cap 570, none expired: the 30 oldest removed
+    """
+    # The wall clock in ms.
+    now = int(1000 * self.time())
+    # The removals and the horizon under one hold of the lock, so no save holds one without the other.
+    with self.__persistence_lock:
+      # The tombstones held, by stamp, oldest first.
+      tombs = sorted((record[self.CS_VER], key) for key, record in self.__chain_storage.items()
+                     if key.startswith(self.CS_DEL) and record.get(self.CS_VALUE) is None
+                     and isinstance(record.get(self.CS_VER), list))
+      # How many of the oldest go: all with the order switch 'off' or no tombstone life; else the expired ones and
+      # those beyond the cap, whichever is more.
+      cut = len(tombs) if self.__cs_modes["order"] == "off" or not self.__tomb_ms else max(
+        len(tombs) - self.__tomb_cap, sum(ver[0] < now - self.__tomb_ms for ver, _ in tombs))
+      # The oldest ones, up to the cut.
+      for ver, key in tombs[:cut]:
+        # Removed from the replica.
+        del self.__chain_storage[key]
+        if ver[0] <= now + self.__ver_ahead:
+          # The horizon rises with it, in the same lock hold; a future stamp is left out of it.
+          self.__tomb_horizon = max(self.__tomb_horizon, ver[0])
+    if cut:
+      # Saved by the next flush; counted for the line.
+      self.__chain_storage_dirty = True
+      # How many went.
+      self.__cs_count("tombstones_dropped", n=cut)
+    if len(tombs) > cut:
+      # How many are held, for the line this sweep precedes.
+      self.__cs_count("tombstones_held", n=len(tombs) - cut)
 
 
   def __netmon_node_is_online_for_control(self, peer):
@@ -981,7 +1058,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Acts from the wave 03 release with no switch: today only the Tunnels Manager credentials carry
     ``cs_rev`` (the signed client time of the update). A live write refused here is counted as
     ``refused_cs_rev`` and not confirmed, as every refused remote write. A delete (``value`` None) is a live
-    write without ``cs_rev`` and is applied; a snapshot never carries a delete (the merge skips None). The
+    write without ``cs_rev`` and is applied; a snapshot carries a delete only as a tombstone copy, which the
+    merge reads with the order switch 'on', and then it is stale over a record that carries ``cs_rev``. The
     cost per write is two dict reads and a few type checks.
 
     The comparison is ``__rev_order``'s, the one the order rule (``__ver_admit``) reads ``cs_rev`` with too.
@@ -1136,7 +1214,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     1. a stamp more than ``CSTORE_VER_MAX_AHEAD`` ahead of the wall clock: ``future``;
     2. a live remote write stamped with another address than its verified sender: ``origin``;
-    3. nothing held under the key: admitted;
+    3. nothing held under the key, neither a record nor the tombstone of its delete: admitted;
     4. a live write (local or remote) of the value held: admitted (an identical write);
     5. the namespace's signed sequence or revision (``CS_SIGNED_FIELDS``), then ``cs_rev``, read by
        ``__rev_order``: a side that carries the field beats a side that lacks it, else the higher wins; the
@@ -1144,7 +1222,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     6. a held record without a stamp, or with one more than ``CSTORE_VER_MAX_AHEAD`` ahead (not trusted):
        admitted, the last arrival wins as in the previous release;
     7. an unstamped arrival over a trusted stamp: ``unstamped``;
-    8. an older stamp: ``older``;
+    8. an older stamp: ``older``, or ``older_than_delete`` over a tombstone;
     9. an equal stamp with another value: ``collision`` for the side that loses one fixed comparison (a delete
        beats a value, else the larger canonical JSON), so every replica keeps the same one; the winner is
        admitted.
@@ -1168,8 +1246,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Returns
     -------
     str or None
-      The word: ``future``, ``origin``, ``older``, ``unstamped`` or ``collision``; None when admitted. With the
-      order switch 'on' the caller refuses the write (or skips the copy) on a word; in 'report' it only counts.
+      The word: ``future``, ``origin``, ``older``, ``older_than_delete``, ``unstamped`` or ``collision``; None
+      when admitted. With the order switch 'on' the caller refuses the write (or skips the copy) on a word; in
+      'report' it only counts.
 
     Notes
     -----
@@ -1191,8 +1270,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     # The wall clock in ms, against which a stamp is a future one.
     now = int(1000 * self.time())
-    # The record held under the key, if any.
-    held = self.__chain_storage.get(key)
+    # The record held under the key, else the tombstone of its delete, if any.
+    held = self.__chain_storage.get(key) or self.__chain_storage.get(self.CS_DEL + key)
     if ver is not None and ver[0] > now + self.__ver_ahead:
       # Step 1: further ahead than any trusted clock; not taken, and the clock does not move.
       reason = "future"
@@ -1223,8 +1302,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # Step 7: an unstamped write over a stamped record.
         reason = "unstamped"
       elif ver < held_ver:
-        # Step 8: an older stamp.
-        reason = "older"
+        # Step 8: an older stamp; over a tombstone, a write the delete already replaced.
+        reason = "older" if held[self.CS_VALUE] is not None else "older_than_delete"
       else:
         # Step 9: the loser of an equal stamp with another value (order None: the values differ) is the side lower by
         # (is a delete, canonical JSON); an equal stamp of the same value, a sync's steady state, builds no JSON.
@@ -1280,6 +1359,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     namespace is the one whose index (``__hset_index``) ``hkey`` has, the
     prefix the records are selected by.
 
+    With the order switch ``CSTORE_ORDER`` not 'off', the tombstones of the
+    namespace's deleted keys are exported too, each under the key it deleted
+    (value None, with its stamp), so a peer that missed a delete can apply it
+    ('on'). A node of the previous release skips a record with value None.
+
     Examples
     --------
     >>> list(self.__export_hset_snapshot("players"))  # composed keys of the fields that carry no token
@@ -1289,11 +1373,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if self.__secret_namespace(self.__hset_index(hkey)) and not self.__registry_member(self.ee_addr, dauth_only=True):
       return {}
     index = self.__hset_index(hkey)
+    # The prefix of the tombstones of the namespace's keys; none with the order switch 'off', which sends none.
+    tombs = None if self.__cs_modes["order"] == "off" else self.CS_DEL + index
     snapshot = {}
     # Freeze the current dictionary view before filtering so live writes do not
     # mutate the iterator while this response is being serialized.
     for key, record in list(self.__chain_storage.items()):
-      if not isinstance(key, str) or not key.startswith(index):
+      # A record of the namespace, or the tombstone of a deleted key of it.
+      if not isinstance(key, str) or not (key.startswith(index) or (tombs is not None and key.startswith(tombs))):
         continue
       if not isinstance(record, dict):
         continue
@@ -1301,8 +1388,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # protected records merely because the caller knows a namespace name.
       if record.get(self.CS_TOKEN) is not None:
         continue
-      snapshot[key] = self.deepcopy(record)
-      snapshot[key].pop(self.CS_TOKEN, None)
+      if key.startswith(self.CS_DEL) and record.get(self.CS_VALUE) is not None:
+        # Under the tombstones' prefix but holding a value (a plain key the previous release let a caller write):
+        # not a tombstone, never sent as the key it names.
+        continue
+      # A tombstone travels under the key it deleted, with value None and its stamp.
+      name = key[len(self.CS_DEL):] if key.startswith(self.CS_DEL) else key
+      # A copy of the record.
+      snapshot[name] = self.deepcopy(record)
+      # Without its token.
+      snapshot[name].pop(self.CS_TOKEN, None)
     return snapshot
 
 
@@ -1349,6 +1444,17 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     to a stamp it takes; an equal copy raises the held stamp only when it gives
     no word. An applied copy keeps its stamp.
 
+    A delete travels as a copy with value None and a stamp (a tombstone, see
+    ``__export_hset_snapshot``). The previous release, and this one with the
+    order switch 'off', skip it. In 'report' it runs the signed-record,
+    ``cs_rev`` and order rules (counted) and is skipped; one 'on' would apply
+    over a value held here is counted as ``<bucket>/hsync/ver_copy_delete``.
+    In 'on' it goes through the same rules as a value and, admitted, removes
+    the key's value (counted ``ver_copy_delete``) and stores the tombstone
+    under ``"dl:" + key`` (``tombstone_new`` when there was none), so a
+    replica that missed the delete does not keep the key. A value copy
+    removes the key's tombstone.
+
     Examples
     --------
     >>> self.__merge_hset_snapshot("players", {key: record})
@@ -1375,7 +1481,19 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           continue
 
         value = self.deepcopy(record.get(self.CS_VALUE))
-        if value is None or not self.__versioned_record(key, value):
+        # The copy's stamp, checked for form (a malformed one counts ver_invalid and is unstamped); none is read
+        # with the order switch 'off'.
+        ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, "hsync")
+        if value is None and order != "on":
+          # A delete travels as a stamped copy with value None (a tombstone), applied only in 'on'; with 'off', or
+          # unstamped, it is skipped as before. In 'report' the rules below run and count, and a delete 'on' would
+          # apply over a value held here is counted as ver_copy_delete.
+          if (ver is not None and self.__versioned_record(key, None) and not self.__stale_revision(key, None, True)
+              and self.__ver_admit(key, None, ver, None, "hsync") is None and key in self.__chain_storage):
+            # The value 'on' would remove.
+            self.__cs_count("ver_copy_delete", key, "hsync")
+          continue
+        if (value is None and ver is None) or not self.__versioned_record(key, value):
           continue
         if self.__stale_revision(key, value, snapshot=True):
           # The peer's copy is older than ours, or unversioned over a versioned record: a restart sync must not
@@ -1409,13 +1527,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           record[self.CS_OWNER] = value["coordinator"]
           readonly = False
           token = None
-        # The copy's stamp, checked for form (a malformed one counts ver_invalid and is unstamped); none is read
-        # with the order switch 'off'.
-        ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, "hsync")
         # The order rule's word for the copy (counted as ver_<word>; it also moves the clock up to a stamp taken),
         # None when admitted or with the order switch 'off'.
         reason = None if order == "off" else self.__ver_admit(key, value, ver, None, "hsync")
-        local_record = self.__chain_storage.get(key)
+        # The record the copy is compared with: the key's, or for a delete the tombstone held for it.
+        local_record = self.__chain_storage.get(self.CS_DEL + key if value is None else key)
         if isinstance(local_record, dict):
           same_owner = local_record.get(self.CS_OWNER) == record.get(self.CS_OWNER)
           same_value = local_record.get(self.CS_VALUE) == value
@@ -1433,10 +1549,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           # 'report' only counted, and applied below as in the previous release.
           continue
 
+        # The copy lands under its key, a delete under "dl:" and its key; the other of the two goes, so a key and its
+        # tombstone are never both held.
+        name, other = (self.CS_DEL + key, key) if value is None else (key, self.CS_DEL + key)
+        if value is None and key in self.__chain_storage:
+          # In 'on' only: a delete a peer holds removes a value held here.
+          self.__cs_count("ver_copy_delete", key, "hsync")
+        if value is None and name not in self.__chain_storage:
+          # A new tombstone, counted per bucket as a live delete's is.
+          self.__cs_count("tombstone_new", key, "hsync")
+        # Dropped: the value a delete removes, or the tombstone a value replaces.
+        self.__chain_storage.pop(other, None)
         # Apply the peer record only to the local replica. HSync intentionally
         # does not enqueue a broadcast because this node is catching up to peer
         # state rather than originating a new write.
-        self.__chain_storage[key] = {
+        self.__chain_storage[name] = {
           self.CS_KEY: key,
           self.CS_VALUE: value,
           self.CS_OWNER: record.get(self.CS_OWNER),
@@ -1575,6 +1702,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     When ``value`` is ``None``, the key is deleted locally. The existing
     delete semantics and related trade-offs described below are preserved.
+    A stamped delete (``ver`` given, ``CSTORE_TOMBSTONE_DAYS`` above 0) also
+    leaves a tombstone: a record under ``"dl:" + key`` with value None, the
+    delete's owner, readonly and token, and its stamp; a local one gets the
+    confirmation fields of a local write, a remote one the -1 of a remote
+    write. A tombstone already held with an equal or newer stamp is kept as
+    it is; an older one is replaced (a stamp-only change: ``_set_value``
+    does not mark it for a save). A new tombstone is counted as
+    ``<bucket>/<origin>/tombstone_new``. Storing a value removes the key's
+    tombstone, so a key and its tombstone are never both held.
     The caller must hold the persistence lock and, after releasing it, mark
     the chain storage dirty when the call changed the replica (``_set_value``
     does not mark it for a delete of a key not held or for a write of what
@@ -1583,7 +1719,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Examples
     --------
     >>> self.__set_key_value("key", "v", "node", ver=[1700000000000, "0xai_self"])   # record with its stamp
-    >>> self.__set_key_value("key", None, "node")                                    # deleted
+    >>> self.__set_key_value("key", None, "node")                                    # deleted, no tombstone
+    >>> self.__set_key_value("key", None, "node", ver=[1700000000001, "0xai_self"])  # tombstone under "dl:key"
     """
     # key should be composed of the chainstore app identity and the actual key
     # so if two chainstore apps are running on the same node, they will not overwrite each other
@@ -1599,7 +1736,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # delete. If confirmed-deletes are needed in the future, introduce a dedicated CS_DELETE
       # operation with its own confirmation tracking (e.g. a __pending_deletes dict).
       self.__chain_storage.pop(chain_key, None)
-      return
+      # The tombstone already held for the key, if any.
+      held = self.__chain_storage.get(self.CS_DEL + key)
+      if ver is None or not self.__tomb_ms or (held is not None and (held.get(self.CS_VER) or []) >= ver):
+        # No tombstone: an unstamped delete (order switch 'off', or a writer of the previous release), tombstones
+        # turned off (CSTORE_TOMBSTONE_DAYS 0), or one at least as new already held.
+        return
+      if held is None:
+        # A new tombstone, counted per bucket: the rate the tombstone cap is sized from.
+        self.__cs_count("tombstone_new", key, "remote" if local_sync_storage_op else "local")
+      # The delete leaves a tombstone under "dl:" and the key: the record below, with value None and the stamp.
+      chain_key = self.CS_DEL + key
+    else:
+      # A value replaces the key's tombstone, if any: a key and its tombstone are never both held.
+      self.__chain_storage.pop(self.CS_DEL + key, None)
     self.__chain_storage[chain_key] = {
       self.CS_KEY       : key,
       self.CS_VALUE     : value,
@@ -1610,13 +1760,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       **({self.CS_VER: ver} if ver is not None else {}),
     }
     self.__reset_confirmations(
-      key,
+      # The record's own key: the tombstone's for a delete, so a confirmation of a local delete has a record to land on.
+      chain_key,
       peers=peers,
       include_default_peers=include_default_peers,
     )
     if local_sync_storage_op:
       # set the confirmations to -1 to indicate that the key is remote synced on this node
-      self.__set_confirmations(key, -1) # set to -1 to indicate that the key is remote synced on this node
+      self.__set_confirmations(chain_key, -1) # set to -1 to indicate that the key is remote synced on this node
     return
 
 
@@ -1694,7 +1845,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Raises
     ------
     ValueError
-      If ``key`` is invalid, if ``timeout`` or ``max_retries`` fail
+      If ``key`` is invalid (not a str, empty, or starting with ``"dl:"``,
+      the prefix of the tombstones), if ``timeout`` or ``max_retries`` fail
       validation, or if the underlying storage/update flow raises an error.
 
     Notes
@@ -1743,7 +1895,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     - ``refused_readonly``: the stored record is readonly for another owner;
     - with the order switch ``CSTORE_ORDER`` 'on' only, the order rule's
       words (``__ver_admit``): ``refused_older``, ``refused_future``,
-      ``refused_origin``, ``refused_unstamped`` and ``refused_collision``.
+      ``refused_origin``, ``refused_unstamped``, ``refused_collision`` and
+      ``refused_older_than_delete``.
 
     The order rule (``CSTORE_ORDER``, read once at start), after the
     namespace rules and before the token and readonly checks. 'off': no
@@ -1755,6 +1908,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     write of the value held is identical in every mode; it raises the held
     stamp to its own when that is newer, in memory without a dirty mark, as
     an identical local write's fresh stamp is.
+
+    A stamped delete leaves a tombstone (``__set_key_value``), which the
+    order rule takes as the held record: an older value arriving after it is
+    ``older_than_delete``. A delete of a key not held, or a newer delete over
+    a held tombstone, changes only the tombstone: held without a dirty mark
+    and saved at an orderly stop.
 
     ``error`` is a call that raised before it changed the replica (a bad
     ``timeout`` or ``max_retries``, for example). A local write that changed
@@ -1782,6 +1941,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     if not isinstance(key, str) or len(key) == 0:
       raise ValueError("Key must be a non-empty string.")
+    if key.startswith(self.CS_DEL):
+      # Reserved for the tombstones of deletes: no write may name such a key (a remote one is dropped by __exec_store).
+      raise ValueError(f"Keys starting with {self.CS_DEL!r} are reserved for the chain store's deletes.")
     # Outcome counted once by the finally below: every way out sets its own word, so one left unset is an error
     # (wave 02 counted every other way out as "refused"); and how a local write's wait ended, when it failed.
     outcome, wait_end = "error", None
@@ -2297,6 +2459,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The store's version stamp and its verified sender go to ``_set_value``, whose order rule reads them
     (switch ``CSTORE_ORDER``; with it 'off' the stamp is dropped there).
 
+    A store whose key starts with ``"dl:"``, the prefix of the tombstones, is dropped unconfirmed and counted
+    as ``<bucket>/remote/refused_invalid_key`` under the bucket of the key after the prefix; ``_set_value``
+    would raise for it, and a raise here would stall the plugin loop.
+
     A refused delete is not reported back to its sender: the sender does not wait for the confirmations of a
     delete, so it treats it as done. On that node ``__set_key_value`` removes the key at once, so the wait loop of its
     ``_set_value`` reads 0 confirmations of 0 required for a key it no longer holds and returns True, and
@@ -2322,6 +2488,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       with self.__persistence_lock:
         # A plain increment of one counter; one label per bucket.
         self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
+    if isinstance(key, str) and key.startswith(self.CS_DEL):
+      # A key reserved for tombstones: dropped unconfirmed and counted under the bucket of the key it names. Not raised:
+      # a raise leaves the plugin loop, which then sleeps, so one such store would stall every write here.
+      self.__cs_count("refused_invalid_key", key[len(self.CS_DEL):], "remote")
+      return
     if self.__secret_namespace(key):
       if not self.__registry_member(peers) or not self.__registry_member(self.ee_addr, dauth_only=True):
         # Counted as a refused remote write of the bucket; before, these drops were not counted at all.
@@ -2374,14 +2545,26 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     Process a confirmation for a previously broadcast store operation.
 
+    A confirmation counts when it echoes the owner and value of the record it is for, the sender is one of
+    the record's targets and has not confirmed it yet. The record is the key's, or, when the key is not held,
+    the tombstone a stamped delete left under ``"dl:" + key`` (none with the order switch 'off'), so a delete's
+    confirmation (value None) now lands on the tombstone of a local delete instead of being dropped.
+
     Parameters
     ----------
     data : dict
       Decrypted confirmation payload received from the network.
+    sender : str, optional
+      The verified address of the confirming node.
 
     Returns
     -------
     None
+
+    Examples
+    --------
+    >>> self.__exec_received_confirm({"op": "SCONFIRM", "key": "k", "value": "v", "owner": owner}, sender="peer1")
+    >>> self.__exec_received_confirm({"op": "SCONFIRM", "key": "k", "value": None, "owner": owner}, sender="peer1")
     """
     key = data.get(self.CS_KEY, None)
     value = data.get(self.CS_VALUE, None)
@@ -2392,19 +2575,26 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if self.cfg_chain_store_debug:
       self.P(f" === LOCAL: Received {op} from {confirm_by} for  {key}={value}, owner{owner}")
     with self.__persistence_lock:
-      local_owner = self.__get_key_owner(key)
-      local_value = self.__get_key_value(key)
-      if value is None and key not in self.__chain_storage:
+      # The record confirmed: the key's, or the tombstone of a delete of it (a key from the network is formatted, not
+      # concatenated, so one that is not a str finds nothing instead of raising).
+      target = key if key in self.__chain_storage else f"{self.CS_DEL}{key}"
+      # Its owner and value, which a confirmation must echo.
+      local_owner = self.__get_key_owner(target)
+      # The value.
+      local_value = self.__get_key_value(target)
+      if value is None and target not in self.__chain_storage:
         # Deletion confirmed — key already removed locally, nothing to increment
         if self.cfg_chain_store_debug:
           self.P(f" === LOCAL: Key {key} deletion confirmed by {confirm_by}")
       elif owner == local_owner and value == local_value:
-        record = self.__chain_storage.get(key, {})
+        # The record confirmed.
+        record = self.__chain_storage.get(target, {})
         confirmed = record.setdefault("confirmed_peers", [])
         if sender not in record.get("target_peers", []) or sender in confirmed:
           return
         confirmed.append(sender)
-        self.__increment_confirmations(key)
+        # Counted on the record confirmed: the tombstone's own counter for a delete.
+        self.__increment_confirmations(target)
         if self.cfg_chain_store_debug:
           self.P(f" === LOCAL: Key {key} confirmed by {confirm_by}")
     return
@@ -2631,6 +2821,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (one line in the log). ``modes`` is the table of the wave 03 switches read once by ``on_init``.
     ``stamp_lead_max_s`` is the largest lead over this node's wall clock, in seconds, of a version stamp the
     order rule took in the period (a peer's clock ahead of this one, plus the transit time); 0 when none led.
+    Before the counters are taken, the lap sweeps the tombstones (``__sweep_tombstones``).
 
     Returns
     -------
@@ -2654,6 +2845,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # Keep the largest input queue seen since the last CSTORE_STATS line; before, it was not kept.
     self.__cs_stats_queue_peak = max(self.__cs_stats_queue_peak, self.input_queue_size)
     if self.time() - self.__cs_stats_last >= self.CS_STATS_INTERVAL:
+      # The tombstones swept (expired, past the cap, or all with the order switch 'off'), counted into this line.
+      self.__sweep_tombstones()
       # Take the counters and start new ones, under the lock the counts are made under.
       with self.__persistence_lock:
         # The counts go to the new dict from here; the old one is only read below. The same for the largest lead of

@@ -290,7 +290,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
     for name in ("cs_stats", "cs_stats_last", "cs_stats_queue_peak", "cs_stats_lost", "cs_modes", "save_max_gap",
                  # The save back-off's pause, the stamp bound, the period's largest stamp lead, the stamp clock and the
                  # flag of changes held without a dirty mark.
-                 "save_resume", "ver_ahead", "ver_lead", "ver_clock", "chain_storage_unmarked"):
+                 "save_resume", "ver_ahead", "ver_lead", "ver_clock", "chain_storage_unmarked",
+                 # The tombstone life, the cap and the horizon.
+                 "tomb_ms", "tomb_cap", "tomb_horizon"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"
@@ -424,19 +426,35 @@ class TestWritesThatChangeNothing(unittest.TestCase):
     self.assertEqual(getattr(store, STATS), {"plain/remote/absent_delete": 1})
 
   def test_local_delete_of_an_absent_key_is_broadcast_and_not_saved(self):
+    """A local delete of a key not held returns True at once, is sent, does not mark the replica and counts
+    absent_delete (in 'report' also the tombstone it leaves)."""
+    # The store of "node", holding nothing.
     store = make_store()
+    # The delete: its wait ends at once.
     self.assertTrue(store._set_value("absent", None, owner="node", timeout=.1, max_retries=0))
+    # Not marked for a save.
     self.assertFalse(getattr(store, DIRTY))
+    # Sent as a store with value None.
     self.assertEqual([op[store.CS_VALUE] for op in getattr(store, OPS)], [None])
-    self.assertEqual(getattr(store, STATS), {"plain/local/absent_delete": 1})
+    # Counted as a delete of a key not held; in 'report' its stamped delete leaves a new tombstone.
+    self.assertEqual(getattr(store, STATS), {"plain/local/absent_delete": 1,
+                                             **reported({"plain/local/tombstone_new": 1})})
 
   def test_delete_of_a_held_key_is_saved(self):
+    """A local delete of a held key removes it, marks the replica for a save and counts changed (in 'report' also
+    the tombstone it leaves)."""
+    # The store of "node", holding "key".
     store = make_store()
+    # Held as a write leaves it.
     seed(store, "key", "value")
+    # The delete: its wait ends at once.
     self.assertTrue(store._set_value("key", None, owner="node", timeout=.1, max_retries=0))
+    # The key is gone.
     self.assertNotIn("key", store.storage)
+    # Marked for a save.
     self.assertTrue(getattr(store, DIRTY))
-    self.assertEqual(getattr(store, STATS), {"plain/local/changed": 1})
+    # Counted as a change; in 'report' its stamped delete leaves a new tombstone.
+    self.assertEqual(getattr(store, STATS), {"plain/local/changed": 1, **reported({"plain/local/tombstone_new": 1})})
 
 
 class TestCounters(unittest.TestCase):
@@ -471,8 +489,9 @@ class TestCounters(unittest.TestCase):
       "plain/local/absent_delete": 1, "plain/remote/absent_delete": 1, "plain/remote/refused_token": 1,
       # The local write with no target peer.
       "plain/local/refused_no_peers": 1,
-      # In 'report', the order rule's count of the unstamped remote write over the stamped local record.
-      **reported({"plain/remote/ver_unstamped": 1}),
+      # In 'report', the order rule's count of the unstamped remote write over the stamped local record, and the
+      # tombstone the local delete leaves.
+      **reported({"plain/remote/ver_unstamped": 1, "plain/local/tombstone_new": 1}),
     })
 
   def test_a_write_that_raises_is_counted_once_by_what_it_did_to_the_replica(self):

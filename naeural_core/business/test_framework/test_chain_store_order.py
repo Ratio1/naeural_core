@@ -31,6 +31,8 @@ from naeural_core.main.serialization_manager import SerializationManager
 from test_chain_store_accounting import STATS, SIGNED_POINTER, _StartHarness, make_signed_store
 # The harness, its fake network, the composer of a hash key and the payload field names.
 from test_chain_store_hsync import _ChainStoreRuntimeHarness, _FakeNetwork, _PayloadData, _hset_key
+# The harness of the plugin API (chainstore_get, hget, hlist, hgetall) over a store's memory.
+from test_chain_store_hsync import _PeerSelectionHarness
 
 # The wall clock of the tests, in seconds, and the same in ms (the unit of a stamp).
 NOW, NOW_MS = 1_700_000_000.0, 1_700_000_000_000
@@ -44,6 +46,10 @@ MERGE, EXPORT = "_ChainStoreBasePlugin__merge_hset_snapshot", "_ChainStoreBasePl
 KEY = _hset_key("players", "alpha")
 # Its bucket, the 14-character "hs:" prefix the counters use.
 BUCKET = KEY[:14]
+# The key a tombstone of KEY is held under.
+TOMB = "dl:" + KEY
+# One day in ms, the unit of a tombstone's life.
+DAY_MS = 86_400_000
 
 
 def make(mode, address="node", peers=("peer1", "peer2"), storage=None, signed=False):
@@ -653,6 +659,278 @@ class TestCostAndPersistence(unittest.TestCase):
     self.assertEqual(store.saved_storage[-1][KEY]["ver"], [NOW_MS + 5000, "peer2"])
 
 
+def tombstone(key, owner, ver):
+  """
+  Build the tombstone a remote stamped delete leaves, as a replica holds it under ``"dl:" + key``.
+
+  Parameters
+  ----------
+  key : str
+    The deleted key.
+  owner : str
+    The deleter's owner.
+  ver : list
+    The delete's stamp.
+
+  Returns
+  -------
+  dict
+    The record: value None, the stamp, a remote record's confirmation fields.
+
+  Examples
+  --------
+  >>> tombstone(KEY, "peer1", [NOW_MS, "peer1"])["value"] is None
+  True
+  """
+  # A remote record of the key with value None and the delete's stamp.
+  return record(key, None, owner, ver)
+
+
+class TestTombstones(unittest.TestCase):
+  """A stamped delete leaves a tombstone under "dl:" + key: hidden from reads, ordered, synced, swept."""
+
+  def test_a_delete_leaves_a_tombstone_that_no_read_shows(self):
+    """In 'report' a local delete of a held key removes it, stores a stamped tombstone and marks the replica; get,
+    hget, hlist and hgetall do not show it; an older or equal delete changes nothing; a delete of a key not held
+    leaves a tombstone held without a dirty mark; 'off' leaves none."""
+    # A replica holding KEY and another field.
+    store = make("report", storage={KEY: record(KEY, "v", "peer1"),
+                                    _hset_key("players", "beta"): record(_hset_key("players", "beta"), "b", "p")})
+    # The local delete: True at once, as before.
+    self.assertTrue(local_write(store, KEY, None))
+    # The key is gone, its tombstone holds the stamp and the deleter, and the replica is marked.
+    self.assertEqual((KEY in store.storage, store.storage[TOMB]["value"], store.storage[TOMB]["ver"],
+                      store.storage[TOMB]["owner"], getattr(store, DIRTY)),
+                     (False, None, [NOW_MS, "node"], "node", True))
+    # The plugin API over the replica's memory.
+    api = _PeerSelectionHarness()
+    # Its key hashing and field encoding, as the plugin's.
+    api.get_hash, api.str_to_base64 = _ChainStoreRuntimeHarness.get_hash, _ChainStoreRuntimeHarness.str_to_base64
+    # Its field decoding.
+    api.base64_to_str = _ChainStoreRuntimeHarness.base64_to_str
+    # The replica and its getter in the shared memory.
+    api.plugins_shmem.update({"__chain_storage": store.storage, "__chain_storage_get": store._get_value})
+    # Neither a read nor a listing shows the deleted field.
+    self.assertEqual((api.chainstore_hget("players", "alpha"), api.chainstore_get(KEY),
+                      api.chainstore_hlist("players"), api.chainstore_hgetall("players")),
+                     (None, None, ["beta"], {"beta": "b"}))
+    # An older and an equal delete from peers: the tombstone kept as it is.
+    deliver(store, KEY, None, "peer1", [NOW_MS - 5, "peer1"])
+    # The equal one.
+    deliver(store, KEY, None, "node", [NOW_MS, "node"])
+    # Kept.
+    self.assertEqual(store.storage[TOMB]["ver"], [NOW_MS, "node"])
+    # A delete of a key not held, on a saved replica.
+    setattr(store, DIRTY, False)
+    # A key never held.
+    other = _hset_key("players", "gamma")
+    # Deleted locally.
+    local_write(store, other, None)
+    # A tombstone, held without a dirty mark.
+    self.assertEqual(("dl:" + other in store.storage, getattr(store, DIRTY), getattr(store, UNMARKED)),
+                     (True, False, True))
+    # Off: the same delete leaves no tombstone.
+    store = make("off", storage={KEY: record(KEY, "v", "peer1")})
+    # Deleted.
+    local_write(store, KEY, None)
+    # Nothing left.
+    self.assertEqual(store.storage, {})
+
+  def test_a_value_older_than_the_delete_is_refused_in_on(self):
+    """A value stamped before the tombstone counts ver_older_than_delete: refused in 'on', applied in 'report' (the
+    tombstone removed); a newer value with its own owner, readonly and token is applied as to a key not held."""
+    # Each mode.
+    for mode in ("report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A replica holding the tombstone of a delete at +5 s.
+        store = make(mode, storage={TOMB: tombstone(KEY, "peer1", [NOW_MS + 5000, "peer1"])})
+        # A value written before the delete arrives late.
+        late = deliver(store, KEY, "old", "peer2", [NOW_MS + 1000, "peer2"])
+        # Refused unconfirmed in 'on'; applied in 'report', its tombstone removed.
+        self.assertEqual((len(late), KEY in store.storage, TOMB in store.storage),
+                         (0, False, True) if mode == "on" else (1, True, False))
+        # Counted in both.
+        self.assertEqual(getattr(store, STATS).get(BUCKET + "/remote/ver_older_than_delete"), 1)
+    # A newer write with a token and readonly over the tombstone: applied as to a key not held.
+    store = make("on", storage={TOMB: tombstone(KEY, "peer1", [NOW_MS + 5000, "peer1"])})
+    # Its body, with a token and readonly.
+    store.default_handler({_PayloadData.EE_SENDER: "peer2", _PayloadData.EE_ID: "peer2",
+                           _PayloadData.EE_DESTINATION: ["node"], _PayloadData.EE_IS_ENCRYPTED: True,
+                           "decoded": {store.CS_DATA: {store.CS_OP: store.CS_STORE, store.CS_KEY: KEY,
+                                                       store.CS_VALUE: "new", store.CS_OWNER: "peer2",
+                                                       store.CS_TOKEN: "t", store.CS_READONLY: True,
+                                                       store.CS_VER: [NOW_MS + 9000, "peer2"]}}})
+    # Stored with them, the tombstone gone.
+    self.assertEqual((store.storage[KEY]["value"], store.storage[KEY]["token"], store.storage[KEY]["readonly"],
+                      TOMB in store.storage), ("new", "t", True, False))
+
+  def test_no_write_names_a_tombstone_key(self):
+    """A local write to a "dl:" key raises; a store for one from a peer is dropped unconfirmed and counted
+    refused_invalid_key, without raising."""
+    # A replica in 'on'.
+    store = make("on")
+    # The local write raises.
+    with self.assertRaisesRegex(ValueError, "reserved"):
+      # Through the store's setter.
+      store._set_value("dl:x", "v", owner="node")
+    # The remote one: nothing stored or sent, and counted under the bucket of the key it names.
+    self.assertEqual((deliver(store, TOMB, "v", "peer1", [NOW_MS, "peer1"]), store.storage, getattr(store, STATS)),
+                     ([], {}, {BUCKET + "/remote/refused_invalid_key": 1}))
+
+  def test_the_export_sends_a_tombstone_under_its_key_except_in_off(self):
+    """A sync answer carries a tombstone under the key it deleted (value None, its stamp) in 'report' and 'on', none
+    in 'off'; a "dl:" record holding a value is never sent."""
+    # Each mode and whether the tombstone is sent.
+    for mode, sent in (("off", False), ("report", True), ("on", True)):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A replica holding a tombstone and a "dl:" record a caller of the previous release wrote with a value.
+        other = _hset_key("players", "beta")
+        # Both records.
+        store = make(mode, storage={TOMB: tombstone(KEY, "peer1", [NOW_MS, "peer1"]),
+                                    "dl:" + other: record("dl:" + other, "x", "api")})
+        # Its answer.
+        snapshot = getattr(store, EXPORT)("players")
+        # The tombstone under KEY with value None and its stamp (without its token, as every exported record), or
+        # nothing.
+        self.assertEqual(snapshot, {KEY: {field: item for field, item in tombstone(KEY, "peer1", [NOW_MS, "peer1"])
+                                          .items() if field != "token"}} if sent else {})
+
+  def test_a_tombstone_copy_is_applied_in_on_and_only_counted_in_report(self):
+    """A sync copy of a delete removes the held value and stores the tombstone in 'on' (counted ver_copy_delete and
+    tombstone_new); 'report' keeps the value and counts ver_copy_delete; 'off' skips it and counts nothing."""
+    # Each mode.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A replica holding KEY stamped at +1 s.
+        store = make(mode, storage={KEY: record(KEY, "v", "peer1", [NOW_MS + 1000, "peer1"])})
+        # A peer's tombstone of a later delete, as its answer carries it.
+        merged = getattr(store, MERGE)("players", {KEY: tombstone(KEY, "peer2", [NOW_MS + 2000, "peer2"])})
+        # Applied only in 'on'.
+        self.assertEqual((merged, KEY in store.storage, TOMB in store.storage),
+                         (1, False, True) if mode == "on" else (0, True, False))
+        # Counted in 'report' and 'on'.
+        self.assertEqual(getattr(store, STATS), {} if mode == "off" else {
+          BUCKET + "/hsync/ver_copy_delete": 1, **({BUCKET + "/hsync/tombstone_new": 1} if mode == "on" else {})})
+
+  def test_a_deleted_key_does_not_come_back_on_a_replica_that_held_a_legacy_copy(self):
+    """The council's split history ('on'): a key written before stamps existed is deleted while one replica is away;
+    the delete, sent again with its own stamp, removes the legacy copy there; afterwards neither a sync from a peer
+    that still holds the legacy copy nor one from a peer holding an older stamped copy brings the key back."""
+    # The replica that was away, still holding the legacy unstamped value.
+    store = make("on", storage={KEY: record(KEY, "v0", "peer1")})
+    # The delete of peer1 reaches it (a live store, or the same store sent again later).
+    self.assertEqual(len(deliver(store, KEY, None, "peer1", [NOW_MS, "peer1"])), 1)
+    # Gone, a tombstone held.
+    self.assertEqual((KEY in store.storage, TOMB in store.storage), (False, True))
+    # The same delete again: still deleted, confirmed.
+    self.assertEqual(len(deliver(store, KEY, None, "peer1", [NOW_MS, "peer1"])), 1)
+    # A sync from a peer holding the legacy copy, then from one holding a copy stamped before the delete.
+    merged = [getattr(store, MERGE)("players", {KEY: record(KEY, "v0", "peer2")}),
+              getattr(store, MERGE)("players", {KEY: record(KEY, "v1", "peer2", [NOW_MS - 1000, "peer2"])})]
+    # Neither brings the key back.
+    self.assertEqual((merged, KEY in store.storage), ([0, 0], False))
+
+  def test_a_delete_confirmation_lands_on_the_tombstone(self):
+    """A peer's confirmation of a local delete (value None, the previous release's full form) counts on the
+    tombstone the delete left, once per target."""
+    # A replica in 'report' holding KEY.
+    store = make("report", storage={KEY: record(KEY, "v", "peer1")})
+    # The local delete, targeting peer1 and peer2.
+    local_write(store, KEY, None)
+    # peer1's confirmation, twice, as the previous release sends it.
+    for _ in range(2):
+      # Through the payload handler.
+      store.default_handler({_PayloadData.EE_SENDER: "peer1", _PayloadData.EE_ID: "peer1",
+                             _PayloadData.EE_DESTINATION: ["node"], _PayloadData.EE_IS_ENCRYPTED: True,
+                             "decoded": {store.CS_DATA: {store.CS_OP: store.CS_CONFIRM, store.CS_KEY: KEY,
+                                                         store.CS_VALUE: None, store.CS_OWNER: "node"}}})
+    # Counted once on the tombstone.
+    self.assertEqual((store.storage[TOMB]["confirms"], store.storage[TOMB]["confirmed_peers"]), (1, ["peer1"]))
+
+  def test_the_sweep_removes_expired_and_surplus_tombstones_and_raises_the_horizon(self):
+    """At each CSTORE_STATS line the tombstones older than CSTORE_TOMBSTONE_DAYS and the oldest past
+    CSTORE_TOMBSTONE_CAP go, counted, the replica marked; the horizon is the newest removed stamp that is not a
+    future one; 'off' and a life of 0 days remove every tombstone; a "dl:" record that is not a tombstone stays."""
+    # Tombstones 8 days, 1 day and 1 s old, and one 2 min ahead; and a "dl:" record holding a value.
+    stamps = {"a": NOW_MS - 8 * DAY_MS, "b": NOW_MS - DAY_MS, "c": NOW_MS - 1000, "d": NOW_MS + 120_000}
+    # As held.
+    held = {"dl:" + name: tombstone(name, "p", [ms, "p"]) for name, ms in stamps.items()}
+    # The record that is not a tombstone.
+    held["dl:x"] = record("dl:x", "kept", "api")
+    # Each case: mode, cap, life in days, the tombstones left, the horizon.
+    cases = (("on", 2, 7, ["c", "d"], stamps["b"]), ("on", 570, 7, ["b", "c", "d"], stamps["a"]),
+             ("on", 0, 7, [], stamps["c"]), ("report", 570, 0, [], stamps["c"]), ("off", 570, 7, [], stamps["c"]))
+    # Each case.
+    for mode, cap, days, left, horizon in cases:
+      # One sub-test each.
+      with self.subTest(mode=mode, cap=cap, days=days):
+        # The replica, with this cap and life.
+        store = make(mode, storage=held)
+        # As on_init reads them.
+        store._ChainStoreBasePlugin__tomb_cap, store._ChainStoreBasePlugin__tomb_ms = cap, days * DAY_MS
+        # The sweep.
+        store._ChainStoreBasePlugin__sweep_tombstones()
+        # What is left, the horizon, the mark and the counts.
+        self.assertEqual((sorted(store.storage), store._ChainStoreBasePlugin__tomb_horizon, getattr(store, DIRTY),
+                          getattr(store, STATS)),
+                         (sorted(["dl:x"] + ["dl:" + name for name in left]), horizon, True,
+                          {"tombstones_dropped": 4 - len(left), **({"tombstones_held": len(left)} if left else {})}))
+
+  def test_start_drops_a_tombstone_whose_key_is_held_again(self):
+    """on_init ('report') drops the tombstone of a key that is held again (rewritten under the previous release) and
+    keeps a tombstone whose key is not held and a "dl:" record holding a value."""
+    # A data folder with a cache folder, removed after the test.
+    folder = tempfile.TemporaryDirectory()
+    # Removed after the test.
+    self.addCleanup(folder.cleanup)
+    # The cache folder.
+    os.makedirs(os.path.join(folder.name, "chain_store"))
+    # The manager in use, put back after the test.
+    self.addCleanup(setattr, SerializationManager, "instance", SerializationManager.instance)
+    # A manager that takes the registration.
+    SerializationManager.instance = SimpleNamespace(register=lambda save, every: None)
+    # KEY held again with its old tombstone; "b" deleted; "x" held next to a "dl:x" holding a value.
+    stored = {KEY: record(KEY, "again", "p"), TOMB: tombstone(KEY, "p", [NOW_MS, "p"]),
+              "dl:b": tombstone("b", "p", [NOW_MS, "p"]), "x": record("x", 1, "p"), "dl:x": record("dl:x", 2, "api")}
+    # Written as the replica file.
+    with open(os.path.join(folder.name, "chain_store", "object.pickle"), "wb") as stream:
+      # The pickle the start loads.
+      pickle.dump(stored, stream)
+    # A store to start in 'report'.
+    with mock.patch.object(_ChainStoreRuntimeHarness, "CSTORE_MODE", "report"):
+      # Built with the switches in 'report'.
+      store = _StartHarness(folder.name)
+    # At the tests' wall clock, with an empty whitelist for the peer refresh.
+    store._now, store.bc = NOW, SimpleNamespace(get_whitelist=lambda with_prefix=False: [])
+    # The real on_init.
+    store.on_init()
+    # Only the tombstone of the held key is gone.
+    self.assertEqual(sorted(store.storage), sorted([KEY, "dl:b", "x", "dl:x"]))
+
+  def test_an_orderly_stop_saves_a_tombstone_held_without_a_dirty_mark(self):
+    """The tombstone of a delete of a key not held is not saved by the periodic flush but is saved at an orderly
+    stop, so after a restart an older write of that key is still refused."""
+    # A replica in 'on' holding nothing.
+    store = make("on")
+    # A peer's delete of a key this replica does not hold.
+    deliver(store, KEY, None, "peer1", [NOW_MS, "peer1"])
+    # The periodic flush finds nothing changed.
+    store._ChainStoreBasePlugin__maybe_flush_chain_storage()
+    # Nothing written.
+    self.assertEqual(store.saved_storage, [])
+    # The manager in use, put back after the test.
+    self.addCleanup(setattr, SerializationManager, "instance", SerializationManager.instance)
+    # A manager that takes the removal of the registration.
+    SerializationManager.instance = SimpleNamespace(unregister=lambda save: None)
+    # The orderly stop.
+    store.on_close()
+    # The tombstone is in the file.
+    self.assertEqual(store.saved_storage[-1][TOMB]["ver"], [NOW_MS, "peer1"])
+
+
 class _QueuedNetwork(_FakeNetwork):
   """A network that holds every message until the history delivers it, so messages arrive in any order."""
 
@@ -710,14 +988,15 @@ class _QueuedNetwork(_FakeNetwork):
     _FakeNetwork.dispatch(self, sender, target, decoded)
 
 
-def run_history(seed, mode, deletes=False, steps=40):
+def run_history(seed, mode, steps=40):
   """
   Run one seeded random history on three replicas and bring them to rest.
 
-  Each step is one of: a local write of a random key and value on a random replica (a delete too when ``deletes``
-  is True); the delivery of a random held message; a second delivery of one (a re-delivery); the loss of one; a
-  sync of one replica from another (export, then merge). The replicas' wall clocks differ by up to 20 s. At rest
-  every held message is delivered, then every replica syncs from every other one.
+  Each step is one of: a local write of a random key on a random replica, a value or a delete; the delivery of a
+  random held message; a second delivery of one (a re-delivery); the loss of one; a sync of one replica from
+  another (export, then merge). The replicas' wall clocks differ by up to 20 s. At rest every held message is
+  delivered in a random order, then every replica syncs from every other one, the syncs in a random order: under
+  arrival order the last sync of a replica would decide what it keeps, so equal contents prove the order rule.
 
   Parameters
   ----------
@@ -725,8 +1004,6 @@ def run_history(seed, mode, deletes=False, steps=40):
     The history's seed; the same seed gives the same history in every mode.
   mode : str
     The mode of every switch of the three replicas.
-  deletes : bool, optional
-    True to mix deletes into the writes. Default is False.
   steps : int, optional
     Number of steps before the rest. Default is 40.
 
@@ -753,8 +1030,8 @@ def run_history(seed, mode, deletes=False, steps=40):
     network.register(store)
   # Clock offsets of the replicas, within the 60 s bound.
   skews = [rng.uniform(-10, 10) for _ in fleet]
-  # Two keys of one namespace, three values (and deletes).
-  keys, values = [_hset_key("ns", "a"), _hset_key("ns", "b")], ["x", "y", "z"] + ([None] if deletes else [])
+  # Two keys of one namespace, three values and a delete.
+  keys, values = [_hset_key("ns", "a"), _hset_key("ns", "b")], ["x", "y", "z", None]
   # The trace and the shared wall clock.
   trace, now = [], NOW
   # Each step.
@@ -790,18 +1067,18 @@ def run_history(seed, mode, deletes=False, steps=40):
       # The merged count of that sync.
       trace.append(("sync", target.ee_addr, source.ee_addr,
                     getattr(target, MERGE)("ns", getattr(source, EXPORT)("ns"))))
-  # At rest: every held message delivered.
+  # At rest: every held message delivered, in a random order.
   while network.pending:
-    # In order.
-    network.deliver(0)
-  # Then every replica syncs from every other one.
-  for target in fleet:
-    # From each other replica.
-    for source in fleet:
-      if target is not source:
-        # The sync.
-        trace.append(("sync", target.ee_addr, source.ee_addr,
-                      getattr(target, MERGE)("ns", getattr(source, EXPORT)("ns"))))
+    # One of them.
+    network.deliver(rng.randrange(len(network.pending)))
+  # Then every replica syncs from every other one, in a random order.
+  pairs = [(target, source) for target in fleet for source in fleet if target is not source]
+  # Shuffled by the history's seed.
+  rng.shuffle(pairs)
+  # Each sync.
+  for target, source in pairs:
+    # Its merged count.
+    trace.append(("sync", target.ee_addr, source.ee_addr, getattr(target, MERGE)("ns", getattr(source, EXPORT)("ns"))))
   # The value of each key each replica holds, tombstones left out.
   contents = [{key: rec["value"] for key, rec in store.storage.items() if not key.startswith("dl:")}
               for store in fleet]
@@ -813,16 +1090,34 @@ class TestConvergence(unittest.TestCase):
   """Random histories of writes, re-deliveries, losses and syncs between three replicas."""
 
   def test_replicas_end_equal_in_on(self):
-    """With the order switch 'on', 2,000 seeded histories of writes delivered in any order, re-delivered, lost and
-    synced end with the same value of every key on the three replicas."""
-    # The histories whose replicas differ at rest.
-    split = [seed for seed in range(2000) if len({repr(sorted(c.items())) for c in run_history(seed, "on")[0]}) > 1]
-    # None.
-    self.assertEqual(split, [])
+    """With the order switch 'on', 2,000 seeded histories of writes and deletes delivered in any order, re-delivered,
+    lost and synced end with the same value of every key on the three replicas, a deleted key absent on all; the
+    same harness with the switch 'off' (arrival order) leaves some of the first 500 split, so it can tell."""
+
+    def split(mode, seeds):
+      """
+      Give the seeds whose replicas end with different contents.
+
+      Parameters
+      ----------
+      mode : str
+        The mode of every switch.
+      seeds : range
+        The histories run.
+
+      Returns
+      -------
+      list of int
+        The seeds of the split histories.
+      """
+      # A history splits when its three contents are not one.
+      return [seed for seed in seeds if len({repr(sorted(c.items())) for c in run_history(seed, mode)[0]}) > 1]
+    # None in 'on'; some in 'off'.
+    self.assertEqual((split("on", range(2000)), split("off", range(500)) != []), ([], True))
 
   def test_report_behaves_as_off_apart_from_stamps(self):
-    """1,000 seeded histories run in 'off' and in 'report' give the same returns, the same messages apart from their
-    stamps, the same sync counts and the same values at rest."""
+    """1,000 seeded histories of writes and deletes run in 'off' and in 'report' give the same returns, the same
+    messages apart from their stamps, the same sync counts and the same values at rest (tombstones left out)."""
     # The histories whose two runs differ.
     differ = [seed for seed in range(1000) if run_history(seed, "off") != run_history(seed, "report")]
     # None.

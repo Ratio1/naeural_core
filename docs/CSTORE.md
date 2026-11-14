@@ -325,6 +325,34 @@ default). With it `off` no stamp is made or read, as in the previous release.
   and the losing write is gone except in the counters; a record written before stamps
   existed keeps arrival order until it is rewritten.
 
+### Deletes that stick (tombstones)
+
+With `CSTORE_ORDER` not `off`, a stamped delete leaves a **tombstone**: a record under
+`dl:` plus the deleted key, with value `None`, the delete's owner and its stamp. A key
+and its tombstone are never both held (storing a value removes the tombstone).
+
+- Reads never see it: `get` and `hget` of the key return `None`; `hlist`, `hkeys` and
+  `hgetall` match only `hs:` keys. No write may name a `dl:` key: a local one raises, a
+  store from a peer is dropped and counted as `refused_invalid_key`.
+- The order rule takes the tombstone as the held record, so a value stamped before the
+  delete is `older_than_delete` (refused in `on`). A newer value is applied as to a key
+  not held.
+- An hsync answer carries each tombstone of the namespace under the deleted key (value
+  `None`, its stamp). `on` applies it (the key removed, `ver_copy_delete`); `report`
+  only counts what `on` would remove; `off` and the previous release skip it.
+- A confirmation of a local delete (value `None`) counts on the tombstone.
+- At each `CSTORE_STATS` line the sweep removes tombstones older than
+  `CSTORE_TOMBSTONE_DAYS` (7) and the oldest past `CSTORE_TOMBSTONE_CAP` (570), or all
+  of them with `CSTORE_ORDER` `off` or 0 days. A key whose tombstone was removed can come
+  back from a peer that still holds it.
+- At start a tombstone whose key is held again (rewritten under the previous release)
+  is dropped. A tombstone of a key not held, or a newer stamp on one, is not marked for
+  the periodic save; the save at an orderly stop writes it.
+- With `CSTORE_ORDER` `on`, a delete of a record whose value carries `cs_rev`, or of a
+  signed record, is refused (a side that carries the field beats one that lacks it).
+- Previous release: a `dl:` record loads as a plain key no read lists or exports, and
+  stays until a later release's sweep removes it.
+
 ## Cost line in the node log (`CSTORE_STATS`)
 
 Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
@@ -364,10 +392,13 @@ Labels in `counts`:
     - `refused_secret_rule`: a revocation marker emptied or changed, or a payload for a revoked secret revision.
     - `refused_token`: the stored record has another token.
     - `refused_readonly`: the stored record is readonly for another owner.
-    - with `CSTORE_ORDER` `on` only: `refused_future`, `refused_origin`, `refused_older`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
+    - with `CSTORE_ORDER` `on` only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).
 - `<bucket>/local/unconfirmed` and `<bucket>/local/overwritten`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, or another write replaced the key during the wait.
-- `<bucket>/<origin>/ver_<word>` (`CSTORE_ORDER` `report` or `on`): a write or copy the order rule gives a word (`future`, `origin`, `older`, `unstamped`, `collision`), counted whether or not it is refused; `<origin>` is `local`, `remote` or `hsync` (a record of a sync answer). `ver_invalid`: a stamp that is not `[int, str]`, treated as none.
+- `<bucket>/<origin>/ver_<word>` (`CSTORE_ORDER` `report` or `on`): a write or copy the order rule gives a word (`future`, `origin`, `older`, `older_than_delete`, `unstamped`, `collision`), counted whether or not it is refused; `<origin>` is `local`, `remote` or `hsync` (a record of a sync answer). `ver_invalid`: a stamp that is not `[int, str]`, treated as none. `<bucket>/hsync/ver_copy_delete`: a tombstone copy that removes (`on`) or would remove (`report`) a value held.
+- `<bucket>/<origin>/tombstone_new`: a delete that left a new tombstone; `<origin>` also `hsync` in `on`.
+- `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`.
+- `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.

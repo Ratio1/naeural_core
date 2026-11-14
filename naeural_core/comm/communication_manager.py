@@ -679,7 +679,8 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
 
     The orderly stop calls this right after it queued the SHUTDOWN heartbeat and before the communicators are
     stopped: a communicator that is stopped discards what is still in its queue, while a message its thread
-    has already taken is sent in the same lap. The queue is polled every 0.1 s.
+    has already taken is sent in the same lap when the communicator has its connection. The queue is polled
+    every 0.1 s.
 
     Parameters
     ----------
@@ -693,9 +694,15 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
     Notes
     -----
     This replaces a fixed 5 s sleep at every orderly stop; the thread takes a queued heartbeat within one lap
-    (20 ms at the default loop resolution), so the wait normally ends at its first or second poll. When the
-    time is up and a heartbeat is still queued (the communicator has no broker connection), one red line says
-    so and the close goes on; the heartbeat is then discarded when the communicator stops.
+    (20 ms at the default loop resolution) when its previous message was delivered, so the wait normally ends
+    at its first or second poll. The thread takes no new heartbeat while it holds one it could not send (no
+    broker connection, or a failed publish): when the time is up and a heartbeat is still queued for that
+    reason, one red line says so and the close goes on; the heartbeat is then discarded when the communicator
+    stops.
+
+    Only the queue is watched. A heartbeat the thread took while the communicator had no connection is held
+    and tried again each lap; this wait returns at once for it, with no line, and it is lost if the
+    communicator stops before the connection is back.
 
     Examples
     --------

@@ -1591,10 +1591,13 @@ class Orchestrator(DecentrAIObject,
 
     Notes
     -----
-    Before, a fixed 5 s sleep followed the heartbeat at every stop, a quarter of the 20 s a container runtime
-    commonly allows for a stop. The heartbeat leaves the queue within one lap of the communicator thread, so
-    the wait now normally ends within a tenth of a second; it lasts the 5 s only when the heartbeat cannot be
-    sent, and then one red line says so.
+    Before, a fixed 5 s sleep followed the heartbeat at every stop: half of the 10 s a container runtime allows
+    for a stop by default, a quarter of a 20 s limit. The communicator thread takes the heartbeat from the
+    queue within one lap when its previous message was delivered, and sends it in that lap when it has its
+    connection, so the wait now normally ends within a tenth of a second. It lasts the 5 s when the thread does
+    not take the heartbeat because it still holds an earlier message it could not send; then one red line says
+    so. A heartbeat the thread took without a connection is held, not sent: the wait ends at once, and the
+    heartbeat is lost with no line if the communicators stop before the connection is back.
 
     Examples
     --------

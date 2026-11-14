@@ -605,6 +605,38 @@ class TestOrderOfSyncCopies(unittest.TestCase):
         # Its value and stamp.
         self.assertEqual((store.storage[KEY]["value"], store.storage[KEY]["ver"]), ("c", [NOW_MS + 4000, "peer2"]))
 
+  def test_an_equal_copy_raises_the_held_stamp_only_to_a_newer_stamp_the_rule_admits(self):
+    """A sync copy equal to the held record in value, owner, readonly and token leaves the held stamp as it is when
+    its stamp is older or more than 60 s ahead (the rule's words older and future, each counted), and raises it in
+    place to a newer one with no dirty mark but the unmarked flag set, in 'report' and 'on'; in 'on', after the
+    older copy, a live store stamped between that copy and the held stamp is still refused as older."""
+    # The stamp the replica holds, at +2 s.
+    held = [NOW_MS + 2000, "peer1"]
+    # Each copy: the rule's word for its stamp, the stamp, and the stamp the replica holds after it.
+    cases = (("older", [NOW_MS + 1000, "peer1"], held), ("future", [NOW_MS + 61_000, "peer1"], held),
+             (None, [NOW_MS + 3000, "peer1"], [NOW_MS + 3000, "peer1"]))
+    # Each mode.
+    for mode in ("report", "on"):
+      # Each copy.
+      for word, ver, after in cases:
+        # One sub-test each.
+        with self.subTest(mode=mode, word=word):
+          # A replica holding "b" of peer1 at the held stamp, saved.
+          store = make(mode, storage={KEY: record(KEY, "b", "peer1", list(held))})
+          # The same record (value, owner, readonly, token) with the copy's stamp, as a sync answer.
+          merged = getattr(store, MERGE)("players", {KEY: record(KEY, "b", "peer1", list(ver))})
+          # Nothing applied; the stamp held after it; no dirty mark; held for the stop only when raised; the word
+          # counted under the sync origin.
+          self.assertEqual(
+            (merged, store.storage[KEY]["ver"], getattr(store, DIRTY), getattr(store, UNMARKED), getattr(store, STATS)),
+            (0, after, False, word is None, {BUCKET + "/hsync/ver_" + word: 1} if word else {}))
+          if mode == "on" and word == "older":
+            # A live store of another value from peer2, stamped between the older copy and the held stamp.
+            bodies = deliver(store, KEY, "x", "peer2", [NOW_MS + 1500, "peer2"])
+            # Still older than the held stamp: refused with an answer, the held value and stamp kept.
+            self.assertEqual((answers(bodies), store.storage[KEY]["value"], store.storage[KEY]["ver"]),
+                             (["older"], "b", held))
+
 
 class TestCostAndPersistence(unittest.TestCase):
   """What stamps add to the replica file, the stats line and the save at an orderly stop."""

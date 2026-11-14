@@ -37,7 +37,12 @@ from ..message_buffer import ObservableMessageBuffer
 
 
 RUN_ON_THREAD = True
-MAX_MESSAGE_LEN = 1024 * 1024 * 2  # 2MB
+# The largest message handed to the transport, in bytes of its UTF-8 text. The brokers the nodes use accept a
+# packet of at most 1 MB (1,048,576 bytes, a common broker default), counted in bytes and including the topic
+# and the packet header: 1,000,000 leaves 48,576 bytes for those. It was 2 MiB of characters, so a message
+# between the two sizes was handed over and the broker then closed the communicator's connection, with no
+# line that named the message.
+MAX_MESSAGE_LEN = 1_000_000
 
 _CONFIG = {
 
@@ -1037,9 +1042,33 @@ class BaseCommThread(
     ----------
     message : str
         message to be validated.
+
+    Returns
+    -------
+    bool
+        True when the message may be published: its UTF-8 text is at most ``MAX_MESSAGE_LEN`` bytes.
+
+    Raises
+    ------
+    UnicodeEncodeError
+        For a text UTF-8 cannot encode (a lone surrogate). The transport raises the same for such a text;
+        ``send_wrapper`` reports it and the message stays pending, as before.
+
+    Notes
+    -----
+    The size is counted in bytes, as a broker counts a packet. Counted in characters, a text with characters
+    outside ASCII was taken for up to four times smaller than it is on the wire.
+
+    Examples
+    --------
+    >>> self._check_send_message("a" * 1_000_000), self._check_send_message("a" * 1_000_001)
+    (True, False)
+    >>> self._check_send_message("\u20ac" * 400_000)   # 400,000 characters, 1,200,000 bytes
+    False
     """
     
-    if len(message) > MAX_MESSAGE_LEN:
+    # Bytes of the UTF-8 text, which is what goes on the wire; before, the number of characters.
+    if len(message.encode()) > MAX_MESSAGE_LEN:
       return False
     return True
     
@@ -1161,7 +1190,8 @@ class BaseCommThread(
           is_ok = published_bytes
       else:
         self.P("Message size {:,.1f} KB was dropped for pipeline {}".format(
-          len(message) / 1024, signed_data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>")
+          # The size the check compared: bytes of the UTF-8 text, not characters.
+          len(message.encode()) / 1024, signed_data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>")
           ), color='r'
         )
         self._last_send_outcome = 'terminal_dropped_oversize'

@@ -35,6 +35,11 @@ ERRORS = {
   "IMAGE_PULL_FAILED": "Container image could not be downloaded.",
   "SECRET_RESOLUTION_FAILED": "Protected configuration could not be resolved.",
 }
+# The failures that a later start of the workload can clear (a start, an image fetch). An instance leaves one of
+# them once its plugin no longer holds the error code (the runner reported a new status after the failure) and is
+# ready, or when a node restart starts the attempt again; before, every failure was kept for the attempt although
+# the app ran again. Every other code is still kept for the attempt.
+RECOVERABLE_ERRORS = ("WORKLOAD_START_FAILED", "IMAGE_PULL_FAILED")
 
 
 class DeploymentLifecycle:
@@ -49,6 +54,44 @@ class DeploymentLifecycle:
   """
 
   def __init__(self, path, node_addr):
+    """
+    Load the node's deployment journal and reset the observations a restart makes stale.
+
+    Reads the private journal when it exists. A persisted readiness is not evidence after a node restart,
+    so such an attempt reports again from "starting", with its instances "initializing". The same holds
+    for a failed attempt that is not aborted, has at least one failed instance, and whose failed instances
+    all hold a start or image failure (`RECOVERABLE_ERRORS`): the restarted node starts its workload
+    again, and the plugin reports the failure again if the workload still cannot start. Stopping and
+    stopped attempts, a failed attempt without a failed instance (a rejected command, whose error is on
+    the record), and a failed attempt holding any other failure keep their persisted status.
+
+    Parameters
+    ----------
+    path : str
+      Private local journal path. Unreadable/corrupt journals fail closed.
+    node_addr : str
+      Blockchain address used for signed observations.
+
+    Returns
+    -------
+    None
+      The journal records and empty runtime maps are set on the new object.
+
+    Raises
+    ------
+    ValueError
+      If the journal does not hold a mapping of records.
+    json.JSONDecodeError
+      If the journal is not valid JSON.
+    OSError
+      If the journal exists but cannot be read.
+
+    Examples
+    --------
+    >>> lifecycle = DeploymentLifecycle(os.path.join(data_folder, "deeploy_node_operations.json"), node_addr)
+    >>> lifecycle.records["operation|deploy"]["status"]  # persisted "failed" with WORKLOAD_START_FAILED
+    'starting'
+    """
     self.path = path
     self.node_addr = node_addr
     self.process_id = PROCESS_ID
@@ -66,10 +109,18 @@ class DeploymentLifecycle:
         raise ValueError("Invalid deployment lifecycle journal")
       # A persisted readiness observation is not evidence after node restart.
       for record in self.records.values():
-        if record["status"] not in ("stopping", "stopped", "failed"):
+        # The codes of the attempt's failed instances, read to tell a retried start from a kept failure.
+        failures = [instance["error"]["code"] for instance in record["instances"] if instance["status"] == "failed"]
+        # As before, reset an attempt that is not stopping, stopped or failed; now also a failed one that is not
+        # aborted, has a failed instance, and whose failures are all start or image failures, since the restarted
+        # node starts it again (before, it stayed "failed" while the workload ran again). Any other failure is
+        # kept, and so is a rejected command, whose record is failed without a failed instance.
+        if record["status"] not in ("stopping", "stopped", "failed") or (
+            not record["aborted"] and failures and all(code in RECOVERABLE_ERRORS for code in failures)):
           record["status"] = "starting"
           for instance in record["instances"]:
-            instance["status"] = "initializing"
+            # The error goes with the failed status: an instance reported again from the start carries none.
+            instance.update(status="initializing", error=None)
 
   def _save(self):
     """Atomically persist the journal, propagating every durability failure."""
@@ -365,7 +416,49 @@ class DeploymentLifecycle:
       self._save()
 
   def _observe(self, key, record):
-    """Aggregate plugin evidence without executing plugin workload methods."""
+    """
+    Aggregate plugin evidence into one attempt's record without executing plugin workload methods.
+
+    An aborted attempt moves its instances to "stopping", and to "stopped" once the stop is proven.
+    Otherwise each instance takes its plugin's state: "failed" with a fixed error code, "ready", or the
+    plugin's own progress status. A failure is kept for the attempt, except a start or image failure
+    (`RECOVERABLE_ERRORS`) whose plugin is ready again and no longer holds an error code: the runner
+    retried, reported a new status after the failure (which clears the code) and the workload runs, so
+    the instance leaves "failed" and the record's status is computed again from its instances. A ready
+    plugin that still holds an error code (it reported nothing new since the failure, as after a build
+    command that failed) stays "failed" with the code it holds.
+
+    Parameters
+    ----------
+    key : str
+      The attempt identity, "operation_id|attempt".
+    record : dict
+      The journal record of that attempt; it is updated in place.
+
+    Returns
+    -------
+    None
+      Statuses, errors and runtime artifacts are written into `record`.
+
+    Raises
+    ------
+    Exception
+      Whatever the scoped cleanup callback or a plugin's readiness check raises; `publish` isolates it to
+      this record.
+
+    Examples
+    --------
+    >>> lifecycle._observe("operation|deploy", record)  # a failed start, then "starting" and ready
+    >>> record["status"], record["instances"][0]["error"]
+    ('ready', None)
+
+    Notes
+    -----
+    A record whose ready report was confirmed is no longer published (NetMon owns workload liveness from
+    then on), so a later change of its status stays in the node's journal.
+    """
+    # Set when this pass takes an instance off a start or image failure, so the record's status follows.
+    recovered = False
     for instance in record["instances"]:
       if record["aborted"] and instance["status"] == "stopped":
         # Stop evidence remains valid after releasing the runtime object.
@@ -404,7 +497,15 @@ class DeploymentLifecycle:
         instance["status"] = "stopped" if thread_dead and stopped else "stopping"
         continue
       if instance["status"] == "failed":
-        continue
+        # A start or image failure can be left once the plugin is ready again, if the checks below find its error
+        # code cleared by a new report. Before, every failure stayed for the attempt. Any other failure, or a
+        # workload not ready yet, stays.
+        if instance["error"]["code"] not in RECOVERABLE_ERRORS or not plugin.is_plugin_ready():
+          continue
+        # The checks below set the instance's status, and a new error only if the plugin still reports one.
+        instance["error"] = None
+        # The record's "failed" is computed again below; another failed instance keeps it.
+        recovered = True
       failure = getattr(plugin, "_deployment_error_code", None)
       if failure or thread_dead:
         failure = failure if failure in ERRORS else "PLUGIN_EXECUTION_FAILED"
@@ -420,7 +521,8 @@ class DeploymentLifecycle:
     statuses = [instance["status"] for instance in record["instances"]]
     if record["aborted"]:
       record["status"] = "stopped" if all(status == "stopped" for status in statuses) else "stopping"
-    elif record["status"] != "failed":
+    # A failed record stays failed, unless this pass took an instance off a start or image failure.
+    elif record["status"] != "failed" or recovered:
       record["status"] = "failed" if "failed" in statuses else "ready" if statuses and all(status == "ready" for status in statuses) else "starting"
 
   def publish(self, setter, signer):

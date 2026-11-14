@@ -38,6 +38,43 @@ def plugin(ready=False, alive=True, external=False, stopped=False):
     _deployment_cleanup_complete=stopped)
 
 
+def report(runtime, status, code=None):
+  """
+  Drive a fake plugin the way `report_deployment_status` drives a real one.
+
+  The real method stores the status and the error code, and makes the plugin ready only for "ready".
+  Of a plugin's reported state, the lifecycle reads these three things. A container or worker runner
+  never reports "ready": it reports "starting" and later makes the plugin ready by itself, which a
+  test models by replacing `is_plugin_ready` after the report.
+
+  Parameters
+  ----------
+  runtime : types.SimpleNamespace
+    A fake plugin made by `plugin`.
+  status : str
+    The workload status the runner reports, for example "failed", "pulling_image" or "ready".
+  code : str or None
+    The error code reported with "failed", or None.
+
+  Returns
+  -------
+  types.SimpleNamespace
+    The same fake plugin, so a test can build it and report in one expression.
+
+  Examples
+  --------
+  >>> runtime = report(plugin(), "failed", "WORKLOAD_START_FAILED")
+  >>> runtime.is_plugin_ready(), runtime._deployment_error_code
+  (False, 'WORKLOAD_START_FAILED')
+  """
+  # The status and the error code, set together as the real method sets them.
+  runtime._deployment_status, runtime._deployment_error_code = status, code
+  # Ready only for "ready", as the real method sets the plugin's readiness.
+  runtime.is_plugin_ready = lambda: status == "ready"
+  # The same fake plugin, for use in one expression.
+  return runtime
+
+
 class DeploymentLifecycleTest(unittest.TestCase):
   def setUp(self):
     self.directory = tempfile.TemporaryDirectory()
@@ -338,6 +375,180 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.publish(succeed=False)
     self.assertEqual([record["operation_id"] for _, record, _ in self.writes],
                      ["stopped", "failed", "operation"])
+
+  def test_start_failure_moves_to_ready_once_the_workload_runs(self):
+    """
+    A start or image failure stays while the plugin holds its code or is not ready; it moves to ready, and is
+    published, once the runner reports "starting" and then makes the plugin ready, as a container runner does.
+    """
+    # The two codes a node leaves; the test names them so a change of that list is seen here.
+    for code in ("WORKLOAD_START_FAILED", "IMAGE_PULL_FAILED"):
+      # One subtest per code.
+      with self.subTest(code=code):
+        # A fresh journal per code, so each attempt starts unreported.
+        self.path = os.path.join(self.directory.name, code + ".json")
+        # The lifecycle that keeps that journal.
+        self.lifecycle = DeploymentLifecycle(self.path, "node")
+        # The coordinator's start of the attempt.
+        self.lifecycle.admit(config(), "oracle", True)
+        # The runner reports that the workload could not start.
+        runtime = report(plugin(), "failed", code)
+        # Its plugin joins the attempt.
+        self.lifecycle.attach(config(), "WORKER", "worker", runtime)
+        # The failure is published.
+        failed = self.publish()
+        # As "failed", with the runner's code.
+        self.assertEqual((failed["status"], failed["instances"][0]["error"]["code"]), ("failed", code))
+        # The writes so far.
+        written = len(self.writes)
+        # The plugin becomes ready with no new report, so it still holds the code (a build command that failed in
+        # a container whose health check passes looks like this).
+        runtime.is_plugin_ready = lambda: True
+        # Observed again.
+        self.publish()
+        # Still "failed", and nothing new was written.
+        self.assertEqual((len(self.writes), self.lifecycle.records["operation|deploy"]["status"]), (written, "failed"))
+        # While the runner retries, a new report clears the code, but the workload is not ready.
+        report(runtime, "pulling_image")
+        # Observed again.
+        self.publish()
+        # Still "failed", and nothing new was written.
+        self.assertEqual((len(self.writes), self.lifecycle.records["operation|deploy"]["status"]), (written, "failed"))
+        # The workload starts: the runner reports "starting", which clears the code ...
+        report(runtime, "starting")
+        # ... and its health check later makes the plugin ready, without another report.
+        runtime.is_plugin_ready = lambda: True
+        # Observed again.
+        ready = self.publish()
+        # The attempt and its instance left "failed", with no error.
+        self.assertEqual((ready["status"], ready["instances"][0]["status"], ready["instances"][0]["error"]),
+                         ("ready", "ready", None))
+        # Published as a newer snapshot.
+        self.assertGreater(ready["sequence"], failed["sequence"])
+
+  def test_restart_starts_a_persisted_start_failure_again(self):
+    """After a node restart a persisted start failure reports again from "starting", then ready."""
+    # The coordinator's start of the attempt.
+    self.lifecycle.admit(config(), "oracle", True)
+    # The workload could not start before the node restarted.
+    self.lifecycle.attach(config(), "WORKER", "worker", report(plugin(), "failed", "WORKLOAD_START_FAILED"))
+    # The failure is published.
+    failed = self.publish()
+    # As "failed".
+    self.assertEqual(failed["status"], "failed")
+    # The restarted node starts the attempt again, so the persisted failure is no longer its state.
+    self.restart_process()
+    # Published again after the restart.
+    starting = self.publish()
+    # As "starting", its instance "initializing" with no error.
+    self.assertEqual((starting["status"], starting["instances"][0]["status"], starting["instances"][0]["error"]),
+                     ("starting", "initializing", None))
+    # As a newer snapshot.
+    self.assertGreater(starting["sequence"], failed["sequence"])
+    # The new process's plugin brings the workload up: the usual ready report follows.
+    self.lifecycle.attach(config(), "WORKER", "worker", report(plugin(), "ready"))
+    # Published as ready.
+    self.assertEqual(self.publish()["status"], "ready")
+
+  def test_other_failures_stay_failed_beside_a_recovered_start(self):
+    """Only a start or image failure is left: any other failure keeps its instance and the attempt failed."""
+    # One attempt.
+    pipeline = config()
+    # Two instances of it.
+    pipeline["PLUGINS"][0]["INSTANCES"].append({"INSTANCE_ID": "other"})
+    # The coordinator's start of the attempt.
+    self.lifecycle.admit(pipeline, "oracle", True)
+    # One fails to start.
+    started = report(plugin(), "failed", "WORKLOAD_START_FAILED")
+    # The other fails its health check, a code that is kept.
+    unhealthy = report(plugin(), "failed", "WORKLOAD_UNHEALTHY")
+    # The first plugin joins the attempt.
+    self.lifecycle.attach(pipeline, "WORKER", "worker", started)
+    # The second one too.
+    self.lifecycle.attach(pipeline, "WORKER", "other", unhealthy)
+    # Both failures are published.
+    self.publish()
+    # The first workload runs again.
+    report(started, "ready")
+    # The second one too.
+    report(unhealthy, "ready")
+    # Observed again.
+    observed = self.publish()
+    # The start failure is left; the other failure stays.
+    self.assertEqual([(item["status"], (item["error"] or {}).get("code")) for item in observed["instances"]],
+                     [("ready", None), ("failed", "WORKLOAD_UNHEALTHY")])
+    # And keeps the attempt failed.
+    self.assertEqual(observed["status"], "failed")
+    # The node restarts.
+    self.restart_process()
+    # A restart does not reset an attempt that holds a kept failure.
+    self.assertEqual(self.lifecycle.records["operation|deploy"]["status"], "failed")
+
+  def test_restart_keeps_a_rejected_command_failed(self):
+    """A rejected command's record, failed with no failed instance, is published as failed again after a restart."""
+    # The live revision 3 of job 7.
+    previous = config(revision=3)
+    # Its job and revision, which a retirement must name.
+    previous["DEEPLOY_SPECS"] = {"job_id": 7, "revision": 3}
+    # The coordinator's start of it.
+    self.lifecycle.admit(previous, "oracle", True)
+    # A retirement of revision 1, not the live one.
+    operation = config(action="retire", attempt="retire", revision=1)["DEEPLOY_OPERATION"]
+    # Of the same job, after the live operation.
+    operation.update(job_id=7, expected_previous_operation_id="operation")
+    # Rejected: its record is failed with the error on the record, and none of its instances failed.
+    self.assertFalse(self.lifecycle.retire("app", previous, operation, "oracle", True))
+    # The rejection is published.
+    self.publish()
+    # The node restarts.
+    self.restart_process()
+    # Keep only what is published from now on.
+    self.writes = []
+    # The restarted node publishes its journal again.
+    self.publish()
+    # What it published for the retirement.
+    observed = [record for _, record, _ in self.writes if record["attempt"] == "retire"]
+    # Published again (each snapshot goes to two keys), always as failed with the rejection, never as "starting".
+    self.assertEqual({(record["status"], record["error"]["code"]) for record in observed},
+                     {("failed", "CONFIGURATION_REJECTED")})
+
+  def test_restart_keeps_a_stopped_attempt_stopping(self):
+    """A restart starts a start failure again only for a running attempt; a stopped one keeps its stop."""
+    # Two apps.
+    stopped, running = config(), config()
+    # With their own names and operations.
+    running["NAME"] = running["DEEPLOY_OPERATION"]["operation_id"] = "running"
+    # Each started, and each external workload failed to start.
+    for pipeline in (stopped, running):
+      # The coordinator's start of the app.
+      self.lifecycle.admit(pipeline, "oracle", True)
+      # Its plugin, which reports the failed start, joins the attempt.
+      self.lifecycle.attach(pipeline, "WORKER", "worker",
+                            report(plugin(external=True), "failed", "WORKLOAD_START_FAILED"))
+    # Both failures are published.
+    self.publish()
+    # The coordinator stops the first one.
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    # The node restarts before that stop is proven.
+    self.restart_process()
+    # The journal after the restart.
+    records = self.lifecycle.records
+    # The stopped attempt keeps its stop and its instance's failure.
+    self.assertEqual((records["operation|deploy"]["status"], records["operation|deploy"]["instances"][0]["status"]),
+                     ("stopping", "failed"))
+    # The running one starts again.
+    self.assertEqual(records["running|deploy"]["status"], "starting")
+    # Published after the restart.
+    self.publish()
+    # Nothing the stopped app reports says starting or ready.
+    self.assertEqual({record["status"] for _, record, _ in self.writes if record["app_id"] == "app"},
+                     {"failed", "stopping"})
+    # Its stop is proven now.
+    self.lifecycle._cleanup = lambda *args: True
+    # Observed again.
+    self.publish()
+    # It reports stopped.
+    self.assertEqual(records["operation|deploy"]["status"], "stopped")
 
   def test_recent_snapshot_storage_is_bounded(self):
     self.lifecycle.admit(config(), "oracle", True)

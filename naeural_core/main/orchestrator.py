@@ -1526,6 +1526,28 @@ class Orchestrator(DecentrAIObject,
     return
 
   def _maybe_gracefull_stop(self):
+    """
+    First step of an orderly close: send the SHUTDOWN-status heartbeat, then stop the orchestrator's threads.
+
+    Does nothing when a shutdown or exception stop already ran. Otherwise it sets the shutdown return code,
+    queues a full SHUTDOWN heartbeat with the log, waits until the heartbeat communicator's thread has taken it
+    (5 s at most), and joins the orchestrator's own threads (``_stop``).
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Before, a fixed 5 s sleep followed the heartbeat at every stop, a quarter of the 20 s a container runtime
+    commonly allows for a stop. The heartbeat leaves the queue within one lap of the communicator thread, so
+    the wait now normally ends within a tenth of a second; it lasts the 5 s only when the heartbeat cannot be
+    sent, and then one red line says so.
+
+    Examples
+    --------
+    >>> self._maybe_gracefull_stop()   # Orchestrator.close_main_loop(), and the logger's close callback
+    """
     if self._in_shutdown:
       return
     self._in_shutdown = True
@@ -1535,8 +1557,9 @@ class Orchestrator(DecentrAIObject,
       status=ct.DEVICE_STATUS_SHUTDOWN,
       full_info=True, send_log=True, force=True,
     )
-    # TODO: implement queue empty wait instead of sleep
-    sleep(5)
+    # Wait until the heartbeat communicator's thread took the SHUTDOWN heartbeat from its queue (a stopped
+    # communicator discards what is still queued), at most the 5 s the fixed sleep here always took.
+    self._comm_manager.wait_heartbeats_sent(timeout=5)
     self._stop()
     return
 

@@ -1110,12 +1110,41 @@ class BusinessManager(Manager):
     return
 
   def close(self):
+    """
+    Stop every plugin instance at the node's close: dAuth, then the other pipelines' instances, then the admin plugins.
+
+    The admin dispatch thread is stopped first. The dAuth instance closes before all others, as before. The
+    remaining instances are stopped one after another, each with a forced stop that joins its thread: first the
+    instances of every pipeline other than the admin pipeline, in the order they were started, then the admin
+    pipeline's instances in theirs. Last, the deployment lifecycle service is closed when the node has one.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Before, the instances stopped in start order, and the admin pipeline is started first, so the other
+    pipelines' instances (the apps a node hosts) came last. An app's stop is the slow part of a close (a
+    container is stopped and removed), so a host that ends the node a fixed time after the stop signal ended it
+    before any app was asked to stop. With the apps first, what such a host cuts short is the admin plugins'
+    close, and the admin plugins keep running while the apps close, so an app that uses one of them at its stop
+    still finds it. The chain store's periodic save goes on until its own close, so a cut there loses only
+    the writes accepted after its last periodic save.
+
+    Examples
+    --------
+    >>> self._business_manager.close()   # Orchestrator.close_main_loop()
+    """
     self.P("Stopping all business plugins...", color='y')
     self._stop_admin_dispatch_thread()
     # First, shutdown special instances
     self.__maybe_shutdown_special_instances()
     # Now, we can shutdown normal instances
     keys = list(self._dct_current_instances.keys())
+    # Instances outside the admin pipeline first (False sorts before True; the sort keeps the start order inside
+    # each group): their stop is the slow one, and before it came after every admin plugin's.
+    keys.sort(key=lambda instance_hash: self._dct_hash_mappings[instance_hash][0] == ct.CONST_ADMIN_PIPELINE_NAME)
     for _hash in keys:
       self._send_stop_signal_to_plugin(instance_hash=_hash, forced=True)
     self.P("Done stopping all business plugins.", color='y')

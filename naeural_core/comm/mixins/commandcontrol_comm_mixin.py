@@ -15,11 +15,27 @@ class _CommandControlCommMixin(object):
   def _run_thread_command_and_control(self):
     """Run the command-and-control comm loop.
 
+    The loop sends the commands of the send queue one at a time and receives commands and heartbeats, until the
+    thread is told to stop.
+
     Notes
     -----
     The loop multiplexes command send, command receive, and heartbeat
     registration. Command retries preserve the original command payload and only
     narrow the transport targets when a multi-target publish partially fails.
+
+    A command whose preparation raises (``_prepare_command``: for example text that is not UTF-8 encodable, which
+    its encryption cannot encode) is dropped with one red line naming its action, receiver and the error, and
+    accounted as discarded for good; the next command is taken. Before, the same command was prepared again every
+    5 s for good and no later command left this thread. An error elsewhere in the loop is handled as before.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> self._run_thread_command_and_control()   # on the comm thread, until ``self._stop`` is set
     """
     bytes_delivered = 1 # force to 1 to trigger the first send
     data = None
@@ -73,7 +89,21 @@ class _CommandControlCommMixin(object):
           raw_command = command
           self._set_outbound_current_state('preparing')
           t_section = perf_counter() if debug_timings else None
-          command = self._prepare_command(command, receiver_addr)
+          try:
+            # The command as sent, its payload encrypted for the receiver.
+            command = self._prepare_command(command, receiver_addr)
+          except Exception as exc:
+            # A command that cannot be prepared (text that is not UTF-8 encodable, which its encryption cannot encode,
+            # for example) fails the same way at every retry: dropped with one red line naming its action, receiver
+            # and the error, never its payload, so the commands queued behind it still leave. Before, it was prepared
+            # again every 5 s for good.
+            self.P("Dropped command {} to '{}' <{}> that cannot be prepared: {}".format(
+              raw_command.get(ct.COMMS.COMM_SEND_MESSAGE.K_ACTION), receiver_id, receiver_addr, exc), color='r')
+            # Accounted as a command discarded for good, as an oversized one is.
+            self._finish_outbound_current(terminal_discard=True)
+            # The next command is taken at the next turn.
+            bytes_delivered = 1
+            continue
           if debug_timings:
             self._comm_loop_timing_add("prepare_command", perf_counter() - t_section)
           self.P("Sending '{}'  <{}> (LOG_SEND_COMMANDS={}){}".format(

@@ -3,8 +3,14 @@ Offline tests of the chain store's own resync of the signed namespaces: which no
 namespace and when, how every answer is merged without a waiting caller, and the merge taking a copy of the value
 held without checking its signature again.
 """
+# A record held from before a rule, copied for a sync answer.
+import copy
+# The digest of a value's canonical text, the tests' stand-in for a signature over it.
+import hashlib
 # The ids of a store's requests.
 import itertools
+# The canonical text of a value: its JSON with sorted keys, where 5 and 5.0 are two texts.
+import json
 # The data folder of a started store.
 import os
 # Its temporary place.
@@ -69,6 +75,37 @@ def operation(name, sequence, note="a"):
            "EE_SIGN": "valid", "note": note}
   # As the merge stores a signed operation: owned by its coordinator and readonly.
   return key, {**record(key, value, "oracle"), "readonly": True}
+
+
+def text_signed(value):
+  """
+  Sign a value over its canonical text, as a real signature covers it: equal values of another text do not verify.
+
+  The harness's block engine accepts any value marked ``EE_SIGN: "valid"``. The real one hashes the value's
+  canonical JSON, where the int 5 and the float 5.0 are two texts although Python holds them equal. This gives a
+  value such a signature: the SHA-256 of its JSON with sorted keys, without the signature field itself.
+
+  Parameters
+  ----------
+  value : dict
+    The value to sign; an ``EE_SIGN`` it already carries is replaced.
+
+  Returns
+  -------
+  dict
+    A copy of ``value`` whose ``EE_SIGN`` is the digest of the rest. A value verifies when it equals the result
+    of signing it again: ``value == text_signed(value)``.
+
+  Examples
+  --------
+  >>> good = text_signed({"n": 5})
+  >>> good == text_signed(good), {**good, "n": 5.0} == text_signed({**good, "n": 5.0})
+  (True, False)
+  """
+  # The value without its signature.
+  body = {name: item for name, item in value.items() if name != "EE_SIGN"}
+  # The digest of its canonical text as the signature.
+  return {**body, "EE_SIGN": hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()}
 
 
 def oracle(mode, address="node", peers=("peer1", "oracle"), storage=None, network=None):
@@ -427,6 +464,97 @@ class TestMergeOfTheValueHeld(unittest.TestCase):
         self.assertEqual((getattr(store, MERGE)("DEEPLOY_OPERATIONS", {gone: record(gone, None, "oracle",
                                                                                      [NOW_MS, "oracle"])}),
                           "dl:" + gone in store.storage), (0, False))
+
+  def test_a_copy_equal_to_the_value_held_is_checked_before_anything_of_it_is_stored(self):
+    """A copy whose value Python holds equal to the one held but whose text differs (5.0 for 5), so that its
+    signature fails, is refused when it would change the held record's token, in every mode; the same copy without
+    the token, and an unstamped copy as a node of the previous release sends it, change nothing but the stamp and
+    cost no signature check; the held value stays the signed one."""
+    # Each mode: the rule has no switch.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # Operation x as a replica holds it.
+        key, held = operation("x", 1)
+        # Its value signed over its text, with a whole number in it.
+        held["value"] = text_signed({**held["value"], "updated_at": 5})
+        if mode != "off":
+          # Stamped by its coordinator ('off' keeps no stamp).
+          held["ver"] = [NOW_MS, "oracle"]
+        # The replica.
+        store = oracle(mode, storage={key: held})
+        # The signature checks made.
+        checked = []
+        # A block engine that checks the signature over the value's text, and records each check.
+        store.bc.verify = lambda value, **kwargs: checked.append(1) or SimpleNamespace(valid=value == text_signed(value))
+        # The same value with 5.0 for 5: equal for Python, another text, so the signature does not cover it.
+        variant = {**held["value"], "updated_at": 5.0}
+        # Equal, and not verifying.
+        self.assertEqual((variant == held["value"], store.bc.verify(variant).valid), (True, False))
+        # Only the merge's checks are counted from here.
+        checked.clear()
+        # A copy of the variant with a token and a newer stamp: it would be stored (the token differs), so it is
+        # checked first, fails, and is skipped.
+        self.assertEqual(getattr(store, MERGE)("DEEPLOY_OPERATIONS", {key: {
+          **held, "value": variant, "token": "T", "ver": [NOW_MS + 1000, "peer1"]}}), 0)
+        # One signature check; the record held is untouched, stamp included.
+        self.assertEqual((len(checked), store.storage[key]), (1, held))
+        # The variant without the token, with a newer stamp: it leaves everything but the stamp, and is not checked.
+        self.assertEqual(getattr(store, MERGE)("DEEPLOY_OPERATIONS", {key: {
+          **held, "value": variant, "ver": [NOW_MS + 2000, "peer1"]}}), 0)
+        # An unstamped copy of the value held, as a node of the previous release answers: not checked either.
+        self.assertEqual(getattr(store, MERGE)("DEEPLOY_OPERATIONS", {key: {
+          name: item for name, item in held.items() if name != "ver"}}), 0)
+        # Still one check in all.
+        self.assertEqual(len(checked), 1)
+        # The record now.
+        now = store.storage[key]
+        # The value is the one held before (a whole number, its signature valid), with no token; only the stamp
+        # was raised, where stamps are read.
+        self.assertEqual((type(now["value"]["updated_at"]), store.bc.verify(now["value"]).valid, now["token"],
+                          now.get("ver")), (int, True, None, None if mode == "off" else [NOW_MS + 2000, "peer1"]))
+
+  def test_an_equal_copy_of_a_held_value_the_rule_refuses_is_skipped_and_raises_nothing(self):
+    """A record of an operation namespace held from before the signed-record rule, a plain text or a dict without
+    the signed fields: a copy equal to it is skipped as any copy the rule refuses, without an exception, and the
+    record keeps its owner and readonly mark, in every mode."""
+    # Each mode, each of the two operation namespaces, each old form of a value.
+    for mode, namespace, value in itertools.product(
+        ("off", "report", "on"), ("DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS"), ("legacy-text", {"note": "old"})):
+      # One sub-test each.
+      with self.subTest(mode=mode, namespace=namespace, value=value):
+        # The field of the old record.
+        key = _hset_key(namespace, "legacy")
+        # As a replica holds it from before the rule: another owner than the rule derives, not readonly.
+        held = record(key, value, "peer2")
+        # The replica.
+        store = oracle(mode, storage={key: held})
+        # A copy of exactly that record: nothing merged, nothing raised.
+        self.assertEqual(getattr(store, MERGE)(namespace, {key: copy.deepcopy(held)}), 0)
+        # The record is as it was.
+        self.assertEqual(store.storage[key], held)
+
+  def test_a_held_record_whose_coordinator_left_the_registry_takes_no_token_from_a_copy(self):
+    """A held operation whose coordinator is no longer in the oracle registry fails the signed-record rule today:
+    a copy of its value that carries a token and a newer stamp gives it neither, in every mode."""
+    # Each mode.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # Operation x as a replica holds it.
+        key, held = operation("x", 1)
+        if mode != "off":
+          # Stamped by its coordinator ('off' keeps no stamp).
+          held["ver"] = [NOW_MS, "oracle"]
+        # The replica.
+        store = oracle(mode, storage={key: held})
+        # The coordinator "oracle" has left the oracle registry.
+        store.bc.get_eth_oracles = lambda: []
+        # A copy of the value held, with a token and a newer stamp: checked before it is stored, and skipped.
+        self.assertEqual(getattr(store, MERGE)("DEEPLOY_OPERATIONS", {key: {
+          **held, "token": "T", "ver": [NOW_MS + 1000, "peer1"]}}), 0)
+        # Neither the token nor the stamp was taken.
+        self.assertEqual(store.storage[key], held)
 
 
 class TestResyncStart(unittest.TestCase):

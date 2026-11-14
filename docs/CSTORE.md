@@ -322,10 +322,16 @@ takes under 1 microsecond; merging one answer of 1,000 signed operations (2.1 MB
 equal the held ones took 82 ms of CPU and 214 ms of wall time, under the persistence lock,
 with no signature check. An oracle answers about two such requests per namespace and round.
 
-In every merge, a caller's `hsync` included, a copy whose value is the one held under its
-key is not put through the signed-record rule again: a sync of a signed namespace that
-already agrees verifies no signature, where it verified one per record (about 3 ms each at
-0.35 core). A copy with another value is checked as before.
+In every merge, a caller's `hsync` included, a copy whose value is a dict equal to the one
+held under its key is not put through the signed-record rule while it leaves everything
+but the held stamp as it is: a sync of a signed namespace that already agrees verifies no
+signature, where it verified one per record (about 3 ms each at 0.35 core). An equal copy
+that would be stored, because its owner, readonly mark or token differ from the held ones,
+is put through the rule right before the store and skipped when the rule refuses it. Equal
+is not verified: `5.0` equals `5` and is another text, whose signature fails, and a record
+held from before the rule, or whose coordinator has left the registry, does not pass it
+today. A copy with another value, or of a held value that is not a dict, goes through the
+rule first.
 
 ## Writer revisions (`cs_rev`)
 

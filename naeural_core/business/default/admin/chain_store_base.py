@@ -2143,15 +2143,21 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     and one JSON encoding only for each copy that differs, under the
     persistence lock.
 
-    A copy whose value is the one held under its key is not put through the
-    signed-record rule (``__versioned_record``) again: that rule passed the
-    held value when it was stored, and its one signature check per record
-    (about 3 ms at 0.35 core) made a sync of a namespace that already agrees
-    cost as much as a first sync. Such a copy still goes through every rule
-    below and changes no value: at most the held record's stamp, or its
-    owner, readonly mark and token where the namespace does not derive them
-    from the value, as before. A copy with any other value is checked as
-    before.
+    A copy whose value is a dict equal (``==``) to the one held under its key
+    is not put through the signed-record rule (``__versioned_record``) where
+    the other copies are: the rule's one signature check per record (about
+    3 ms at 0.35 core) made a sync of a namespace that already agrees cost
+    as much as a first sync. The rule is skipped only for a copy that leaves
+    everything but the held stamp as it is: the same value, with the owner,
+    readonly mark and token the namespace rules give it equal to the held
+    ones. Such a copy stores nothing and at most raises the held stamp. An
+    equal copy that would be stored (its owner, readonly mark or token differ
+    from the held ones) is put through the rule right before the store and
+    skipped when the rule refuses it. Equal is not verified: ``5.0`` equals
+    ``5`` and is another text, whose signature fails; and a record held from
+    before the rule, or whose coordinator has left the registry, does not
+    pass it today. A held value that is not a dict is never taken as equal,
+    so its copy goes through the rule first, as a copy with any other value.
 
     The order rule (switch ``CSTORE_ORDER``, read once at start): with the switch
     'off' the stamp of a copy is not read. Else a copy equal to the held record
@@ -2238,10 +2244,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # The value 'on' would remove.
             self.__cs_count("ver_copy_delete", key, "hsync")
           continue
-        # A copy whose value is the one held under the key is not put through the signed-record rule again (one
-        # signature check per record of a signed namespace): the held value passed that rule when it was stored, and
-        # such a copy can change nothing below but the held record's stamp, owner, readonly mark and token, as before.
-        same = value is not None and held.get(self.CS_VALUE) == value
+        # A copy whose value equals the one held under the key is not put through the signed-record rule here (one
+        # signature check per record of a signed namespace): most such copies leave everything but the stamp as it is.
+        # One that would be stored is checked below, before the store. Only a dict counts as equal: the namespace
+        # rules below read the value's fields, and a held value that is not a dict (from before the rule) raised there.
+        same = isinstance(value, dict) and held.get(self.CS_VALUE) == value
         if (value is None and ver is None) or not (same or self.__versioned_record(key, value)):
           continue
         if self.__stale_revision(key, value, snapshot=True):
@@ -2296,6 +2303,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if reason is not None and order == "on":
           # Older than the held record by the order rule (or a future, unstamped or losing copy): skipped in 'on'; in
           # 'report' only counted, and applied below as in the previous release.
+          continue
+        if same and not self.__versioned_record(key, value):
+          # An equal copy that is about to be stored (its owner, readonly mark or token differ from the held ones) was
+          # not checked above: the signed-record rule runs now, on what would be stored, and a copy it refuses is
+          # skipped. Before, such a copy was stored unchecked: a value equal for Python and of another text (5.0 for
+          # 5), whose signature fails, replaced the signed one, and a held record that fails the rule took a token.
           continue
         if order != "off":
           # The write-permission count, only counted; a copy's writer is its stamp's address, which nothing verifies.

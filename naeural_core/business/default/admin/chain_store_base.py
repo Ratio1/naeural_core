@@ -133,6 +133,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_VER = "ver"
   # The prefix of the key a delete's tombstone is held under: "dl:" + the deleted key. No write may name such a key.
   CS_DEL = "dl:"
+  # A refusal answer: the confirmation message with the refusal word and the receiver's stamp for the key.
+  CS_REFUSED, CS_HELD_VER = "refused", "held_ver"
   # The namespaces with write rules of their own (the signed ones and the dAuth secret revisions): the write-permission
   # count leaves them out.
   CS_PROTECTED_NAMESPACES = (
@@ -1999,8 +2001,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ``timeout`` or ``max_retries``, for example). A local write that changed
     the replica and then failed its wait gets a second label,
     ``<bucket>/local/<wait end>``: ``unconfirmed`` (too few confirmations
-    after the retries) or ``overwritten`` (another write replaced the key
-    during the wait). ``result_info["outcome"]`` is the wait end when there
+    after the retries), ``overwritten`` (another write replaced the key
+    during the wait) or ``refused_by_peers`` (every target settled, one at
+    least by a refusal answer, and too few confirmed it: the wait ends at
+    once). ``result_info["outcome"]`` is the wait end when there
     is one, else the outcome. None of these words changes the bool returned.
 
     A local write or delete of a Tunnels Manager namespace is sent only to
@@ -2263,6 +2267,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                 return False
               recv_confirm = self.__get_key_confirmations(key)
               min_confirm = self.__get_key_min_confirmations(key)
+              # The peers settled on the record: those that confirmed it and those that refused it with an answer.
+              settled = len(self.__chain_storage.get(key, {}).get("confirmed_peers", []))
+              if recv_confirm < min_confirm and recv_confirm < settled >= len(
+                self.__chain_storage[key]["target_peers"]
+              ):
+                # Every target settled, one at least by a refusal answer, and too few confirmed: no confirmation can
+                # come, so the wait ends now instead of after the retries. Counted in addition to "changed".
+                wait_end = "refused_by_peers"
+                # The same False a wait that ran out returns.
+                return False
             if recv_confirm > _prev_confirm:
               _prev_confirm = recv_confirm
               if debug:
@@ -2542,6 +2556,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The store's version stamp and its verified sender go to ``_set_value``, whose order rule reads them
     (switch ``CSTORE_ORDER``; with it 'off' the stamp is dropped there).
 
+    Refusal answer (order switch ``CSTORE_ORDER`` 'on' only): a stamped store that ``_set_value`` refuses is
+    answered to its sender with one confirmation message ``{op, key, ver, refused, held_ver}``: the store's
+    stamp echoed, the refusal word without its ``refused_`` prefix, and this node's stamp for the key (None
+    when unstamped or not held), never the value. A refused ``future`` stamp, an unstamped store, and the
+    stores dropped before ``_set_value`` (membership, oracle-only, ``"dl:"`` keys) are not answered. In
+    'report' nothing is sent and nothing more is counted. A writer of the previous release never gets one:
+    it sends no stamp.
+
     A store whose key starts with ``"dl:"``, the prefix of the tombstones, is dropped unconfirmed and counted
     as ``<bucket>/remote/refused_invalid_key`` under the bucket of the key after the prefix; ``_set_value``
     would raise for it, and a raise here would stall the plugin loop.
@@ -2595,6 +2617,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       return
     if self.cfg_chain_store_debug:
       self.P(f" === REMOTE: Exec remote-to-local-sync store for {key}={value} by {owner}")
+    # The store's stamp when it is well formed (counted once, by _set_value, when it is not); none with the order
+    # switch 'off'. Only a stamped store is answered when refused.
+    ver = None if self.__cs_modes["order"] == "off" else self.__ver_valid(data.get(self.CS_VER))
+    # The word _set_value ends with: the refusal word of a refused store.
+    info = {}
     result = self._set_value(
       key, value, owner=owner, 
       token=token, readonly=readonly,
@@ -2602,6 +2629,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # The store's stamp as received (checked there, and read only when the order switch is not 'off'), and the
       # verified sender its stamp must name.
       ver=data.get(self.CS_VER), sender=peers,
+      # How it ended.
+      result_info=info,
     )
     if result:
       # now send confirmation of the storage execution
@@ -2618,6 +2647,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         }
       }
       self.__send_data_to_chain_peers(data, peers=peers, include_default_peers=False)
+    elif ver is not None and self.__cs_modes["order"] == "on" and info["outcome"] != "refused_future":
+      # A refused stamped store, with the order switch 'on': answered to its sender in a confirmation message that
+      # carries the refusal word and this node's stamp for the key instead of the value, so the writer stops waiting
+      # for it. A future stamp is not answered: refused now, it can be taken once the clocks agree.
+      held = self.__chain_storage.get(key) or self.__chain_storage.get(self.CS_DEL + key)
+      # The answer, to the sender only.
+      self.__send_data_to_chain_peers({self.CS_DATA: {
+        self.CS_OP: self.CS_CONFIRM, self.CS_KEY: key, self.CS_VER: ver,
+        self.CS_REFUSED: info["outcome"][len("refused_"):], self.CS_HELD_VER: held and held.get(self.CS_VER),
+      }}, peers=peers, include_default_peers=False)
     else:
       if self.cfg_chain_store_debug:
         self.P(f" === REMOTE: Store for {key}={value} of {owner} failed", color='r')
@@ -2627,6 +2666,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   def __exec_received_confirm(self, data, sender=None):
     """
     Process a confirmation for a previously broadcast store operation.
+
+    A refusal answer (a message with ``refused``, from a receiver with the order switch 'on') settles the
+    sender on this node's own record whose stamp it echoes, when the sender is one of its targets and not
+    yet settled: the sender joins ``confirmed_peers`` (now "settled": confirmed or refused) without adding to
+    ``confirms``, so the wait of ``_set_value`` can end at once once every target settled. Its ``held_ver``,
+    when well formed and not a future stamp, moves this node's stamp clock up to it. Handled in every mode.
 
     A confirmation counts when it echoes the owner and value of the record it is for, the sender is one of
     the record's targets and has not confirmed it yet. The record is the key's, or, when the key is not held,
@@ -2657,6 +2702,23 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     
     if self.cfg_chain_store_debug:
       self.P(f" === LOCAL: Received {op} from {confirm_by} for  {key}={value}, owner{owner}")
+    if self.CS_REFUSED in data:
+      # A refusal answer: it carries no value, so the confirmation rule below never matches it.
+      with self.__persistence_lock:
+        # This node's own record the refused store was for: the key's, else the tombstone of its delete.
+        record = self.__chain_storage.get(key) or self.__chain_storage.get(f"{self.CS_DEL}{key}")
+        if (record is None or record.get(self.CS_CONFIRMATIONS, -1) < 0
+            or record.get(self.CS_VER) != data.get(self.CS_VER)
+            or sender not in record.get("target_peers", []) or sender in record["confirmed_peers"]):
+          return
+        # Settled by the refusal: no confirmation will come from it for this stamp.
+        record["confirmed_peers"].append(sender)
+        # The receiver's stamp for the key, checked for form.
+        held_ver = self.__ver_valid(data.get(self.CS_HELD_VER))
+        if held_ver is not None and held_ver[0] <= int(1000 * self.time()) + self.__ver_ahead:
+          # Taken into the clock, so this node's next write of the key is stamped above what the receiver holds.
+          self.__ver_clock = max(self.__ver_clock, held_ver[0])
+      return
     with self.__persistence_lock:
       # The record confirmed: the key's, or the tombstone of a delete of it (a key from the network is formatted, not
       # concatenated, so one that is not a str finds nothing instead of raising).

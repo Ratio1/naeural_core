@@ -497,8 +497,8 @@ class _BasePluginAPIMixin:
       ``refused_not_member``, ``refused_versioned``, ``refused_cs_rev``, ``refused_secret_rule``,
       ``refused_token``, ``refused_readonly``, and with the store's order switch ``CSTORE_ORDER`` 'on'
       ``refused_older``, ``refused_older_than_delete``, ``refused_future``, ``refused_origin``,
-      ``refused_unstamped``, ``refused_collision``); ``unconfirmed`` or ``overwritten`` for a write applied here
-      whose wait failed;
+      ``refused_unstamped``, ``refused_collision``); ``unconfirmed``, ``overwritten`` or ``refused_by_peers``
+      (every peer settled, one at least by a refusal answer) for a write applied here whose wait failed;
       ``error`` when the call raised (a value that is not JSON, a bad timeout, and so on).
 
     Returns
@@ -513,8 +513,9 @@ class _BasePluginAPIMixin:
     ``result_info`` is filled when the chain store's setter ran or the call raised. The ``refused_<reason>``
     words are this node's own refusals and end the call at once; a write with no peer to send it to
     (``refused_no_peers``, for example on a seed whose only whitelisted node is itself) no longer waits for
-    confirmations first. A peer that refuses the write does not answer, so the caller sees ``unconfirmed``
-    after the wait, as it saw False before.
+    confirmations first. A peer that refuses the write answers only when its order switch is 'on' and the write
+    carries a stamp; then the caller sees ``refused_by_peers`` as soon as every peer settled. Otherwise it does not
+    answer, and the caller sees ``unconfirmed`` after the wait, as it saw False before.
 
     See Also
     --------

@@ -353,6 +353,26 @@ and its tombstone are never both held (storing a value removes the tombstone).
 - Previous release: a `dl:` record loads as a plain key no read lists or exports, and
   stays until a later release's sweep removes it.
 
+### Refusal answers
+
+With `CSTORE_ORDER` `on`, a receiver that refuses a stamped store answers its sender
+with one `SCONFIRM` message `{op, key, ver, refused, held_ver}`: the store's stamp
+echoed, the refusal word without its `refused_` prefix (`older`, `older_than_delete`,
+`origin`, `collision`, or a rule of the previous release: `versioned`, `cs_rev`,
+`secret_rule`, `token`, `readonly`) and its own stamp for the key, never the value. A
+`future` stamp is counted and not answered, so the writer can deliver it once the clocks
+agree. Unstamped stores and stores dropped for their sender's membership or a `dl:` key
+are never answered. In `report` nothing is sent.
+
+The writer handles answers in every mode: an answer that echoes the stamp of its own
+record, from a target not yet settled, adds the sender to the record's
+`confirmed_peers` (now meaning settled: confirmed or refused) without counting a
+confirmation, and moves the writer's stamp clock up to `held_ver` when that is not a
+future stamp. The blocking wait ends at once with `False` when every target is
+settled, one at least by a refusal, and too few confirmed it; `result_info["outcome"]`
+is then `refused_by_peers`. A writer of the previous release sends no stamp, so it is
+never answered.
+
 ### Write-permission count
 
 With `CSTORE_ORDER` not `off`, every write the order rule admits (and every hsync copy
@@ -409,7 +429,7 @@ Labels in `counts`:
     - `refused_readonly`: the stored record is readonly for another owner.
     - with `CSTORE_ORDER` `on` only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).
-- `<bucket>/local/unconfirmed` and `<bucket>/local/overwritten`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, or another write replaced the key during the wait.
+- `<bucket>/local/unconfirmed`, `<bucket>/local/overwritten` and `<bucket>/local/refused_by_peers`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, another write replaced the key during the wait, or every target settled with at least one refusal answer and too few confirmations.
 - `<bucket>/<origin>/ver_<word>` (`CSTORE_ORDER` `report` or `on`): a write or copy the order rule gives a word (`future`, `origin`, `older`, `older_than_delete`, `unstamped`, `collision`), counted whether or not it is refused; `<origin>` is `local`, `remote` or `hsync` (a record of a sync answer). `ver_invalid`: a stamp that is not `[int, str]`, treated as none. `<bucket>/hsync/ver_copy_delete`: a tombstone copy that removes (`on`) or would remove (`report`) a value held.
 - `<bucket>/<origin>/tombstone_new`: a delete that left a new tombstone; `<origin>` also `hsync` in `on`.
 - `<bucket>/<origin>/perm_readonly`, `<bucket>/<origin>/delete_foreign` (`CSTORE_ORDER` `report` or `on`): the write-permission count (above); counts only.

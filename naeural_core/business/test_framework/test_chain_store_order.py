@@ -141,6 +141,29 @@ def deliver(store, key, value, sender, ver=None, owner=None):
   return [sent["data"][store.CS_DATA] for sent in store.sent_payloads[before:]]
 
 
+def answers(bodies):
+  """
+  Name what a replica sent back for one store: ``"confirm"`` for a confirmation, the word of a refusal answer.
+
+  Parameters
+  ----------
+  bodies : list of dict
+    The bodies ``deliver`` returns.
+
+  Returns
+  -------
+  list of str
+    One name per body: ``"confirm"``, or the ``refused`` word (``"older"``, ``"origin"``, ...).
+
+  Examples
+  --------
+  >>> answers([{"op": "SCONFIRM", "key": KEY, "ver": [NOW_MS, "peer1"], "refused": "older", "held_ver": None}])
+  ['older']
+  """
+  # A refusal answer carries its word; a confirmation carries none.
+  return [body.get("refused", "confirm") for body in bodies]
+
+
 def record(key, value, owner, ver=None):
   """
   Build one stored record of a remote write, as a replica holds it.
@@ -355,8 +378,8 @@ class TestOrderOfLiveWrites(unittest.TestCase):
         store = make(mode)
         # Sent by peer1 with peer2's address in the stamp.
         confirms = deliver(store, KEY, "v", "peer1", [NOW_MS, "peer2"])
-        # Applied and confirmed only in 'report'.
-        self.assertEqual((len(confirms), KEY in store.storage), (int(applied), applied))
+        # Applied and confirmed only in 'report'; refused with an answer in 'on'.
+        self.assertEqual((answers(confirms), KEY in store.storage), (["confirm" if applied else "origin"], applied))
         # Counted in both modes.
         self.assertEqual(getattr(store, STATS).get(BUCKET + "/remote/ver_origin"), 1)
 
@@ -372,8 +395,9 @@ class TestOrderOfLiveWrites(unittest.TestCase):
         store = make(mode, storage={KEY: record(KEY, "b", "peer1", [NOW_MS + 2000, "peer1"])})
         # An older write from peer2.
         older = deliver(store, KEY, "a", "peer2", [NOW_MS + 1000, "peer2"])
-        # Refused unconfirmed in 'on', applied in 'report'.
-        self.assertEqual((len(older), store.storage[KEY]["value"]), (0, "b") if mode == "on" else (1, "a"))
+        # Refused with an answer in 'on', applied and confirmed in 'report'.
+        self.assertEqual((answers(older), store.storage[KEY]["value"]),
+                         (["older"], "b") if mode == "on" else (["confirm"], "a"))
         # Counted in both modes.
         self.assertEqual(getattr(store, STATS).get(BUCKET + "/remote/ver_older"), 1)
         # A newer write from peer2: applied with its stamp.
@@ -464,15 +488,17 @@ class TestOrderOfLiveWrites(unittest.TestCase):
     store = make("on", signed=True, storage={key: record(key, operation, "oracle", [NOW_MS + 5000, "peer1"])})
     # The same sequence with another body: older stamp refused, newer applied.
     other = {**operation, "note": "x"}
-    # Older, then newer.
-    self.assertEqual([len(deliver(store, key, other, "peer1", [NOW_MS + 1000, "peer1"])),
-                      len(deliver(store, key, other, "peer1", [NOW_MS + 9000, "peer1"]))], [0, 1])
+    # Older (refused with an answer), then newer (confirmed).
+    self.assertEqual([answers(deliver(store, key, other, "peer1", [NOW_MS + 1000, "peer1"])),
+                      answers(deliver(store, key, other, "peer1", [NOW_MS + 9000, "peer1"]))], [["older"], ["confirm"]])
     # cs_rev: a replica holding cs_rev 200 stamped at +5 s.
     store = make("on", storage={KEY: record(KEY, {"t": "b", "cs_rev": 200}, "peer1", [NOW_MS + 5000, "peer1"])})
     # A higher cs_rev with an older stamp: applied.
     self.assertEqual(len(deliver(store, KEY, {"t": "c", "cs_rev": 300}, "peer2", [NOW_MS + 1000, "peer2"])), 1)
-    # A lower cs_rev with a newer stamp: refused (by the cs_rev rule of every mode, before the order rule).
-    self.assertEqual(len(deliver(store, KEY, {"t": "a", "cs_rev": 250}, "peer2", [NOW_MS + 9000, "peer2"])), 0)
+    # A lower cs_rev with a newer stamp: refused (by the cs_rev rule of every mode, before the order rule), with an
+    # answer since the store is stamped and the order switch 'on'.
+    self.assertEqual(answers(deliver(store, KEY, {"t": "a", "cs_rev": 250}, "peer2", [NOW_MS + 9000, "peer2"])),
+                     ["cs_rev"])
     # The cs_rev 300 value kept, and the refusal under the cs_rev word.
     self.assertEqual((store.storage[KEY]["value"]["t"], getattr(store, STATS).get(BUCKET + "/remote/refused_cs_rev")),
                      ("c", 1))
@@ -510,8 +536,8 @@ class TestOrderOfLiveWrites(unittest.TestCase):
         # The versioned one with an older stamp: applied in both modes (no counter: the order rule admits it).
         self.assertEqual(len(deliver(store, KEY, {"t": "v", "cs_rev": 100}, "peer2", [NOW_MS + 1000, "peer2"])), 1)
         # An unversioned one with a newer stamp: refused in 'on' (it lacks cs_rev), applied in 'report'.
-        self.assertEqual(len(deliver(store, KEY, {"t": "x"}, "peer2", [NOW_MS + 9000, "peer2"])),
-                         0 if mode == "on" else 1)
+        self.assertEqual(answers(deliver(store, KEY, {"t": "x"}, "peer2", [NOW_MS + 9000, "peer2"])),
+                         ["older" if mode == "on" else "confirm"])
         # Counted as older in both modes.
         self.assertEqual(getattr(store, STATS).get(BUCKET + "/remote/ver_older"), 1)
 
@@ -747,9 +773,9 @@ class TestTombstones(unittest.TestCase):
         store = make(mode, storage={TOMB: tombstone(KEY, "peer1", [NOW_MS + 5000, "peer1"])})
         # A value written before the delete arrives late.
         late = deliver(store, KEY, "old", "peer2", [NOW_MS + 1000, "peer2"])
-        # Refused unconfirmed in 'on'; applied in 'report', its tombstone removed.
-        self.assertEqual((len(late), KEY in store.storage, TOMB in store.storage),
-                         (0, False, True) if mode == "on" else (1, True, False))
+        # Refused with an answer in 'on'; applied in 'report', its tombstone removed.
+        self.assertEqual((answers(late), KEY in store.storage, TOMB in store.storage),
+                         (["older_than_delete"], False, True) if mode == "on" else (["confirm"], True, False))
         # Counted in both.
         self.assertEqual(getattr(store, STATS).get(BUCKET + "/remote/ver_older_than_delete"), 1)
     # A newer write with a token and readonly over the tombstone: applied as to a key not held.
@@ -1012,6 +1038,151 @@ class TestPermissionCount(unittest.TestCase):
     # Applied as before, and counted.
     self.assertEqual((store.storage[KEY]["value"], getattr(store, STATS)),
                      ("w", {BUCKET + "/hsync/perm_readonly": 1}))
+
+
+def refusal(store, key, sender, ver, held_ver=None, word="older"):
+  """
+  Deliver one refusal answer from ``sender`` to the writer ``store``, as a receiver with the order switch 'on' sends it.
+
+  Parameters
+  ----------
+  store : _ChainStoreRuntimeHarness
+    The writer.
+  key : str
+    The key of the refused store.
+  sender : str
+    The refusing receiver.
+  ver : list
+    The refused store's stamp, echoed.
+  held_ver : list, optional
+    The receiver's stamp for the key; None by default.
+  word : str, optional
+    The refusal word; ``"older"`` by default.
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> refusal(store, KEY, "peer1", [NOW_MS, "node"])
+  """
+  # Through the payload handler, as the network delivers it.
+  store.default_handler({_PayloadData.EE_SENDER: sender, _PayloadData.EE_ID: sender,
+                         _PayloadData.EE_DESTINATION: [store.ee_addr], _PayloadData.EE_IS_ENCRYPTED: True,
+                         "decoded": {store.CS_DATA: {store.CS_OP: store.CS_CONFIRM, store.CS_KEY: key,
+                                                     store.CS_VER: ver, store.CS_REFUSED: word,
+                                                     store.CS_HELD_VER: held_ver}}})
+
+
+class TestRefusalAnswers(unittest.TestCase):
+  """With the order switch 'on' a receiver answers a refused stamped store; the writer settles on the answer."""
+
+  def test_a_refused_stamped_store_is_answered_to_its_sender_in_on_only(self):
+    """'on' answers a refused stamped store with one message to its sender: the key, the echoed stamp, the word and
+    the held stamp, no value. 'report' answers nothing; an unstamped store, a future stamp and a store dropped for
+    its sender's membership are never answered (the future one is counted)."""
+    # Each mode and what an older store gets back.
+    for mode, sent in (("report", [{"op": "SCONFIRM", "key": KEY, "value": "a", "owner": "peer2",
+                                    "confirm_by": ["node", "stream", "CHAIN_STORE", "instance"],
+                                    "confirm_by_addr": "node"}]),
+                       ("on", [{"op": "SCONFIRM", "key": KEY, "ver": [NOW_MS + 1000, "peer2"], "refused": "older",
+                                "held_ver": [NOW_MS + 2000, "peer1"]}])):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # A replica holding "b" stamped by peer1 at +2 s, and a plain record with a token.
+        store = make(mode, storage={KEY: record(KEY, "b", "peer1", [NOW_MS + 2000, "peer1"]),
+                                    "tok": {**record("tok", "v", "peer1", [NOW_MS, "peer1"]), "token": "t"}})
+        # An older store from peer2: its answer, sent to peer2 alone.
+        self.assertEqual((deliver(store, KEY, "a", "peer2", [NOW_MS + 1000, "peer2"]),
+                          store.sent_payloads[-1]["node_addr"]), (sent, ["peer2"]))
+        # An unstamped store refused by its token, and a store stamped 61 s ahead: nothing sent back.
+        self.assertEqual([deliver(store, "tok", "w", "peer2"),
+                          deliver(store, KEY, "c", "peer2", [NOW_MS + 61_000, "peer2"])],
+                         [[], [] if mode == "on" else [sent[0] | {"value": "c"}]])
+    # A dAuth secret from a sender outside the registries: dropped before any rule, never answered.
+    store = make("on", signed=True)
+    # The store and what came back.
+    self.assertEqual(deliver(store, _hset_key("DAUTH_JOB_SECRETS", "7"), {"x": 1}, "outsider", [NOW_MS, "outsider"]),
+                     [])
+
+  def test_the_writer_settles_a_matching_answer_once_and_takes_the_held_stamp(self):
+    """A refusal answer settles its sender on the writer's own record whose stamp it echoes, once, without counting
+    a confirmation, and moves the writer's clock up to the held stamp (not to one more than 60 s ahead); an answer
+    from a non-target, a settled sender, for another stamp, for a remote record or for a key not held changes
+    nothing."""
+    # A writer in 'report' (the writer side acts in every mode) with peers peer1 and peer2, and a remote record.
+    store = make("report", storage={"remote": record("remote", "v", "peer1", [NOW_MS, "peer1"])})
+    # Its own write of KEY, unconfirmed.
+    local_write(store, KEY, "v")
+    # Its stamp.
+    ver = store.storage[KEY]["ver"]
+    # Answers that change nothing: a non-target, another stamp, a remote record, a key not held.
+    for sender, key, echoed in (("peer3", KEY, ver), ("peer1", KEY, [NOW_MS - 1, "node"]),
+                                ("peer1", "remote", [NOW_MS, "peer1"]), ("peer1", "absent", ver)):
+      # Delivered.
+      refusal(store, key, sender, echoed)
+    # Nothing settled yet.
+    self.assertEqual(store.storage[KEY]["confirmed_peers"], [])
+    # peer1's answer, held stamp 30 s ahead, twice.
+    for _ in range(2):
+      # Delivered.
+      refusal(store, KEY, "peer1", ver, [NOW_MS + 30_000, "peer1"])
+    # Settled once, no confirmation counted, the clock at the held stamp.
+    self.assertEqual((store.storage[KEY]["confirmed_peers"], store.storage[KEY]["confirms"], getattr(store, CLOCK)),
+                     (["peer1"], 0, NOW_MS + 30_000))
+    # peer2's answer with a held stamp 2 min ahead: settled, the clock not moved.
+    refusal(store, KEY, "peer2", ver, [NOW_MS + 120_000, "peer2"])
+    # Both settled.
+    self.assertEqual((store.storage[KEY]["confirmed_peers"], getattr(store, CLOCK)),
+                     (["peer1", "peer2"], NOW_MS + 30_000))
+
+  def test_the_wait_ends_at_once_when_every_target_refused(self):
+    """A local write that both peers refuse (they hold a newer stamp) returns False before its timeout with the wait
+    end refused_by_peers; with one refusal and one silent peer it waits out its retries and ends unconfirmed."""
+    # With both peers answering, and with peer2 silent.
+    for silent, end in ((False, "refused_by_peers"), (True, "unconfirmed")):
+      # One sub-test each.
+      with self.subTest(silent=silent):
+        # A network that delivers at once.
+        network = _FakeNetwork()
+        # The writer and its two peers, in 'on'; the peers hold KEY stamped 50 s ahead by a third node.
+        writer = make("on")
+        # The peers.
+        peers = [make("on", name, peers=("node",), storage={KEY: record(KEY, "b", "x", [NOW_MS + 50_000, "x"])})
+                 for name in ("peer1", "peer2")]
+        # Registered; a silent peer2 is not on the network.
+        for store in [writer] + peers[:1 if silent else 2]:
+          # Reachable.
+          network.register(store)
+        # The writer's clock, to see how long it waited.
+        sleep = writer.sleep
+
+        def sleep_and_send(seconds):
+          """
+          Stand for the wait loop's sleep: the plugin loop sends the queued store meanwhile.
+
+          Parameters
+          ----------
+          seconds : float
+            The sleep asked for.
+
+          Returns
+          -------
+          None
+          """
+          # The queued store goes out, and the answers come back at once.
+          writer._ChainStoreBasePlugin__maybe_broadcast()
+          # Then the sleep itself.
+          sleep(seconds)
+        # Used by the wait loop.
+        writer.sleep = sleep_and_send
+        # The caller's dict.
+        info = {}
+        # The write, with a 10 s timeout and no retry.
+        self.assertFalse(writer._set_value(KEY, "a", owner="node", timeout=10, max_retries=0, result_info=info))
+        # How it ended and how long it waited (fake clock): at once when both refused, the whole timeout otherwise.
+        self.assertEqual((info["outcome"], writer._now - NOW < 1), (end, not silent))
 
 
 class _QueuedNetwork(_FakeNetwork):

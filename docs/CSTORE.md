@@ -92,8 +92,8 @@ Merge rules:
 - delete pruning is out of scope
 - each exported record carries only `key`, `value`, `owner`, `readonly` and, when
   stamped, `ver` (the fields a merge reads); a record with a token is never exported
-- a copy that takes more than 512 KiB on the wire, or that no message could carry, is
-  skipped and counted (see "Record size cap")
+- a copy that takes more than 512 KiB on the wire, that no message could carry, or that
+  is nested deeper than 64 levels, is skipped and counted (see "Record size cap")
 
 Result rules:
 
@@ -324,9 +324,9 @@ Cost, on the node image's interpreter under a 0.35 CPU limit: an idle lap of the
 takes under 1 microsecond. Merging one answer of 1,000 signed operations (2.7 MB of JSON),
 with real signature checks, took 1.1 to 1.8 s of CPU and 3 to 5 s of wall time when the
 replica lacks them all (one signature check per record: the first answers after an
-absence), and 0.07 to 0.15 s of CPU and 0.2 to 0.5 s of wall time when it holds them all,
-whether the copies carry the same stamps, other stamps or none (no signature check: every
-later answer). The merge runs on the plugin thread under the persistence lock: for that
+absence), and 0.02 to 0.08 s of CPU and 0.1 to 0.3 s of wall time when it holds them all,
+the higher figures when the copies carry other stamps than the held ones or none (no
+signature check: every later answer). The merge runs on the plugin thread under the persistence lock: for that
 time the store handles no other message, and local writers, the counters and the save's
 copy wait. An oracle answers about two such requests per namespace and round.
 
@@ -390,9 +390,21 @@ one nested deeper than the encoder goes (about 10,000 levels on the node image's
 interpreter). One such record made every sync answer of its namespace fail to be
 prepared for sending. A refused store of this kind is never answered: the answer would
 echo the key and the stamp. Values the encoder converts (numpy numbers and arrays,
-datetimes) are stored as before. Depth is not bounded below the encoder's limit: a walk
-of the value that would bound it costs 36 % of the check for the 122 KB record below, so
-none is made.
+datetimes) are stored as before.
+
+The same paths refuse a record nested too deep, as `refused_too_deep`: one whose value,
+owner, readonly mark or token holds dicts and lists inside each other more than
+`CS_MAX_DEPTH` (64) levels deep, the outermost counted as the first. The wire's encoder and
+decoder take about 10,000 levels, but the steps after the store copy a value level by
+level and stop far earlier: the export of a sync answer and a read from about 445 levels,
+the save's pickle of the replica from 5,000. So one deeper record, which any sender could
+store, broke every sync answer and read of its namespace, or every later save. The
+deepest value known in use, a deployment's secret record with one pipeline configuration
+per node, is nested 10 levels. Such a record can be carried, so unlike an unencodable one
+its stamped store is answered (`too_deep`) with `CSTORE_ORDER` `on`. A record held from
+before the bound is not removed by it; its delete is taken. The bound is checked by a walk
+of the record's dicts and lists, after the encoding and the size, that stops at the bound;
+a record over the cap is not walked.
 
 A delete is a record with value `None`, so a key that holds a larger record, written
 before the cap existed, can still be deleted. Such a record is not removed by the cap; a
@@ -408,26 +420,29 @@ ASCII, 72 % with content chosen to compress worst sent to 100 receivers, and sta
 80 % for content that does not compress at all. A namespace-sync answer carries every
 record of its namespace and is not bounded by this cap.
 
-A node of the previous release has no cap: it applies and confirms a larger record, and a
-sync answer from it can carry one (skipped here). Its own larger store is refused here
-without an answer, as it carries no stamp, so its write returns `False` after its retries
-unless enough of its other peers confirm it.
+A node of the previous release has no cap and no depth bound: it applies and confirms a
+larger or deeper record, and a sync answer from it can carry a larger one (skipped here).
+Its own larger or deeper store is refused here without an answer, as it carries no stamp,
+so its write returns `False` after its retries unless enough of its other peers confirm
+it.
 
-Cost: one JSON encoding of the record per write call, under the persistence lock. On the
-node image's interpreter under a 0.35 CPU limit, in wall time with the limit's throttling:
-0.05 to 0.11 ms for a 0.4 KB value, 3.9 to 5.0 ms for a 122 KB record of nested
-configuration (the kind the largest production value is; about what the receiver spends
-parsing the same value out of its message), 6 to 8 ms for 125 KB of small nested dicts,
-20 ms for 125 KB of floats, and 15 to 20 ms (5.7 ms of CPU) for a 511 KB record of nested
-configuration, just under the cap; a record of twice the cap is refused after 30 ms. At
-full speed: 0.01 ms, 0.7 to 0.85 ms for the 122 KB record and 2.8 ms for the one at the cap.
-A sync answer costs one encoding per copy that would change the record held, and none for
-a copy that would be stored as that record field for field: its fields are compared
-instead, its value up to three times (for this skip, for the signed-record rule's and for
-the order rule's identical case). Merging one answer of 1,000 signed operations (2.7 MB)
-that all are the records held takes 0.07 to 0.11 s of CPU at 0.35 CPU, the comparisons
-included; when their stamps differ from the held ones each copy is encoded once, and the
-same merge takes 0.08 to 0.15 s.
+Cost: one JSON encoding of the record and one walk of its dicts and lists per write call,
+under the persistence lock. On the node image's interpreter under a 0.35 CPU limit, in
+wall time with the limit's throttling: 0.06 ms for a 0.4 KB value (0.05 without the walk),
+0.5 to 0.6 ms for a 14 KB value, 4.9 to 5.1 ms for a 122 KB record of nested configuration
+(the kind the largest production value is; 4.6 without the walk, 1.6 to 1.9 ms of CPU),
+10 ms for 125 KB of small nested dicts, where the walk costs most, 20 ms for 125 KB of
+floats, and 19 to 21 ms (6 to 7 ms of CPU) for a 511 KB record of nested configuration,
+just under the cap; a record of twice the cap is refused after 30 ms, not walked. At full
+speed: 0.012 ms, 0.11 ms, 0.96 ms for the 122 KB record and 3.9 ms for the one at the cap.
+A sync answer costs one check (the encoding and the walk) per copy that would change the
+record held, and none for a copy that would be stored as that record field for field: its
+fields are compared instead, its value up to three times (for this skip, for the
+signed-record rule's and for the order rule's identical case). A copy's value is copied
+only when it is stored. Merging one answer of 1,000 signed operations (2.7 MB) that all are
+the records held takes 0.02 to 0.04 s of CPU at 0.35 CPU, the comparisons included; when
+their stamps differ from the held ones each copy is checked once, and the same merge takes
+0.06 to 0.08 s.
 
 ### New keys per sender
 
@@ -534,7 +549,7 @@ as the previous release removes it; a sync answer's delete copy of the key is sk
 With `CSTORE_ORDER` `on`, a receiver that refuses a stamped store answers its sender
 with one `SCONFIRM` message `{op, key, ver, refused, held_ver}`: the store's stamp
 echoed, the refusal word without its `refused_` prefix (`older`, `older_than_delete`,
-`origin`, `collision`, `too_large`, or a rule of the previous release: `versioned`,
+`origin`, `collision`, `too_large`, `too_deep`, or a rule of the previous release: `versioned`,
 `cs_rev`, `secret_rule`, `token`, `readonly`) and its own stamp for the key, never the
 value. A `future` stamp is counted and not answered, so the writer can deliver it once the
 clocks agree; a record that is not encodable (`unencodable`) is not answered either.
@@ -710,7 +725,7 @@ Labels in `counts`:
     - `refused_secret_rule`: a revocation marker emptied or changed, or a payload for a revoked secret revision.
     - `refused_token`: the stored record has another token.
     - `refused_readonly`: the stored record is readonly for another owner.
-    - `refused_too_large`: a record over the size cap of 512 KiB on the wire (above); `refused_unencodable`: a record no message can carry (above). A copy of a sync answer skipped for either is counted under the same words with the origin `hsync`.
+    - `refused_too_large`: a record over the size cap of 512 KiB on the wire (above); `refused_too_deep`: a record nested deeper than 64 levels (above); `refused_unencodable`: a record no message can carry (above). A copy of a sync answer skipped for one of them is counted under the same words with the origin `hsync`.
     - `refused_new_keys`: only with `CSTORE_NEW_KEYS_MAX` above 0, a peer's store that would create a key after its sender reached that number of new keys in the period (above).
     - with `CSTORE_ORDER` `on` (or `report`, for a hand-off re-send) only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).
@@ -764,7 +779,9 @@ CSTORE_CENSUS {"hs:<hash>:":[<records>,<unstamped>,<tombstones>,<readonly>,<size
   digest. Read digest and size together there.
 - `unencodable`: live records whose value cannot be put in canonical form (a type or a
   dict key no encoder takes, a circular value or one nested deeper than the encoder goes,
-  which the wire could not send either, as an old own record can hold); they are left out of `size` and
+  about 10,000 levels, which the wire could not send either, as an old own record can
+  hold; the store itself now refuses a value nested deeper than 64 levels, so only a
+  record held from before can be that deep); they are left out of `size` and
   `digest`, and the line is still written.
   The census does not raise on what a replica holds: records of an older shape (no
   `readonly` or `token`) and keys holding a lone surrogate are counted too.

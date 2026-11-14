@@ -1,11 +1,14 @@
 """
-Offline tests of the chain store's record size cap, of the refusal of a record no message can carry, and of the
-count of new keys per sender outside the replication peers and the oracle registries, with the limit it can be given.
+Offline tests of the chain store's record size cap, of the refusal of a record no message can carry or that is nested
+too deep, and of the count of new keys per sender outside the replication peers and the oracle registries, with the
+limit it can be given.
 """
 # A datetime value, which the wire's encoder turns into text.
 import datetime
 # The independent measure of a record's wire form, and the wire form of a sync answer.
 import json
+# The save's encoding of a replica.
+import pickle
 # The data folder of a started store.
 import tempfile
 # The test framework.
@@ -42,6 +45,8 @@ OPS = "_ChainStoreBasePlugin__ops"
 SURROGATE = "bad \ud800 text"
 # The limit of new keys per outside sender, as on_init reads it, by its private name.
 LIMIT = "_ChainStoreBasePlugin__new_keys_max"
+# How deep a record's value, owner, readonly mark and token may be nested: dicts and lists inside each other.
+DEPTH = 64
 
 
 def node(mode, **kwargs):
@@ -136,6 +141,38 @@ def filler(size, key, owner, ver=None):
   """
   # One byte per character: the size of the record with an empty value, then the rest.
   return "x" * (size - wire_size(key, "", owner, ver=ver))
+
+
+def nested(depth, leaf="v"):
+  """
+  Build a value nested ``depth`` levels deep: lists and dicts inside each other in turn, around one text.
+
+  Parameters
+  ----------
+  depth : int
+    How many containers are nested; 0 gives the text itself. The innermost is a dict, the next one a list, and
+    so on in turn, so a walk that follows only dicts or only lists stops after one level.
+  leaf : str, optional
+    The text in the innermost container; ``"v"`` by default.
+
+  Returns
+  -------
+  any
+    The nested value, as a decoded message holds it (plain dicts and lists).
+
+  Examples
+  --------
+  >>> nested(0), nested(1), nested(3)
+  ('v', {'a': 'v'}, {'a': [{'a': 'v'}]})
+  """
+  # The innermost content.
+  value = leaf
+  # One container around it per level, a dict and a list in turn.
+  for level in range(depth):
+    # A list around a dict, a dict around a list.
+    value = [value] if level % 2 else {"a": value}
+  # The outermost container.
+  return value
 
 
 class TestSizeCap(unittest.TestCase):
@@ -329,6 +366,122 @@ class TestSizeCap(unittest.TestCase):
                          (False, [] if mode == "off" else ["too_large"]))
         # Counted once under its word.
         self.assertEqual(getattr(store, STATS), {BUCKET + "/remote/refused_too_large": 1})
+
+
+class TestDepthBound(unittest.TestCase):
+  """A record nested deeper than 64 levels is refused wherever a record is stored, in every mode, under its own word."""
+
+  def test_a_value_nested_to_the_bound_is_stored_and_one_level_deeper_is_refused_on_every_path(self):
+    """A local write, a peer's store and a sync copy nested exactly 64 levels are stored; nested 65 levels they are
+    refused as too_deep (nothing stored, sent or confirmed; a stamped store answered in 'on', a re-send also in
+    'report'), with every switch 'off', 'report' or 'on'; a record over the size cap as well is refused for its
+    size; a sync copy nested 600 or 5,000 levels is skipped the same way and raises nothing; and a copy that is
+    stored is stored as a copy of its own."""
+    # Each mode: the bound has no switch.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # The stamp a peer's store carries (none is read in 'off').
+        stamp = None if mode == "off" else [NOW_MS, "peer1"]
+        # A peer's store nested exactly to the bound: stored and confirmed.
+        store = node(mode)
+        # Confirmed once.
+        self.assertEqual((answers(deliver(store, KEY, nested(DEPTH), "peer1", stamp)), KEY in store.storage),
+                         (["confirm"], True))
+        # One level deeper, to another key: not stored, not confirmed ('on' answers the stamped store with the word).
+        self.assertEqual((answers(deliver(store, OTHER, nested(DEPTH + 1), "peer1", stamp)), OTHER in store.storage),
+                         (["too_deep"] if mode == "on" else [], False))
+        # The same as a hand-off re-send, as the payload handler passes it.
+        store._ChainStoreBasePlugin__exec_store({"key": OTHER, "value": nested(DEPTH + 1), "owner": "peer1",
+                                                 "resend": True, **({"ver": stamp} if stamp else {})}, peers="peer1")
+        # Refused too; a re-send is answered with the word wherever stamps are read.
+        self.assertEqual((OTHER in store.storage, answers([store.sent_payloads[-1]["data"][store.CS_DATA]])),
+                         (False, ["confirm"] if mode == "off" else ["too_deep"]))
+        # Counted under its own word, once per refused store.
+        self.assertEqual(getattr(store, STATS), {BUCKET + "/remote/changed": 1, BUCKET + "/remote/refused_too_deep": 2})
+        # A local write nested exactly to the bound: stored and queued for the peers.
+        writer, info = node(mode), {}
+        # Stored here without waiting.
+        self.assertEqual((writer._set_value(KEY, nested(DEPTH), owner="node", wait=False, result_info=info), info),
+                         (True, {"outcome": "changed"}))
+        # One level deeper: refused at once, under the word.
+        self.assertEqual((writer._set_value(OTHER, nested(DEPTH + 1), owner="node", wait=False, result_info=info), info),
+                         (False, {"outcome": "refused_too_deep"}))
+        # Nothing stored and nothing more queued for it.
+        self.assertEqual((OTHER in writer.storage, len(getattr(writer, OPS))), (False, 1))
+        # A record that is both over the size cap and too deep is refused for its size: the size is decided first,
+        # so a record over the cap is not walked.
+        self.assertEqual((writer._set_value(OTHER, nested(DEPTH + 1, "x" * 600_000), owner="node", wait=False,
+                                            result_info=info), info), (False, {"outcome": "refused_too_large"}))
+        # A sync answer: one copy at the bound, and copies one level, 600 and 5,000 levels deep.
+        store = node(mode)
+        # The copy at the bound, as the answer holds it.
+        copy_at_bound = record(KEY, nested(DEPTH), "peer1", stamp)
+        # The deeper ones, each under its own field.
+        deeper = {_hset_key("players", "deep%d" % depth): depth for depth in (DEPTH + 1, 600, 5000)}
+        # Only the copy at the bound is merged; nothing is raised for the others.
+        self.assertEqual(getattr(store, MERGE)("players", {KEY: copy_at_bound, **{
+          key: record(key, nested(depth), "peer1", stamp) for key, depth in deeper.items()}}), 1)
+        # The others are skipped and counted.
+        self.assertEqual((sorted(store.storage), getattr(store, STATS)),
+                         ([KEY], {BUCKET + "/hsync/refused_too_deep": 3}))
+        # What is stored is a copy: the replica does not share the answer's value.
+        self.assertEqual((store.storage[KEY]["value"] is copy_at_bound["value"], store.storage[KEY]["value"][0]["a"] is
+                          copy_at_bound["value"][0]["a"]), (False, False))
+
+  def test_every_field_a_sender_chooses_is_bounded_not_only_the_value(self):
+    """A small value with an owner, a readonly mark or a token nested 65 levels is refused from a peer and skipped
+    in a sync answer; nested 64 levels each is stored."""
+    # Each field a store carries beside the key, the value and the stamp (a stamp is checked for its form).
+    for field in ("owner", "readonly", "token"):
+      # One sub-test each.
+      with self.subTest(field=field):
+        # A replica in 'report'.
+        store = node("report")
+        # A store of "v" with that field one level too deep, as the payload handler passes it.
+        store._ChainStoreBasePlugin__exec_store({"key": KEY, "value": "v", "owner": "peer1", field: nested(DEPTH + 1)},
+                                                peers="peer1")
+        # Not stored, not confirmed.
+        self.assertEqual((KEY in store.storage, store.sent_payloads), (False, []))
+        # The same record as a copy of a sync answer: skipped.
+        self.assertEqual(getattr(store, MERGE)("players", {KEY: {**record(KEY, "v", "peer1"),
+                                                                 field: nested(DEPTH + 1)}}), 0)
+        # Counted on both paths.
+        self.assertEqual(getattr(store, STATS),
+                         {BUCKET + "/remote/refused_too_deep": 1, BUCKET + "/hsync/refused_too_deep": 1})
+        # Nested exactly to the bound, the same store is applied and confirmed.
+        store._ChainStoreBasePlugin__exec_store({"key": KEY, "value": "v", "owner": "peer1", field: nested(DEPTH)},
+                                                peers="peer1")
+        # Stored and confirmed once.
+        self.assertEqual((KEY in store.storage, len(store.sent_payloads)), (True, 1))
+
+  def test_a_refused_deep_store_leaves_the_sync_answer_a_read_and_the_save_working(self):
+    """A peer's store of a value nested 600 or 5,000 levels is refused, so the three things such a record broke
+    still work: the namespace's sync answer is sent, a local read returns, and the replica is saved and pickles."""
+    # Each depth: 600 broke the copies of the export and the read, 5,000 also the save's pickle.
+    for depth in (600, 5000):
+      # One sub-test each.
+      with self.subTest(depth=depth):
+        # A replica holding one good record of the namespace.
+        store = node("report", storage={OTHER: record(OTHER, "fine", "peer1")})
+        # The message as a node receives it: decoded, not copied again (the harness's own copy stops near 500 levels).
+        store.receive_and_decrypt_payload = lambda data: data["decoded"]
+        # The deep store from a peer: refused, with no confirmation.
+        self.assertEqual((deliver(store, KEY, nested(depth), "peer1", [NOW_MS, "peer1"]), sorted(store.storage)),
+                         ([], [OTHER]))
+        # A peer's sync request for the namespace: answered.
+        store.default_handler(store.make_request_payload(request_id="q", sender="peer1", hkey="players"))
+        # The answer sent.
+        body = store.sent_payloads[-1]["data"][store.CS_DATA]
+        # It carries the good record.
+        self.assertEqual((body["op"], sorted(body["snapshot"])), ("SHSYNC_RESP", [OTHER]))
+        # A local read of the namespace's record returns.
+        self.assertEqual(store._get_value(OTHER), "fine")
+        # The save of the replica: written, with no failure logged.
+        store._ChainStoreBasePlugin__save_chain_storage()
+        # One snapshot saved, which pickles as the replica file does.
+        self.assertEqual((len(store.saved_storage), sorted(pickle.loads(pickle.dumps(store.saved_storage[-1]))),
+                          [line for line in store.messages if "save failed" in line]), (1, [OTHER], []))
 
 
 class TestUnencodable(unittest.TestCase):

@@ -112,7 +112,7 @@ def copy_or_fail(value):
   """
   Copy a value as the store does, and fail for the one marked bad: a merge that raises at one of its records.
 
-  A test gives it to a store as its ``deepcopy``, which the merge calls first for each copy of an answer.
+  A test gives it to a store as its ``deepcopy``, which the merge calls for each copy of an answer it stores.
 
   Parameters
   ----------
@@ -434,7 +434,7 @@ class TestResyncAnswers(unittest.TestCase):
     store = oracle("report")
     # Its first request, to both peers.
     lap(store, 0)
-    # The store's copy of a value, which the merge calls first for each record: it fails for the one marked bad.
+    # The store's copy of a value, which the merge calls for each copy it stores: it fails for the one marked bad.
     store.deepcopy = copy_or_fail
     # An answer with a good record, then the one whose copy fails: the exception leaves the handler.
     with self.assertRaises(RuntimeError):

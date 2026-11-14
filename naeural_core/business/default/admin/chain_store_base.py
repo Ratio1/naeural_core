@@ -171,6 +171,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   # fills at most 80 % of the broker's 1 MiB packet (72 % measured for content chosen to compress worst, sent to 100
   # receivers; 63 % for random printable ASCII).
   CS_MAX_RECORD_BYTES = 524_288
+  # How deep a record's value, owner, readonly mark and token may each be nested: dicts and lists inside each other,
+  # the outermost counted as the first level. A deeper one is refused on every path that stores a record. The wire's
+  # encoder and decoder take about 10,000 levels, but the steps after the store copy a value level by level and stop
+  # far earlier: the export of a sync answer and a read from about 445 levels, the save's pickle of the replica from
+  # 5,000. One deeper record from any sender then broke every sync answer and read of its namespace, or every later
+  # save. The deepest value known in use is a deployment's secret record (one pipeline configuration per node), 10
+  # levels as its writer builds it; the values of the store's own tests are nested 2 levels at most.
+  CS_MAX_DEPTH = 64
   # The hand-off: seconds between two sweeps, re-sends per sweep, re-sends per record and peer before giving up,
   # the longest gap of the back-off, and how long before a lost peer was dropped its settlements are re-opened.
   CS_HANDOFF_INTERVAL, CS_HANDOFF_BUDGET, CS_HANDOFF_MAX_SENDS, CS_HANDOFF_MAX_GAP = 15, 32, 6, 3600
@@ -800,7 +808,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     once per replication peer at each request, never between requests, and at most once more for each answer's
     merge. Merging one answer of 1,000 signed operations (2.7 MB of JSON), under the same limit and with real
     signature checks: 1.1 to 1.8 s of CPU and 3 to 5 s of wall time when the replica lacks them all (one
-    signature check per record: the first answers after an absence), and 0.07 to 0.15 s of CPU and 0.2 to 0.5 s
+    signature check per record: the first answers after an absence), and 0.02 to 0.08 s of CPU and 0.1 to 0.3 s
     of wall time when it holds them all (no signature check: every later answer). For that time this thread
     handles no store, confirmation or sync request, and the persistence lock is held: local writers, every
     counter and the save's copy wait for it.
@@ -2080,7 +2088,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   def __wire_refusal(self, key, value, owner, readonly, token, ver):
     """
-    Tell why a record must not be stored for what it is on the wire: too large, or not encodable at all.
+    Tell why a record must not be stored for what it is: too large on the wire, not encodable, or nested too deep.
 
     The record is encoded once as a namespace-sync answer would carry it, ``{key: {key, value, owner, readonly,
     token, ver}}``, with the encoder every message leaves with (``json_dumps``: compact, a non-ASCII character as
@@ -2111,7 +2119,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       ``"unencodable"`` when the encoder or UTF-8 cannot take the record (a string that holds a lone surrogate,
       a value of a type or with a dict key no encoder takes, a circular value, or one nested deeper than the
       encoder goes, which is about 10,000 levels on the node image's interpreter);
-      ``"too_large"`` when it takes more than ``CS_MAX_RECORD_BYTES`` (524,288) bytes; None when it may be stored.
+      ``"too_large"`` when it takes more than ``CS_MAX_RECORD_BYTES`` (524,288) bytes;
+      ``"too_deep"`` when its value, owner, readonly mark or token is nested deeper than ``CS_MAX_DEPTH`` (64)
+      levels of dicts and lists; None when it may be stored. The first that applies, in this order.
 
     Notes
     -----
@@ -2120,22 +2130,31 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     every receiver, as each measures the record with the owner, mark, token and stamp it would store. A record
     that passes fits one message: a sync answer's entry for it is at most the size measured here.
 
-    Depth is not bounded below the encoder's own limit: a value nested less deep than that is not refused for
-    its depth. A walk of the value that would bound it costs 36 % of this check for the 122 KB record below
-    (0.3 ms of CPU on 0.86 ms under the 0.35 CPU limit), so none is made here.
+    The depth is bounded by a walk of the record's dicts and lists, level by level, that stops at the bound
+    and reads no string or number beyond its type. It runs after the encoding and the size, so it only walks a
+    record the encoder took (a circular one never reaches it) and of at most ``CS_MAX_RECORD_BYTES``. Dicts
+    and lists are the containers a decoded message holds, and the ones the plugin API passes after its JSON
+    normalization; a tuple or a subclass of them, which only a direct caller of ``_set_value`` can pass, is not
+    followed. A stamp is not walked: it is checked for its form before it reaches here. The word is its own:
+    such a record can be carried, so its store is answered like one that is too large, and its count tells a
+    writer's data shape from a string no message carries.
 
     One record UTF-8 cannot encode made every sync answer of its namespace fail to be prepared for sending, as
     the answer carries every record of the namespace; a JSON escape in a peer's message, or a local caller, can
     deliver such a string. A value the encoder turns into JSON (a numpy number or array, a datetime) is
     encodable, and is measured as the JSON it becomes.
 
-    The cost is one JSON encoding of the record. Measured on the node image's interpreter under a 0.35 CPU
-    limit, in wall time with the limit's throttling: 0.05 to 0.11 ms for a 0.4 KB value, 3.9 to 5.0 ms for a
-    122 KB record of nested configuration (the kind the largest production value is; about what the receiver
-    spends parsing the same value out of its message), 6 to 8 ms for 125 KB of small nested dicts, 20 ms for
-    125 KB of floats, and 15 to 20 ms (5.7 ms of CPU) for a 511 KB record of nested configuration, just under
-    the cap; a record of twice the cap is refused after 30 ms. At full speed: 0.01 ms, 0.7 to 0.85 ms for the
-    122 KB record and 2.8 ms for the one at the cap.
+    The cost is one JSON encoding of the record and the walk of its dicts and lists. Measured on the node
+    image's interpreter under a 0.35 CPU limit, in wall time with the limit's throttling: 0.06 ms for a 0.4 KB
+    value (0.05 without the walk), 0.5 to 0.6 ms for a 14 KB value, 4.9 to 5.1 ms for a 122 KB record of nested
+    configuration (the kind the largest production value is; 4.6 without the walk, 1.6 to 1.9 ms of CPU), 10 ms
+    for 125 KB of small nested dicts, where the walk costs most, 20 ms for 125 KB of floats, and 19 to 21 ms (6
+    to 7 ms of CPU) for a 511 KB record of nested configuration, just under the cap; a record of twice the cap
+    is refused after 30 ms, not walked. At full speed: 0.012 ms, 0.11 ms, 0.96 ms for the 122 KB record and
+    3.9 ms for the one at the cap. The walk is a fifth to a third of these, and about half for small nested
+    dicts. A count of the brackets in the encoded text, which could spare the walk for a record with fewer of
+    them than the bound, was measured and left out: it saves under a microsecond for the 0.4 KB value and
+    costs a fifth of the encoding for every larger record.
 
     Examples
     --------
@@ -2144,6 +2163,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     'too_large'
     >>> self.__wire_refusal(key, {"name": "\\ud800"}, "owner", False, None, None)
     'unencodable'
+    >>> deep = "v"
+    >>> for _ in range(65):
+    ...   deep = [deep]
+    >>> self.__wire_refusal(key, deep, "owner", False, None, None)
+    'too_deep'
     """
     try:
       # The bytes the record takes in a sync answer: one encoding with the wire's encoder (unsorted: the order of
@@ -2159,8 +2183,24 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # too long to be written as text; RecursionError: a circular value, or one nested deeper than the encoder goes,
       # about 10,000 levels): no message could carry this record to a peer.
       return "unencodable"
-    # Larger than one record may be, or fine.
-    return "too_large" if size > self.CS_MAX_RECORD_BYTES else None
+    if size > self.CS_MAX_RECORD_BYTES:
+      # Larger than one record may be. Returned before the walk below, which so never walks more than the cap.
+      return "too_large"
+    # The dicts and lists among the value and the three fields a sender chooses beside it: the first level. A value
+    # nested deeper than CS_MAX_DEPTH passed here and was stored, and the copies a sync answer and a read make of it
+    # then failed (from about 445 levels), and from 5,000 the save's pickle of the whole replica.
+    level = [item for item in (value, owner, readonly, token) if type(item) is dict or type(item) is list]
+    # One level per pass, at most CS_MAX_DEPTH passes: the walk ends at the bound however deep the record is.
+    for _ in range(self.CS_MAX_DEPTH):
+      # The dicts and lists the containers of this level hold directly, which are the next level; a string or a
+      # number is only asked for its type.
+      level = [child for item in level for child in (item.values() if type(item) is dict else item)
+               if type(child) is dict or type(child) is list]
+      if not level:
+        # No deeper level: the record is nested within the bound, and it fits.
+        return None
+    # A level below the bound exists.
+    return "too_deep"
 
   def __hset_index(self, hkey):
     """
@@ -2287,9 +2327,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     node image's interpreter under a 0.35 CPU limit with real signature
     checks, for one answer of 1,000 signed operations (2.7 MB of JSON): 1.1
     to 1.8 s of CPU and 3 to 5 s of wall time when the replica lacks them
-    all (one signature check per record); 0.07 to 0.15 s of CPU and 0.2 to
-    0.5 s of wall time when it holds them all, with or without the same
-    stamps (no signature check).
+    all (one signature check per record); 0.02 to 0.04 s of CPU and 0.1 s
+    of wall time when the copies are the records held field for field, and
+    0.06 to 0.08 s of CPU and 0.1 to 0.3 s of wall time when only their
+    stamps differ from the held ones or are missing, as each such copy is
+    then measured once (no signature check in either case).
 
     A record whose stored value carries an int ``cs_rev`` (``__stale_revision``)
     is replaced only by a copy with a higher or equal ``cs_rev``: an older or
@@ -2300,10 +2342,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     the namespace rules give it, and its stamp): after the signed-record,
     ``cs_rev`` and namespace rules and before the order rule, as
     ``_set_value`` measures a write. One that takes more than
-    ``CS_MAX_RECORD_BYTES`` on the wire, or that no message could carry, is
-    skipped and counted as ``<bucket>/hsync/refused_too_large`` or
-    ``refused_unencodable``; the other copies of the answer are merged. In
-    every mode. A copy the earlier rules skip is not measured, as it is not
+    ``CS_MAX_RECORD_BYTES`` on the wire, that no message could carry, or
+    that is nested deeper than ``CS_MAX_DEPTH`` levels, is skipped and
+    counted as ``<bucket>/hsync/refused_too_large``,
+    ``refused_unencodable`` or ``refused_too_deep``; the other copies of the
+    answer are merged. In every mode. A copy's value is read as the answer
+    holds it and copied only where it is stored, after this check, so no
+    copy is made of a value before its depth is known, nor of a copy that
+    stores nothing. A copy the earlier rules skip is not measured, as it is not
     stored either; a delete copy is measured only with the order switch
     'on', where it is stored. A copy that would be stored as the record
     held under its key field for field (value, owner, readonly mark, token
@@ -2393,7 +2439,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if self.CS_OWNER not in record or self.CS_VALUE not in record:
           continue
 
-        value = self.deepcopy(record.get(self.CS_VALUE))
+        # The copy's value as the answer holds it: the rules below only read it, and it is copied where it is stored.
+        # Before, it was deep-copied here, before any check, and that copy failed for a value nested deeper than about
+        # 445 levels: the error left the merge, and for a resync answer the payload handler.
+        value = record.get(self.CS_VALUE)
         # The copy's stamp, checked for form (a malformed one counts ver_invalid and is unstamped); none is read
         # with the order switch 'off'.
         ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, "hsync")
@@ -2520,7 +2569,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # state rather than originating a new write.
         self.__chain_storage[name] = {
           self.CS_KEY: key,
-          self.CS_VALUE: value,
+          # A copy of the value, so the replica does not share it with the answer; made here, for a copy that passed
+          # every rule and the size and depth check, and no longer for the copies that store nothing.
+          self.CS_VALUE: self.deepcopy(value),
           self.CS_OWNER: record.get(self.CS_OWNER),
           self.CS_READONLY: readonly,
           self.CS_TOKEN: token,
@@ -2957,6 +3008,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     - ``refused_too_large``: a record that takes more than
       ``CS_MAX_RECORD_BYTES`` (512 KiB) on the wire, all those fields
       counted (``__wire_refusal``);
+    - ``refused_too_deep``: a record whose value, owner, readonly mark or
+      token is nested deeper than ``CS_MAX_DEPTH`` (64) levels of dicts and
+      lists (``__wire_refusal``);
     - ``refused_new_keys``: only with ``CSTORE_NEW_KEYS_MAX`` above 0, a
       peer's store that would create a key after its sender, outside the
       replication peers and the oracle registries, created that many in
@@ -2967,14 +3021,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       ``refused_origin``, ``refused_unstamped``, ``refused_collision`` and
       ``refused_older_than_delete``.
 
-    The size cap has no switch and acts in every mode. After the namespace
-    rules and the stamp, and before the order rule, the record is measured
-    as it would be stored (``__wire_refusal``) and refused on a word:
-    nothing is stored or sent for a local write, and a peer's store is not
-    confirmed. A delete is a record with value None, so the delete of a key
-    that holds a larger record, written before the cap existed, is taken.
-    The check costs one JSON encoding of the record per call (the numbers
-    are in ``__wire_refusal``).
+    The size cap and the depth bound have no switch and act in every mode.
+    After the namespace rules and the stamp, and before the order rule, the
+    record is measured as it would be stored (``__wire_refusal``) and
+    refused on a word: nothing is stored or sent for a local write, and a
+    peer's store is not confirmed. A delete is a record with value None, so
+    the delete of a key that holds a larger or deeper record, written before
+    the cap and the bound existed, is taken. The check costs one JSON
+    encoding of the record and a walk of its dicts and lists per call (the
+    numbers are in ``__wire_refusal``).
 
     A peer's store that creates a key this replica did not hold, outside
     the protected namespaces (``CS_PROTECTED_NAMESPACES``), is counted as
@@ -3727,7 +3782,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     when unstamped or not held), never the value. A refused ``future`` stamp, a record that is not encodable
     (``unencodable``: the answer would echo its key and stamp, which may hold the string no message can carry),
     an unstamped store, and the stores dropped before ``_set_value`` (membership, oracle-only, ``"dl:"`` keys) are
-    not answered. A record over the size cap (``too_large``) is answered like any other refusal. In
+    not answered. A record over the size cap (``too_large``) or nested too deep (``too_deep``) is answered
+    like any other refusal. In
     'report' nothing is sent for a live store and nothing more is counted. A writer of the previous release
     never gets one: it sends no stamp.
 

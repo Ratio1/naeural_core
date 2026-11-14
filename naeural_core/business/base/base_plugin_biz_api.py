@@ -497,6 +497,7 @@ class _BasePluginAPIMixin:
       ``refused_<reason>`` per refusal (``refused_no_peers``, ``refused_oracle_only``,
       ``refused_not_member``, ``refused_versioned``, ``refused_cs_rev``, ``refused_secret_rule``,
       ``refused_token``, ``refused_readonly``, ``refused_too_large`` for a record over 512 KiB on the wire,
+      ``refused_too_deep`` for a value or token nested deeper than 64 levels of dicts and lists,
       ``refused_unencodable`` for a key or value that holds a string UTF-8 cannot encode, and with the store's
       order switch ``CSTORE_ORDER`` 'on'
       ``refused_older``, ``refused_older_than_delete``, ``refused_future``, ``refused_origin``,

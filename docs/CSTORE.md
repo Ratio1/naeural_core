@@ -433,8 +433,8 @@ answer, or the writer gave up; `confirmed_peers` holds the settled targets.
   worker, which gets few stores from oracles, proves its oracles by their confirmations).
   It is not proven when that message carried no stamp (a node of the previous release,
   or with `CSTORE_ORDER` or `CSTORE_LEAN_CONFIRM` `off`), when it sent nothing since this
-  node started, or when it left the replication peers since its last such message (it
-  may come back on the previous release). A dAuth secret goes only to a target still in
+  node started, or when it left or joined the replication peers since its last such
+  message (it may come back on the previous release). A dAuth secret goes only to a target still in
   the dAuth registry, and the payload of a secret revision is not re-sent once the writer
   holds the revision's revocation marker (its marker and redacted erasure still are).
 - In `on`, at most `CSTORE_HANDOFF_WINDOW` (8) re-sends wait per peer (1 on a node in
@@ -458,7 +458,12 @@ too (signed field, `cs_rev`, then the stamp; a stamped re-send replaces an unsta
 copy), and answers a refused one. A node of the previous release would apply it in
 arrival order, which is why re-sends go only to peers proven to stamp their stores. A
 peer that restarts within one peer refresh (60 s) is never seen leaving, so it keeps its
-proof until its first store or confirmation without a stamp.
+proof until its first store or confirmation without a stamp. So does an explicit target
+of a write that is never in the replication peers (for example a single peer named with
+`include_default_peers=False`), for as long as it sends nothing unstamped. A stamped
+message from a peer that stopped proves it again only if this node processes it after
+the refresh that adds the peer back, which takes an input queue that lags by more than
+the peer's absence.
 
 Records: an own record also carries `default_peers`; a remote record carries
 `confirms` -1 and `min_confirms` 0 and no peer lists (the previous release gave it

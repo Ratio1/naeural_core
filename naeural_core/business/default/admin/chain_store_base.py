@@ -386,8 +386,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # Peers dropped from the replication peers as lost (address -> when), and peers that joined or came back since the
     # last sweep (address -> when they were dropped as lost, or None); the first refresh below makes every peer join.
     self.__peer_left, self.__peer_back = {}, {}
-    # The peers whose last store or confirmation carried a stamp since they last joined the replication peers (nodes
-    # of this release with the order switch not 'off'): the only ones a re-send goes to.
+    # The peers whose last store or confirmation carried a stamp, since they last joined or left the replication peers
+    # (nodes of this release with the order switch not 'off'): the only ones a re-send goes to. A target never in the
+    # replication peers is never seen joining or leaving: only an unstamped message withdraws its proof.
     self.__stamped_peers = set()
     self.__last_chain_peers_refresh = 0
     self.__chain_peers = []
@@ -513,8 +514,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       record's age of 300, 600, 1200, 2400, 4800 and 8400 s;
     - a due pair whose peer is offline, or is not proven to stamp its stores, is skipped and uses nothing: an
       oracle away for any length gets it once back. A peer is proven by its last store or confirmation to this
-      node carrying a well-formed stamp, and loses the proof when it leaves the replication peers (it may come
-      back on the previous release);
+      node carrying a well-formed stamp, and loses the proof when it leaves or joins the replication peers (it
+      may come back on the previous release);
     - a due pair of a dAuth secret record is skipped unless this node is a registry member and the peer a
       dAuth registry member, as the write itself requires; so is a due pair of a secret revision's payload once
       this node holds the revision's revocation marker (the write rule takes only the redacted erasure then),
@@ -911,10 +912,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     off the whitelist is not recorded as lost: it lost nothing, so its settlements are not re-opened. A peer
     that comes back within one refresh interval is seen neither leaving nor joining.
 
-    Every peer that left, lost or not, also loses its proof that it stamps its stores: it may come back on the
-    previous release, which applies a re-sent delete in arrival order, so the hand-off re-sends nothing to it
-    until its next stamped store or stamped confirmation. A peer that comes back within one refresh interval
-    keeps its proof until it sends a store or confirmation without a stamp.
+    Every peer that left, lost or not, and every peer that joined also loses its proof that it stamps its stores:
+    it may come back on the previous release, which applies a re-sent delete in arrival order, so the hand-off
+    re-sends nothing to it until its next stamped store or stamped confirmation processed after it joined (a
+    stamped message it sent before it stopped, processed after the refresh that dropped it, proves it only until
+    it joins again). A peer that comes back within one refresh interval keeps its proof until it sends a store or
+    confirmation without a stamp.
 
     Examples
     --------
@@ -933,9 +936,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # in the list a seed holding only itself waited 3 x 10 s per write.
         peer for peer in _chain_peers if peer != self.ee_addr and self.__netmon_node_is_online_for_control(peer)
       ]
-      # A peer that left loses its proof that it stamps its stores, whatever the reason it left: it may come back on
-      # the previous release (a rollback), so it proves it again before the hand-off re-sends anything to it.
-      self.__stamped_peers.difference_update(set(old) - set(self.__chain_peers))
+      # A peer that left or joined loses its proof that it stamps its stores, whatever the reason: it may come back on
+      # the previous release (a rollback), so it proves it again before the hand-off re-sends anything to it. Dropped
+      # on a join too, as a stamped message it sent before it stopped can be processed after the refresh that dropped
+      # it (an input queue that lags) and would prove it again while it was away.
+      self.__stamped_peers.difference_update(set(old) ^ set(self.__chain_peers))
       # Each peer of the list before the refresh.
       for peer in old:
         # A peer dropped because NetMon reports it lost (a crash or a cut, not an orderly stop or a whitelist change),

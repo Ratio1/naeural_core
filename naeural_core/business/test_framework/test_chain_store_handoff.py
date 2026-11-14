@@ -504,8 +504,9 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
   """Widening and re-confirm: in 'on' they change the record's lists, in 'report' only the table."""
 
   def test_a_peer_that_joins_later_gets_the_records_meant_for_every_default_peer(self):
-    """A record written to peer1 alone (peer2 not yet a peer) goes to peer2 once a refresh adds it: in 'on' peer2
-    becomes a target, in 'report' the record is left as written and the send is only counted."""
+    """A record written to peer1 alone (peer2 not yet a peer) goes to peer2 once a refresh adds it and peer2 proved
+    after joining that it stamps its stores: in 'on' peer2 becomes a target, in 'report' the record is left as
+    written and the send is only counted."""
     # Each mode.
     for mode in ("on", "report"):
       # One sub-test each.
@@ -516,16 +517,16 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
         local_write(store, KEY, "v")
         # peer1 confirms.
         confirm(store, KEY, "peer1", value="v", owner="node")
-        # peer2 whitelisted, online and proven; the refresh is due.
+        # peer2 whitelisted and online; the refresh is due.
         store.whitelist.append("peer2")
         # Online.
         store.online.add("peer2")
-        # Proven.
-        store._ChainStoreBasePlugin__stamped_peers.add("peer2")
         # A refresh more than 60 s after the last.
         store._now = NOW + 120
         # The refresh notes the join.
         getattr(store, REFRESH)()
+        # peer2 then proves it stamps its stores, with a stamped store of a key the writer does not own.
+        deliver(store, _hset_key("players", "p2"), "x", "peer2", [NOW_MS + 150_000, "peer2"])
         # The sweep at 300 s.
         sent = sweep(store, 300)
         # Sent to peer2 in 'on' (now a target); counted only in 'report' (targets as written).
@@ -542,16 +543,16 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
     key = _hset_key("tunnels_manager_secrets", "0xabc")
     # Written unconfirmed.
     local_write(store, key, {"cs_rev": 1})
-    # peer2 whitelisted, online and proven, not in the oracle registry.
+    # peer2 whitelisted and online, not in the oracle registry.
     store.whitelist.append("peer2")
     # Online.
     store.online.add("peer2")
-    # Proven.
-    store._ChainStoreBasePlugin__stamped_peers.add("peer2")
     # A refresh more than 60 s after the last.
     store._now = NOW + 120
     # The refresh notes the join.
     getattr(store, REFRESH)()
+    # peer2 then proves it stamps its stores.
+    deliver(store, _hset_key("players", "p2"), "x", "peer2", [NOW_MS + 150_000, "peer2"])
     # At 300 s the record goes to peer1 alone, and its targets stay peer1.
     self.assertEqual(([peers for peers, _ in sweep(store, 300)], store.storage[key]["target_peers"]),
                      ([["peer1"]], ["peer1"]))
@@ -598,8 +599,9 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
 
   def test_a_peer_that_left_proves_again_before_a_resend(self):
     """A proven peer that stops in order and comes back gets no re-send of a record written while it was away until
-    it proves again: a confirmation without a stamp (as the previous release sends) keeps it unproven, a stamped one
-    proves it and the record goes to it at the next sweep."""
+    it proves again after it joined: a stamped confirmation it sent before it stopped, processed after the refresh
+    that dropped it, does not prove it past its return; a confirmation without a stamp (as the previous release
+    sends) keeps it unproven, a stamped one proves it and the record goes to it at the next sweep."""
     # The writer in 'on' with peer1 and peer2, both proven.
     store = writer("on")
     # NetMon reports a peer that left as stopped in order.
@@ -610,6 +612,8 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
     store._now = NOW + 61
     # It drops peer1.
     getattr(store, REFRESH)()
+    # A stamped confirmation peer1 sent before it stopped, processed only now (an input queue that lags).
+    confirm(store, _hset_key("players", "earlier"), "peer1", ver=[NOW_MS, "node"])
     # A write at 100 s.
     store._now = NOW + 100
     # Sent to peer2 alone.

@@ -315,7 +315,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  # The peers back since the last sweep and those proven to stamp their stores.
                  "peer_back", "stamped_peers",
                  # The writes made with wait=False owed a re-send, and the hour of the last census line.
-                 "unwaited", "census_hour"):
+                 "unwaited", "census_hour",
+                 # The resync's next request time and the turn of its namespaces.
+                 "resync_next", "resync_turn"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"

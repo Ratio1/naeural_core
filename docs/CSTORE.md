@@ -169,7 +169,8 @@ Open and documented:
 - local-only fields are intentionally preserved, so exact delete reconciliation
   remains out of scope
 - startup orchestration remains app-owned; the platform still does not auto-run
-  `hsync` during container boot
+  `hsync` during container boot (the store's own resync, below, covers only the five
+  signed namespaces)
 
 Improved in this workstream:
 
@@ -279,6 +280,52 @@ signature-only differences for idempotent retries. Once versioned, a field canno
 be replaced by an unversioned write or deletion. A signed higher generation
 allows explicit reuse after deletion. Both direct writes and HSync enforce the
 same rules, preventing stale cached pipeline discovery from reviving deletion.
+
+## Resync of the signed namespaces
+
+No switch: it acts in every mode. The chain store of an oracle asks for the five signed
+namespaces by itself, so an oracle that was away gets what it missed there without waiting
+for a caller's sync. A round asks `DEEPLOY_OPERATIONS`, `DEEPLOY_NODE_OPERATIONS`,
+`DEEPLOY_DEPLOYED_JOBS`, `DAUTH_JOB_SECRETS` and `NODE_KEY_ROTATIONS` in turn, one request
+every 60 s, and the next round starts 1800 s after a round's last request (a round about
+every 34 min). Each wait is stretched or shortened by up to a quarter at random, so the
+oracles of a network do not ask together. The first request goes at the first plugin lap
+that finds a replication peer.
+
+- Who asks: a node in a registry (the oracles' or the dAuth servers'); `DAUTH_JOB_SECRETS`
+  only a dAuth registry member. A node in neither registry never asks.
+- Who is asked: 2 peers picked at random among the replication peers that are registry
+  members; for `DAUTH_JOB_SECRETS` and `NODE_KEY_ROTATIONS`, which dAuth servers write,
+  dAuth registry members only.
+- The request is the `SHSYNC_REQ` of `hsync` (a request id and the namespace), so a node of
+  any release answers it as it answers a caller's sync.
+- No caller waits. The answer of each asked peer is merged on the plugin thread when it
+  arrives, once per peer, until 60 s after the request; a later answer is dropped. Both
+  answers are merged, not only the first.
+- Only records whose value carries the namespace's signed field (`sequence`, `revision`,
+  `deployment_revision`) are taken, and every record of the key rotations, whose merge
+  checks each proof. A pointer of the old form (a plain CID without a revision) that was
+  removed is not brought back, and no delete is applied.
+- The merge is the one of `hsync`, with its rules.
+
+Counters, under the namespace's bucket: `<bucket>/resync/asked` (requests sent),
+`<bucket>/resync/answered` (answers merged) and `<bucket>/resync/merged` (records they
+inserted or replaced; present with 0 when the answers changed nothing). Two answers per
+request are expected; fewer means a peer did not answer within 60 s.
+
+It does not cover `DAUTH_JOB_SECRET_REVISIONS`, whose records carry no version to order
+them by, nor any unsigned namespace. A node of the previous release never asks, and
+answers these requests as today.
+
+Cost, on the node image's interpreter under a 0.35 CPU limit: an idle lap of the step
+takes under 1 microsecond; merging one answer of 1,000 signed operations (2.1 MB) that all
+equal the held ones took 82 ms of CPU and 214 ms of wall time, under the persistence lock,
+with no signature check. An oracle answers about two such requests per namespace and round.
+
+In every merge, a caller's `hsync` included, a copy whose value is the one held under its
+key is not put through the signed-record rule again: a sync of a signed namespace that
+already agrees verifies no signature, where it verified one per record (about 3 ms each at
+0.35 core). A copy with another value is checked as before.
 
 ## Writer revisions (`cs_rev`)
 
@@ -560,7 +607,8 @@ not stop the admission of requests. A non-blocking chain-store write from it doe
 wait for the plugin thread, which a hung endpoint can hold, but like any write it takes
 the chain store's persistence lock, which other threads hold for whole-store walks: a
 namespace sync's merge holds it for its whole answer, with one signature check per
-signed record (about 3 s for 1,000 signed records at 0.35 core), and the save holds it
+signed record whose value is not the one held (about 3 ms each at 0.35 core, so 3 s for
+1,000 records a replica lacks), and the save holds it
 while it copies the replica. The write waits for as long.
 
 ## Cost line in the node log (`CSTORE_STATS`)
@@ -614,6 +662,7 @@ Labels in `counts`:
 - `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
+- `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers merged, and records those answers inserted or replaced.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `new_keys/<sender>`: keys this replica did not hold, created outside the protected namespaces by stores from a verified sender that is neither a replication peer nor in an oracle registry (above); counts only.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.

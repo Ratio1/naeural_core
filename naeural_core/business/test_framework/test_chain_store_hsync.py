@@ -331,6 +331,9 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self.done_loop = False
     # The UTC hour of the start (time 0), as on_init sets it: no CSTORE_CENSUS line before the next full hour.
     self._ChainStoreBasePlugin__census_hour = 0
+    # The resync of the signed namespaces as on_init leaves it: due at the first lap that finds a peer, at its first
+    # namespace.
+    self._ChainStoreBasePlugin__resync_next, self._ChainStoreBasePlugin__resync_turn = 0, 0
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

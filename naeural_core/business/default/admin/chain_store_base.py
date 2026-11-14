@@ -36,6 +36,9 @@ from collections import Counter
 # Keeps one copy of each writer address that stamps carry, so the stamps of one writer share it in memory and in the
 # replica file.
 from sys import intern
+# The resync of the signed namespaces: the random stretch of each wait between two requests, and the pick of the peers
+# one request asks.
+from random import random, sample
 from threading import Lock, RLock
 # Times each periodic save for the save back-off: its wall time on a clock no wall-clock step moves, and the CPU
 # time of the save thread.
@@ -176,6 +179,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     "DEEPLOY_OPERATIONS": "sequence", "DEEPLOY_NODE_OPERATIONS": "sequence", "DEEPLOY_DEPLOYED_JOBS": "revision",
     "DAUTH_JOB_SECRETS": "deployment_revision",
   }
+  # The namespaces the store resyncs by itself, one per request: the four with a signed field and the key rotations,
+  # whose merge takes only a valid rotation proof and keeps the first one.
+  CS_RESYNC_NAMESPACES = (*CS_SIGNED_FIELDS, NODE_KEY_ROTATIONS_HKEY)
+  # The resync: seconds from one request to the next within a round (also how long the answers to a request are taken),
+  # seconds from a round's last request to the next round's first, and how many peers one request asks.
+  CS_RESYNC_GAP, CS_RESYNC_PAUSE, CS_RESYNC_PEERS = 60, 1800, 2
+  # In the entry of a pending sync request the store made itself (no caller waits for it): the time until which its
+  # answers are taken. A blocking sync's entry has no such field.
+  CS_UNTIL = "until"
   # Seconds between two saves of a changed chain storage. The SerializationManager runs them at this cadence
   # on a thread of their own; one full-store save covers every write accepted since the previous one. That
   # thread checks once a second, so an accepted write reaches the disk after up to this cadence, plus up to
@@ -249,6 +261,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The hand-off's state starts empty, in memory only: its side table, its first sweep
     ``CSTORE_HANDOFF_FIRST_S`` after this start, the peers dropped as lost or back, and the peers proven to
     stamp their stores (none until each sends a stamped store or a stamped confirmation).
+
+    The resync of the signed namespaces (``__maybe_resync``) starts due, at its first namespace: the first lap
+    that finds a replication peer sends its first request.
 
     The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
     and the plugin does not start, where it used to start empty and fail at its first save. A file that
@@ -407,6 +422,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__last_chain_peers_refresh = 0
     self.__chain_peers = []
     self.__pending_hsync = {}
+    # The resync of the signed namespaces: the time of its next request (0: the first lap that finds a replication
+    # peer) and the turn of the namespace it asks then, in memory only.
+    self.__resync_next, self.__resync_turn = 0, 0
     self.__maybe_refresh_chain_peers()
     return
   
@@ -712,6 +730,98 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         pending += sum(pair[1] is not None for pair in pairs.values())
     # The new table, and its pending pairs for the next CSTORE_STATS line, once the walk ended.
     self.__handoff, self.__handoff_pending = new, pending
+
+
+  def __maybe_resync(self):
+    """
+    The resync: ask two peers for the next signed namespace when due, and forget the store's own requests whose
+    wait is over.
+
+    An oracle that was away gets the records of the signed namespaces it missed from the store itself, not only
+    from its callers' periodic syncs. A round asks the namespaces of ``CS_RESYNC_NAMESPACES`` in turn
+    (``DEEPLOY_OPERATIONS``, ``DEEPLOY_NODE_OPERATIONS``, ``DEEPLOY_DEPLOYED_JOBS``, ``DAUTH_JOB_SECRETS``,
+    ``NODE_KEY_ROTATIONS``), one request every ``CS_RESYNC_GAP`` (60) seconds; the next round starts
+    ``CS_RESYNC_PAUSE`` (1800) seconds after a round's last request. Each wait is stretched or shortened by up to a
+    quarter at random, so the oracles of a network do not ask together. The first request goes at the first lap
+    that finds a replication peer.
+
+    One request is the namespace sync's own message (``SHSYNC_REQ`` with a request id and the namespace), sent to
+    ``CS_RESYNC_PEERS`` (2) peers picked at random among the replication peers that are registry members, so a
+    node of any release answers it as it answers a caller's sync:
+
+    - only a registry member asks (an oracle or a dAuth server); ``DAUTH_JOB_SECRETS`` only a dAuth registry
+      member;
+    - ``DAUTH_JOB_SECRETS`` and ``NODE_KEY_ROTATIONS``, which dAuth servers write, are asked of dAuth registry
+      members only (another node's answer for them is not taken);
+    - a turn with nobody to ask, or on a node that may not ask, passes without a request.
+
+    No caller waits for the answers: the request is registered with ``until``, the time its answers are taken
+    until (``CS_RESYNC_GAP`` after it), and ``__exec_hsync_response`` merges the answer of each asked peer when
+    it arrives, not only the first. Each request counts ``<bucket>/resync/asked`` under its namespace's bucket.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Runs on the plugin thread from ``process``, every lap, after the peer refresh. Every lap it first drops each
+    pending request whose ``until`` has passed, whoever registered it, so a later answer is not taken; the entry of
+    a blocking sync (``_hsync``) has no ``until`` and is left to its caller. A lap with nothing pending and no
+    request due costs one copy of the (empty) pending table and two comparisons (under 1 microsecond, measured
+    on the node image's interpreter under a 0.35 CPU limit). The registries are read once for this node and
+    once per replication peer at each request, never between requests. Merging one answer of 1,000 signed
+    operations (2.1 MB) that all equal the held ones took 82 ms of CPU and 214 ms of wall time under the same
+    limit, with no signature check.
+
+    It has no switch and acts in every mode of the order switch: the merge it feeds applies the rules a caller's
+    sync gets, and for these namespaces a lower signed sequence or revision is refused in every mode. A node of
+    the previous release never asks, and answers these requests as today.
+
+    Examples
+    --------
+    >>> self.__maybe_resync()   # a round's first lap on an oracle: DEEPLOY_OPERATIONS asked of two registry members
+    """
+    # The wall clock the requests and their waits are timed on.
+    now = self.time()
+    # Each pending request the store made itself whose wait is over (a blocking sync's entry has no such time).
+    for request_id in [name for name, entry in list(self.__pending_hsync.items())
+                       if entry.get(self.CS_UNTIL, now) < now]:
+      # Forgotten: an answer that comes later is not taken.
+      del self.__pending_hsync[request_id]
+    if now < self.__resync_next or not self.__chain_peers:
+      return
+    # The namespace whose turn it is.
+    hkey = self.CS_RESYNC_NAMESPACES[self.__resync_turn]
+    # The next namespace's turn.
+    self.__resync_turn = (self.__resync_turn + 1) % len(self.CS_RESYNC_NAMESPACES)
+    # When it is asked: one gap later within a round, one pause later once the round ended (the turn is back at the
+    # first namespace), stretched or shortened by up to a quarter at random.
+    self.__resync_next = now + (self.CS_RESYNC_GAP if self.__resync_turn else self.CS_RESYNC_PAUSE) * (
+      0.75 + random() / 2)
+    if not self.__registry_member(self.ee_addr, dauth_only=hkey == "DAUTH_JOB_SECRETS"):
+      return
+    # The two namespaces dAuth servers write are answered only by dAuth registry members.
+    dauth = hkey in ("DAUTH_JOB_SECRETS", NODE_KEY_ROTATIONS_HKEY)
+    # Who may be asked: the registry members among the replication peers (dAuth members for those two namespaces).
+    peers = [peer for peer in self.__chain_peers if self.__registry_member(peer, dauth_only=dauth)]
+    if not peers:
+      return
+    # Up to CS_RESYNC_PEERS of them, picked at random, so the requests spread over the peers.
+    peers = sample(peers, min(len(peers), self.CS_RESYNC_PEERS))
+    # The request's id, which each answer echoes.
+    request_id = self.uuid()
+    # Registered as the store's own request: the peers whose answers are taken, and until when; no caller reads
+    # the response slot a blocking sync fills.
+    self.__pending_hsync[request_id] = {
+      self.CS_HKEY: hkey, self.CS_PEERS: peers, self.CS_RESPONSE: None, self.CS_UNTIL: now + self.CS_RESYNC_GAP,
+    }
+    # The request a caller's sync sends, to those peers alone.
+    self.__send_data_to_chain_peers({self.CS_DATA: {
+      self.CS_OP: self.CS_HSYNC_REQ, self.CS_REQUEST_ID: request_id, self.CS_HKEY: hkey,
+    }}, peers=peers, include_default_peers=False)
+    # Counted under the namespace's bucket, to read against the answers that came.
+    self.__cs_count("asked", self.__hset_index(hkey), "resync")
 
 
   def __log_census(self):
@@ -2020,6 +2130,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     and one JSON encoding only for each copy that differs, under the
     persistence lock.
 
+    A copy whose value is the one held under its key is not put through the
+    signed-record rule (``__versioned_record``) again: that rule passed the
+    held value when it was stored, and its one signature check per record
+    (about 3 ms at 0.35 core) made a sync of a namespace that already agrees
+    cost as much as a first sync. Such a copy still goes through every rule
+    below and changes no value: at most the held record's stamp, or its
+    owner, readonly mark and token where the namespace does not derive them
+    from the value, as before. A copy with any other value is checked as
+    before.
+
     The order rule (switch ``CSTORE_ORDER``, read once at start): with the switch
     'off' the stamp of a copy is not read. Else a copy equal to the held record
     in value, owner, readonly and token only raises the held stamp to the copy's
@@ -2105,7 +2225,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # The value 'on' would remove.
             self.__cs_count("ver_copy_delete", key, "hsync")
           continue
-        if (value is None and ver is None) or not self.__versioned_record(key, value):
+        # A copy whose value is the one held under the key is not put through the signed-record rule again (one
+        # signature check per record of a signed namespace): the held value passed that rule when it was stored, and
+        # such a copy can change nothing below but the held record's stamp, owner, readonly mark and token, as before.
+        same = value is not None and held.get(self.CS_VALUE) == value
+        if (value is None and ver is None) or not (same or self.__versioned_record(key, value)):
           continue
         if self.__stale_revision(key, value, snapshot=True):
           # The peer's copy is older than ours, or unversioned over a versioned record: a restart sync must not
@@ -2568,8 +2692,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     the key still holds the record this write left (a newer write by another
     thread in between owns the key's entry). Other threads hold that lock for
     whole-store walks: a namespace sync's merge holds it for its whole answer,
-    with one signature check per signed record (about 3 s for 1,000 signed
-    records at 0.35 core), and the save holds it while it copies the replica;
+    with one signature check per signed record whose value is not the one
+    held (about 3 ms each at 0.35 core, so 3 s for 1,000 records a replica
+    lacks), and the save holds it while it copies the replica;
     a ``wait=False`` write waits for them as any write does.
 
     A write that leaves the replica as it was does not mark it for a save: a
@@ -3689,7 +3814,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   def __exec_hsync_response(self, data, sender=None):
     """
-    Record the first valid peer snapshot response for one pending request.
+    Take one peer's snapshot answer for a pending request: recorded for a waiting caller, or merged at once.
+
+    For a blocking sync (``_hsync``) the first valid answer is recorded in the request's entry, where the waiting
+    caller finds and merges it. For a request the store made itself (an entry with ``until``, registered by
+    ``__maybe_resync``) nobody waits: the answer is merged here, on the plugin thread, and so is the answer of
+    every other peer that was asked, each peer once, until the request's wait is over.
 
     Parameters
     ----------
@@ -3704,9 +3834,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Notes
     -----
-    The first valid response wins. This keeps each ``_hsync`` call
+    For a blocking sync the first valid response wins. This keeps each ``_hsync`` call
     deterministic and avoids merging multiple peer views into a single refresh
     operation. Freshness arbitration remains a documented follow-up concern.
+
+    An answer to the store's own request passes the same checks (the sender was asked, the namespace is the one
+    asked, the namespace's sender rules below) and is then merged by ``__merge_hset_snapshot``, whose rules
+    decide each record. Of such an answer only the records whose value carries the namespace's signed field
+    (``CS_SIGNED_FIELDS``: a sequence or a revision; every record for the key rotations, which have none and
+    whose merge checks each proof) are merged: a pointer of the old form, a plain CID without a revision, that
+    was removed here is not brought back, and a delete copy is never applied. The answering peer is taken off
+    the request's peers, so it is not merged twice. Each merged answer counts ``<bucket>/resync/answered`` and
+    adds the records it inserted or replaced to ``<bucket>/resync/merged`` (the label is present with 0 when it
+    changed nothing), under the namespace's bucket. An answer that comes after the wait finds no entry and is
+    dropped like any answer to an unknown request.
 
     An answer for a Tunnels Manager namespace is taken only from an oracle
     registry member (either registry); another sender's answer is dropped and
@@ -3765,6 +3906,23 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if isinstance(record, dict) and not self.__oracle_only_write(key, record.get(self.CS_VALUE))
       }
 
+    if self.CS_UNTIL in pending:
+      # An answer to a request the store made itself (the resync): this peer's answer is taken once.
+      allowed_peers.remove(sender)
+      # The signed sequence or revision the namespace's values carry (none for the key rotations).
+      field = self.CS_SIGNED_FIELDS.get(hkey)
+      # Merged now, on the plugin thread, as no caller waits: every asked peer's answer, not only the first. Only
+      # the records whose value carries the signed field are taken, so a pointer of the old form (a plain CID, with
+      # no revision) that was removed here is not brought back, and no delete is applied.
+      merged = self.__merge_hset_snapshot(hkey, {
+        key: record for key, record in snapshot.items()
+        if isinstance(record, dict) and (field is None or self.__rev_order(None, record.get(self.CS_VALUE), field))
+      })
+      # Counted under the namespace's bucket: the answer, and the records it inserted or replaced.
+      self.__cs_count("answered", index, "resync")
+      # The records.
+      self.__cs_count("merged", index, "resync", n=merged)
+      return
     # Accept only one response from the precomputed peer set so an unrelated
     # or late peer cannot replace the snapshot chosen for this sync request.
     pending[self.CS_RESPONSE] = {
@@ -3822,7 +3980,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   def process(self):
     """
-    Run one plugin lap: refresh the replication peers when due, run the hand-off's sweep when due
+    Run one plugin lap: refresh the replication peers when due, send the resync's next request when due
+    (``__maybe_resync``), run the hand-off's sweep when due
     (``__maybe_handoff``), queue the due re-sends of writes made with ``wait=False``
     (``__maybe_resend_unwaited``) and send the queued writes.
 
@@ -3867,6 +4026,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     >>> self.process()   # one lap of the plugin loop; every 300 s it also logs the CSTORE_STATS line
     """
     self.__maybe_refresh_chain_peers()
+    # The resync of the signed namespaces: its next request when due, and its requests whose wait is over forgotten.
+    self.__maybe_resync()
     # The hand-off's sweep, when due, before the queued stores go out, so its re-sends leave on this lap.
     self.__maybe_handoff()
     # The re-sends of the writes made with wait=False, when due, on this lap too.

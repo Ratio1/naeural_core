@@ -739,15 +739,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -----
     Runs on the plugin thread from ``process``, at the first lap after each full UTC hour, so every node takes it
     within a lap of the same moment and the digests compare one moment's state, except for writes still in
-    transit then. It walks a list copy of the replica's items without the persistence lock: records
-    are replaced, not changed in value, so each one read is a whole record. The line holds counts, sizes and
-    digests only: no key and no value. Cost: one JSON encoding and one hash per live record, and the wire
-    encoder's round trip for each own record, once an hour.
+    transit then. It walks a list copy of the replica's items without the persistence lock: records are replaced,
+    not changed in value, so each one read is a whole record, and every field of its row is read from that record,
+    never again by key, so a record another thread deletes or replaces during the walk is still read as one record
+    (before, its token was read from the live replica, and the value of a token record deleted meanwhile was
+    hashed). The line holds counts, sizes and digests only: no key and no value. Cost: one JSON encoding and one
+    hash per live record, and the wire encoder's round trip for each own record, once an hour.
 
     It does not raise on what a replica can hold: a record of an older shape (no ``readonly`` or ``token``
-    field) is read through the record getters, a key decoded from a JSON escape that holds a lone surrogate is
-    hashed as it is, and a value that cannot be encoded is counted as ``unencodable``. Before, any of these
-    raised out of ``process`` at every census, and the plugin loop's exception back-off grew with each raise.
+    field) is read as not readonly and without a token, a key decoded from a JSON escape that holds a lone
+    surrogate is hashed as it is, and a value that cannot be encoded (a type or dict key no encoder takes, a
+    circular or too deeply nested value) is counted as ``unencodable``. Before, any of these raised out of
+    ``process`` at every census, and the plugin loop's exception back-off grew with each raise.
 
     Examples
     --------
@@ -773,20 +776,22 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # One more tombstone; not in the digest.
         row[2] += 1
         continue
-      # One more record, unstamped or not, readonly or not (read through the getters, as an older record shape has
-      # no readonly or token field).
+      # One more record, unstamped or not, readonly or not, read from the record walked, never again by key from the
+      # live replica, where another thread may have replaced or deleted it since the copy (an older record shape has
+      # no readonly field: not readonly).
       row[0], row[1], row[3] = (row[0] + 1, row[1] + (record.get(self.CS_VER) is None),
-                                row[3] + bool(self.__get_key_readonly(key)))
+                                row[3] + bool(record.get(self.CS_READONLY)))
       try:
-        # The value's canonical JSON, made from the value as its receivers hold it: a copy from a peer (confirms -1)
-        # is already in the wire's form, and this node's own record goes through the wire's encoder (unsorted: the
-        # sort is done once, here) and back first (numpy and datetime values, int dict keys), so a writer and its
-        # receivers give equal records one text.
-        text = json.dumps(record[self.CS_VALUE] if self.__get_key_confirmations(key) == -1 else
+        # The value's canonical JSON, made from the value as its receivers hold it: a copy from a peer (confirms -1,
+        # read from the record walked) is already in the wire's form, and this node's own record goes through the
+        # wire's encoder (unsorted: the sort is done once, here) and back first (numpy and datetime values, int dict
+        # keys), so a writer and its receivers give equal records one text.
+        text = json.dumps(record[self.CS_VALUE] if record.get(self.CS_CONFIRMATIONS) == -1 else
                           self.json_loads(self.json_dumps(record[self.CS_VALUE], sort_keys=False)), sort_keys=True)
       except (TypeError, ValueError, RecursionError):
-        # A value of a type or with a dict key no encoder takes (the wire could not send it either), as an old own
-        # record can hold: counted in the last column and left out of the size and the digest; the line is written.
+        # A value of a type or with a dict key no encoder takes (TypeError), or circular (ValueError) or nested too
+        # deep (RecursionError): the wire could not send it either, but an old own record can hold it. Counted in the
+        # last column and left out of the size and the digest; the line is written.
         row[6] += 1
         continue
       # Its size.
@@ -794,8 +799,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # The hashed text: the key and the value, or the key and the stamp for a record with a token or in a dAuth
       # secret namespace.
       hashed = name + "\0" + (
-        # The token read through its getter, as an older record shape has none.
-        str(record.get(self.CS_VER)) if self.__get_key_token(key) is not None or name[:14] in secrets else text)
+        # The token read from the record walked (an older record shape has none): a token record deleted or replaced
+        # since the copy still has its stamp hashed, never its value.
+        str(record.get(self.CS_VER)) if record.get(self.CS_TOKEN) is not None or name[:14] in secrets else text)
       # XOR-ed into the digest, which makes it independent of the records' order; a key decoded from a JSON escape
       # can hold a lone surrogate, which strict UTF-8 refuses, so it is encoded as is (other keys give the same bytes).
       row[5] ^= int.from_bytes(hashlib.blake2b(hashed.encode("utf-8", "surrogatepass"), digest_size=4).digest(), "big")

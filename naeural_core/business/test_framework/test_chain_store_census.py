@@ -56,6 +56,65 @@ def census(store):
   return json.loads(line[len("CSTORE_CENSUS "):]), line
 
 
+class _ChangedDuringTheWalk(dict):
+  """
+  A replica whose records another thread changed after the census took its list of items.
+
+  The dict holds the records as they are now; ``items`` gives them as they were when the census copied them, as a
+  census that copied the items just before the change sees them.
+
+  Parameters
+  ----------
+  copied : dict
+    The records as the census copied them.
+  now : dict
+    The records as the replica holds them after the change.
+
+  Examples
+  --------
+  >>> replica = _ChangedDuringTheWalk({"k": 1}, {})
+  >>> (list(replica.items()), "k" in replica)
+  ([('k', 1)], False)
+  """
+
+  def __init__(self, copied, now):
+    """
+    Hold ``now`` and remember ``copied`` for ``items``.
+
+    Parameters
+    ----------
+    copied : dict
+      The records as the census copied them.
+    now : dict
+      The records as the replica holds them after the change.
+
+    Returns
+    -------
+    None
+    """
+    # The records as they are now.
+    super().__init__(now)
+    # The records as the census copied them.
+    self.copied = copied
+
+  def items(self):
+    """
+    Give the records as the census copied them.
+
+    Returns
+    -------
+    list of tuple
+      The copied ``(key, record)`` pairs.
+
+    Examples
+    --------
+    >>> list(_ChangedDuringTheWalk({"k": 1}, {}).items())
+    [('k', 1)]
+    """
+    # The census's copy, not the records held now.
+    return list(self.copied.items())
+
+
 class TestCensus(unittest.TestCase):
   """The census line's rows, its digest, what it never shows, and when it is written."""
 
@@ -163,20 +222,61 @@ class TestCensus(unittest.TestCase):
     # The same rows.
     self.assertEqual(census(writer)[0], census(receiver)[0])
 
+  def test_a_record_changed_during_the_walk_is_read_from_the_copy(self):
+    """A readonly token record another thread deletes, and an own record a peer's write replaces, after the census
+    copied the replica's items, are read whole from the copy: the token record counts as readonly and only its stamp
+    is hashed, never its value, and the own record goes through the wire's round trip; the row equals that of a
+    replica that still holds the copied records."""
+    # The records as the census copied them: a readonly token record, and an own record with mixed dict keys (which
+    # only the wire's round trip puts in canonical form).
+    copied = {"tok-key": {**record("tok-key", "token-guarded", "peer1", [NOW_MS, "peer1"]), "token": "t",
+                          "readonly": True},
+              "own": {**record("own", {1: "a", "b": 2}, "node", [NOW_MS, "node"]), "confirms": 0}}
+    # A replica that still holds them, and one where, during the walk, the token record was deleted and the own
+    # record replaced by a peer's copy.
+    held, raced = make("report", storage=copied), make("report")
+    # The changed replica as the census walks it.
+    raced._ChainStoreBasePlugin__chain_storage = _ChangedDuringTheWalk(
+      copied, {"own": record("own", "new", "peer1", [NOW_MS + 1, "peer1"])})
+    # Both encode as a node does.
+    for store in (held, raced):
+      # The plugin's json_dumps.
+      store.json_dumps = _JSONSerializationMixin.safe_json_dumps
+    # The same row, which counts both records, one readonly, none unencodable.
+    self.assertEqual((census(raced)[0], census(held)[0]["plain"][:4] + census(held)[0]["plain"][6:]),
+                     (census(held)[0], [2, 0, 0, 1, 0]))
+
   def test_the_census_does_not_raise_on_what_a_replica_can_hold(self):
     """A key that holds a lone surrogate (decoded from a JSON escape), a record of an older shape without readonly
-    and token, and an own value no encoder takes still give a line: the last is counted as unencodable and left out
-    of the size and the digest."""
-    # A key decoded from a JSON escape, a record of an older shape, and an own value of a type JSON has not.
-    surrogate, odd = json.loads('"plain\\ud800k"'), {**record("odd", {1, 2}, "node"), "confirms": 0}
-    # The replica, and the same without the unencodable record.
+    and token, and own values no encoder takes (a set, a circular list, a list nested too deep) still give a line:
+    those values are counted as unencodable and left out of the size and the digest."""
+    # A key decoded from a JSON escape, and a list that holds itself.
+    surrogate, circular = json.loads('"plain\\ud800k"'), []
+    # Circular.
+    circular.append(circular)
+    # A list nested deeper than the encoder's recursion limit.
+    deep = []
+    # Each level.
+    for _ in range(100_000):
+      # One level more.
+      deep = [deep]
+    # Own records of a set (TypeError), the circular list (ValueError) and the deep list (RecursionError).
+    odd = {name: {**record(name, value, "node"), "confirms": 0}
+           for name, value in (("odd-set", {1, 2}), ("odd-circular", circular), ("odd-deep", deep))}
+    # Two replicas holding the surrogate key's record and a record of an older shape.
     store, without = (make("report", storage={
-      surrogate: record(surrogate, "v", "peer1"), "legacy": {"key": "legacy", "value": "old", "owner": "peer1"},
-      **extra}) for extra in ({"odd": odd}, {}))
+      surrogate: record(surrogate, "v", "peer1"), "legacy": {"key": "legacy", "value": "old", "owner": "peer1"}})
+      for _ in range(2))
+    # The first also holds the unencodable records, added as they are (a copy of the deep list would raise itself).
+    store._ChainStoreBasePlugin__chain_storage.update(odd)
+    # Both encode as a node does.
+    for replica in (store, without):
+      # The plugin's json_dumps.
+      replica.json_dumps = _JSONSerializationMixin.safe_json_dumps
     # The two lines' plain rows.
     row, other = census(store)[0]["plain"], census(without)[0]["plain"]
-    # Three records, all unstamped, sizes of "v" and "old" only, one unencodable; the same digest as without it.
-    self.assertEqual((row[:5], row[6], row[5]), ([3, 3, 0, 0, len('"v"') + len('"old"')], 1, other[5]))
+    # Five records, all unstamped, sizes of "v" and "old" only, three unencodable; the same digest as without them.
+    self.assertEqual((row[:5], row[6], row[5]), ([5, 5, 0, 0, len('"v"') + len('"old"')], 3, other[5]))
 
   def test_the_census_runs_at_the_first_lap_after_each_full_hour(self):
     """Two replicas started 31.5 min apart (their stats lines 90 s out of step) write the census line at the same

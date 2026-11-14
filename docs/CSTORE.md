@@ -581,14 +581,17 @@ CSTORE_CENSUS {"hs:<hash>:":[<records>,<unstamped>,<tombstones>,<readonly>,<size
   the values, and an equal value whose stamp was raised on one replica shows a different
   digest. Read digest and size together there.
 - `unencodable`: live records whose value cannot be put in canonical form (a type or a
-  dict key no encoder takes, which the wire could not send either, as an old own record
-  can hold); they are left out of `size` and `digest`, and the line is still written.
+  dict key no encoder takes, a circular or too deeply nested value, which the wire could
+  not send either, as an old own record can hold); they are left out of `size` and
+  `digest`, and the line is still written.
   The census does not raise on what a replica holds: records of an older shape (no
   `readonly` or `token`) and keys holding a lone surrogate are counted too.
 
 The line holds no key and no value. Keys under `hs:` whose 14th character is not `:`
 (a namespace's keys start with `hs:`, 10 hex digits and `:`) are left out. The walk runs on the plugin
-thread without the persistence lock. On a synthetic 5,700-record, 5.0 MB replica with
+thread without the persistence lock, over a copy of the replica's items, and reads every
+field of a row from the record copied, so a record deleted or replaced meanwhile is still
+read whole (a token record's value is never hashed). On a synthetic 5,700-record, 5.0 MB replica with
 float-heavy values, half of them own records, one census took about 320 ms of CPU on the
 node image's interpreter, about 200 ms before own records went through the wire's
 encoder; the wall time at 0.35 CPU is about three times the CPU time.

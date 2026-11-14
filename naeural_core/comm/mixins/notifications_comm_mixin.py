@@ -11,11 +11,26 @@ class _NotificationsCommMixin(object):
   def _run_thread_notifications(self):
     """Run the notifications comm loop.
 
+    The loop sends the notification payloads of the send queue one at a time, until the thread is told to stop.
+
     Notes
     -----
     Notification payloads remain queued as their original objects until a send
     succeeds. Partial fanout failures reuse the same payload and retry only the
     unresolved destinations from the previous attempt.
+
+    A payload whose preparation raises (``_prepare_message``: for example text that is not UTF-8 encodable,
+    which its encryption cannot encode) is dropped with one red line naming its path (node, stream, signature,
+    instance) and the error, and the next payload is taken; before, the same payload was prepared again every
+    5 s for good and no later payload left this thread. An error elsewhere in the loop is handled as before.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> self._run_thread_notifications()   # on the comm thread, until ``self._stop`` is set
     """
     self._init()
     bytes_delivered = 1 # force to 1 to trigger the first send
@@ -40,7 +55,19 @@ class _NotificationsCommMixin(object):
         if to_send is not None and self.has_send_conn:
           msg_id, msg, ts_added_in_buff, retry_send_to = to_send
           raw_msg = msg
-          msg = self._prepare_message(msg=msg, msg_id=msg_id)
+          try:
+            # The final payload (encrypted when it has a destination).
+            msg = self._prepare_message(msg=msg, msg_id=msg_id)
+          except Exception as exc:
+            # A payload that cannot be prepared (text that is not UTF-8 encodable, for example) fails the same way
+            # at every retry, as each one prepares a copy of it: dropped with one red line naming its path, so the
+            # payloads queued behind it still leave. Before, it was retried every 5 s for good.
+            path = [raw_msg.get(key) for key in (
+              ct.EE_ID, ct.PAYLOAD_DATA.STREAM_NAME, ct.PAYLOAD_DATA.SIGNATURE, ct.PAYLOAD_DATA.INSTANCE_ID)]
+            self.P("Dropped payload {} that cannot be prepared: {}".format(path, exc), color='r')
+            # The next payload is taken at the next turn.
+            bytes_delivered = 1
+            continue
           bytes_delivered = self.send_wrapper(msg, send_to=retry_send_to)
           if bytes_delivered <= 0 and self._last_send_retry_targets is not None:
             to_send = (msg_id, raw_msg, ts_added_in_buff, self._last_send_retry_targets)

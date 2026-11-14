@@ -39,9 +39,11 @@ from ..message_buffer import ObservableMessageBuffer
 RUN_ON_THREAD = True
 # The largest message handed to the transport, in bytes of its UTF-8 text. The brokers the nodes use accept a
 # packet of at most 1 MB (1,048,576 bytes, a common broker default), counted in bytes and including the topic
-# and the packet header: 1,000,000 leaves 48,576 bytes for those. It was 2 MiB of characters, so a message
-# between the two sizes was handed over and the broker then closed the communicator's connection, with no
-# line that named the message.
+# and the packet header: 1,000,000 leaves 48,576 bytes for those, also where a bridge between brokers
+# lengthens the topic. It was 2 MiB of characters, so a message above the brokers' limit was handed over and
+# the broker then closed the communicator's connection, with no line that named the message.
+# The margin has a price: a message of more than 1,000,000 bytes that still fitted a packet with its topic
+# and header (a band of about 48 KB of sizes) was delivered before and is now dropped with the red line.
 MAX_MESSAGE_LEN = 1_000_000
 
 _CONFIG = {
@@ -1103,8 +1105,11 @@ class BaseCommThread(
     Returns
     -------
     is_ok : int
-      `0` on send failure, or the number of bytes successfully published across
-      all transport sends for the serialized message.
+      `0` when the caller keeps the message for a retry: the publish to one of its targets failed, or a
+      step of this method raised (signing, serializing, the size check). `1` when the serialized message is
+      larger than ``MAX_MESSAGE_LEN`` bytes: it is dropped with a red line and the caller must not keep it.
+      Otherwise the length of the serialized text (in characters, which are bytes for ASCII text) times the
+      number of targets it was published to.
 
     Notes
     -----
@@ -1113,6 +1118,11 @@ class BaseCommThread(
     failed destinations so the comm loop can retry those targets without
     re-broadcasting to the successful ones.
 
+    Examples
+    --------
+    >>> delivered = self.send_wrapper(msg, send_to=retry_send_to)   # a comm loop, for the message it took
+    >>> delivered > 0   # published, or dropped for its size: the loop takes its next message
+    True
     """
     is_ok = 0
     self._last_send_retry_targets = None

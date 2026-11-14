@@ -315,7 +315,6 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     with self.__persistence_lock:
       # A plain increment of one counter of a small dict (one label per bucket, origin and event).
       self.__cs_stats[event] = self.__cs_stats.get(event, 0) + n
-    return
 
 
   def __netmon_node_is_online_for_control(self, peer):

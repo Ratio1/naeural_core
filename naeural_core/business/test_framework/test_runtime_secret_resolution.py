@@ -440,6 +440,31 @@ class OrchestratorRuntimeSecretTests(unittest.TestCase):
     # No refusal wording on these lines.
     self.assertNotIn("refused", orchestrator._messages[-1])
 
+  def test_a_request_still_in_progress_keeps_the_30_second_retry(self):
+    """While an earlier secret request has not ended, the resolver's own TimeoutError keeps the 30 s limit, not 300 s."""
+    # No answers are needed: no request is sent while one is in progress.
+    orchestrator = self._make_orchestrator([])
+    # One pipeline that needs its dAuth secrets.
+    self._set_canonical(orchestrator, {"secret_pipeline": _pipeline()})
+    # The worker thread of an earlier request, which has not ended.
+    orchestrator._runtime_secret_request_worker = _FakeThread()
+    # The resolver's clock, and the delay scheduled after each failure.
+    now, delays = 0, []
+    # Eight passes, each at the retry time of the one before.
+    for _ in range(8):
+      # The pass finds the earlier request still in progress: nothing is resolved.
+      self.assertEqual(orchestrator._resolve_runtime_streams_once(now=now), 0)
+      # The retry scheduled for this pipeline.
+      retry = next(iter(orchestrator._runtime_secret_retry_state.values()))
+      # How far away it is.
+      delays.append(retry["next_retry"] - now)
+      # The next pass comes exactly then.
+      now = retry["next_retry"]
+    # The schedule of a failure that is not a refusal.
+    self.assertEqual(delays, [1, 2, 4, 8, 16, 30, 30, 30])
+    # No request was sent, and the line does not speak of a refusal.
+    self.assertEqual((orchestrator._blockchain_manager.calls, "refused" in orchestrator._messages[-1]), ([], False))
+
   def test_a_changed_pipeline_is_asked_for_at_once_despite_a_long_wait(self):
     """While a refused pipeline waits 300 s, a new version of it is requested on the next pass."""
     # Ten refusals bring the wait to 300 s; the eleventh answer is the bundle.

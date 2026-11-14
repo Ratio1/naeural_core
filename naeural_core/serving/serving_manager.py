@@ -1254,8 +1254,44 @@ class ServingManager(Manager):
   
   def _wait_for_result(self, server_name, message_callback=None, comm_eng=None, max_wait_time=None):
     """
+    Wait for the next message of a serving process and return it.
+
     This method should ALWAYS be called with a default timeout. If the server does not send any information
-    in the given time then something is wrong (including bad coding on the server side)
+    in the given time then something is wrong (including bad coding on the server side). Timers sent with a
+    message are imported. A message that is not a ``RESULT`` is logged by its type and handed to
+    ``message_callback``, after which the next message is waited for; without a callback it is returned as it
+    is. An ``ABNORMAL_EXIT`` is shown as a serving error and the server is cleaned up.
+
+    Parameters
+    ----------
+    server_name : str or tuple
+      The serving process, by its name or its (name, ...) identification.
+    message_callback : callable, optional
+      Called with the data of each message that is not a ``RESULT``. Default None: such a message ends the wait.
+    comm_eng : object, optional
+      The communication engine to read from; None uses the server's own. Default None.
+    max_wait_time : float, optional
+      Seconds to wait for the first message. Default None: the server's configured wait time.
+
+    Returns
+    -------
+    tuple or None
+      ``(message type, message data)``, or None when no message came in time or the serving process ended
+      abnormally (the server is closed then).
+
+    Notes
+    -----
+    The log line of a message that is not a ``RESULT`` holds its type and the server's name only. It used to
+    print the message data too, and the answer to ``GET_CONFIG`` is the whole serving configuration: every
+    start of a serving process put its values, credentials among them, into the node log, which also leaves
+    the node with a full-log heartbeat. The data still goes to the caller unchanged.
+
+    Examples
+    --------
+    >>> self._send_message(server_name=server_name, command=SMConst.GET_CONFIG, inputs=None)
+    >>> msg_type, config = self._wait_for_result(server_name=server_name)
+    >>> msg_type
+    'GET_CONFIG'
     """
     
     server_name = self.get_server_name(server_name)
@@ -1313,7 +1349,8 @@ class ServingManager(Manager):
         self._cleanup_server(server_name, wait=True)
         return None
       else:
-        self.P("Received '{}': from '{}' with data: '{}'".format(msg_type, server_name, msg_data), color='y')
+        # The type and the sender only, never the data: a GET_CONFIG answer is the whole serving configuration.
+        self.P("Received '{}' from '{}'".format(msg_type, server_name), color='y')
         # now we can use message_callback in order to to custom processing on the received message if needed
         if message_callback is not None:
           message_callback(msg_data)

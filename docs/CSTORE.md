@@ -465,7 +465,8 @@ hand-off `on` means "not confirmed yet": the store keeps delivering it.
 
 `chainstore_set(..., wait=False)` and `chainstore_hset(..., wait=False)` (no switch; a
 caller that does not pass `wait` sees no change) run every check and the local apply of
-a blocking write, queue the same `SSTORE` and return at once: `True` with the write's
+a blocking write, queue the same `SSTORE` and return without waiting for any
+confirmation: `True` with the write's
 own outcome (`changed`, `identical` or `absent_delete`) when it was stored here and
 queued (not confirmed), `False` with the blocking write's refusal word otherwise. The plugin thread re-sends a value while it is
 unconfirmed on the blocking wait's schedule (with the defaults at 10 s and 20 s) and
@@ -482,7 +483,11 @@ Web apps get a hook, `on_request_monitor_tick()`, run on the request monitor thr
 before each read of the server queue (about every 0.25 s while idle, and after each
 request); it does nothing in the base web app, and an exception in it is logged and does
 not stop the admission of requests. A non-blocking chain-store write from it does not
-depend on the plugin thread, which a hung endpoint can hold.
+wait for the plugin thread, which a hung endpoint can hold, but like any write it takes
+the chain store's persistence lock, which other threads hold for whole-store walks: a
+namespace sync's merge holds it for its whole answer, with one signature check per
+signed record (about 3 s for 1,000 signed records at 0.35 core), and the save holds it
+while it copies the replica. The write waits for as long.
 
 ## Cost line in the node log (`CSTORE_STATS`)
 

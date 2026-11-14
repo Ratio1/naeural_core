@@ -2318,9 +2318,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     wait : bool, optional
       True (the default) waits for the confirmations as before. False, for a
       local write: every check and the local apply run as for a blocking
-      write, the same store is queued, and the call returns True at once
-      (``result_info`` outcome: the write's own, ``changed``, ``identical`` or
-      ``absent_delete``) without waiting; the plugin thread
+      write, the same store is queued, and the call returns True without
+      waiting for any confirmation (``result_info`` outcome: the write's own,
+      ``changed``, ``identical`` or ``absent_delete``); the plugin thread
       re-sends a value while it is unconfirmed (``__maybe_resend_unwaited``).
       Not allowed in the protected namespaces (``CS_PROTECTED_NAMESPACES``).
       Once this instance's plugin loop has ended (``done_loop``: a stop, or a
@@ -2349,16 +2349,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     This method blocks the caller thread while waiting for confirmations on
     local-originated writes, unless ``wait`` is False. A non-blocking write
     is refused exactly as a blocking one (the same words) and leaves the same
-    record; its store is sent at once, and a value is queued again after
+    record; its store goes out on the plugin's next lap, and a value is queued again after
     each ``timeout`` while unconfirmed, up to ``max_retries`` times, by the
     plugin thread, whose later wait end (``unconfirmed``, ``overwritten``,
     ``refused_by_peers``) is counted as a blocking write's. A delete is
     queued once, as a blocking
-    delete, which does not wait either. The caller's thread holds the
-    persistence lock for the checks and the apply, as for any write, and once
-    more to register the re-sends, which it does only while the key still
-    holds the record this write left (a newer write by another thread in
-    between owns the key's entry).
+    delete, which does not wait either. The caller's thread takes, and may
+    wait for, the persistence lock for the checks and the apply, as for any
+    write, and once more to register the re-sends, which it does only while
+    the key still holds the record this write left (a newer write by another
+    thread in between owns the key's entry). Other threads hold that lock for
+    whole-store walks: a namespace sync's merge holds it for its whole answer,
+    with one signature check per signed record (about 3 s for 1,000 signed
+    records at 0.35 core), and the save holds it while it copies the replica;
+    a ``wait=False`` write waits for them as any write does.
 
     A write that leaves the replica as it was does not mark it for a save: a
     delete of a key this replica does not hold, and a local write whose value

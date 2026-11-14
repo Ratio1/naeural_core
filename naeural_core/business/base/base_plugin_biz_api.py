@@ -506,7 +506,8 @@ class _BasePluginAPIMixin:
 
     wait : bool, optional
       True (the default) waits for the chain store to start and for the confirmations, as before. False runs
-      every check and the local apply of a blocking write, queues the same store and returns at once: True when
+      every check and the local apply of a blocking write, queues the same store and returns without waiting
+      for any confirmation (it still takes the store's persistence lock, as any write does): True when
       the write was stored here and queued (the store re-sends it while it is unconfirmed, as the blocking wait
       would), False on a refusal, as a blocking write. It never waits for the store to start: before the store
       started, and after the chain-store plugin's loop ended (a stop, or a restart before the next instance

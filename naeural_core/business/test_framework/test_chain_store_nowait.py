@@ -2,6 +2,8 @@
 Offline tests of the chain store's opt-in non-blocking write (``wait=False``): the same checks and local apply as a
 blocking write, an immediate return, and the store's own re-sends at the blocking wait's schedule.
 """
+# The send queue a test interleaves a second writer into.
+import collections
 # The test framework.
 import unittest
 
@@ -181,6 +183,41 @@ class TestNonBlockingWrite(unittest.TestCase):
     deliver(store, KEY, "w", "peer1", [NOW_MS + 1000, "peer1"])
     # No re-send at 10 s, counted overwritten.
     self.assertEqual((lap(store, 10), getattr(store, STATS).get(BUCKET + "/local/overwritten")), (0, 1))
+
+  def test_an_older_write_never_replaces_a_newer_writes_entry(self):
+    """When a newer wait=False write of the key runs whole between an older one's apply and its registration (two
+    threads writing one key), the entry stays the newer one's: the value held is re-sent at 10 and 20 s."""
+    # A writer whose peers never answer.
+    store = make("report")
+
+    class Interleaved(collections.deque):
+      """The send queue, which runs a second writer's whole write of "v2" right after the first writer queues "v1"."""
+
+      def append(self, op):
+        """
+        Queue ``op``; after the store of "v1", run the second writer's whole wait=False write of "v2".
+
+        Parameters
+        ----------
+        op : dict
+          The store queued.
+
+        Returns
+        -------
+        None
+        """
+        # Queued.
+        super().append(op)
+        if op["value"] == "v1":
+          # The second writer, between the first one's queueing and its registration.
+          store._set_value(KEY, "v2", owner="node", wait=False)
+    # The store's send queue.
+    store._ChainStoreBasePlugin__ops = Interleaved()
+    # The first writer's write of "v1".
+    write(store, KEY, "v1")
+    # The entry is the second write's, and its value is re-sent at 10 and 20 s.
+    self.assertEqual((getattr(store, UNWAITED)[KEY][0]["value"], [lap(store, at) for at in (10, 20, 30)],
+                      store.sent_payloads[-1]["data"]["CHAIN_STORE_DATA"]["value"]), ("v2", [1, 1, 0], "v2"))
 
   def test_refusal_by_every_target_ends_the_resends(self):
     """When both targets answer with a refusal, the re-sends end, counted refused_by_peers."""

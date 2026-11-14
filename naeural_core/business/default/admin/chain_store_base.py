@@ -2352,7 +2352,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     counts the wait end ``queued``. A delete is queued once, as a blocking
     delete, which does not wait either. The caller's thread holds the
     persistence lock for the checks and the apply, as for any write, and once
-    more for the one dict operation that registers the re-sends.
+    more to register the re-sends, which it does only while the key still
+    holds the record this write left (a newer write by another thread in
+    between owns the key's entry).
 
     A write that leaves the replica as it was does not mark it for a save: a
     delete of a key this replica does not hold, and a local write whose value
@@ -2644,6 +2646,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # The stamp the record keeps; None with the order switch 'off'.
             ver=ver,
           )
+          # The record this write left: a wait=False write registers its re-sends below only while it is still held.
+          mine = self.__chain_storage.get(key)
           # The outcome counted for this call: a delete of a key not held, a write of what was already stored,
           # or a change of the replica. Before, nothing was counted.
           outcome = ("absent_delete" if value is None else "identical") if unchanged else "changed"
@@ -2679,11 +2683,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           if not wait:
             if value is not None:
               # A value is re-sent by the plugin thread (__maybe_resend_unwaited) on the schedule of the wait below,
-              # while unconfirmed; a newer write of the key replaces the entry. The lock is held for this one dict
-              # operation only (the plugin thread walks the dict under it).
+              # while unconfirmed; a newer write of the key replaces the entry. The lock is held for this check and
+              # one dict operation only (the plugin thread walks the dict under it).
               with self.__persistence_lock:
-                # First re-send after one timeout, then max_retries of them.
-                self.__unwaited[key] = [op, self.time() + timeout, max_retries]
+                if self.__chain_storage.get(key) is mine:
+                  # Registered only while the key holds this write's record: a newer write applied since this one's
+                  # apply (another thread) registered its own entry, which an older write must not replace.
+                  self.__unwaited[key] = [op, self.time() + timeout, max_retries]
             # Counted in addition to the outcome: stored here and queued, not confirmed.
             wait_end = "queued"
             # At once, without waiting for any confirmation.
@@ -2984,9 +2990,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Notes
     -----
     Runs on the plugin thread from ``process``, before the queued stores are sent. The walk holds the persistence
-    lock, under which ``_set_value`` adds or replaces an entry from the caller's thread, so an entry replaced by a
-    newer write is never dropped or re-sent in its place. The table is empty unless a caller uses ``wait=False``
-    (one entry per key in flight), so a lap pays one emptiness check.
+    lock, under which ``_set_value`` adds or replaces an entry from the caller's thread. A write registers its
+    entry only while the key still holds the record it left, so when two threads write one key, an older write's
+    entry never replaces a newer write's, and the entry always describes the value held. The table is empty
+    unless a caller uses ``wait=False`` (one entry per key in flight), so a lap pays one emptiness check.
 
     Examples
     --------

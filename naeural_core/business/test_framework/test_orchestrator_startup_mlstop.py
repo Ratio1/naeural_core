@@ -36,7 +36,8 @@ class _Engine(orchestrator_module.Orchestrator):
   cfg_app_seconds_heartbeat, cfg_eeid = 10, "node"
   # Loop timing figures of the heartbeat's log lines.
   avg_loop_timings, real_main_loop_resolution, cfg_main_loop_resolution = 0.0, 0, 5
-  # Seconds since the node started; a test sets its own value on the instance's class copy.
+  # Seconds since the process started, printed in the stop lines; a test sets its own value on the instance's
+  # class copy.
   running_time = 30.0
 
 
@@ -47,7 +48,8 @@ def _engine(running_time=30.0):
   Parameters
   ----------
   running_time : float, optional
-    Seconds since the node started, as the heartbeat reads them. Default 30.
+    Seconds since the process started, as the heartbeat's lines print them. Default 30. The start-up grace
+    does not read it: it is counted from the first heartbeat, on the clock the test case moves.
 
   Returns
   -------
@@ -116,19 +118,57 @@ def _engine(running_time=30.0):
 
 
 class TestStartupMainLoopStop(unittest.TestCase):
+  """A stop on lap counter 0 is the normal start for the grace after the first heartbeat, and dangerous past it."""
+
+  def setUp(self):
+    """
+    Replace the orchestrator module's clock with one the test moves.
+
+    Returns
+    -------
+    None
+    """
+    # The time the heartbeat reads: one cell, so a test moves it by assigning to it.
+    self.clock = [1_000_000.0]
+    # The heartbeat calls the module's name `time`.
+    patcher = mock.patch.object(orchestrator_module, "time", lambda: self.clock[0])
+    # In force during the whole test.
+    patcher.start()
+    # Removed after it, also when it fails.
+    self.addCleanup(patcher.stop)
+
+  def _ticks(self, eng, count):
+    """
+    Run heartbeat ticks 10 s apart on the test's clock.
+
+    Parameters
+    ----------
+    eng : _Engine
+      The orchestrator built by ``_engine``.
+    count : int
+      Number of ticks.
+
+    Returns
+    -------
+    None
+    """
+    # One tick after another, as the communication thread makes them.
+    for _ in range(count):
+      # Ten seconds later.
+      self.clock[0] += 10
+      # One tick of the heartbeat.
+      eng._maybe_send_heartbeat(force=True)
 
   def test_a_stop_before_the_first_lap_is_normal_and_withholds_no_heartbeat(self):
     """Three heartbeats while the first lap has not begun, then one after it: all four are sent, nothing is an alert."""
     # A node 30 s into its start, loading its admin plugins.
     eng, sent, lines, alerts = _engine(running_time=30.0)
     # Three heartbeat ticks with the lap counter still at 0: the second and third see a stopped loop.
-    for _ in range(3):
-      # One tick of the heartbeat.
-      eng._maybe_send_heartbeat(force=True)
+    self._ticks(eng, 3)
     # The main loop has started and is at its fiftieth lap when the next heartbeat is due.
     eng._main_loop_counts["ITER"] = 50
     # The tick that sees the loop running again.
-    eng._maybe_send_heartbeat(force=True)
+    self._ticks(eng, 1)
     # All four heartbeats left; before, the third and the fourth were withheld.
     self.assertEqual(len(sent), 4)
     # The two stop notifications are not alerts.
@@ -141,11 +181,15 @@ class TestStartupMainLoopStop(unittest.TestCase):
     self.assertEqual([text for text, _ in lines if "NOT sent" in text], [])
 
   def test_a_start_that_lasts_beyond_the_grace_is_dangerous(self):
-    """Past the start-up grace a stop before the first lap is reported as dangerous and heartbeats are withheld."""
-    # A node still loading its plugins after more than the grace: a hung start.
-    eng, sent, lines, alerts = _engine(running_time=orchestrator_module.MLSTOP_STARTUP_GRACE + 1)
-    # Three heartbeat ticks with the lap counter still at 0.
-    for _ in range(3):
+    """One second past the grace after the first heartbeat, a stop before the first lap is dangerous and withholds heartbeats."""
+    # A node at its first heartbeat, loading its admin plugins.
+    eng, sent, lines, alerts = _engine(running_time=30.0)
+    # The first heartbeat: the grace is counted from here.
+    eng._maybe_send_heartbeat(force=True)
+    # The plugins are still loading one second after the grace has passed: a hung start.
+    self.clock[0] += orchestrator_module.MLSTOP_STARTUP_GRACE + 1
+    # Two more heartbeat ticks at that time, with the lap counter still at 0.
+    for _ in range(2):
       # One tick of the heartbeat.
       eng._maybe_send_heartbeat(force=True)
     # The first two were sent (the stop is only known after the second); the third is withheld.
@@ -155,6 +199,34 @@ class TestStartupMainLoopStop(unittest.TestCase):
     # The stop lines carry the warning label.
     self.assertTrue(all(text.startswith("WARNING:") for text, _ in lines if "MLSTOP" in text))
 
+  def test_the_last_second_of_the_grace_is_still_the_normal_start(self):
+    """Exactly the grace after the first heartbeat, a stop before the first lap is still normal: the bound is 600 s, not less."""
+    # A node at its first heartbeat, loading its admin plugins.
+    eng, sent, lines, alerts = _engine(running_time=30.0)
+    # The first heartbeat: the grace is counted from here.
+    eng._maybe_send_heartbeat(force=True)
+    # The whole grace later, to the second.
+    self.clock[0] += orchestrator_module.MLSTOP_STARTUP_GRACE
+    # Two more heartbeat ticks at that time, with the lap counter still at 0.
+    for _ in range(2):
+      # One tick of the heartbeat.
+      eng._maybe_send_heartbeat(force=True)
+    # All three heartbeats left, and the two stop notifications are not alerts.
+    self.assertEqual((len(sent), alerts), (3, [False, False]))
+    # The stop lines read as the normal start.
+    self.assertTrue(all(text.startswith("Normal") for text, _ in lines if "MLSTOP" in text))
+
+  def test_the_grace_is_counted_from_the_first_heartbeat_not_from_the_process_start(self):
+    """A node whose dAuth wait took longer than the grace still gets it: its start-up stop is normal, with no gap."""
+    # The process is twice the grace old at its first heartbeat: the dAuth wait before it took that long.
+    eng, sent, lines, alerts = _engine(running_time=2 * orchestrator_module.MLSTOP_STARTUP_GRACE)
+    # Three heartbeat ticks with the lap counter still at 0.
+    self._ticks(eng, 3)
+    # All three heartbeats left and nothing is an alert; counted from the process start, the third was withheld.
+    self.assertEqual((len(sent), alerts), (3, [False, False]))
+    # The stop lines read as the normal start.
+    self.assertTrue(all(text.startswith("Normal") for text, _ in lines if "MLSTOP" in text))
+
   def test_a_stop_after_the_first_lap_is_dangerous_as_before(self):
     """Once the loop has made laps, a stop in a dangerous stage is an alert and withholds heartbeats, as before."""
     # A node 30 s after its start whose loop already runs.
@@ -162,9 +234,7 @@ class TestStartupMainLoopStop(unittest.TestCase):
     # The loop is at its seventh lap and stays there.
     eng._main_loop_counts["ITER"] = 7
     # Three heartbeat ticks on the same lap.
-    for _ in range(3):
-      # One tick of the heartbeat.
-      eng._maybe_send_heartbeat(force=True)
+    self._ticks(eng, 3)
     # The third heartbeat is withheld.
     self.assertEqual(len(sent), 2)
     # Both stop notifications are alerts.

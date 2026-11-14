@@ -76,9 +76,9 @@ CHECK_AND_COMPLETE_MAX_PAUSE = 300
 CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle checks
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
 RUNTIME_SECRET_RESOLVER_POLL_SECONDS = 0.25
-# Seconds after the node's start within which a main-loop stop before the first lap is the normal start (the
-# admin plugins are being loaded) and not a dangerous stop. A start that has not reached its first lap by then
-# is taken as hung.
+# Seconds after the node's first heartbeat within which a main-loop stop before the first lap is the normal
+# start (the admin plugins are being loaded) and not a dangerous stop. A start that has not reached its first
+# lap by then is taken as hung.
 MLSTOP_STARTUP_GRACE = 600
 RUNTIME_SECRET_RETRY_MAX_SECONDS = 30
 # Longest wait, in seconds, before a pipeline's dAuth secret request is sent again after a ValueError: dAuth
@@ -1831,10 +1831,15 @@ class Orchestrator(DecentrAIObject,
     One stop is not: the one every start makes. Before its first lap the main thread loads the admin plugins
     for 10 s to a minute, the lap counter stays at 0, and the plugin loading marks its stages as dangerous. So
     every start raised a false alert and withheld one or more heartbeats, which other nodes saw as a gap.
-    A stop on lap counter 0 is now the normal start as long as the node has run for at most
-    ``MLSTOP_STARTUP_GRACE`` seconds (600); past that, the start is taken as hung and the stop is dangerous
-    again. The lap counter of the stop is the one the previous heartbeat saw, so the resume of a start-up
-    stop is judged as that stop was, not by the laps made since.
+    A stop on lap counter 0 is now the normal start as long as at most ``MLSTOP_STARTUP_GRACE`` seconds (600)
+    have passed since the node's first heartbeat; past that, the start is taken as hung and the stop is
+    dangerous again. The lap counter of the stop is the one the previous heartbeat saw, so the resume of a
+    start-up stop is judged as that stop was, not by the laps made since.
+
+    The grace is counted from the first heartbeat and not from the process start: the first heartbeat comes
+    after the start-up dAuth wait, which lasts about 900 s when no dAuth round brings variables. Counted from
+    the process start, a node that waited more than 600 s for dAuth had no grace left, and its start raised
+    the false alert and withheld heartbeats as before.
 
     Examples
     --------
@@ -1888,12 +1893,17 @@ class Orchestrator(DecentrAIObject,
       
       # TODO: add in payload upload-URL & upload date-time ???
       
+      if self._last_checked_main_loop_iter is None:
+        # The node's first heartbeat (no heartbeat has compared the lap counter yet): the start-up grace is
+        # counted from here. Counted from the process start, the dAuth wait before this point used it up.
+        self._first_heartbeat_time = time()
       # Whether a stop of the main loop counts as dangerous at this heartbeat. As before, the stage decides;
       # except a stop on lap counter 0 (the counter the previous heartbeat saw: the first lap has not begun,
       # the admin plugins are being loaded), which is the normal start until the grace has passed. Before, every
-      # start was an alert and withheld heartbeats.
-      mlstop_dangerous = self.__is_mlstop_dangerous and (
-        self._last_checked_main_loop_iter != 0 or self.running_time > MLSTOP_STARTUP_GRACE)
+      # start was an alert and withheld heartbeats. A lap counter of 0 means a heartbeat already ran, so the
+      # time of the first one is set when it is read.
+      mlstop_dangerous = self.__is_mlstop_dangerous and (self._last_checked_main_loop_iter != 0 or (
+        time() - self._first_heartbeat_time > MLSTOP_STARTUP_GRACE))
       # The same decision as before, on the value above.
       if not self.in_mlstop or (self.in_mlstop and (not mlstop_dangerous)):
         # send HB only if not stopped or if stopped but NOT dangerous

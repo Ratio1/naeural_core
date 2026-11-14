@@ -553,8 +553,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     table (storage key -> (record, {peer: [re-sends, next due time, or None once given up in 'report']})) is
     used only on this thread, by this sweep and by ``__exec_received_confirm``, which ends a pair on its
     answer; an entry whose record was replaced is dropped at the next sweep, so the table holds only pairs
-    of own records still held. Nothing here marks the replica for a save. The pairs left pending are kept for
-    the ``handoff_pending`` field of the next ``CSTORE_STATS`` line.
+    of own records still held. The sweep builds the new table aside and puts it in place when its walk ends:
+    a raise in the walk leaves the last table (with the changes made to its pairs before the raise), so no
+    pair starts its back-off again. Nothing here marks the replica for a save. The pairs left pending are kept
+    for the ``handoff_pending`` field of the next ``CSTORE_STATS`` line.
 
     A record's age is read from its own stamp, which this node's clock keeps within ``CSTORE_VER_MAX_AHEAD`` of
     its wall clock, so a re-send is never early and at most that much late. Cost: one dict read and one
@@ -577,8 +579,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The peers that joined or came back since the last sweep (with when they were dropped as lost, or None), for this
     # sweep alone.
     back, self.__peer_back = self.__peer_back, {}
-    # The last sweep's table; this sweep keeps the entries of the own records still held.
-    table, self.__handoff = self.__handoff, {}
+    # The last sweep's table, and the one this sweep builds from the entries of the own records still held; the last
+    # one stays in place until the walk ends, so a raise in the walk does not restart every pair's back-off.
+    table, new = self.__handoff, {}
     # The re-sends in flight per peer: pairs re-sent whose next due time has not come.
     flight = Counter(peer for _, pairs in table.values() for peer, (sends, due) in pairs.items()
                      if sends and due is not None and due > now)
@@ -681,11 +684,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         })
       if pairs:
         # Kept for the next sweep.
-        self.__handoff[key] = (record, pairs)
+        new[key] = (record, pairs)
         # Its pairs not given up.
         pending += sum(pair[1] is not None for pair in pairs.values())
-    # For the next CSTORE_STATS line.
-    self.__handoff_pending = pending
+    # The new table, and its pending pairs for the next CSTORE_STATS line, once the walk ended.
+    self.__handoff, self.__handoff_pending = new, pending
 
 
   def __log_census(self):

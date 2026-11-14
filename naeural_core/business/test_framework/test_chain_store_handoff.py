@@ -359,6 +359,32 @@ class TestResends(unittest.TestCase):
     # Only peer2's late confirmation is counted.
     self.assertEqual((early, getattr(store, STATS).get(BUCKET + "/handoff/answered")), (None, 1))
 
+  def test_a_sweep_that_raises_keeps_the_last_table(self):
+    """A sweep that raises on a record (an own record without default_peers, a shape no release writes, while a peer
+    joined) leaves the last sweep's table in place, with each pair's re-send count, so no back-off starts again."""
+    # The writer in 'report'.
+    store = writer("report")
+    # Two writes, unconfirmed.
+    local_write(store, KEY, "v")
+    # The second.
+    other = _hset_key("players", "other")
+    # Written 0.2 s later.
+    local_write(store, other, "o")
+    # At 315 s both pairs of both records are counted as first re-sends.
+    sweep(store, 315)
+    # The second record loses default_peers.
+    del store.storage[other]["default_peers"]
+    # peer3 joins, as a refresh notes it.
+    store._ChainStoreBasePlugin__peer_back["peer3"] = None
+    # The next sweep raises on the second record.
+    with self.assertRaises(KeyError):
+      # The sweep.
+      sweep(store, 330)
+    # Both records' entries are kept with their re-send counts (the first one also tracks the joined peer3).
+    self.assertEqual({key: {peer: pair[0] for peer, pair in pairs.items()} for key, (_, pairs) in
+                      getattr(store, TABLE).items()},
+                     {KEY: {"peer1": 1, "peer2": 1, "peer3": 0}, other: {"peer1": 1, "peer2": 1}})
+
   def test_a_confirmation_and_a_refusal_answer_each_settle_a_pair(self):
     """After the first re-send, peer1's confirmation (counted answered) and peer2's refusal answer each end their
     pair: nothing is re-sent later and nothing is pending."""

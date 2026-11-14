@@ -85,14 +85,14 @@ _CONFIG = {
   # How many days the tombstone a delete leaves is kept (0: no tombstone is kept), and how many tombstones are held at
   # most (the oldest go first): about 10 % of a production replica's records. Both apply with CSTORE_ORDER not 'off'.
   "CSTORE_TOMBSTONE_DAYS" : 7,
-  # The cap, a count the defaults-only release can set from the measured rate of new tombstones.
+  # The cap, a count a later release can set from the measured rate of new tombstones.
   "CSTORE_TOMBSTONE_CAP" : 570,
   # Confirmations by key and stamp instead of echoing the value.
   "CSTORE_LEAN_CONFIRM" : "report",
   # The writer re-sends its own unconfirmed writes.
   "CSTORE_HANDOFF" : "report",
   # Seconds from a write to its first re-send (also the first gap of the doubling back-off), and how many re-sends
-  # may wait for an answer per peer: numbers the defaults-only release can retune from the report counts.
+  # may wait for an answer per peer: numbers a later release can retune from the report counts.
   "CSTORE_HANDOFF_FIRST_S" : 300,
   # The re-sends in flight per peer.
   "CSTORE_HANDOFF_WINDOW" : 8,
@@ -224,8 +224,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       ``chainstore_hlist`` on this node waits for it with no timeout.
     TypeError
       When ``CSTORE_SAVE_MAX_GAP`` is not a number nor a str (``None``, a list); the start stops the same way.
-      A str that is not a number raises ValueError instead; a numeric str such as ``"30"`` is taken.
-      ``CSTORE_VER_MAX_AHEAD`` must be a number (a str raises TypeError), and so must the hand-off's numbers.
+      A str that is not a number raises ValueError instead; a numeric str such as ``"30"`` is taken. The same
+      holds for the hand-off's numbers (``float`` and ``int``). ``CSTORE_VER_MAX_AHEAD`` must be a number:
+      ``None`` raises TypeError, and a str is not checked.
 
     Notes
     -----
@@ -314,7 +315,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__ver_ahead, self.__ver_lead = int(1000 * self.cfg_cstore_ver_max_ahead), 0
     # The life of a tombstone in ms and the most tombstones held, read once as well.
     self.__tomb_ms = int(86_400_000 * self.cfg_cstore_tombstone_days)
-    # The cap, a count the defaults-only release can set.
+    # The cap, a count a later release can set.
     self.__tomb_cap = int(self.cfg_cstore_tombstone_cap)
     # The hand-off's first re-send delay in seconds and its window (re-sends in flight per peer), read once as well.
     self.__handoff_first = float(self.cfg_cstore_handoff_first_s)
@@ -387,8 +388,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     memory[self.CS_HSYNC] = self._hsync
     
     # The hand-off's side table (storage key -> (record, {peer: [re-sends, next due time or None once given up]}),
-    # memory only), the time of its first sweep (CSTORE_HANDOFF_FIRST_S after start, so a booting node sends no burst)
-    # and the pairs left pending by the last sweep.
+    # memory only), the time of its first sweep (CSTORE_HANDOFF_FIRST_S after start: the sweep after the first refresh,
+    # which makes every peer join, scans every own record's lists, and is kept out of the boot; no peer is proven
+    # before it sends a stamped message anyway) and the pairs left pending by the last sweep.
     self.__handoff, self.__handoff_next, self.__handoff_pending = {}, self.time() + self.__handoff_first, 0
     # Peers dropped from the replication peers as lost (address -> when), and peers that joined or came back since the
     # last sweep (address -> when they were dropped as lost, or None); the first refresh below makes every peer join.
@@ -2150,8 +2152,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Examples
     --------
-    >>> self.__reset_confirmations("key")   # default peers peer1 and peer2
-    {'confirms': 0, 'confirmed_peers': [], 'target_peers': ['peer1', 'peer2'], 'min_confirms': 2, 'default_peers': True}
+    >>> self.__reset_confirmations("key")   # default peers peer1 and peer2, MIN_CONFIRMATIONS 1 (the default)
+    {'confirms': 0, 'confirmed_peers': [], 'target_peers': ['peer1', 'peer2'], 'min_confirms': 1, 'default_peers': True}
     """
     # The fields, built before the record is stored.
     return {
@@ -2800,8 +2802,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           if not wait:
             if value is not None:
               # A value is re-sent by the plugin thread (__maybe_resend_unwaited) on the schedule of the wait below,
-              # while unconfirmed; a newer write of the key replaces the entry. The lock is held for this check and
-              # one dict operation only (the plugin thread walks the dict under it).
+              # while unconfirmed; a newer wait=False write of the key replaces the entry, and a later blocking write
+              # of another value or a delete ends it at the next lap (counted overwritten). The lock is held for this
+              # check and one dict operation only (the plugin thread walks the dict under it).
               with self.__persistence_lock:
                 if self.__chain_storage.get(key) is mine:
                   # Registered only while the key holds this write's record: a newer write applied since this one's
@@ -3105,10 +3108,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Notes
     -----
     Runs on the plugin thread from ``process``, before the queued stores are sent. The walk holds the persistence
-    lock, under which ``_set_value`` adds or replaces an entry from the caller's thread. A write registers its
-    entry only while the key still holds the record it left, so when two threads write one key, an older write's
-    entry never replaces a newer write's, and the entry always describes the value held. The table is empty
-    unless a caller uses ``wait=False`` (one entry per key in flight), so a lap pays one emptiness check.
+    lock, under which ``_set_value`` adds or replaces an entry from the caller's thread. A ``wait=False`` write
+    registers its entry only while the key still holds the record it left, so when two threads write one key, an
+    older write's entry never replaces a newer one's. A blocking write or a delete registers nothing: the entry
+    of an earlier ``wait=False`` write of the key then ends at the next lap, counted ``overwritten``, unless the
+    owner and value are unchanged, when it goes on re-sending its own store (with that write's stamp) until the
+    record is confirmed or its re-sends run out. The table is empty unless a caller uses ``wait=False`` (one entry
+    per key in flight), so a lap pays one emptiness check.
 
     Examples
     --------

@@ -482,8 +482,9 @@ confirmation: `True` with the write's own outcome (`changed`, `identical` or
 blocking write's refusal word otherwise. The plugin thread re-sends a value while it is
 unconfirmed on the blocking wait's schedule (with the defaults at 10 s and 20 s) and
 counts how it ended as a blocking write does (`unconfirmed`, `overwritten`,
-`refused_by_peers`; nothing when confirmed); a newer write of the key replaces the
-pending re-sends; a delete is queued once. It is refused (`error`) in the protected
+`refused_by_peers`; nothing when confirmed); a newer `wait=False` write of the key
+replaces the pending re-sends, and a blocking write of another value or a delete ends
+them at the next lap (`overwritten`); a delete is queued once. It is refused (`error`) in the protected
 namespaces (the signed ones and `DAUTH_JOB_SECRET_REVISIONS`), whose callers rely on the
 confirmation. It never waits for the chain store to start: before the store started, and
 after the chain-store plugin's loop ended (a stop, or a restart before the next instance

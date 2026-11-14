@@ -357,8 +357,9 @@ class Orchestrator(DecentrAIObject,
     Calls ``blockchain_manager.dauth_autocomplete`` in rounds until it returns either None or a non-empty
     dict of variables, pausing after each round that returns an empty dict: a random 16-29 s after the first
     such round, twice as long after each further one, at most ``CHECK_AND_COMPLETE_MAX_PAUSE`` (300 s). No new
-    round starts once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed, or once a stop was requested
-    (``request_stop``, called by the SIGTERM handler); the node then continues with its local environment.
+    round starts, and a pause in progress ends, once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed
+    or a stop was requested (``request_stop``, called by the SIGTERM handler); the node then continues with its
+    local environment.
     When dAuth returned variables, the logger config is reloaded so they take effect.
 
     Each round first sends a new-key announcement that still waits for dAuth's confirmation
@@ -391,7 +392,8 @@ class Orchestrator(DecentrAIObject,
     restarted by its host, went on at that rate for good; many such nodes kept the oracles' dAuth thread busy
     refusing. With the growing pause a node makes 6 or 7 rounds in that time. The price is paid by a
     licensed node that meets busy oracles several times in a row: its later rounds come later. The pause that
-    is running when the time limit passes is finished before the node continues.
+    is running when the time limit passes ends there, within a second, and no round follows it: the node
+    continues about 900 s after it began to ask, as it did with the short pauses, and not up to 300 s later.
 
     Examples
     --------
@@ -433,9 +435,10 @@ class Orchestrator(DecentrAIObject,
         # answer is a busy oracle or a refusal, and neither is helped by asking again every 16-29 s.
         pause = min(pause * 2 ** (tries - 1), CHECK_AND_COMPLETE_MAX_PAUSE)
         self.P(f'Retrying dAuth completion({tries} tries so far in {elapsed:.1f}s), next try in {pause:.0f}s...')
-        # Slept one second at a time: a pause of up to 300 s must not hold back a stop request.
+        # Slept one second at a time: a pause of up to 300 s must not hold back a stop request, and it ends at
+        # the time limit. Slept in full, the last pause ended up to 300 s past the limit.
         for _ in range(int(pause)):
-          if self._return_code is not None:
+          if self._return_code is not None or time() - start_ts >= CHECK_AND_COMPLETE_TIMEOUT:
             break
           # One second of the pause.
           sleep(1)

@@ -1591,8 +1591,8 @@ class Orchestrator(DecentrAIObject,
 
     Notes
     -----
-    Before, a fixed 5 s sleep followed the heartbeat at every stop: half of the 10 s a container runtime allows
-    for a stop by default, a quarter of a 20 s limit. The communicator thread takes the heartbeat from the
+    Before, a fixed 5 s sleep followed the heartbeat at every stop: half of the 10 s that Docker and Podman
+    allow for a stop by default, a quarter of a 20 s limit. The communicator thread takes the heartbeat from the
     queue within one lap when its previous message was delivered, and sends it in that lap when it has its
     connection, so the wait now normally ends within a tenth of a second. It lasts the 5 s when the thread does
     not take the heartbeat because it still holds an earlier message it could not send; then one red line says
@@ -1898,7 +1898,8 @@ class Orchestrator(DecentrAIObject,
       
       if self._last_checked_main_loop_iter is None:
         # The node's first heartbeat (no heartbeat has compared the lap counter yet): the start-up grace is
-        # counted from here. Counted from the process start, the dAuth wait before this point used it up.
+        # counted from here. Counted from the process start, a dAuth wait of more than 600 s before this
+        # point used it up.
         self._first_heartbeat_time = time()
       # Whether a stop of the main loop counts as dangerous at this heartbeat. As before, the stage decides;
       # except a stop on lap counter 0 (the counter the previous heartbeat saw: the first lap has not begun,

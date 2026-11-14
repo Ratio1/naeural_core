@@ -76,6 +76,10 @@ CHECK_AND_COMPLETE_MAX_PAUSE = 300
 CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle checks
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
 RUNTIME_SECRET_RESOLVER_POLL_SECONDS = 0.25
+# Seconds after the node's start within which a main-loop stop before the first lap is the normal start (the
+# admin plugins are being loaded) and not a dangerous stop. A start that has not reached its first lap by then
+# is taken as hung.
+MLSTOP_STARTUP_GRACE = 600
 RUNTIME_SECRET_RETRY_MAX_SECONDS = 30
 # Longest wait, in seconds, before a pipeline's dAuth secret request is sent again after a ValueError: dAuth
 # refused it for good, or its answer or bundle cannot be accepted as it is. Any other failure keeps the 30 s above.
@@ -1787,6 +1791,53 @@ class Orchestrator(DecentrAIObject,
 
 
   def _maybe_send_heartbeat(self, status=None, full_info=True, send_log=False, force=False, initiator_id=None, session_id=None, **kwargs):
+    """
+    Send a heartbeat when one is due, and watch the main loop for a stop.
+
+    A heartbeat is due when ``APP_SECONDS_HEARTBEAT`` have passed since the last one, or when forced. The
+    status is read from the application monitor and handed to the communication manager, unless the main loop
+    is in a dangerous stop. Then the lap counter is compared with its value at the previous heartbeat: an
+    unchanged counter is a stop of the main loop (logged, with a notification), a counter that moved after a
+    stop is the resume (logged, with a notification).
+
+    Parameters
+    ----------
+    status : str, optional
+      Status text of the heartbeat (for example the shutdown status). Default None.
+    full_info : bool, optional
+      Whether the heartbeat carries the full status. Default True.
+    send_log : bool, optional
+      Whether the heartbeat carries the node log. Default False.
+    force : bool, optional
+      Send now, whatever the time since the last heartbeat. Default False.
+    initiator_id : str, optional
+      Who asked for this heartbeat, written into it. Default None.
+    session_id : str, optional
+      Session of the request; not used here. Default None.
+    **kwargs
+      Ignored.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A stop is dangerous when the stage the loop is in says so (``set_loop_stage``): its lines are labelled
+    "WARNING:", its notification is an alert, and heartbeats are withheld while it lasts and at the resume.
+    One stop is not: the one every start makes. Before its first lap the main thread loads the admin plugins
+    for 10 s to a minute, the lap counter stays at 0, and the plugin loading marks its stages as dangerous. So
+    every start raised a false alert and withheld one or more heartbeats, which other nodes saw as a gap.
+    A stop on lap counter 0 is now the normal start as long as the node has run for at most
+    ``MLSTOP_STARTUP_GRACE`` seconds (600); past that, the start is taken as hung and the stop is dangerous
+    again. The lap counter of the stop is the one the previous heartbeat saw, so the resume of a start-up
+    stop is judged as that stop was, not by the laps made since.
+
+    Examples
+    --------
+    >>> self._maybe_send_heartbeat(status=None, full_info=True, send_log=False)   # the communication thread
+    >>> self._maybe_send_heartbeat(status=ct.DEVICE_STATUS_SHUTDOWN, send_log=True, force=True)
+    """
     
     if self._comm_manager is None:
       self.P("Cannont send heartbeat due to incomplete startup!")
@@ -1834,7 +1885,14 @@ class Orchestrator(DecentrAIObject,
       
       # TODO: add in payload upload-URL & upload date-time ???
       
-      if not self.in_mlstop or (self.in_mlstop and (not self.__is_mlstop_dangerous)):
+      # Whether a stop of the main loop counts as dangerous at this heartbeat. As before, the stage decides;
+      # except a stop on lap counter 0 (the counter the previous heartbeat saw: the first lap has not begun,
+      # the admin plugins are being loaded), which is the normal start until the grace has passed. Before, every
+      # start was an alert and withheld heartbeats.
+      mlstop_dangerous = self.__is_mlstop_dangerous and (
+        self._last_checked_main_loop_iter != 0 or self.running_time > MLSTOP_STARTUP_GRACE)
+      # The same decision as before, on the value above.
+      if not self.in_mlstop or (self.in_mlstop and (not mlstop_dangerous)):
         # send HB only if not stopped or if stopped but NOT dangerous
         hb_prep_time = time() - hb_prep_start
         if True:
@@ -1876,23 +1934,26 @@ class Orchestrator(DecentrAIObject,
         stage_last_change = time() - self.__main_loop_last_stage_change
         timer, elapsed = self.log.get_opened_timer()
         msg = "{} MLSTOP @ {} from start, stage stop '{}', now '{}', {} stops so far, {:.0f}s since stop, {:.0f}s since last, timer `{}={:.1f}s`,(E2 loop avg/last time {:.1f}s/{:.1f}s)".format(
-          "WARNING:" if self.__is_mlstop_dangerous else "Normal (start/stop)", 
+          # The label follows the decision above, so a start-up stop reads "Normal (start/stop)".
+          "WARNING:" if mlstop_dangerous else "Normal (start/stop)", 
           self.log.elapsed_to_str(self.running_time), 
           self.__main_loop_stop_at_stage, self.__loop_stage,
           self.__main_loop_stopped_count, time() - self.__main_loop_stopped_time, 
           stage_last_change, timer, elapsed, self.avg_loop_timings, self._get_last_timing()
         )
-        self.P(msg, color='error' if self.__is_mlstop_dangerous else 'r')
+        self.P(msg, color='error' if mlstop_dangerous else 'r')
         self._create_notification(
           notif=ct.STATUS_TYPE.STATUS_ABNORMAL_FUNCTIONING, msg=msg,
-          is_alert=self.__is_mlstop_dangerous,
+          # An alert only for a dangerous stop: not for the stop every start makes.
+          is_alert=mlstop_dangerous,
           displayed=True
         )
       elif self.__main_loop_stopped:
         self.__log_main_loop_stop(end=time())
         self.__main_loop_stopped = False
         msg = "{} main loop resumed after {:.0f}s from stage '{}', {} stop-resumes so far! (E2 loop avg/last {:.1f}s/{:.1f}s)".format(
-          "WARNING:" if self.__is_mlstop_dangerous else "Normal (start/stop)", 
+          # The resume is labelled as its stop was.
+          "WARNING:" if mlstop_dangerous else "Normal (start/stop)", 
           time() - self.__main_loop_stopped_time, self.__main_loop_stop_at_stage,
           self.__main_loop_stopped_count, self.avg_loop_timings, self._get_last_timing()
         )

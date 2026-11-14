@@ -670,14 +670,89 @@ class TestMergeOfTheValueHeld(unittest.TestCase):
         self.assertEqual(store.storage[key], held)
 
 
+class _MethodEngine:
+  """
+  A block engine whose registry reads are methods of one object, as the node's engine wrapper has them.
+
+  The harness's engine holds plain functions, so every access to a read gives the same object. A method is bound
+  anew at each access: two accesses give two objects that are equal. A memo of the registries must take them for
+  one read.
+  """
+
+  def __init__(self, engine):
+    """
+    Wrap the harness's engine and start with no read made.
+
+    Parameters
+    ----------
+    engine : types.SimpleNamespace
+      The harness's block engine: its address conversion and signature check are used as they are, and its two
+      registries are what the reads here return.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> _MethodEngine(store.bc).reads
+    []
+    """
+    # The harness's engine, for everything but the two reads' bookkeeping.
+    self.engine = engine
+    # The address conversion and the signature check, as the harness has them.
+    self.node_address_to_eth_address, self.verify = engine.node_address_to_eth_address, engine.verify
+    # The registry reads made, by registry.
+    self.reads = []
+
+  def get_eth_dauth_oracles(self):
+    """
+    Read the dAuth oracle registry, recording the read.
+
+    Returns
+    -------
+    list of str
+      The harness engine's dAuth registry.
+
+    Examples
+    --------
+    >>> _MethodEngine(store.bc).get_eth_dauth_oracles()
+    ['node', 'peer1']
+    """
+    # One more read of this registry.
+    self.reads.append("dauth")
+    # What the harness's engine holds.
+    return self.engine.get_eth_dauth_oracles()
+
+  def get_eth_oracles(self):
+    """
+    Read the oracle registry, recording the read.
+
+    Returns
+    -------
+    list of str
+      The harness engine's oracle registry.
+
+    Examples
+    --------
+    >>> _MethodEngine(store.bc).get_eth_oracles()
+    ['oracle']
+    """
+    # One more read of this registry.
+    self.reads.append("oracles")
+    # What the harness's engine holds.
+    return self.engine.get_eth_oracles()
+
+
 class TestMergeRegistryReads(unittest.TestCase):
   """One merge reads each registry at most once, however many signed copies it checks, also when the read fails."""
 
   def test_a_merge_reads_each_registry_once_and_does_not_repeat_a_read_that_failed(self):
     """A merge of 20 signed operations the replica lacks reads the dAuth and the oracle registry once each, not
-    once per operation, and merges them all; the next merge reads them again; with a registry read that fails,
-    the merge makes that read once, not 20 times, and merges nothing; and a question for dAuth members only is
-    not answered from the oracle registry the same merge has read."""
+    once per operation, and merges them all, also when the reads are methods of the block engine; the next merge
+    reads them again; with a registry read that fails, the merge makes that read once, not 20 times, and merges
+    nothing; and a question for dAuth members only is not answered from the oracle registry the same merge has
+    read."""
     # Twenty signed operations of the coordinator "oracle", which the replica lacks.
     answer = dict(operation("op%d" % index, 1) for index in range(20))
     # A replica of a dAuth member.
@@ -699,6 +774,13 @@ class TestMergeRegistryReads(unittest.TestCase):
     self.assertEqual((getattr(store, MERGE)("DEEPLOY_OPERATIONS", {key: {**held, "token": "T"}
                                                                    for key, held in answer.items()}), reads),
                      (20, ["dauth", "oracles"] * 3))
+    # A replica whose block engine is one object with the registry reads as its methods, as a node's is: each
+    # access to such a read gives a new method object, and the merge must still take them for the same read.
+    store = oracle("report")
+    # The engine: the harness's functions and the two reads, each call recorded.
+    store.bc = _MethodEngine(store.bc)
+    # Twenty merged on one read of each registry.
+    self.assertEqual((getattr(store, MERGE)("DEEPLOY_OPERATIONS", answer), store.bc.reads), (20, ["dauth", "oracles"]))
     # A replica whose oracle registry cannot be read (the remote call fails once the engine's copy has expired).
     store = oracle("report")
     # The failing reads made.

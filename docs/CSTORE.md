@@ -337,7 +337,8 @@ and its tombstone are never both held (storing a value, live or from a sync answ
 removes the tombstone; with `CSTORE_ORDER` `off` it stays until the next sweep). A `dl:`
 record that holds a value (one a caller of the previous release could write, as that
 release's API did not refuse the prefix) is not a tombstone: a write of the key never
-removes it.
+removes it, and a delete of the key leaves no tombstone over it (the key is only removed,
+as the previous release removes it; a sync answer's delete copy of the key is skipped).
 
 - Reads never see it: `get` and `hget` of the key return `None`; `hlist`, `hkeys` and
   `hgetall` match only `hs:` keys. No write may name a `dl:` key: a local one raises, a

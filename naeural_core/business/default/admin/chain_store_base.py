@@ -1948,7 +1948,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     under ``"dl:" + key`` (``tombstone_new`` when there was none), so a
     replica that missed the delete does not keep the key. A value copy
     removes the key's tombstone (``__held_tombstone``: not another record
-    under ``"dl:"``, and none with the order switch 'off'). A copy that is
+    under ``"dl:"``, and none with the order switch 'off'). A delete copy of
+    a key whose ``"dl:"`` record holds a value (an older release's caller
+    wrote it there) is skipped in every mode, as the previous release skips
+    every delete copy, so that record stays. A copy that is
     applied, with the order
     switch not 'off', also goes through the write-permission count
     (``__perm_count``), which counts and never refuses.
@@ -1982,6 +1985,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # The copy's stamp, checked for form (a malformed one counts ver_invalid and is unstamped); none is read
         # with the order switch 'off'.
         ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, "hsync")
+        if value is None and self.__chain_storage.get(self.CS_DEL + key, {}).get(self.CS_VALUE) is not None:
+          # A delete copy of a key whose "dl:" record holds a value (an older release's caller wrote it there; it is
+          # no tombstone): skipped in every mode, as the previous release skips every delete copy, so the tombstone
+          # never replaces that record (nor counts in 'report' what 'on' would remove).
+          continue
         if value is None and order != "on":
           # A delete travels as a stamped copy with value None (a tombstone), applied only in 'on'; with 'off', or
           # unstamped, it is skipped as before. In 'report' the rules below run and count, and a delete 'on' would
@@ -2171,8 +2179,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     A tombstone is the record a stamped delete leaves under ``"dl:" + key``: value None and a well-formed stamp.
     Any other record there (one a caller of an older release could write under that prefix, holding a value) is
-    not one and is never replaced by a write of ``key``. With the order switch 'off' nothing there is replaced, as
-    in the previous release; the tombstone sweep removes every tombstone at the next ``CSTORE_STATS`` line then.
+    not one and is never replaced by a write of ``key``, nor by a delete of it (``__set_key_value`` and
+    ``__merge_hset_snapshot`` leave no tombstone over a record with a value). With the order switch 'off' nothing
+    there is replaced, as in the previous release; the tombstone sweep removes every tombstone at the next
+    ``CSTORE_STATS`` line then.
 
     Parameters
     ----------
@@ -2260,7 +2270,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     delete semantics and related trade-offs described below are preserved.
     A stamped delete (``ver`` given, ``CSTORE_TOMBSTONE_DAYS`` above 0) also
     leaves a tombstone: a record under ``"dl:" + key`` with value None, the
-    delete's owner, readonly and token, and its stamp; a local one gets the
+    delete's owner, readonly and token, and its stamp (none when a record
+    with a value is held there: the key is only removed, as the previous
+    release removes it, and that record stays); a local one gets the
     confirmation fields of a local write, a remote one the -1 of a remote
     write; a local record or tombstone also keeps the stamp as ``sent_ver``,
     the one its confirmations and refusal answers echo. A tombstone already
@@ -2271,7 +2283,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     tombstone (``__held_tombstone``), so a key and its tombstone are never
     both held; with the order switch 'off' the tombstone stays until the
     next sweep, and a record under ``"dl:" + key`` that is not a tombstone
-    (a value an older release's caller wrote there) always stays.
+    (a value an older release's caller wrote there) always stays, under a
+    write or a delete of the key.
     The caller must hold the persistence lock and, after releasing it, mark
     the chain storage dirty when the call changed the replica (``_set_value``
     does not mark it for a delete of a key not held or for a write of what
@@ -2297,11 +2310,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # delete. If confirmed-deletes are needed in the future, introduce a dedicated CS_DELETE
       # operation with its own confirmation tracking (e.g. a __pending_deletes dict).
       self.__chain_storage.pop(chain_key, None)
-      # The tombstone already held for the key, if any.
+      # The tombstone already held for the key, if any (or a record with a value an older release's caller wrote
+      # under "dl:" and the key).
       held = self.__chain_storage.get(self.CS_DEL + key)
-      if ver is None or not self.__tomb_ms or (held is not None and (held.get(self.CS_VER) or []) >= ver):
+      if ver is None or not self.__tomb_ms or (held is not None and (
+          held[self.CS_VALUE] is not None or (held.get(self.CS_VER) or []) >= ver)):
         # No tombstone: an unstamped delete (order switch 'off', or a writer of the previous release), tombstones
-        # turned off (CSTORE_TOMBSTONE_DAYS 0), or one at least as new already held.
+        # turned off (CSTORE_TOMBSTONE_DAYS 0), one at least as new already held, or a record with a value held under
+        # "dl:" and the key, which stays: the key is only removed, as the previous release removes it.
         return
       if held is None:
         # A new tombstone, counted per bucket: the rate the tombstone cap is sized from.

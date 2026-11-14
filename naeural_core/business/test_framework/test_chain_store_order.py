@@ -828,9 +828,11 @@ class TestTombstones(unittest.TestCase):
   def test_a_value_write_removes_only_a_tombstone_and_none_in_off(self):
     """A value written to a key, by a peer's store, locally or by a sync copy, removes the tombstone held for it with
     the order switch 'report' or 'on' but not 'off', and never removes a "dl:" record that holds a value (one a caller
-    of the previous release could write there)."""
-    # The "dl:" + KEY records: a tombstone of KEY, and a value a caller of the previous release wrote there.
-    held = {"tombstone": tombstone(KEY, "peer1", [NOW_MS - 5000, "peer1"]), "app": record(TOMB, {"progress": 5}, "app")}
+    of the previous release could write there) nor one with value None and no stamp, which no delete leaves."""
+    # The "dl:" + KEY records: a tombstone of KEY, a value a caller of the previous release wrote there, and a record
+    # with value None but no stamp.
+    held = {"tombstone": tombstone(KEY, "peer1", [NOW_MS - 5000, "peer1"]), "app": record(TOMB, {"progress": 5}, "app"),
+            "unstamped": record(KEY, None, "peer1")}
     # Per mode, held record and way of writing: the value of KEY then, and whether the "dl:" record is still held.
     results = {}
     # Each mode.
@@ -852,10 +854,38 @@ class TestTombstones(unittest.TestCase):
             getattr(store, MERGE)("players", {KEY: record(KEY, "v", "peer2", [NOW_MS, "peer2"])})
           # The value written, and whether the "dl:" record stayed.
           results[(mode, name, way)] = (store.storage[KEY]["value"], TOMB in store.storage)
-    # Written every time; the tombstone removed except in 'off', the other record never.
+    # Written every time; the tombstone removed except in 'off', the other records never.
     self.assertEqual(results, {
-      (mode, name, way): ("v", name == "app" or mode == "off")
+      (mode, name, way): ("v", name != "tombstone" or mode == "off")
       for mode in ("off", "report", "on") for name in held for way in ("remote", "local", "sync")})
+
+  def test_a_delete_leaves_a_dl_record_that_holds_a_value_in_place(self):
+    """A stamped delete of a key, by a peer's store, locally or by a sync copy, leaves a "dl:" record that holds a
+    value (one a caller of the previous release could write there) as it is in every mode: a live delete only removes
+    the key, as the previous release does, and a sync copy of the delete is skipped, as the previous release skips
+    it."""
+    # Per mode and way of deleting: the "dl:" + KEY record's value after the delete, and whether KEY is still held.
+    results = {}
+    # Each mode.
+    for mode in ("off", "report", "on"):
+      # Each way of deleting.
+      for way in ("remote", "local", "sync"):
+        # A replica holding KEY (unstamped) and a value a caller of the previous release wrote under "dl:" + KEY.
+        store = make(mode, storage={TOMB: record(TOMB, {"progress": 5}, "app"), KEY: record(KEY, "v", "node")})
+        if way == "remote":
+          # A peer's stamped delete of KEY.
+          deliver(store, KEY, None, "peer2", [NOW_MS + 1000, "peer2"])
+        elif way == "local":
+          # A local delete of KEY.
+          local_write(store, KEY, None)
+        else:
+          # A sync copy of KEY's delete, stamped.
+          getattr(store, MERGE)("players", {KEY: record(KEY, None, "peer2", [NOW_MS + 1000, "peer2"])})
+        # The "dl:" record's value, and whether KEY is still held.
+        results[(mode, way)] = (store.storage[TOMB]["value"], KEY in store.storage)
+    # The "dl:" record kept every time; KEY removed by a live delete, kept under a sync copy of one.
+    self.assertEqual(results, {(mode, way): ({"progress": 5}, way == "sync")
+                               for mode in ("off", "report", "on") for way in ("remote", "local", "sync")})
 
   def test_no_write_names_a_tombstone_key(self):
     """A local write to a "dl:" key raises; a store for one from a peer is dropped unconfirmed and counted

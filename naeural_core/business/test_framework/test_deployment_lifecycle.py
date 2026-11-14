@@ -1528,6 +1528,117 @@ class RefusedReportTest(unittest.TestCase):
     # Still retried every pass, and reported once.
     self.assertEqual((len(self.calls), len(self.lines)), (6, 1))
 
+  def test_a_refusal_for_want_of_a_target_peer_keeps_its_retry_and_is_reported_once(self):
+    """A write refused because it has no peer to go to is not one of the final refusals: retried every pass, one red line."""
+    # The node at the address of its record.
+    self.use()
+    # Three passes whose write the store refuses for want of a target peer.
+    self.passes("refused_no_peers", count=3)
+    # One attempt per pass, and one line for the three refusals.
+    self.assertEqual((len(self.calls), len(self.lines)), (3, 1))
+    # The line names the word and says that the write is retried.
+    self.assertTrue("refused_no_peers" in self.lines[0][0] and "retried each pass" in self.lines[0][0])
+
+  def test_the_reporter_thread_writes_the_refusal_line_through_the_log_method_given_to_start(self):
+    """Started with start(), the reporter thread reports a refused report in one red line and does not fail its pass."""
+    # The stop event of the reporter, and the signal this test waits on.
+    from threading import Event
+
+    class QuickTick(Event):
+      """
+      The reporter's stop event with a tick of 10 ms in place of the reporter's one second.
+
+      Parameters
+      ----------
+      None
+
+      Returns
+      -------
+      None
+      """
+
+      def wait(self, timeout=None):
+        """
+        Wait 10 ms for the stop, whatever time the reporter asks for.
+
+        Parameters
+        ----------
+        timeout : float, optional
+          The time the caller asked for; not used. Default None.
+
+        Returns
+        -------
+        bool
+          Whether the stop was asked.
+        """
+        # The same wait, shortened.
+        return Event.wait(self, 0.01)
+
+    # The node now runs with another address than the one its journal record carries.
+    self.lifecycle = DeploymentLifecycle(self.path, "node-now")
+    # The reporter makes a pass every 10 ms.
+    self.lifecycle._stop = QuickTick()
+    # Set when the reporter begins its third pass; one entry per pass.
+    third_pass, passes = Event(), []
+
+    def setter(key, value, **kwargs):
+      """
+      Count the write and refuse it by the signed-record rule, as the chain store does for another node address.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        False: the write was refused.
+      """
+      # One more write attempt.
+      self.calls.append(value["sequence"])
+      # The word of the signed-record rule.
+      kwargs["result_info"]["outcome"] = "refused_versioned"
+      # Refused.
+      return False
+
+    def provider():
+      """
+      Count the reporter's pass and hand out the setter, as the shared memory does once the chain store is ready.
+
+      Returns
+      -------
+      callable
+        The refusing setter.
+      """
+      # One more pass.
+      passes.append(1)
+      if len(passes) == 3:
+        # Two passes are complete.
+        third_pass.set()
+      # The setter of this pass.
+      return setter
+
+    # Started as the business manager starts it: a setter provider, a signer and its log method.
+    self.lifecycle.start(provider, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"),
+                         lambda text, color=None: self.lines.append((text, color)))
+    # Stopped also when an assertion below fails.
+    self.addCleanup(self.lifecycle.close)
+    # The reporter reaches its third pass.
+    self.assertTrue(third_pass.wait(10))
+    # Stopped before its lines are read.
+    self.lifecycle.close()
+    # One write in all its passes: the refusal is final.
+    self.assertEqual(len(self.calls), 1)
+    # One red line and nothing else; without the log method the pass failed and wrote "publication failed".
+    self.assertEqual([color for _, color in self.lines], ['r'])
+    # It is the refusal line.
+    self.assertTrue("refused_versioned" in self.lines[0][0] and "not retried" in self.lines[0][0])
+
   def test_a_refused_record_does_not_hold_back_another_record_s_end_of_reporting(self):
     """In one pass, one attempt is refused for good and another is confirmed ready: the second one's end is saved."""
     # A second attempt, of another app, on the same node.

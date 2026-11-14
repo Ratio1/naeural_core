@@ -255,9 +255,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       ``CSTORE_VER_MAX_AHEAD`` and
       ``CSTORE_TOMBSTONE_DAYS`` (``float``, then milliseconds as an int): ``"60"`` and ``"7"`` are taken as 60 and
       7, ``"soon"`` raises ValueError and ``None`` TypeError.
+    OverflowError
+      When ``CSTORE_VER_MAX_AHEAD`` or ``CSTORE_TOMBSTONE_DAYS`` is infinite (``"inf"``, ``"1e400"`` or a float
+      infinity): it cannot be turned into milliseconds as an int, and the start stops the same way. ``"nan"``
+      raises ValueError.
 
     Notes
     -----
+    A numeric str for ``CSTORE_VER_MAX_AHEAD`` or ``CSTORE_TOMBSTONE_DAYS`` is taken by this code only. Code of
+    this store that reads the two keys without the conversion multiplies the value as it is: ``"60"`` gives a
+    stamp bound of 2,000 digits, so no stamp is ever a future one, and ``"7"`` stops the start. A config that
+    such code may read again must give these two numbers as numbers.
+
     The registration comes after the load, so a save can never run before the stored replica is in memory,
     and before the steps that can fail, so ``on_close`` always finds the registration it removes. The switch
     checks are among those steps. The one check of a switch against others: hand-off 'on' needs the order rule
@@ -463,7 +472,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       The composed chain-store key the event is about; None (the default) for a count of the whole store.
       It must be a str when given (a key that came from the network is checked before it reaches here).
     origin : str, optional
-      Where the write came from, ``"local"`` or ``"remote"``; used only with ``key``.
+      Where the event came from, used only with ``key``: ``"local"`` or ``"remote"`` for a write, ``"hsync"``
+      for a copy of a sync answer or a sync message, ``"confirm"`` for a confirmation, ``"resync"`` for the
+      store's own resync, ``"handoff"`` for the hand-off's re-sends.
     n : int, optional
       How much to add, 1 by default (a sum such as milliseconds can add more).
 
@@ -2098,7 +2109,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     -------
     str or None
       ``"unencodable"`` when the encoder or UTF-8 cannot take the record (a string that holds a lone surrogate,
-      a value of a type or with a dict key no encoder takes, a circular or too deeply nested value);
+      a value of a type or with a dict key no encoder takes, a circular value, or one nested deeper than the
+      encoder goes, which is about 10,000 levels on the node image's interpreter);
       ``"too_large"`` when it takes more than ``CS_MAX_RECORD_BYTES`` (524,288) bytes; None when it may be stored.
 
     Notes
@@ -2107,6 +2119,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     readonly mark, the token and the address in the stamp as well. The size is the same on the writer and on
     every receiver, as each measures the record with the owner, mark, token and stamp it would store. A record
     that passes fits one message: a sync answer's entry for it is at most the size measured here.
+
+    Depth is not bounded below the encoder's own limit: a value nested less deep than that is not refused for
+    its depth. A walk of the value that would bound it costs 36 % of this check for the 122 KB record below
+    (0.3 ms of CPU on 0.86 ms under the 0.35 CPU limit), so none is made here.
 
     One record UTF-8 cannot encode made every sync answer of its namespace fail to be prepared for sending, as
     the answer carries every record of the namespace; a JSON escape in a peer's message, or a local caller, can
@@ -2140,8 +2156,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       }}, sort_keys=False, ensure_ascii=False, check_circular=False).encode("utf-8"))
     except (TypeError, ValueError, RecursionError):
       # No encoder takes it (TypeError: a type or a dict key; ValueError: a string UTF-8 cannot encode, or an integer
-      # too long to be written as text; RecursionError: a circular value, or one nested too deep): no message could
-      # carry this record to a peer.
+      # too long to be written as text; RecursionError: a circular value, or one nested deeper than the encoder goes,
+      # about 10,000 levels): no message could carry this record to a peer.
       return "unencodable"
     # Larger than one record may be, or fine.
     return "too_large" if size > self.CS_MAX_RECORD_BYTES else None
@@ -2292,8 +2308,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     'on', where it is stored. A copy that would be stored as the record
     held under its key field for field (value, owner, readonly mark, token
     and stamp) is not measured, as nothing of it is stored: a periodic sync
-    between replicas that agree pays one comparison per copy, and one JSON
-    encoding only for each copy that differs, under the persistence lock.
+    between replicas that agree pays the comparison of each copy's fields
+    with the held ones (its value up to three times: here, for the
+    signed-record rule's skip and for the order rule's identical case), and
+    one JSON encoding only for each copy that differs, under the persistence
+    lock.
 
     A copy whose value is a dict equal (``==``) to the one held under its key
     is not put through the signed-record rule (``__versioned_record``) where

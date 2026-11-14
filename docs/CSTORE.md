@@ -309,9 +309,12 @@ that finds a replication peer.
 - The merge is the one of `hsync`, with its rules.
 
 Counters, under the namespace's bucket: `<bucket>/resync/asked` (requests sent),
-`<bucket>/resync/answered` (answers merged) and `<bucket>/resync/merged` (records they
-inserted or replaced; present with 0 when the answers changed nothing). Two answers per
-request are expected; fewer means a peer did not answer within 60 s.
+`<bucket>/resync/answered` (answers taken, counted before their merge) and
+`<bucket>/resync/merged` (records they inserted or replaced; present with 0 when the
+answers changed nothing). Two answers per request are expected; fewer means a peer did not
+answer within 60 s. Each change of a merge marks the replica for the save when it is made,
+so an answer whose merge an exception ends has its earlier records saved; they are not in
+`merged`.
 
 It does not cover `DAUTH_JOB_SECRET_REVISIONS`, whose records carry no version to order
 them by, nor any unsigned namespace. A node of the previous release never asks, and
@@ -382,11 +385,14 @@ its signature checked before its size):
 The same paths refuse a record no message can carry, as `refused_unencodable`: a key,
 value, owner, readonly mark, token or stamp that holds a string UTF-8 cannot encode (a
 lone surrogate, which a JSON escape in a peer's message or a local caller can deliver), a
-value of a type or with a dict key the wire's encoder does not take, a circular or too
-deeply nested value. One such record made every sync answer of its namespace fail to be
+value of a type or with a dict key the wire's encoder does not take, a circular value, or
+one nested deeper than the encoder goes (about 10,000 levels on the node image's
+interpreter). One such record made every sync answer of its namespace fail to be
 prepared for sending. A refused store of this kind is never answered: the answer would
 echo the key and the stamp. Values the encoder converts (numpy numbers and arrays,
-datetimes) are stored as before.
+datetimes) are stored as before. Depth is not bounded below the encoder's limit: a walk
+of the value that would bound it costs 36 % of the check for the 122 KB record below, so
+none is made.
 
 A delete is a record with value `None`, so a key that holds a larger record, written
 before the cap existed, can still be deleted. Such a record is not removed by the cap; a
@@ -415,10 +421,13 @@ parsing the same value out of its message), 6 to 8 ms for 125 KB of small nested
 20 ms for 125 KB of floats, and 15 to 20 ms (5.7 ms of CPU) for a 511 KB record of nested
 configuration, just under the cap; a record of twice the cap is refused after 30 ms. At
 full speed: 0.01 ms, 0.7 to 0.85 ms for the 122 KB record and 2.8 ms for the one at the cap.
-A sync answer costs one comparison per copy that is the record held field for field, which
-is not measured (nothing of it is stored), and one encoding per copy that differs: merging
-1,000 records of 2.1 MB that all equal the held ones took 6 to 7 % more CPU (89 to 96 ms at
-0.35 CPU).
+A sync answer costs one encoding per copy that would change the record held, and none for
+a copy that would be stored as that record field for field: its fields are compared
+instead, its value up to three times (for this skip, for the signed-record rule's and for
+the order rule's identical case). Merging one answer of 1,000 signed operations (2.7 MB)
+that all are the records held takes 0.07 to 0.11 s of CPU at 0.35 CPU, the comparisons
+included; when their stamps differ from the held ones each copy is encoded once, and the
+same merge takes 0.08 to 0.15 s.
 
 ### New keys per sender
 
@@ -714,7 +723,7 @@ Labels in `counts`:
 - `plain/hsync/refused_malformed`, `plain/remote/refused_malformed`: a namespace-sync answer whose `request_id` is not a str, and a message whose `CHAIN_STORE_DATA` is not a dict; both dropped. Each of these six inputs used to raise out of the payload handler, which ends the plugin's lap; any count of them points at a sender that forges or corrupts messages.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
-- `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers merged, and records those answers inserted or replaced.
+- `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers taken, and records those answers inserted or replaced.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `new_keys/<sender>`: keys this replica did not hold, created outside the protected namespaces by stores from a verified sender that is neither a replication peer nor in an oracle registry (above); with `CSTORE_NEW_KEYS_MAX` above 0 it is also the count the limit reads.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
@@ -754,8 +763,8 @@ CSTORE_CENSUS {"hs:<hash>:":[<records>,<unstamped>,<tombstones>,<readonly>,<size
   the values, and an equal value whose stamp was raised on one replica shows a different
   digest. Read digest and size together there.
 - `unencodable`: live records whose value cannot be put in canonical form (a type or a
-  dict key no encoder takes, a circular or too deeply nested value, which the wire could
-  not send either, as an old own record can hold); they are left out of `size` and
+  dict key no encoder takes, a circular value or one nested deeper than the encoder goes,
+  which the wire could not send either, as an old own record can hold); they are left out of `size` and
   `digest`, and the line is still written.
   The census does not raise on what a replica holds: records of an older shape (no
   `readonly` or `token`) and keys holding a lone surrogate are counted too.

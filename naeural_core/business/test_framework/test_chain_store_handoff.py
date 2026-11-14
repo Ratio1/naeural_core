@@ -175,7 +175,7 @@ class TestResends(unittest.TestCase):
   def test_the_back_off_schedule_then_the_give_up_in_on_and_in_report(self):
     """With no answer, a pair is re-sent at the record's age of 300, 600, 1200, 2400, 4800 and 8400 s and given up at
     12,000 s: in 'on' the stores go out and the give-up settles the peer in the record; in 'report' the same counts
-    and table, but no store and no record change."""
+    and table, but no store and no record change. In both, a given-up pair is no longer pending."""
     # The re-send ages and counts each mode gives.
     seen = {}
     # Each mode.
@@ -190,9 +190,10 @@ class TestResends(unittest.TestCase):
         ages = [at for at in range(0, 12_030, 15) if sweep(store, at)]
         # The record as stored after the give-up.
         held = store.storage[KEY]
-        # 'on' sent at the schedule and settled peer1; 'report' sent nothing and left the record as written.
-        self.assertEqual((ages, held["confirmed_peers"]), ([300, 600, 1200, 2400, 4800, 8400], ["peer1"])
-                         if mode == "on" else ([], []))
+        # 'on' sent at the schedule and settled peer1; 'report' sent nothing and left the record as written; no pair
+        # pending in either.
+        self.assertEqual((ages, held["confirmed_peers"], store._ChainStoreBasePlugin__handoff_pending),
+                         ([300, 600, 1200, 2400, 4800, 8400], ["peer1"], 0) if mode == "on" else ([], [], 0))
         # The counts, the same in both modes.
         seen[mode] = handoff_counts(store)
     # One first re-send, five later ones and one give-up, in both modes.
@@ -445,7 +446,8 @@ class TestResends(unittest.TestCase):
 
   def test_a_revoked_secret_payload_is_not_resent_but_a_marker_and_an_erasure_are(self):
     """Once this node holds a secret revision's revocation marker it does not re-send its own plaintext payload of
-    that revision, while its own marker and redacted erasure of another revision are still re-sent."""
+    that revision, while its own marker and redacted erasure of another revision, and its own delete of the revoked
+    payload, are still re-sent."""
     # The signed store "node" in 'on', with peer1 and peer2 in the dAuth registry and proven.
     store = make("on", signed=True)
     # The dAuth registry.
@@ -465,6 +467,12 @@ class TestResends(unittest.TestCase):
     local_write(store, payload2, {"job_id": "7", "revision": 2, "revoked": True})
     # At 315 s every own record is due: the marker and the erasure go, the revoked plaintext does not.
     self.assertEqual([body["key"] for _, body in sweep(store, 315)], [marker2, payload2])
+    # The node then deletes revision 1's payload itself, with the marker held: its tombstone is unconfirmed.
+    local_write(store, payload, None)
+    # At 630 s the delete is due and goes, as a store of value None under the payload's key, so peers that still hold
+    # the plaintext drop it (the marker and the erasure go again).
+    self.assertEqual([(body["key"], body["value"]) for _, body in sweep(store, 630) if body["key"] == payload],
+                     [(payload, None)])
 
   def test_off_keeps_no_state_and_counts_nothing(self):
     """With the switch 'off' the sweep sends nothing, keeps no table and counts nothing."""
@@ -591,17 +599,37 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
         store._now = NOW + 800
         # Back.
         getattr(store, REFRESH)()
+        # Before it proves again, a sweep at 815 s sends it nothing: it lost its proof when it left.
+        self.assertEqual(sweep(store, 815), [])
         # It left, so it proves again with a stamped store (of a key the writer does not own).
         deliver(store, _hset_key("players", "p"), "x", "peer1", [NOW_MS + 850_000, "peer1"])
         # The sweep at 900 s: only the recent record re-opened, re-sent to peer1, and unsettled in the record.
         self.assertEqual(([body["key"] for _, body in sweep(store, 900)], store.storage[KEY]["confirmed_peers"]),
                          ([KEY], []) if reopened else ([], ["peer1"]))
+        # peer1 confirms KEY again, then stops in order (SHUTDOWN) at 1000 s and is back at 1100 s.
+        confirm(store, KEY, "peer1", value="v", owner="node")
+        # NetMon reports it stopped in order this time.
+        store.netmon.network_node_simple_status = lambda peer, **kwargs: (
+          "ONLINE" if peer in store.online else "SHUTDOWN")
+        # Each refresh: gone at 1000 s, back at 1100 s.
+        for at, online in ((1000, set()), (1100, {"peer1"})):
+          # Who runs then.
+          store.online = online
+          # The refresh's clock.
+          store._now = NOW + at
+          # The refresh.
+          getattr(store, REFRESH)()
+        # It proves again.
+        deliver(store, _hset_key("players", "p"), "y", "peer1", [NOW_MS + 1_150_000, "peer1"])
+        # An orderly stop re-opens nothing: its earlier loss is forgotten once it came back.
+        self.assertEqual(sweep(store, 1200), [])
 
   def test_a_peer_that_left_proves_again_before_a_resend(self):
     """A proven peer that stops in order and comes back gets no re-send of a record written while it was away until
     it proves again after it joined: a stamped confirmation it sent before it stopped, processed after the refresh
     that dropped it, does not prove it past its return; a confirmation without a stamp (as the previous release
-    sends) keeps it unproven, a stamped one proves it and the record goes to it at the next sweep."""
+    sends) or with a malformed one keeps it unproven, a refusal answer with a stamp proves it and the record goes
+    to it at the next sweep."""
     # The writer in 'on' with peer1 and peer2, both proven.
     store = writer("on")
     # NetMon reports a peer that left as stopped in order.
@@ -634,12 +662,40 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
     confirm(store, other, "peer1", value="o", owner="node")
     # Still nothing.
     second = sweep(store, 430)
-    # peer1 confirms with a stamp.
-    confirm(store, other, "peer1", ver=[NOW_MS, "node"])
+    # peer1 confirms with a malformed stamp (ms not an int).
+    confirm(store, other, "peer1", ver=[1.7e12, "node"])
+    # Still nothing.
+    third = sweep(store, 445)
+    # peer1 answers a refusal, with a stamp.
+    refusal(store, other, "peer1", [NOW_MS, "node"])
     # KEY goes to peer1 now.
-    third = [(peers, body["key"]) for peers, body in sweep(store, 445)]
-    # Nothing until the stamped confirmation, then the record.
-    self.assertEqual((first, second, third), ([], [], [(["peer1"], KEY)]))
+    fourth = [(peers, body["key"]) for peers, body in sweep(store, 460)]
+    # Nothing until the stamped answer, then the record.
+    self.assertEqual((first, second, third, fourth), ([], [], [], [(["peer1"], KEY)]))
+
+  def test_a_peer_taken_off_the_whitelist_proves_again_before_a_resend(self):
+    """A proven peer the refresh drops because it left the whitelist, while NetMon still reports it running, gets no
+    re-send of a record that targets it until it proves again: it lost its proof when it left the peers."""
+    # The writer in 'on' with peer1 and peer2, both proven.
+    store = writer("on")
+    # Its write, which peer2 confirms by stamp and peer1 misses.
+    local_write(store, KEY, "v")
+    # peer2's confirmation.
+    confirm(store, KEY, "peer2", ver=store.storage[KEY]["sent_ver"])
+    # peer1 taken off the whitelist; still running.
+    store.whitelist.remove("peer1")
+    # The refresh at 120 s.
+    store._now = NOW + 120
+    # It drops peer1.
+    getattr(store, REFRESH)()
+    # At 300 s KEY is due for peer1, reachable through NetMon but not proven: nothing goes.
+    first = sweep(store, 300)
+    # peer1 proves again with a stamped store.
+    deliver(store, _hset_key("players", "p1"), "x", "peer1", [NOW_MS + 310_000, "peer1"])
+    # KEY goes to peer1 at the next sweep.
+    second = [(peers, body["key"]) for peers, body in sweep(store, 315)]
+    # Nothing before it proved again, then the record.
+    self.assertEqual((first, second), ([], [(["peer1"], KEY)]))
 
 
 class TestReceiverOfAResend(unittest.TestCase):
@@ -702,6 +758,42 @@ class TestRecordsAndStart(unittest.TestCase):
     other = make("report", "other")
     # One record changed per answered record.
     self.assertEqual(getattr(other, MERGE)("players", getattr(store, EXPORT)("players")), 2)
+
+  def test_the_first_sweep_runs_first_s_after_start(self):
+    """After on_init the hand-off sweeps nothing before CSTORE_HANDOFF_FIRST_S: the peers the first refresh added stay
+    queued for the first sweep, which runs at FIRST_S after start and takes them."""
+    # A data folder with a cache folder, removed after the test.
+    folder = tempfile.TemporaryDirectory()
+    # Removed after the test.
+    self.addCleanup(folder.cleanup)
+    # The cache folder of the plugin.
+    os.makedirs(os.path.join(folder.name, "chain_store"))
+    # The manager in use, put back after the test.
+    self.addCleanup(setattr, SerializationManager, "instance", SerializationManager.instance)
+    # A manager that takes the registration.
+    SerializationManager.instance = SimpleNamespace(register=lambda save, every: None)
+    # A store with the hand-off in 'report', started at the tests' wall clock with one running peer.
+    store = _StartHarness(folder.name)
+    # The hand-off switch, and the clock.
+    store.cfg_cstore_handoff, store._now = "report", NOW
+    # Its whitelist and NetMon for the refresh of on_init.
+    store.bc = SimpleNamespace(get_whitelist=lambda with_prefix=False: ["peer1"])
+    # peer1 runs.
+    store.netmon = SimpleNamespace(network_node_simple_status=lambda peer, **kwargs: "ONLINE")
+    # The real on_init, whose first refresh queues peer1 as joined.
+    store.on_init()
+    # The peers still queued for a sweep after a lap at each time after start.
+    queued = []
+    # 15 s and 285 s after start, then FIRST_S (300 s).
+    for at in (15, 285, 300):
+      # The lap's clock.
+      store._now = NOW + at
+      # The sweep step.
+      getattr(store, SWEEP)()
+      # What is still queued.
+      queued.append(sorted(store._ChainStoreBasePlugin__peer_back))
+    # Untouched until FIRST_S, taken then.
+    self.assertEqual(queued, [["peer1"], ["peer1"], []])
 
   def test_handoff_on_needs_order_on_tombstones_and_stamped_confirmations(self):
     """on_init stops with hand-off 'on' while the order switch is 'report', tombstone days or the tombstone cap are 0,

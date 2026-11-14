@@ -43,7 +43,9 @@ _CONFIG = {
 
   'LOG_SEND_COMMANDS': True,
   
-  'ENCRYPTED_COMMS': False,       # if True, all comms are end-to-end encrypted
+  # If True, payloads are end-to-end encrypted for their destination too. Commands do not read it: a command a
+  # node sends is always encrypted for its receiver (see _prepare_command).
+  'ENCRYPTED_COMMS': False,
 
   'DEBUG_LOG_PAYLOADS': False,
   'DEBUG_LOG_PAYLOADS_PIPELINES': [],
@@ -972,8 +974,22 @@ class BaseCommThread(
 
     Parameters
     ----------
-    jsonpayload : dict
-        the payload that leaves the execution engine.
+    jsonpayload : str
+        JSON text of the message that was published (a payload or a command).
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A command is recognised by the payload path it does not carry. Its ``ACTION`` field cannot tell any more:
+    commands leave encrypted, so the action is inside the encrypted body. Read by its action, every published
+    command would end in the ``Failed debug`` line below, in error color and with the whole envelope.
+
+    Examples
+    --------
+    >>> self.payload_debugger(message)   # send_wrapper(), after a publish, when DEBUG_LOG_PAYLOADS is on
     """
     pipelines = [x.upper() for x in self.cfg_debug_log_payloads_pipelines]  # constraint pipelines to upper
     signatures = [x.upper() for x in self.cfg_debug_log_payloads_signatures]  # constrain signatures to upper
@@ -988,8 +1004,9 @@ class BaseCommThread(
     
     show = True
     try:    
-      has_action = data.get(ct.COMMS.COMM_SEND_MESSAGE.K_ACTION, None) is not None
-      if has_action:
+      # Only a payload carries a payload path; a command has none, and its action is no longer readable here.
+      is_command = ct.PAYLOAD_DATA.EE_PAYLOAD_PATH not in data
+      if is_command:
         # this is a SEND command message
         pass
       else:
@@ -1671,7 +1688,49 @@ class BaseCommThread(
     
     return dct_output
 
-  def _prepare_command(self, command, receiver_address=None):
+  def _prepare_command(self, command, receiver_address):
+    """
+    Build the outgoing form of a command: its action and payload encrypted for the receiver.
+
+    The command is copied, so the caller's object is not changed. ``ACTION`` and ``PAYLOAD`` are taken out of
+    the copy, written as one JSON text and encrypted for ``receiver_address`` with this node's key; the
+    outgoing command holds the remaining fields (the routing ones), this node's address as sender, the
+    encrypted text and the flag that says so.
+
+    Parameters
+    ----------
+    command : dict
+      The command as queued: routing fields plus ``ACTION`` and ``PAYLOAD``.
+    receiver_address : str
+      Address of the node the command is for; its public key is read from it.
+
+    Returns
+    -------
+    dict or None
+      The outgoing command, or None when the command has no ``ACTION`` or ``PAYLOAD`` field (logged in red).
+
+    Raises
+    ------
+    Exception
+      When the command cannot be encrypted: no receiver address, an address no key can be read from, or text
+      that cannot be encoded. Nothing is returned then, so nothing readable is published; the command loop
+      drops that command with one red line and goes on with the next.
+
+    Notes
+    -----
+    Before, a command was encrypted only when ``ENCRYPTED_COMMS`` was set, which no node has: commands
+    (pipeline configurations with their environment values among them) left readable for every client of
+    the brokers, on a topic any of them may subscribe to. There is no unencrypted form any more and no
+    setting for one. Receivers need no change: they have always decrypted a command that says it is
+    encrypted (the commands of SDK clients arrive this way), and they still accept an unencrypted one from a
+    sender of an earlier release.
+
+    Examples
+    --------
+    >>> out = self._prepare_command(command, receiver_addr)   # the command loop, before it publishes
+    >>> out['EE_IS_ENCRYPTED'], 'ACTION' in out, 'PAYLOAD' in out
+    (True, False, False)
+    """
     try:
       command = deepcopy(command)
       critical_data = {
@@ -1682,26 +1741,22 @@ class BaseCommThread(
       self.P("Failed to prepare command {}:\n{}".format(exc, self.json_dumps(command, indent=3)), color='r')
       return None
 
-    encrypt_payload = self.cfg_encrypted_comms
-
-    if encrypt_payload and receiver_address is not None:
-      # encrypt the payload
-      str_data = self.log.safe_json_dumps(critical_data, ensure_ascii=False)
-      str_enc_data = self.bc_engine.encrypt(
-        plaintext=str_data,
-        receiver_address=receiver_address,
-        #compressed=True, # default is True
-        #embed_compressed=True, # default is True - data will be 13:end instead of 12:end due to compression flag
-      )
-      critical_data = {
-        ct.COMMS.COMM_SEND_MESSAGE.K_EE_IS_ENCRYPTED: True,
-        ct.COMMS.COMM_SEND_MESSAGE.K_EE_ENCRYPTED_DATA: str_enc_data,
-      }
-    else:
-      critical_data[ct.COMMS.COMM_SEND_MESSAGE.K_EE_IS_ENCRYPTED] = False
-      if encrypt_payload:
-        critical_data[ct.COMMS.COMM_SEND_MESSAGE.K_EE_ENCRYPTED_DATA] = "ERROR: No receiver address found!"
-    # endif encrypted payload
+    # The action and the payload as one JSON text: the part of a command that is encrypted.
+    str_data = self.log.safe_json_dumps(critical_data, ensure_ascii=False)
+    # Always encrypted for the receiver, whatever ENCRYPTED_COMMS says; before, only with that setting, which
+    # is off on every node. A failure raises (no address, an address without a key): there is no unencrypted
+    # form to fall back to.
+    str_enc_data = self.bc_engine.encrypt(
+      plaintext=str_data,
+      receiver_address=receiver_address,
+      #compressed=True, # default is True
+      #embed_compressed=True, # default is True - data will be 13:end instead of 12:end due to compression flag
+    )
+    # What leaves in place of the action and the payload: the flag receivers read, and the encrypted text.
+    critical_data = {
+      ct.COMMS.COMM_SEND_MESSAGE.K_EE_IS_ENCRYPTED: True,
+      ct.COMMS.COMM_SEND_MESSAGE.K_EE_ENCRYPTED_DATA: str_enc_data,
+    }
 
     dct_outgoing = {
       **command,

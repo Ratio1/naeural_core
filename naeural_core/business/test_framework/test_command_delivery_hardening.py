@@ -81,15 +81,27 @@ def _command(command_id="cmd-1"):
 class TestCommandPreparationImmutability(unittest.TestCase):
 
   def test_prepare_command_does_not_mutate_original_envelope(self):
+    """Preparing a command leaves the caller's command as it was; the prepared copy holds the body encrypted."""
+    # The payload encryption setting is off, as on every node: a command is encrypted all the same.
     harness = _CommandHarness()
+    # The caller's command.
     original = _command()
+    # A copy to compare with afterwards.
     expected = copy.deepcopy(original)
 
+    # The outgoing form of the command.
     prepared = harness._prepare_command(original, receiver_address="0xai_NODE")
 
+    # The caller's command still has its action and payload.
     self.assertEqual(original, expected)
-    self.assertEqual(prepared["ACTION"], expected["ACTION"])
-    self.assertEqual(prepared["PAYLOAD"], expected["PAYLOAD"])
+    # The prepared one has neither in the clear.
+    self.assertFalse("ACTION" in prepared or "PAYLOAD" in prepared)
+    # It says it is encrypted.
+    self.assertIs(prepared["EE_IS_ENCRYPTED"], True)
+    # The stand-in engine "encrypts" by prefixing the receiver, so the body can be read back here.
+    body = json.loads(prepared["EE_ENCRYPTED_DATA"].split("encrypted:0xai_NODE:", 1)[1])
+    # The encrypted body is exactly the caller's action and payload.
+    self.assertEqual(body, {"ACTION": expected["ACTION"], "PAYLOAD": expected["PAYLOAD"]})
 
   def test_repeated_preparation_uses_exact_same_original_content(self):
     harness = _CommandHarness(encrypted=True)

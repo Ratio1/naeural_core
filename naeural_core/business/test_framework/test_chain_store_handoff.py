@@ -425,6 +425,24 @@ class TestResends(unittest.TestCase):
     self.assertEqual(([peers for peers, _ in sweep(store, 300)], store.storage[key]["target_peers"]),
                      ([["peer1"]], ["peer1", "peer2"]))
 
+  def test_a_secret_record_is_not_resent_once_this_node_left_the_registries(self):
+    """A dAuth secret record is not re-sent, even to a dAuth registry member, once this node itself is in neither
+    registry."""
+    # The signed store "node" in 'on', with peer1 and peer2 in the dAuth registry and proven.
+    store = make("on", signed=True)
+    # The dAuth registry at the write.
+    store.bc.get_eth_dauth_oracles = lambda: ["node", "peer1", "peer2"]
+    # Both peers proven.
+    store._ChainStoreBasePlugin__stamped_peers.update(("peer1", "peer2"))
+    # The secret's key.
+    key = _hset_key("DAUTH_JOB_SECRETS", "7")
+    # The coordinator's bundle, written here unconfirmed.
+    local_write(store, key, {"job_id": "7", "secret": "s"})
+    # The node leaves the dAuth registry; the oracle registry holds only "oracle".
+    store.bc.get_eth_dauth_oracles = lambda: ["peer1", "peer2"]
+    # At 300 s nothing goes.
+    self.assertEqual(sweep(store, 300), [])
+
   def test_a_revoked_secret_payload_is_not_resent_but_a_marker_and_an_erasure_are(self):
     """Once this node holds a secret revision's revocation marker it does not re-send its own plaintext payload of
     that revision, while its own marker and redacted erasure of another revision are still re-sent."""
@@ -514,6 +532,29 @@ class TestPeersThatJoinOrComeBack(unittest.TestCase):
         self.assertEqual(([peers for peers, _ in sent], store.storage[KEY]["target_peers"], handoff_counts(store)),
                          ([["peer2"]] if mode == "on" else [], ["peer1", "peer2"] if mode == "on" else ["peer1"],
                           {"handoff/send/peer2": 1}))
+
+  def test_a_tunnel_record_is_not_widened_to_a_joining_peer(self):
+    """A Tunnels Manager record, written to the oracle registry members among the peers only, is not widened to a
+    peer that joins later outside the registry: it is not re-sent to it and does not become a target."""
+    # The writer in 'on' with peer1, an oracle registry member.
+    store = writer("on", peers=("peer1",))
+    # A tunnel credential's key.
+    key = _hset_key("tunnels_manager_secrets", "0xabc")
+    # Written unconfirmed.
+    local_write(store, key, {"cs_rev": 1})
+    # peer2 whitelisted, online and proven, not in the oracle registry.
+    store.whitelist.append("peer2")
+    # Online.
+    store.online.add("peer2")
+    # Proven.
+    store._ChainStoreBasePlugin__stamped_peers.add("peer2")
+    # A refresh more than 60 s after the last.
+    store._now = NOW + 120
+    # The refresh notes the join.
+    getattr(store, REFRESH)()
+    # At 300 s the record goes to peer1 alone, and its targets stay peer1.
+    self.assertEqual(([peers for peers, _ in sweep(store, 300)], store.storage[key]["target_peers"]),
+                     ([["peer1"]], ["peer1"]))
 
   def test_a_peer_back_after_being_lost_is_unsettled_on_its_recent_records_only(self):
     """A peer dropped as LOST and back, once it proved again that it stamps its stores, has its settlement re-opened

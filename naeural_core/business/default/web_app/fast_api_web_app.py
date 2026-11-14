@@ -892,6 +892,30 @@ class FastApiWebAppPlugin(BasePlugin):
     return
 
   def _process_postponed_request(self, request):
+    """
+    Run the solver of one postponed request, on the plugin thread, and queue its answer or keep it postponed.
+
+    Parameters
+    ----------
+    request : dict
+      The postponed request's record (``get_postponed_dict``): ``id``, ``value`` (the ``PostponedRequest``),
+      ``endpoint_name``, ``profile`` and ``client_ip``.
+
+    Returns
+    -------
+    dict or None
+      The record of the request when the solver postponed it again; None when it was answered.
+
+    Notes
+    -----
+    A solver that raises is answered with an error (status 500), and one red line names the endpoint, the solver
+    and the names of its keyword arguments, with the traceback. It never shows their values: an endpoint can put
+    request data, such as a token or a credential, in them. Before, the line printed the values.
+
+    Examples
+    --------
+    >>> self._process_postponed_request(self.get_postponed_dict("r1", PostponedRequest(solve, {"x": 1}), "work"))
+    """
     id, value, endpoint_name, profile = self.parse_postponed_dict(request)
 
     method = value.get_solver_method()
@@ -906,9 +930,10 @@ class FastApiWebAppPlugin(BasePlugin):
       if isinstance(profile, dict):
         self._profile_slice_end(profile)
     except Exception as exc:
+      # The names of the solver's keyword arguments, never their values (one can be a token or a credential).
       self.P(
         f'Exception occurred while processing postponed request for {endpoint_name} with method {method.__name__} '
-        f'and args:\n{kwargs}\nException:\n{self.get_exception()}',
+        f'and args:\n{list(kwargs)}\nException:\n{self.get_exception()}',
         color='r'
       )
       value = {

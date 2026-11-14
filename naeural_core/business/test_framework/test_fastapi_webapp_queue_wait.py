@@ -26,6 +26,9 @@ HARNESS_METHODS = (
   "_reply_unhandled_request",
   "_reject_expired_request",
   "_process_incoming_request",
+  # The postponed request's record reader and runner.
+  "parse_postponed_dict",
+  "_process_postponed_request",
   "_start_request_monitor_thread",
   # The monitor's hook, which the monitor calls on each turn (the base web app's no-op).
   "on_request_monitor_tick",
@@ -261,6 +264,46 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     self.assertEqual(("add_secrets" in line, "['token', 'payload', 'extra']" in line,
                       [secret for secret in ("tok-123", "cf-secret", "x-secret") if secret in line],
                       reply["value"]["result"]["status_code"]), (True, True, [], 500))
+
+  def test_a_postponed_request_error_logs_the_argument_names_never_their_values(self):
+    """When the solver of a postponed request raises, the red line names the endpoint, the solver and its keyword
+    arguments' names and holds none of their values; the caller gets a 500."""
+
+    def solve(api_key, payload):
+      """
+      Stand for a postponed request's solver that takes request data holding credentials, and raises.
+
+      Parameters
+      ----------
+      api_key : str
+        A credential.
+      payload : dict
+        A body holding a credential.
+
+      Returns
+      -------
+      None
+
+      Raises
+      ------
+      TypeError
+        Always, as a solver that fails.
+      """
+      # The solver's failure.
+      raise TypeError("solver failed")
+    # The postponed request, its solver's keyword arguments holding secret values.
+    postponed = self.plugin.get_postponed_dict(
+      "r1", PostponedRequest(solve, {"api_key": "cf-secret", "payload": {"token": "tok-123"}}), "add_secrets")
+    # Run once: answered, not postponed again.
+    self.assertIsNone(self.plugin._process_postponed_request(postponed))
+    # The red line about the error.
+    line = next(msg for msg in self.plugin.logged if msg.startswith("Exception occurred while processing postponed"))
+    # The answer to the caller.
+    [reply] = self._replies()
+    # The endpoint, the solver and the two names in the line, no value, and a 500.
+    self.assertEqual(("add_secrets" in line, "solve" in line, "['api_key', 'payload']" in line,
+                      [secret for secret in ("cf-secret", "tok-123") if secret in line],
+                      reply["value"]["result"]["status_code"]), (True, True, True, [], 500))
 
   def test_monitor_refuses_at_once_while_the_oldest_queued_request_has_expired(self):
     self.plugin._incoming_requests.extend([self._request(waited_s=100, request_id="old"), {"id": "q1"}])

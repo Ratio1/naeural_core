@@ -1,21 +1,30 @@
 """
 Offline tests of the chain store's record size cap, of the refusal of a record no message can carry, and of the
-count of new keys per sender outside the replication peers and the oracle registries.
+count of new keys per sender outside the replication peers and the oracle registries, with the limit it can be given.
 """
 # A datetime value, which the wire's encoder turns into text.
 import datetime
 # The independent measure of a record's wire form, and the wire form of a sync answer.
 import json
+# The data folder of a started store.
+import tempfile
 # The test framework.
 import unittest
+# The stand-in for the SerializationManager on_init registers its save with.
+from types import SimpleNamespace
+# Replaces that manager for one start.
+from unittest import mock
 
 # A numpy value, which the wire's encoder turns into a plain number.
 import numpy as np
 # The encoder a node uses on the wire (the plugin's json_dumps).
 from ratio1.logging.logger_mixins.json_serialization_mixin import _JSONSerializationMixin
 
-# The counter attribute's private name.
-from test_chain_store_accounting import STATS
+# The manager on_init registers its save with, replaced during a start.
+from naeural_core.main.serialization_manager import SerializationManager
+
+# The counter attribute's private name, and the harness that runs the real on_init.
+from test_chain_store_accounting import STATS, _StartHarness
 # The composer of a hash key.
 from test_chain_store_hsync import _hset_key
 # The order tests' store builder, deliverer of a live store, record builder, constants and private names.
@@ -29,6 +38,8 @@ OTHER = _hset_key("players", "beta")
 OPS = "_ChainStoreBasePlugin__ops"
 # A string UTF-8 cannot encode: a lone surrogate, as the JSON escape "\ud800" in a peer's message decodes to.
 SURROGATE = "bad \ud800 text"
+# The limit of new keys per outside sender, as on_init reads it, by its private name.
+LIMIT = "_ChainStoreBasePlugin__new_keys_max"
 
 
 def node(mode, **kwargs):
@@ -346,6 +357,114 @@ class TestNewKeysPerSender(unittest.TestCase):
         # Only the two keys the outside sender created are counted, under its address.
         self.assertEqual({label: count for label, count in getattr(store, STATS).items()
                           if label.startswith("new_keys")}, {"new_keys/worker": 2})
+
+  def test_with_a_limit_a_sender_is_refused_once_its_count_of_the_period_reached_it(self):
+    """With CSTORE_NEW_KEYS_MAX 2, an outside sender's third new key of a CSTORE_STATS period is refused under its
+    own word: not stored, not confirmed, not counted as a new key, and answered in 'on'. Its overwrites and deletes,
+    another outside sender, a replication peer and a registry member are not refused, and after the next
+    CSTORE_STATS line the sender creates keys again."""
+    # Each mode: the limit has no switch; only the answer to a refused stamped store follows the order switch.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # The signed store: replication peers peer1 and peer2, dAuth registry node and peer1, oracle registry oracle.
+        store = node(mode, signed=True)
+        # A limit of two new keys per outside sender and period, as on_init would read it from the config.
+        setattr(store, LIMIT, 2)
+        # The stamp a store of this sender carries (none in 'off').
+        stamp = lambda sender, ms=0: None if mode == "off" else [NOW_MS + ms, sender]  # noqa: E731
+        # The sender's first two new keys: applied and confirmed.
+        self.assertEqual([len(deliver(store, _hset_key("players", name), "v", "worker", stamp("worker")))
+                          for name in ("w1", "w2")], [1, 1])
+        # Its third: refused. Not confirmed; with the order switch 'on' the stamped store gets the refusal answer.
+        self.assertEqual(answers(deliver(store, _hset_key("players", "w3"), "v", "worker", stamp("worker", 1))),
+                         ["new_keys"] if mode == "on" else [])
+        # Not stored.
+        self.assertNotIn(_hset_key("players", "w3"), store.storage)
+        # It still overwrites a key it created and deletes it: neither creates a key.
+        self.assertEqual([len(deliver(store, _hset_key("players", "w1"), value, "worker", stamp("worker", ms)))
+                          for value, ms in (("w", 2), (None, 3))], [1, 1])
+        # Another outside sender has its own count: its first new key is applied.
+        self.assertEqual(len(deliver(store, _hset_key("players", "x1"), "v", "worker2", stamp("worker2"))), 1)
+        # A replication peer and a registry member create three keys each: never counted, never refused.
+        self.assertEqual([len(deliver(store, _hset_key("players", sender + str(index)), "v", sender, stamp(sender)))
+                          for sender in ("peer2", "oracle") for index in range(3)], [1] * 6)
+        # The refused store has its own word under the key's bucket; the count stays at the two keys it created.
+        self.assertEqual({label: count for label, count in getattr(store, STATS).items() if "new_keys" in label},
+                         {"new_keys/worker": 2, "new_keys/worker2": 1, BUCKET + "/remote/refused_new_keys": 1})
+        # The lap that writes the next CSTORE_STATS line, 300 s later, restarts the counts.
+        store._now += store.CS_STATS_INTERVAL
+        # No peer refresh, resync or census in this lap: only the line.
+        store._ChainStoreBasePlugin__last_chain_peers_refresh = store._now
+        # The resync not due, and the census hour the current one.
+        store._ChainStoreBasePlugin__resync_next, store._ChainStoreBasePlugin__census_hour = (
+          store._now + 60, int(store._now // 3600))
+        # The lap.
+        store.process()
+        # A new period: the sender's next new key is applied and confirmed again.
+        self.assertEqual(len(deliver(store, _hset_key("players", "w3"), "v", "worker", stamp("worker", 300_000))), 1)
+        # Stored now.
+        self.assertIn(_hset_key("players", "w3"), store.storage)
+
+  def test_the_refusal_starts_exactly_at_the_limit_and_zero_refuses_nothing(self):
+    """With CSTORE_NEW_KEYS_MAX n above 0, exactly n new keys of one outside sender are stored in a period and the
+    next ones are refused (n = 1 and n = 3); with 0, the default, every one is stored and counted, in every mode."""
+    # Zero and two limits, to pin both ends of the comparison; each mode, as the limit has no switch.
+    for limit in (0, 1, 3):
+      # Each mode.
+      for mode in ("off", "report", "on"):
+        # One sub-test each.
+        with self.subTest(limit=limit, mode=mode):
+          # The signed store, whose registries do not hold the sender.
+          store = node(mode, signed=True)
+          # The limit, as on_init would read it.
+          setattr(store, LIMIT, limit)
+          # Five new keys from the outside sender: one confirmation for each stored one.
+          stored = [len([body for body in deliver(store, _hset_key("players", "w%d" % index), "v", "worker",
+                                                  None if mode == "off" else [NOW_MS + index, "worker"])
+                         if "refused" not in body]) for index in range(5)]
+          # How many the limit lets through: all with 0, else exactly the limit.
+          taken = limit or 5
+          # The first ones are stored, the rest refused.
+          self.assertEqual(stored, [1] * taken + [0] * (5 - taken))
+          # The count holds the keys created; each refused store has the refusal's own word.
+          self.assertEqual({label: count for label, count in getattr(store, STATS).items() if "new_keys" in label},
+                           {"new_keys/worker": taken, **({BUCKET + "/remote/refused_new_keys": 5 - taken}
+                                                         if taken < 5 else {})})
+
+  def test_the_limit_is_read_once_at_start_from_the_config(self):
+    """on_init reads CSTORE_NEW_KEYS_MAX once: the harness default 0 and a numeric str are taken as ints, and a
+    value that is no number stops the start."""
+    # A data folder for the starts, removed after the test.
+    folder = tempfile.TemporaryDirectory()
+    # Removed after the test.
+    self.addCleanup(folder.cleanup)
+    # A manager that takes the save registration of a start and does nothing with it.
+    manager = mock.patch.object(SerializationManager, "instance", SimpleNamespace(register=lambda save, every: None))
+    # In force for this test.
+    manager.start()
+    # Put back after the test.
+    self.addCleanup(manager.stop)
+    # The config value and what on_init keeps for it.
+    for given, kept in ((0, 0), ("25", 25), (40, 40)):
+      # One sub-test each.
+      with self.subTest(given=given):
+        # A store to start.
+        store = _StartHarness(folder.name)
+        # The config value.
+        store.cfg_cstore_new_keys_max = given
+        # The real on_init.
+        store.on_init()
+        # Kept as an int.
+        self.assertEqual(getattr(store, LIMIT), kept)
+    # A store whose value is no number.
+    store = _StartHarness(folder.name)
+    # A word.
+    store.cfg_cstore_new_keys_max = "many"
+    # The start stops on the conversion.
+    with self.assertRaisesRegex(ValueError, "invalid literal for int"):
+      # The real on_init.
+      store.on_init()
 
 
 if __name__ == "__main__":

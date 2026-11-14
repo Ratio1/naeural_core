@@ -103,6 +103,11 @@ _CONFIG = {
   "CSTORE_SAVE_BACKOFF" : "report",
   # The longest pause, in seconds, the save back-off puts between two save starts (0 makes it pause nothing).
   "CSTORE_SAVE_MAX_GAP" : 30,
+  # How many keys one sender that is neither a replication peer nor in an oracle registry may create, outside the
+  # protected namespaces, between two CSTORE_STATS lines; a store that would create one more is refused until the next
+  # line. 0, the default, refuses none: the keys are only counted (new_keys/<sender>), and a later release can set the
+  # number from those counts.
+  "CSTORE_NEW_KEYS_MAX" : 0,
 
   'VALIDATION_RULES' : { 
     **NetworkProcessorPlugin.CONFIG['VALIDATION_RULES'],
@@ -216,7 +221,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     read). Then the counters of the ``CSTORE_STATS`` line start, the wave 03 switches (``CSTORE_ORDER``,
     ``CSTORE_LEAN_CONFIRM``, ``CSTORE_HANDOFF``, ``CSTORE_SAVE_BACKOFF``) are read once into the mode table
     every later step reads, the save back-off's ceiling ``CSTORE_SAVE_MAX_GAP``, the stamp bound
-    ``CSTORE_VER_MAX_AHEAD`` and the hand-off's numbers ``CSTORE_HANDOFF_FIRST_S`` and ``CSTORE_HANDOFF_WINDOW``
+    ``CSTORE_VER_MAX_AHEAD``, the hand-off's numbers ``CSTORE_HANDOFF_FIRST_S`` and ``CSTORE_HANDOFF_WINDOW``
+    and the limit of new keys per outside sender ``CSTORE_NEW_KEYS_MAX``
     are read once too, and the flush of a changed replica is registered with the
     SerializationManager, which runs it on a thread kept for this save every ``CS_SAVE_INTERVAL`` seconds, so
     this plugin's thread no longer runs the save. A switch set
@@ -242,7 +248,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     TypeError
       When ``CSTORE_SAVE_MAX_GAP`` is not a number nor a str (``None``, a list); the start stops the same way.
       A str that is not a number raises ValueError instead; a numeric str such as ``"30"`` is taken. The same
-      holds for the hand-off's numbers (``float`` and ``int``) and for ``CSTORE_VER_MAX_AHEAD`` and
+      holds for the hand-off's numbers (``float`` and ``int``), for ``CSTORE_NEW_KEYS_MAX`` (``int``) and for
+      ``CSTORE_VER_MAX_AHEAD`` and
       ``CSTORE_TOMBSTONE_DAYS`` (``float``, then milliseconds as an int): ``"60"`` and ``"7"`` are taken as 60 and
       7, ``"soon"`` raises ValueError and ``None`` TypeError.
 
@@ -345,6 +352,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__handoff_first = float(self.cfg_cstore_handoff_first_s)
     # The window.
     self.__handoff_window = int(self.cfg_cstore_handoff_window)
+    # The limit of new keys per outside sender and CSTORE_STATS period, read once as well (0: they are only counted).
+    self.__new_keys_max = int(self.cfg_cstore_new_keys_max)
     # The newest stamp of a tombstone this node removed (expired or past the cap), at most CSTORE_VER_MAX_AHEAD ahead
     # of the wall clock: no record stamped below it may come back by a later catch-up. 0 until the first removal.
     self.__tomb_horizon = 0
@@ -2747,6 +2756,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     - ``refused_too_large``: a record that takes more than
       ``CS_MAX_RECORD_BYTES`` (256 KiB) on the wire, all those fields
       counted (``__wire_refusal``);
+    - ``refused_new_keys``: only with ``CSTORE_NEW_KEYS_MAX`` above 0, a
+      peer's store that would create a key after its sender, outside the
+      replication peers and the oracle registries, created that many in
+      the current ``CSTORE_STATS`` period;
     - with the order switch ``CSTORE_ORDER`` 'on' (or 'report', for a
       hand-off re-send) only, the order rule's
       words (``__ver_admit``): ``refused_older``, ``refused_future``,
@@ -2765,9 +2778,18 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     A peer's store that creates a key this replica did not hold, outside
     the protected namespaces (``CS_PROTECTED_NAMESPACES``), is counted as
     ``new_keys/<sender>`` when its verified sender is neither among this
-    node's replication peers nor in an oracle registry. It only counts:
-    the write is applied. The registries are read only for such a store
-    from a sender outside the replication peers.
+    node's replication peers nor in an oracle registry. With
+    ``CSTORE_NEW_KEYS_MAX`` 0, the default, it only counts: the write is
+    applied. With the number above 0, such a store is refused as
+    ``refused_new_keys`` once that sender's count has reached the number
+    in the current ``CSTORE_STATS`` period, which runs from one line to
+    the next (``CS_STATS_INTERVAL``, 300 s; ``process`` restarts the
+    counts at each line): it is not stored, not counted as a new key and
+    not confirmed, and a stamped one is answered like any other refusal
+    (order switch 'on', or a re-send). An overwrite, a delete, a key of a
+    protected namespace, a replication peer's store and a registry
+    member's are never refused by it. The registries are read only for
+    such a store from a sender outside the replication peers.
 
     The order rule (``CSTORE_ORDER``, read once at start), after the
     namespace rules and before the token and readonly checks. 'off': no
@@ -3026,8 +3048,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               and not self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES)
               and not self.__registry_member(sender)):
             # A key this replica did not hold, created outside the protected namespaces by a peer's store whose
-            # verified sender is in neither oracle registry: counted per sender, never refused. A sender among the
-            # replication peers is not counted, so the registries are read only for the other senders' new keys.
+            # verified sender is in neither oracle registry: counted per sender, and refused only past the limit when
+            # one is set. A sender among the replication peers is not counted, so the registries are read only for the
+            # other senders' new keys.
+            if 0 < self.__new_keys_max <= self.__cs_stats.get(f"new_keys/{sender}", 0):
+              # With a limit set (CSTORE_NEW_KEYS_MAX above 0) and this sender's count of the current CSTORE_STATS
+              # period at it: refused under its own word, not stored, not counted as a new key, and not confirmed.
+              outcome = "refused_new_keys"
+              # As every refused store: answered to its sender when stamped and the order switch is 'on'.
+              return False
+            # A new key this sender creates, in the count the limit reads.
             self.__cs_count(f"new_keys/{sender}")
           self.__set_key_value(
             key=key, value=value, owner=owner,

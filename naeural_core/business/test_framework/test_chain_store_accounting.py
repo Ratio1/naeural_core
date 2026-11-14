@@ -317,7 +317,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  # The writes made with wait=False owed a re-send, and the hour of the last census line.
                  "unwaited", "census_hour",
                  # The resync's next request time and the turn of its namespaces.
-                 "resync_next", "resync_turn"):
+                 "resync_next", "resync_turn",
+                 # The limit of new keys per outside sender.
+                 "new_keys_max"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"

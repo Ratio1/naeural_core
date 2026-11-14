@@ -390,14 +390,30 @@ is not measured (nothing of it is stored), and one encoding per copy that differ
 
 ### New keys per sender
 
-Count only, no switch. A store from a peer that creates a key this replica did not hold,
-outside the protected namespaces (the five signed ones and `DAUTH_JOB_SECRET_REVISIONS`),
-counts `new_keys/<sender>` when its verified sender is neither one of this node's
-replication peers nor in an oracle registry. The write is applied as before; an
-overwrite, a delete and a refused store count nothing. The registries are read only for
-such a store from a sender outside the replication peers. The per-sender counts of a
-period show how many keys a node outside the oracles adds, which is what a later limit
-would be set from.
+No switch; by default it only counts. A store from a peer that creates a key this replica
+did not hold, outside the protected namespaces (the five signed ones and
+`DAUTH_JOB_SECRET_REVISIONS`), counts `new_keys/<sender>` when its verified sender is
+neither one of this node's replication peers nor in an oracle registry. An overwrite, a
+delete and a refused store count nothing. The registries are read only for such a store
+from a sender outside the replication peers. The per-sender counts of a period show how
+many keys a node outside the oracles adds, which is what a limit is set from.
+
+The limit is the number `CSTORE_NEW_KEYS_MAX` of the plugin config, read once at start
+(default 0):
+
+- 0: no store is refused; the keys are only counted, as above.
+- above 0: such a store is refused as `refused_new_keys` once its sender's
+  `new_keys/<sender>` count of the current period has reached the number. It is not
+  stored, not counted as a new key and not confirmed; a stamped one is answered like any
+  other refusal (`CSTORE_ORDER` `on`, or a hand-off re-send), so its writer stops waiting
+  and does not re-send it.
+- The period is the one of the `CSTORE_STATS` line: the counts restart at each line, every
+  `CS_STATS_INTERVAL` (300 s) of the wall clock, so a sender creates at most that many keys
+  on this replica between two lines. Each replica counts for itself, and a restart of the
+  plugin starts a new period.
+- Never refused by it: an overwrite or a delete of a key held, a key of a protected
+  namespace, a store from a replication peer or from a registry member, a local write and
+  a sync copy.
 
 ## Version stamps and the order rule (`CSTORE_ORDER`)
 
@@ -652,6 +668,7 @@ Labels in `counts`:
     - `refused_token`: the stored record has another token.
     - `refused_readonly`: the stored record is readonly for another owner.
     - `refused_too_large`: a record over the size cap of 256 KiB on the wire (above); `refused_unencodable`: a record no message can carry (above). A copy of a sync answer skipped for either is counted under the same words with the origin `hsync`.
+    - `refused_new_keys`: only with `CSTORE_NEW_KEYS_MAX` above 0, a peer's store that would create a key after its sender reached that number of new keys in the period (above).
     - with `CSTORE_ORDER` `on` (or `report`, for a hand-off re-send) only: `refused_future`, `refused_origin`, `refused_older`, `refused_older_than_delete`, `refused_unstamped` and `refused_collision`, the order rule's words (above).
   - `error`: the call raised before the replica changed (for example a bad `timeout`).
 - `<bucket>/local/unconfirmed`, `<bucket>/local/overwritten` and `<bucket>/local/refused_by_peers`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, another write replaced the key during the wait, or every target settled with at least one refusal answer and too few confirmations. For a `wait=False` write they are counted later, by the plugin thread's re-sends.
@@ -664,7 +681,7 @@ Labels in `counts`:
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
 - `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers merged, and records those answers inserted or replaced.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
-- `new_keys/<sender>`: keys this replica did not hold, created outside the protected namespaces by stores from a verified sender that is neither a replication peer nor in an oracle registry (above); counts only.
+- `new_keys/<sender>`: keys this replica did not hold, created outside the protected namespaces by stores from a verified sender that is neither a replication peer nor in an oracle registry (above); with `CSTORE_NEW_KEYS_MAX` above 0 it is also the count the limit reads.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.
 - `save_cpu_ms` (save back-off `report` or `on`): CPU milliseconds the periodic saves took on the save thread.

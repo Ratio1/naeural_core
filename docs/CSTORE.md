@@ -353,6 +353,21 @@ and its tombstone are never both held (storing a value removes the tombstone).
 - Previous release: a `dl:` record loads as a plain key no read lists or exports, and
   stays until a later release's sweep removes it.
 
+### Write-permission count
+
+With `CSTORE_ORDER` not `off`, every write the order rule admits (and every hsync copy
+applied) is checked against the held record outside the protected namespaces (the
+five signed ones and `DAUTH_JOB_SECRET_REVISIONS`), when the write carries the record's
+token. It only counts, in `report` and `on` alike, and never refuses:
+
+- `perm_readonly`: a readonly record deleted, taken over with the same value, or
+  rewritten under the same owner by another node than the one that stamped it (a sync
+  copy also with another value and owner, which the merge applies);
+- `delete_foreign`: a delete of a record that is not readonly, stamped by another node.
+
+The node that wrote a record is the address in its stamp: the verified sender for a
+live store, unverified for a sync copy. A record without a stamp is judged by its owner.
+
 ## Cost line in the node log (`CSTORE_STATS`)
 
 Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
@@ -397,6 +412,7 @@ Labels in `counts`:
 - `<bucket>/local/unconfirmed` and `<bucket>/local/overwritten`: counted in addition to `changed` or `identical` when a local write's wait failed: too few confirmations after the retries, or another write replaced the key during the wait.
 - `<bucket>/<origin>/ver_<word>` (`CSTORE_ORDER` `report` or `on`): a write or copy the order rule gives a word (`future`, `origin`, `older`, `older_than_delete`, `unstamped`, `collision`), counted whether or not it is refused; `<origin>` is `local`, `remote` or `hsync` (a record of a sync answer). `ver_invalid`: a stamp that is not `[int, str]`, treated as none. `<bucket>/hsync/ver_copy_delete`: a tombstone copy that removes (`on`) or would remove (`report`) a value held.
 - `<bucket>/<origin>/tombstone_new`: a delete that left a new tombstone; `<origin>` also `hsync` in `on`.
+- `<bucket>/<origin>/perm_readonly`, `<bucket>/<origin>/delete_foreign` (`CSTORE_ORDER` `report` or `on`): the write-permission count (above); counts only.
 - `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.

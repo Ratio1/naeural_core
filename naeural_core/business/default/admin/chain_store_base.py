@@ -133,6 +133,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_VER = "ver"
   # The prefix of the key a delete's tombstone is held under: "dl:" + the deleted key. No write may name such a key.
   CS_DEL = "dl:"
+  # The namespaces with write rules of their own (the signed ones and the dAuth secret revisions): the write-permission
+  # count leaves them out.
+  CS_PROTECTED_NAMESPACES = (
+    "DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS", "DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS",
+    "DAUTH_JOB_SECRET_REVISIONS", NODE_KEY_ROTATIONS_HKEY,
+  )
   # The signed sequence or revision each signed namespace carries in its values: the first step of the order rule.
   CS_SIGNED_FIELDS = {
     "DEEPLOY_OPERATIONS": "sequence", "DEEPLOY_NODE_OPERATIONS": "sequence", "DEEPLOY_DEPLOYED_JOBS": "revision",
@@ -1317,6 +1323,71 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The word the caller acts on in 'on', or None.
     return reason
 
+  def __perm_count(self, key, value, owner, token, writer, origin):
+    """
+    Count a write that changes a readonly record for another owner or node, or deletes another node's record.
+
+    Counts only, in every mode of the order switch but 'off'; it never refuses. Outside the protected namespaces
+    (``CS_PROTECTED_NAMESPACES``), for a held record (not a tombstone) whose token the write carries:
+
+    - ``perm_readonly``: the record is readonly and the write names another owner, or the record is stamped by
+      another node than the writer, and the readonly check does not already refuse it: a delete, a write of
+      the same value (a takeover), or another value under the same owner from another node. A sync copy, which
+      no readonly check refuses, counts also with another value and owner;
+    - ``delete_foreign``: a delete of a record that is not readonly, stamped by another node than the writer.
+
+    Parameters
+    ----------
+    key : str
+      Composed key of the write or the copy.
+    value : any
+      The incoming value; None for a delete.
+    owner : str
+      The owner the write names, after the namespace rules.
+    token : any
+      The write's token.
+    writer : str or None
+      The node making the write: this node for a local write, the verified sender for a remote one, the stamp's
+      address (not verified) for a sync copy; None for an unstamped copy.
+    origin : str
+      ``"local"``, ``"remote"`` or ``"hsync"``, for the count's label.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A readonly record outside the protected namespaces is written by no caller, so any ``perm_readonly`` is a
+    defect or a forged write to look into; ``delete_foreign`` measures how often unsigned namespaces are cleaned
+    by another node (tunnel routes, Deeploy answers deleted by the requester). A record written before stamps
+    existed is judged by its owner only. The namespace lookup (six key hashes) runs only for a write that
+    counts.
+
+    Examples
+    --------
+    >>> self.__perm_count(key, None, "other-owner", None, "0xai_peer", "remote")   # a readonly record deleted
+    """
+    # The record the write replaces; a tombstone is not one (a write over it is a write to a key not held).
+    held = self.__chain_storage.get(key)
+    if held is None or held.get(self.CS_TOKEN) != token:
+      return
+    # Stamped by another node than the one writing now.
+    other_node = held.get(self.CS_VER) is not None and held[self.CS_VER][1] != writer
+    if held.get(self.CS_READONLY) and (owner != held.get(self.CS_OWNER) or other_node) and (
+      origin == "hsync" or value is None or value == held[self.CS_VALUE] or owner == held.get(self.CS_OWNER)
+    ):
+      # A readonly record changed for another owner or node, past the readonly check.
+      event = "perm_readonly"
+    elif value is None and other_node:
+      # Another node's record deleted.
+      event = "delete_foreign"
+    else:
+      return
+    if not self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES):
+      # Counted under the key's bucket and the write's origin.
+      self.__cs_count(event, key, origin)
+
   def __hset_index(self, hkey):
     """
     Compute the composed-key prefix for one hash namespace.
@@ -1453,7 +1524,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     the key's value (counted ``ver_copy_delete``) and stores the tombstone
     under ``"dl:" + key`` (``tombstone_new`` when there was none), so a
     replica that missed the delete does not keep the key. A value copy
-    removes the key's tombstone.
+    removes the key's tombstone. A copy that is applied, with the order
+    switch not 'off', also goes through the write-permission count
+    (``__perm_count``), which counts and never refuses.
 
     Examples
     --------
@@ -1548,6 +1621,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           # Older than the held record by the order rule (or a future, unstamped or losing copy): skipped in 'on'; in
           # 'report' only counted, and applied below as in the previous release.
           continue
+        if order != "off":
+          # The write-permission count, only counted; a copy's writer is its stamp's address, which nothing verifies.
+          self.__perm_count(key, value, record.get(self.CS_OWNER), token, ver and ver[1], "hsync")
 
         # The copy lands under its key, a delete under "dl:" and its key; the other of the two goes, so a key and its
         # tombstone are never both held.
@@ -1909,6 +1985,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     stamp to its own when that is newer, in memory without a dirty mark, as
     an identical local write's fresh stamp is.
 
+    With the order switch not 'off', an admitted write also goes through
+    the write-permission count (``__perm_count``: ``perm_readonly``,
+    ``delete_foreign``), which counts and never refuses.
+
     A stamped delete leaves a tombstone (``__set_key_value``), which the
     order rule takes as the held record: an older value arriving after it is
     ``older_than_delete``. A delete of a key not held, or a newer delete over
@@ -2060,6 +2140,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             outcome = "refused_" + reason
             # Before the token and readonly checks, which an older or forged write does not reach.
             return False
+          # The write-permission count, only counted: a remote write's writer is its verified sender.
+          self.__perm_count(key, value, owner, token, sender if local_sync_storage_op else self.ee_addr,
+                            "remote" if local_sync_storage_op else "local")
         need_store = True
         existing_owner = None
         existing_value = None

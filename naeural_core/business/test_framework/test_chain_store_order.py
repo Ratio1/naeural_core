@@ -811,9 +811,11 @@ class TestTombstones(unittest.TestCase):
         # Applied only in 'on'.
         self.assertEqual((merged, KEY in store.storage, TOMB in store.storage),
                          (1, False, True) if mode == "on" else (0, True, False))
+        # In 'on', where it is applied: a new tombstone, and a delete of peer1's record by peer2.
+        applied = {BUCKET + "/hsync/tombstone_new": 1, BUCKET + "/hsync/delete_foreign": 1} if mode == "on" else {}
         # Counted in 'report' and 'on'.
-        self.assertEqual(getattr(store, STATS), {} if mode == "off" else {
-          BUCKET + "/hsync/ver_copy_delete": 1, **({BUCKET + "/hsync/tombstone_new": 1} if mode == "on" else {})})
+        self.assertEqual(getattr(store, STATS), {} if mode == "off" else {BUCKET + "/hsync/ver_copy_delete": 1,
+                                                                          **applied})
 
   def test_a_deleted_key_does_not_come_back_on_a_replica_that_held_a_legacy_copy(self):
     """The council's split history ('on'): a key written before stamps existed is deleted while one replica is away;
@@ -929,6 +931,87 @@ class TestTombstones(unittest.TestCase):
     store.on_close()
     # The tombstone is in the file.
     self.assertEqual(store.saved_storage[-1][TOMB]["ver"], [NOW_MS, "peer1"])
+
+
+class TestPermissionCount(unittest.TestCase):
+  """Writes that change a readonly record for another owner or node, or delete another node's record, are counted
+  and never refused."""
+
+  def test_readonly_takeovers_and_deletes_are_counted_and_applied_in_every_mode_but_off(self):
+    """Over a readonly record of peer1, stamped by peer1: a delete by another owner, a same-value write by another
+    owner (a takeover) and another value under the same owner from another node count perm_readonly and are applied
+    as before ('report' and 'on'); another value under another owner counts only refused_readonly; the same owner
+    and node deleting counts nothing; 'off' counts nothing."""
+    # Each case: the writer's address, the owner it names, the value, and the counts it adds.
+    cases = (
+      ("peer2", "other", None, {"perm_readonly": 1}), ("peer2", "other", "v", {"perm_readonly": 1}),
+      ("peer2", "peer1", "w", {"perm_readonly": 1}), ("peer2", "other", "w", {"refused_readonly": 1}),
+      ("peer1", "peer1", None, {}),
+    )
+    # Each mode.
+    for mode in ("off", "report", "on"):
+      # Each case.
+      for sender, owner, value, counts in cases:
+        # One sub-test each.
+        with self.subTest(mode=mode, sender=sender, owner=owner, value=value):
+          # A replica holding peer1's readonly record, stamped by peer1.
+          store = make(mode, storage={KEY: {**record(KEY, "v", "peer1", [NOW_MS, "peer1"]), "readonly": True}})
+          # The write, with a newer stamp.
+          deliver(store, KEY, value, sender, [NOW_MS + 1000, sender], owner=owner)
+          # The counts it adds besides the write's own outcome, prefixed by the bucket and origin.
+          added = {label.rsplit("/", 1)[1]: n for label, n in getattr(store, STATS).items()
+                   if label.rsplit("/", 1)[1] in ("perm_readonly", "delete_foreign", "refused_readonly")}
+          # None in 'off' but the readonly refusal, which every mode counts.
+          self.assertEqual(added, counts if mode != "off" else {k: n for k, n in counts.items() if k.startswith("ref")})
+          # Applied unless the readonly check refused it, in every mode.
+          self.assertEqual(store.storage.get(KEY, {}).get("value"), "v" if "refused_readonly" in counts else value)
+
+  def test_a_delete_of_another_nodes_record_is_counted_as_foreign(self):
+    """A delete of a record that is not readonly, stamped by another node, counts delete_foreign and is applied; a
+    record written before stamps existed is judged by its owner only, so its delete counts nothing; a local write
+    over a tombstone counts nothing."""
+    # A replica holding a record stamped by peer1 and a legacy one.
+    store = make("report", storage={KEY: record(KEY, "v", "peer1", [NOW_MS, "peer1"]),
+                                    "legacy": record("legacy", "v", "peer1")})
+    # peer2 deletes both.
+    deliver(store, KEY, None, "peer2", [NOW_MS + 1000, "peer2"])
+    # The legacy one.
+    deliver(store, "legacy", None, "peer2", [NOW_MS + 1000, "peer2"])
+    # This node writes the deleted key again (over its tombstone).
+    local_write(store, KEY, "again")
+    # The permission events counted.
+    events = {label: n for label, n in getattr(store, STATS).items() if "foreign" in label or "perm" in label}
+    # Both deletes applied; only the stamped record's counted.
+    self.assertEqual((KEY in store.storage, "legacy" in store.storage, events),
+                     (True, False, {BUCKET + "/remote/delete_foreign": 1}))
+
+  def test_protected_namespaces_and_another_token_are_not_counted(self):
+    """A delete of a readonly record of a protected namespace by another owner, and a write carrying another token,
+    count no permission event (the token is refused under its own word)."""
+    # A secret revision record, readonly, of a dAuth namespace (protected).
+    key = _hset_key("DAUTH_JOB_SECRET_REVISIONS", "7|1")
+    # A replica of the signed store (a dAuth member) holding it, and a plain record with a token.
+    store = make("on", signed=True, storage={key: {**record(key, {"s": 1}, "oracle", [NOW_MS, "oracle"]),
+                                                    "readonly": True},
+                                              "tok": {**record("tok", "v", "peer1"), "readonly": True, "token": "t"}})
+    # Deleted by peer1, a dAuth member, under another owner.
+    deliver(store, key, None, "peer1", [NOW_MS + 1000, "peer1"])
+    # A write without the token.
+    deliver(store, "tok", "w", "peer2", [NOW_MS + 1000, "peer2"], owner="other")
+    # The delete applied, nothing counted as a permission event, the token refusal under its word.
+    self.assertEqual((key in store.storage, [label for label in getattr(store, STATS) if "perm" in label],
+                      getattr(store, STATS).get("plain/remote/refused_token")), (False, [], 1))
+
+  def test_a_sync_copy_over_a_readonly_record_of_another_owner_is_counted(self):
+    """A sync copy that replaces a readonly record with another value and owner (which the merge applies whatever
+    the readonly flag) counts perm_readonly under the hsync origin."""
+    # A replica holding peer1's readonly record.
+    store = make("report", storage={KEY: {**record(KEY, "v", "peer1", [NOW_MS, "peer1"]), "readonly": True}})
+    # A newer copy of peer2 with another value and owner.
+    getattr(store, MERGE)("players", {KEY: record(KEY, "w", "peer2", [NOW_MS + 1000, "peer2"])})
+    # Applied as before, and counted.
+    self.assertEqual((store.storage[KEY]["value"], getattr(store, STATS)),
+                     ("w", {BUCKET + "/hsync/perm_readonly": 1}))
 
 
 class _QueuedNetwork(_FakeNetwork):

@@ -4178,6 +4178,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     deterministic and avoids merging multiple peer views into a single refresh
     operation. Freshness arbitration remains a documented follow-up concern.
 
+    That answer is recorded as the message was decoded, without a copy: its records are checked only by the
+    waiting caller's merge, which reads them and copies a value where it stores it. A deep copy made here, before
+    any check, raised ``RecursionError`` on the plugin thread for an answer that holds a value nested deeper than
+    about 445 levels (the merge skips such a value as ``too_deep``). The decoded message is held by nothing but
+    this entry once the handler returns, the entry takes no second answer, and the caller drops it after its
+    merge, so nothing changes the records in between.
+
     An answer to the store's own request passes the same checks (the sender was asked, the namespace is the one
     asked, the namespace's sender rules below) and is then merged by ``__merge_hset_snapshot``, whose rules
     decide each record. Of such an answer only the records whose value carries the namespace's signed field
@@ -4278,7 +4285,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # or late peer cannot replace the snapshot chosen for this sync request.
     pending[self.CS_RESPONSE] = {
       self.CS_SENDER: sender,
-      self.CS_SNAPSHOT: self.deepcopy(snapshot),
+      # The records as the message was decoded, with no copy of them. Before, the whole answer was deep-copied here,
+      # before any check of it, and that copy raised RecursionError for an answer holding a value nested deeper than
+      # about 445 levels, out of the payload handler. Nothing changes the recorded answer afterwards: the decoded
+      # message belongs to this call, the entry takes no second answer, and the waiting caller's merge only reads it
+      # and copies each value where it stores it (it also refuses such a value there, as too_deep).
+      self.CS_SNAPSHOT: snapshot,
     }
     return
 

@@ -5,13 +5,17 @@ handler, dropped and counted, because an exception that leaves the handler ends 
 """
 # The test framework.
 import unittest
+# The stand-in for the network of one test: it answers a sync request with a forged answer.
+from types import SimpleNamespace
 
 # The counter attribute's private name.
 from test_chain_store_accounting import STATS
 # The payload field names of the test network and the composers of a namespace's key prefix and of a hash key.
 from test_chain_store_hsync import _PayloadData, _hset_index, _hset_key
 # The order tests' store builder, record builder and constants.
-from test_chain_store_order import KEY, NOW_MS, make, record
+from test_chain_store_order import BUCKET, KEY, NOW_MS, make, record
+# The builder of a value nested a given number of levels deep.
+from test_chain_store_size_cap import nested
 
 # Keys that are not a non-empty str, as a JSON body can carry them.
 BAD_KEYS = (5, 1.5, True, None, "", ["a"], {"a": 1})
@@ -232,6 +236,54 @@ class TestInputsNoNodeSends(unittest.TestCase):
         self.assertEqual(handle(store, {}), [])
         # One count per body that is not a dict; nothing stored.
         self.assertEqual((getattr(store, STATS), store.storage), ({"plain/remote/refused_malformed": len(bodies)}, {}))
+
+  def test_a_blocking_sync_takes_an_answer_that_holds_values_too_deep_to_copy(self):
+    """The answer to a caller's blocking sync is recorded as decoded, with no copy of it: one that holds values
+    nested 65, 600 and 5,000 levels leaves the handler without an exception (a deep copy of it raised
+    RecursionError there from about 445 levels), the caller's merge stores its good record and skips the deep ones
+    as too_deep, the answer is left as it was received, and the stored record does not share its value with it."""
+    # The good record's key and the deep ones', each under its own field of the namespace.
+    good, deep = _hset_key("players", "good"), {_hset_key("players", "deep%d" % depth): depth for depth in (65, 600, 5000)}
+    # Each mode.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # The stamp a copy carries (none is read in 'off').
+        stamp = None if mode == "off" else [NOW_MS, "peer1"]
+
+        def forged():
+          """
+          Build the forged answer: one good record and three whose values are nested too deep.
+
+          Returns
+          -------
+          dict
+            The snapshot, composed key to record, built anew at each call so two of them share nothing.
+          """
+          # The good record, and one record per depth.
+          return {good: record(good, {"a": [1, 2]}, "peer1", stamp),
+                  **{key: record(key, nested(depth), "peer1", stamp) for key, depth in deep.items()}}
+
+        # The store that asks, and the answer its peer sends.
+        store, answer = make(mode), forged()
+        # The message as a node receives it: decoded, not copied again (the harness's own copy stops near 500 levels).
+        store.receive_and_decrypt_payload = lambda data: data["decoded"]
+        # A network whose peer answers the sync request at once with the forged answer, under the request's id.
+        store.network = SimpleNamespace(dispatch=lambda sender, targets, decoded: handle(store, {
+          "op": "SHSYNC_RESP", "request_id": decoded[store.CS_DATA]["request_id"], "hkey": "players",
+          "snapshot": answer}))
+        # The caller's blocking sync: the handler records the answer and the caller merges it; nothing is raised.
+        result = store._hsync("players", peers=["peer1"], include_default_peers=False)
+        # The good record merged, from the peer asked.
+        self.assertEqual((result["source_peer"], result["merged_fields"]), ("peer1", 1))
+        # Only the good record is held; each deep copy was skipped under the depth word.
+        self.assertEqual((sorted(store.storage), getattr(store, STATS).get(BUCKET + "/hsync/refused_too_deep")),
+                         ([good], 3))
+        # The answer is as it was received: the merge only read it.
+        self.assertEqual(answer, forged())
+        # The stored value is a copy of its own, made where it was stored.
+        self.assertEqual((store.storage[good]["value"], store.storage[good]["value"] is answer[good]["value"]),
+                         ({"a": [1, 2]}, False))
 
 
 if __name__ == "__main__":

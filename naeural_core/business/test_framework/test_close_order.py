@@ -303,6 +303,37 @@ class TestShutdownHeartbeatWait(unittest.TestCase):
     self.assertEqual(eng._return_code, ct.CODE_SHUTDOWN)
 
 
+class TestCloseStartsTheLastSavesFirst(unittest.TestCase):
+
+  def test_the_close_asks_for_the_last_saves_first_and_stops_the_saver_last(self):
+    """close_main_loop() starts the last saves before the heartbeat and every close, and stops the saver last."""
+    # No constructor: the method needs only the members set below.
+    eng = orchestrator_module.Orchestrator.__new__(orchestrator_module.Orchestrator)
+    # One recorder for every step, so their order can be read.
+    steps = mock.Mock()
+    # The log line of the close is not read here.
+    eng.P = mock.Mock()
+    # The SHUTDOWN heartbeat and the thread joins.
+    eng._maybe_gracefull_stop = steps.graceful_stop
+    # The four managers the close closes.
+    eng._comm_manager, eng._business_manager = steps.comm, steps.business
+    # Serving and capture.
+    eng._serving_manager, eng._capture_manager = steps.serving, steps.capture
+    # The node's state saver, replaced by the recorder.
+    with mock.patch.object(orchestrator_module, "SerializationManager", steps.saver):
+      # The node's close.
+      eng.close_main_loop()
+    # The names of the recorded steps, in order.
+    order = [call[0] for call in steps.mock_calls]
+    # The last saves are asked for before anything that can take time, and the saver is stopped at the very end.
+    self.assertEqual(order, [
+      'saver.instance.start_last_saves', 'graceful_stop', 'comm.close', 'business.close',
+      'serving.stop_all_servers', 'capture.close', 'saver.instance.stop',
+    ])
+    # The stop still waits up to 60 s for the saves being written.
+    steps.saver.instance.stop.assert_called_once_with(timeout=60)
+
+
 if __name__ == "__main__":
   # Run this file's tests when it is started directly.
   unittest.main()

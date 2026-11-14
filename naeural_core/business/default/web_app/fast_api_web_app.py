@@ -940,6 +940,37 @@ class FastApiWebAppPlugin(BasePlugin):
     return None
 
   def _process_incoming_request(self, request):
+    """
+    Run the endpoint one incoming request names, on the plugin thread, and queue its answer.
+
+    A timing report from the server side is handled apart, and a request that waited past the queue-wait limit is
+    answered with a 503 without running. Otherwise the endpoint runs with the request's arguments (a trailing dict
+    as its keyword arguments when it takes ``**kwargs``): a ``PostponedRequest`` it returns is kept for later
+    laps, any other value is the answer.
+
+    Parameters
+    ----------
+    request : dict
+      The request the monitor queued: ``id``, ``value`` (the endpoint's name, then its arguments), ``profile``,
+      ``t_put_wall_ns`` and ``client_ip``.
+
+    Returns
+    -------
+    dict or None
+      The postponed request's record when the endpoint postponed it; None when it was answered or refused.
+
+    Notes
+    -----
+    An endpoint that raises, or one that is not registered, is answered with an error (status 500, 404 for an
+    unknown endpoint), and one red line names the endpoint, the names of the arguments the request passed (the
+    endpoint's parameter names for the positional ones, then the keys of the keyword ones) and the traceback.
+    It never shows the argument values: an argument can be a token or a credential, such as an API key in a
+    payload. Before, the line printed the values.
+
+    Examples
+    --------
+    >>> self._process_incoming_request({"id": "r1", "value": ("add_secrets", payload), "profile": None})
+    """
     id = request.get('id')
     value = request.get('value')
     profile = request.get('profile')
@@ -959,10 +990,12 @@ class FastApiWebAppPlugin(BasePlugin):
     if self._reject_expired_request(request, method):
       return None
 
+    # The endpoint the request names (None when it is not registered), looked up before the try so the error line
+    # below can name its arguments; and the call's keyword arguments, none until a trailing dict is taken below.
+    endpoint, kwargs = self._endpoints.get(method), {}
     try:
       if self.cfg_log_requests:
         self.P(f"Received request {id} for {method}.[{self.get_deques_stats_str()}]")
-      endpoint = self._endpoints.get(method)
       if endpoint is None:
         raise ValueError(f"Endpoint '{method}' not found in registered endpoints.")
       has_kwargs = any(
@@ -981,9 +1014,12 @@ class FastApiWebAppPlugin(BasePlugin):
       if isinstance(profile, dict):
         self._profile_slice_end(profile)
     except Exception as exc:
+      # The names of the arguments the request passed, never their values (one can be a token or a credential): the
+      # endpoint's parameter names for the positional ones, then the keys of the keyword ones.
+      names = ([] if endpoint is None else list(inspect.signature(endpoint).parameters)[:len(args)]) + list(kwargs)
       self.P("Exception occured while processing\n"
              "Request: {}\nArgs: {}\nException:\n{}".format(
-                 method, args, self.get_exception()), color='r')
+                 method, names, self.get_exception()), color='r')
       status_code = 500
       if isinstance(exc, ValueError) and "not found" in str(exc):
         status_code = 404

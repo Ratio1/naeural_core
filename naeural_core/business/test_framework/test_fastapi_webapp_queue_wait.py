@@ -220,6 +220,48 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
                           any("Exception in on_request_monitor_tick" in msg for msg in self.plugin.logged)),
                          ([0, 1, 2], True, ["r1", "r2"], raising))
 
+  def test_an_endpoint_error_logs_the_argument_names_never_their_values(self):
+    """When an endpoint raises, the red line names the endpoint and its arguments' names (the positional ones by the
+    endpoint's parameters, the keyword ones by their keys) and holds none of their values; the caller gets a 500."""
+
+    def add_secrets(token, payload, **kwargs):
+      """
+      Stand for an endpoint that takes a credential and raises.
+
+      Parameters
+      ----------
+      token : str
+        A credential.
+      payload : dict
+        A body holding a credential.
+      **kwargs
+        Extra arguments.
+
+      Returns
+      -------
+      None
+
+      Raises
+      ------
+      TypeError
+        Always, as a call that fails inside the endpoint.
+      """
+      # The endpoint's failure.
+      raise TypeError("unexpected keyword argument 'result_info'")
+    # The plugin's only endpoint.
+    self.plugin._endpoints = {"add_secrets": add_secrets}
+    # A request with a token, a payload and a keyword dict, each holding a secret value.
+    self.plugin._process_incoming_request({"id": "r1", "value": (
+      "add_secrets", "tok-123", {"api_key": "cf-secret"}, {"extra": "x-secret"}), "profile": None, "client_ip": None})
+    # The red line about the error.
+    line = next(msg for msg in self.plugin.logged if msg.startswith("Exception occured"))
+    # The answer to the caller.
+    [reply] = self._replies()
+    # The endpoint and the three names in the line, no value, and a 500.
+    self.assertEqual(("add_secrets" in line, "['token', 'payload', 'extra']" in line,
+                      [secret for secret in ("tok-123", "cf-secret", "x-secret") if secret in line],
+                      reply["value"]["result"]["status_code"]), (True, True, [], 500))
+
   def test_monitor_refuses_at_once_while_the_oldest_queued_request_has_expired(self):
     self.plugin._incoming_requests.extend([self._request(waited_s=100, request_id="old"), {"id": "q1"}])
     self._run_monitor_on(self._request(waited_s=0, request_id="late"))

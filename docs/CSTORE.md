@@ -308,8 +308,8 @@ that finds a replication peer.
   owed at that turn is asked at the turn after it. A namespace whose answers were lost is so
   asked again 60 to 150 s after its first request (at most 120 s when no other namespace is
   owed then) instead of a round (about 30 minutes) later. A second request is not repeated,
-  so a namespace is asked at most twice per round. This adds at most five requests per round, each to at most two peers, and none
-  while the answers arrive.
+  so a namespace is asked at most twice per round. This adds at most five requests per
+  round, each to at most two peers, and none while the answers arrive.
 - Only records whose value carries the namespace's signed field (`sequence`, `revision`,
   `deployment_revision`) are taken, and every record of the key rotations, whose merge
   checks each proof. A pointer of the old form (a plain CID without a revision) that was
@@ -546,7 +546,7 @@ as the previous release removes it; a sync answer's delete copy of the key is sk
 
 A store's delete of a key not held, outside the protected namespaces, from a verified
 sender that is neither a replication peer nor in an oracle registry (the senders the new-key
-count below counts) leaves no tombstone and changes nothing. Such senders could otherwise fill
+count above counts) leaves no tombstone and changes nothing. Such senders could otherwise fill
 `CSTORE_TOMBSTONE_CAP` with deletes of keys never written, stamped up to
 `CSTORE_VER_MAX_AHEAD` ahead: the sweep then evicts every real tombstone and raises the
 tombstone horizon, and with it the floor of every later catch-up request, to their stamps.

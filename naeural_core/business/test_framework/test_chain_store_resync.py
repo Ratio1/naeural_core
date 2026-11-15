@@ -588,9 +588,9 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
 
   def test_each_answer_the_handler_drops_is_counted_by_why_and_each_peer_not_taken_as_unanswered(self):
     """Answers to the store's own resync requests that the answer handler drops are counted under the namespace's
-    bucket as dropped_no_sender, dropped_not_asked (a node not asked, a second answer of a peer taken),
-    dropped_other_namespace, dropped_malformed and dropped_not_member; when the wait ends, each asked peer whose
-    answer was not taken counts unanswered; a blocking sync's and a catch-up's dropped answers count nothing."""
+    bucket as dropped_not_asked (a node not asked, a second answer of a peer taken), dropped_other_namespace,
+    dropped_malformed and dropped_not_member; when the wait ends, each asked peer whose answer was not taken counts
+    unanswered; a blocking sync's and a catch-up's dropped answers count nothing."""
     # An oracle whose messages are only recorded; no random stretch.
     store = oracle("report")
     # No random stretch: the requests 60 s apart.
@@ -605,8 +605,6 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
     lap(store, 0)
     # A blocking sync's entry: its dropped answers are not the resync's.
     store.pending_hsync["caller"] = {store.CS_HKEY: "players", store.CS_PEERS: ["peer1"], store.CS_RESPONSE: None}
-    # No verified sender.
-    handle({"request_id": "r1", "hkey": "DEEPLOY_OPERATIONS", "snapshot": {}}, sender=None)
     # A node not asked.
     answer(store, "r1", "peer2", "DEEPLOY_OPERATIONS", [])
     # Another namespace than the one asked.
@@ -639,7 +637,8 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
     # Each drop by why, the answer taken, and the peers not taken.
     self.assertEqual(resync_counts(store), {
       OPS_BUCKET + "/resync/asked": 1, OPS_BUCKET + "/resync/answered": 1, OPS_BUCKET + "/resync/merged": 1,
-      OPS_BUCKET + "/resync/dropped_no_sender": 1, OPS_BUCKET + "/resync/dropped_not_asked": 2,
+      # The drops of r1 by why (no answer without a verified sender reaches the handler: none is counted for it).
+      OPS_BUCKET + "/resync/dropped_not_asked": 2,
       OPS_BUCKET + "/resync/dropped_other_namespace": 1, OPS_BUCKET + "/resync/dropped_malformed": 1,
       OPS_BUCKET + "/resync/unanswered": 1, rot + "/resync/asked": 1, rot + "/resync/dropped_not_member": 1,
       rot + "/resync/unanswered": 1})

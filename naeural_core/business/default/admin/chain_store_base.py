@@ -4834,10 +4834,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     pending : dict
       The pending entry the answer's id names.
     word : str
-      Why it is dropped: ``no_sender`` (no verified sender), ``not_asked`` (a sender that is not among the asked
-      peers whose answer is still awaited: a node not asked, or a second answer of a peer already taken),
-      ``other_namespace`` (the answer names another namespace than the one asked), ``not_member`` (a registry
-      rule of the namespace refuses the sender, or this node) or ``malformed`` (a snapshot that is not a dict).
+      Why it is dropped: ``not_asked`` (a sender that is not among the asked peers whose answer is still awaited:
+      a node not asked, or a second answer of a peer already taken), ``other_namespace`` (the answer names another
+      namespace than the one asked), ``not_member`` (the dAuth rule of the secrets or of the key rotations
+      refuses the sender, or this node) or ``malformed`` (a snapshot that is not a dict).
 
     Returns
     -------
@@ -4905,8 +4905,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     save (the merge marks each change as it makes it) and are not in ``merged``. An answer that comes after the
     wait finds no entry and is dropped like any answer to an unknown request; its peer was counted
     ``unanswered`` when the wait ended (``__maybe_resync``). Every other answer to such a request that this
-    method drops is counted ``<bucket>/resync/dropped_<word>`` by why (``__resync_dropped``: ``no_sender``,
-    ``not_asked``, ``other_namespace``, ``not_member``, ``malformed``); before, these drops were not counted.
+    method drops is counted ``<bucket>/resync/dropped_<word>`` by why (``__resync_dropped``: ``not_asked``,
+    ``other_namespace``, ``not_member``, ``malformed``); before, these drops were not counted. Two drops are not
+    counted, as no such answer reaches them: an answer without a verified sender (the payload's signature check
+    refuses it before this handler) and the Tunnels Manager rule (no resync request asks those namespaces).
 
     An answer whose ``request_id`` is not a str (a number, a list, a dict), which no node of this release sends,
     is dropped and counted as ``plain/hsync/refused_malformed``; an id that cannot be hashed raised here before.
@@ -4940,12 +4942,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if pending is None or pending.get(self.CS_RESPONSE, None) is not None:
       return
     if not isinstance(sender, str) or len(sender) == 0:
-      # Dropped, and counted when it answers the store's own resync request (so is each early return below).
-      return self.__resync_dropped(pending, "no_sender")
+      # No verified sender. Not counted: the payload's signature check, before this handler, refuses such a message.
+      return
 
     allowed_peers = pending.get(self.CS_PEERS, [])
     if sender not in allowed_peers:
-      # A node not asked, or a second answer of a peer whose answer was taken.
+      # A node not asked, or a second answer of a peer whose answer was taken: dropped, and counted when it answers
+      # the store's own resync request (so are the early returns below that call the same helper).
       return self.__resync_dropped(pending, "not_asked")
     if self.CS_PULL in pending:
       # The answer to a catch-up request, from the oracle asked (it names no namespace): taken by its own step.
@@ -4972,8 +4975,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The Tunnels Manager namespaces are written only by plugins that run on oracles: an answer for them is taken
     # only from an oracle registry member, so another sender's answer does not end the wait of the sync.
     if self.__namespace_for_key(index, TUNNELS_MANAGER_HKEYS) and not self.__registry_member(sender):
-      # Not from an oracle registry member.
-      return self.__resync_dropped(pending, "not_member")
+      # Not from an oracle registry member. Not counted: no resync request asks these namespaces.
+      return
     snapshot = data.get(self.CS_SNAPSHOT, {})
     if not isinstance(snapshot, dict):
       # A snapshot that is not a dict.

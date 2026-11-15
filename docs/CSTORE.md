@@ -321,9 +321,9 @@ Counters, under the namespace's bucket: `<bucket>/resync/asked` (requests sent),
 answers changed nothing). Two answers per request are expected; fewer means a peer did not
 answer within 60 s. `<bucket>/resync/unanswered` counts, when a request's wait ends, each
 asked peer whose answer was not taken, and `<bucket>/resync/dropped_<word>` each answer the
-handler dropped, by why: `no_sender`, `not_asked` (a node not asked, or a second answer of a
-peer already taken), `other_namespace`, `not_member` (a registry rule of the namespace
-refused the sender or this node) or `malformed` (a snapshot that is not a dict). An answer
+handler dropped, by why: `not_asked` (a node not asked, or a second answer of a peer
+already taken), `other_namespace`, `not_member` (the dAuth rule of the secrets or of the key
+rotations refused the sender or this node) or `malformed` (a snapshot that is not a dict). An answer
 dropped before it reached the chain store, or after its wait, shows only as `unanswered`.
 Each change of a merge marks the replica for the save when it is made,
 so an answer whose merge an exception ends has its earlier records saved; they are not in
@@ -929,7 +929,7 @@ Labels in `counts`:
 - `pull<n>_cut_s`: seconds by which the floor of a request of series n lay above the lowest mark it asked from, the largest of the period (above).
 - `<bucket>/pull<n>/missing`, `newer`, `over_legacy`, `same`, `held`, and the merge's own labels (`ver_<word>`, `refused_too_large`, `refused_too_deep`, `refused_unencodable`, `ver_copy_delete`, `tombstone_new`, `perm_readonly`, `delete_foreign`) under the origin `pull<n>`: what the pages of series n of a catch-up changed, or in `report` would change (above).
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
-- `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers taken, and records those answers inserted or replaced. `<bucket>/resync/unanswered`: asked peers whose answer was not taken when a request's wait ended (a request with none taken is asked again once). `<bucket>/resync/dropped_<word>` (`no_sender`, `not_asked`, `other_namespace`, `not_member`, `malformed`): answers to these requests the answer handler dropped, by why.
+- `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers taken, and records those answers inserted or replaced. `<bucket>/resync/unanswered`: asked peers whose answer was not taken when a request's wait ended (a request with none taken is asked again once). `<bucket>/resync/dropped_<word>` (`not_asked`, `other_namespace`, `not_member`, `malformed`): answers to these requests the answer handler dropped, by why.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.
 - `new_keys/<sender>`: keys this replica did not hold, created outside the protected namespaces by stores from a verified sender that is neither a replication peer nor in an oracle registry (above); with `CSTORE_NEW_KEYS_MAX` above 0 it is also the count the limit reads.
 - `saves`: full-replica saves started in the period (a failed write is counted too, and retried by the next save). A hash-sync merge that changed the replica also leads to a save, without a write label.

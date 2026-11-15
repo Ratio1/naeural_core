@@ -1560,11 +1560,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Notes
     -----
-    The block engine keeps each registry for ten minutes and remembers no failure: once its copy has expired
-    and the registry's remote call fails or hangs, every call here makes that call again (about 20 s each for
-    one that hangs: 10 s per try, two tries). A merge asks once per signed record its replica lacks, under the
-    persistence lock, so it passes a memo: one such call per merge, not one per record. A memo is never kept
-    beyond its merge, so a change of a registry is read at the next one.
+    The block engine keeps each registry for ten minutes. What a read that fails costs once that copy has
+    expired is the SDK's: an SDK that remembers no failure makes the remote call again at each question (about
+    20 s for one that hangs: 10 s per try, two tries), and one that remembers it answers with the failure at once
+    for three times as long as the read took. This code pays that cost once per store, which a failed read
+    refuses, and once per merge: a merge would ask once per signed record its replica lacks, under the
+    persistence lock, so it passes a memo. A memo is never kept beyond its merge, so a change of a registry is
+    read at the next one.
 
     Examples
     --------

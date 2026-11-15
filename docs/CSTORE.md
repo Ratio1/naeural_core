@@ -332,9 +332,10 @@ copy wait. An oracle answers about two such requests per namespace and round.
 
 One merge reads each oracle registry at most once, for all its copies, and does not repeat
 a read that failed: the copies whose rule needs that registry are then skipped. The block
-engine keeps a registry for ten minutes and remembers no failure, so without this a merge
-made one remote call per signed copy the replica lacks while the registry's remote call
-failed or hung (about 20 s each for a call that hangs).
+engine keeps a registry for ten minutes; what a failed read costs after that is the SDK's
+(one that remembers no failure makes the remote call again at each question, about 20 s for
+a call that hangs). Without the memo a merge would ask once per signed copy the replica
+lacks.
 
 In every merge, a caller's `hsync` included, a copy whose value is a dict equal to the one
 held under its key is not put through the signed-record rule while it leaves everything

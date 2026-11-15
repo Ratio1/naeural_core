@@ -304,10 +304,11 @@ that finds a replication peer.
   answers are merged, not only the first.
 - A request no answer of which was taken by the end of its wait (none came, or each was
   dropped) is asked again at the next turn, before the next namespace, and that turn comes
-  at most 60 s later (after a round's last request it was a pause away): a namespace whose
-  answers were lost is asked again 60 to 135 s after its first request instead of a round
-  (about 30 minutes) later. A second request is not repeated, so a namespace is asked at most twice per
-  round. This adds at most five requests per round, each to at most two peers, and none
+  at most 60 s later (after a round's last request it was a pause away); a second namespace
+  owed at that turn is asked at the turn after it. A namespace whose answers were lost is so
+  asked again 60 to 150 s after its first request (at most 120 s when no other namespace is
+  owed then) instead of a round (about 30 minutes) later. A second request is not repeated,
+  so a namespace is asked at most twice per round. This adds at most five requests per round, each to at most two peers, and none
   while the answers arrive.
 - Only records whose value carries the namespace's signed field (`sequence`, `revision`,
   `deployment_revision`) are taken, and every record of the key rotations, whose merge
@@ -850,7 +851,7 @@ publishes its setter), it stores nothing and returns `False` with the outcome
 It waits at most `CS_NOWAIT_LOCK_S` (1 ms) for the chain store's persistence lock, which
 other threads hold for whole-store walks: a namespace sync's merge holds it for its whole
 answer, with one signature check per signed record whose value is not the one held (3 to
-4 ms each at 0.35 core, so 4 to 5 s for 1,000 records a replica lacks), and the save holds
+5 ms each at 0.35 core, so 3 to 5 s for 1,000 records a replica lacks), and the save holds
 it while it copies the replica. Held longer, the write stores nothing and returns `False`
 with the outcome `not_ready`, and the caller writes again later; before, it waited for the
 whole hold. Once it has the lock it keeps it to its end (the apply, the queueing, the
@@ -860,8 +861,11 @@ refusal such as `refused_no_peers`, or `error`) takes it for its count within th
 1 ms, and is not counted when the lock is busy longer. Measured on the node image's interpreter under a
 0.35 CPU limit, while a merge of 1,000 signed records the replica lacked held the lock: the
 write took 2 ms (median) and 6 to 45 ms (99th percentile, three runs), where it waited
-4.9 s (median); in an idle store 0.1 to 0.2 ms. A node where a save or a merge holds the lock for more than 1 ms about
-1 % of the time sees about 1 % of such writes end `not_ready`.
+4.9 s (median); in an idle store 0.1 to 0.2 ms. The share of such writes that end
+`not_ready` is about the share of the time a save or a merge holds the lock for more than
+1 ms: an estimate, not measured on a node. In an emulation at 0.35 CPU where the plugin
+thread applied peers' stores without pause and a save copied 5,700 records every 0.5 s,
+22 of 193 writes (11 %) ended `not_ready`.
 
 Web apps get a hook, `on_request_monitor_tick()`, run on the request monitor thread
 before each read of the server queue (about every 0.25 s while idle, and after each

@@ -331,7 +331,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     by a catch-up); marks that are not a map of writer to int are dropped. With ``CSTORE_HANDOFF`` not 'off'
     and ``CSTORE_PULL_PEERS`` above 0 the marks of this start are then taken, before the setter is published,
     so no write of this run can raise one: per writer, the newest stamp time held that is not a future one
-    (one walk of the replica, 2.8 ms of CPU for 5,700 records under a 0.35 CPU limit). What this start owes is
+    (one walk of the replica, 2 to 3 ms of CPU for 5,700 records under a 0.35 CPU limit). What this start owes is
     those marks or, while marks are still owed from an earlier start, the lower of the two per writer; a writer
     either side lacks is left out, as a writer without a mark is one all of whose records are owed. The record
     is written back in memory (it reaches the file with the next save of a changed replica), and one red line
@@ -944,9 +944,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     answer handler dropped it, which it counts as ``dropped_<word>``) counts ``<bucket>/resync/unanswered``.
     When no answer of a request was taken at all, its namespace is asked again at the next turn, before the
     namespace whose turn it is, and that turn comes at most ``CS_RESYNC_GAP`` later (after a round's last
-    request it was a pause away): a namespace whose answers were lost is asked again 60 to 135 s after its first
-    request instead of a round (about 30 minutes) later. Such a second request is not repeated, so a
-    namespace is asked at most twice per round.
+    request it was a pause away); a second namespace owed at that turn is asked at the turn after it. A
+    namespace whose answers were lost is so asked again 60 to 150 s after its first request (at most 120 s when
+    no other namespace is owed then) instead of a round (about 30 minutes) later. Such a second request is not
+    repeated, so a namespace is asked at most twice per round.
 
     Returns
     -------
@@ -3215,7 +3216,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     delete, which does not wait either. Other threads hold the persistence
     lock for whole-store walks: a namespace sync's merge holds it for its
     whole answer, with one signature check per signed record whose value is
-    not the one held (3 to 4 ms each at 0.35 core: 4 to 5 s measured for
+    not the one held (3 to 5 ms each at 0.35 core: 3 to 5 s measured for
     1,000 records a replica lacks), and the save holds it while it copies
     the replica. A blocking write waits for them. A ``wait=False`` write
     waits at most ``CS_NOWAIT_LOCK_S`` for the lock and then ends

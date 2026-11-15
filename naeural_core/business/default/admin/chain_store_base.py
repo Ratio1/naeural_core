@@ -3250,7 +3250,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ``error``. A ``not_ready`` write (``wait=False`` after the plugin loop
     ended, or with the lock busy beyond its bound) is not counted: no later
     line would carry the first, and the second's count would wait for the
-    lock. ``changed`` says what happened to this replica: a local write
+    lock. A ``wait=False`` write that ends before its bounded wait (a
+    refusal such as ``refused_no_peers``, or ``error``) takes the lock for
+    its count within the same bound, and with the lock busy longer it is
+    not counted either. ``changed`` says what happened to this replica: a local write
     that changed it and then was not confirmed, or raised while waiting, is
     still counted as ``changed``.
 
@@ -3741,16 +3744,22 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       err_msg = f" === Error in _set_value for key {key}[Q:{self.input_queue_size}/{self.cfg_max_inputs_queue_size}]: {e}\n{self.trace_info()}"
       raise ValueError(err_msg)
     finally:
+      if not wait and not held and outcome != "not_ready":
+        # A wait=False write that ended before its bounded wait (a refusal such as refused_no_peers, or an error)
+        # takes the lock for its count within the same CS_NOWAIT_LOCK_S; before, the count waited for the whole
+        # hold (2,000 ms for a 2 s hold, where the write's own bound is 1 ms). Released below, after the count.
+        held = self.__persistence_lock.acquire(timeout=self.CS_NOWAIT_LOCK_S)
       # A not_ready write is not counted: its count would take the lock it could not get (and one made after the
-      # plugin loop ended has no later line to be counted in).
-      if outcome != "not_ready":
+      # plugin loop ended has no later line to be counted in); nor is a wait=False write whose count could not take
+      # the lock within the bound, for the same reason.
+      if outcome != "not_ready" and (wait or held):
         # Count this call once for the CSTORE_STATS line, by namespace bucket (the "hs:" prefix of one hash
         # namespace, or "plain"), origin and outcome, through the one counting helper. Nothing here can raise for
         # the valid key checked above.
         self.__cs_count(outcome, key, "remote" if local_sync_storage_op else "local")
       if held:
-        # The hold this wait=False write took within its bound, released after its count and before anything a
-        # caller's argument could make raise (its result_info).
+        # The hold this wait=False write took within its bound (for its apply, or for its count alone), released
+        # after its count and before anything a caller's argument could make raise (its result_info).
         self.__persistence_lock.release()
       if wait_end is not None:
         # A local write whose wait failed: also counted by how it ended.

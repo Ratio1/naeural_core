@@ -310,6 +310,69 @@ class TestNonBlockingWrite(unittest.TestCase):
     # It got the lock.
     self.assertEqual(free, [True])
 
+  def test_a_non_blocking_write_that_ends_before_its_bounded_wait_counts_within_the_bound(self):
+    """While another thread holds the persistence lock, a wait=False write with no target peer (refused_no_peers)
+    and one with a bad timeout (error) end within a fraction of a second with their own words and are not counted
+    (their count waited for the whole hold before); with the lock free the same refusal is counted, and the lock is
+    left free."""
+    # A writer with no replication peer, and its lock.
+    store = make("report", peers=())
+    # The lock the other thread holds.
+    lock = getattr(store, LOCK)
+    # Set once the other thread holds the lock, and to let it go.
+    taken, done = threading.Event(), threading.Event()
+
+    def hold():
+      """
+      Stand for a merge: hold the persistence lock until the test is done with it, 2 s at most.
+
+      Returns
+      -------
+      None
+      """
+      # The lock, as the merge's with statement takes it.
+      with lock:
+        # Held.
+        taken.set()
+        # Until both writes returned (or 2 s, so a count that waits for the lock ends too).
+        done.wait(2)
+    # The holder.
+    holder = threading.Thread(target=hold)
+    # Running.
+    holder.start()
+    # Held from here.
+    taken.wait()
+    # Each write's caller dict, and the wall time the writes start at.
+    no_peers, bad_timeout, started = {}, {}, time.monotonic()
+    # No target peer: refused before the bounded wait.
+    store._set_value(KEY, "v", owner="node", wait=False, result_info=no_peers)
+    # A bad timeout raises before it.
+    with self.assertRaises(ValueError):
+      # The write.
+      store._set_value(KEY, "v", owner="node", wait=False, timeout=-1, result_info=bad_timeout)
+    # How long both took.
+    elapsed = time.monotonic() - started
+    # The holder lets go.
+    done.set()
+    # And ends.
+    holder.join()
+    # Both ended at once with their own words; neither was counted.
+    self.assertEqual((no_peers, bad_timeout, elapsed < 0.5, getattr(store, STATS)),
+                     ({"outcome": "refused_no_peers"}, {"outcome": "error"}, True, {}))
+    # With the lock free the same refusal is counted.
+    self.assertEqual((write(store, KEY, "v"), getattr(store, STATS)),
+                     ((False, "refused_no_peers", 0), {BUCKET + "/local/refused_no_peers": 1}))
+    # Whether another thread then gets the lock at once: the writes let go of it.
+    free = []
+    # That thread: the lock within 0.5 s, given back at once (release() gives None).
+    checker = threading.Thread(target=lambda: free.append(lock.acquire(timeout=0.5) and lock.release() is None))
+    # Run.
+    checker.start()
+    # Ended.
+    checker.join()
+    # It got the lock.
+    self.assertEqual(free, [True])
+
   def test_a_non_blocking_write_keeps_the_lock_from_its_apply_to_its_count(self):
     """A thread that asks for the persistence lock while a wait=False write is between its apply and the
     registration of its re-sends gets it only after the write registered them and counted itself; the write does

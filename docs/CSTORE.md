@@ -844,7 +844,9 @@ it while it copies the replica. Held longer, the write stores nothing and return
 with the outcome `not_ready`, and the caller writes again later; before, it waited for the
 whole hold. Once it has the lock it keeps it to its end (the apply, the queueing, the
 registration of its re-sends and its count), so it never waits for it twice. A `not_ready`
-write is not counted in `CSTORE_STATS`. Measured on the node image's interpreter under a
+write is not counted in `CSTORE_STATS`. A write that ends before it takes the lock (a
+refusal such as `refused_no_peers`, or `error`) takes it for its count within the same
+1 ms, and is not counted when the lock is busy longer. Measured on the node image's interpreter under a
 0.35 CPU limit, while a merge of 1,000 signed records the replica lacked held the lock: the
 write took 2 ms (median) and 6 to 45 ms (99th percentile, three runs), where it waited
 4.9 s (median); in an idle store 0.1 to 0.2 ms. A node where a save or a merge holds the lock for more than 1 ms about

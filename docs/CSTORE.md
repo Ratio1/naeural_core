@@ -467,8 +467,10 @@ No switch; by default it only counts. A store from a peer that creates a key thi
 did not hold, outside the protected namespaces (the five signed ones and
 `DAUTH_JOB_SECRET_REVISIONS`), counts `new_keys/<sender>` when its verified sender is
 neither one of this node's replication peers nor in an oracle registry. An overwrite, a
-delete and a refused store count nothing. The registries are read only for such a store
-from a sender outside the replication peers, of a key not held, once per store and before
+delete and a refused store count nothing (such a sender's delete of a key not held leaves
+no tombstone either: see the tombstones below). The registries are read only for such a
+store or delete from a sender outside the replication peers, of a key not held, once per
+store and before
 the persistence lock is taken: while a registry's remote call hangs after the block
 engine's copy expired, each such store waits for that call (about 20 s) on the plugin
 thread, without the lock. A key another thread deletes between that question and the lock
@@ -540,6 +542,15 @@ record that holds a value (one a caller of the previous release could write, as 
 release's API did not refuse the prefix) is not a tombstone: a write of the key never
 removes it, and a delete of the key leaves no tombstone over it (the key is only removed,
 as the previous release removes it; a sync answer's delete copy of the key is skipped).
+
+A store's delete of a key not held, outside the protected namespaces, from a verified
+sender that is neither a replication peer nor in an oracle registry (the senders the new-key
+count below counts) leaves no tombstone and changes nothing. Such senders could otherwise fill
+`CSTORE_TOMBSTONE_CAP` with deletes of keys never written, stamped up to
+`CSTORE_VER_MAX_AHEAD` ahead: the sweep then evicts every real tombstone and raises the
+tombstone horizon, and with it the floor of every later catch-up request, to their stamps.
+A copy of such a key that a peer still holds can come back by a sync or a catch-up, as for
+a delete this node never received.
 
 - Reads never see it: `get` and `hget` of the key return `None`; `hlist`, `hkeys` and
   `hgetall` match only `hs:` keys. No write may name a `dl:` key: a local one raises, a

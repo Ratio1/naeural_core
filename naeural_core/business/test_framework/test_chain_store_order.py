@@ -1013,6 +1013,40 @@ class TestTombstones(unittest.TestCase):
         # The record holds the horizon as the sweep left it, and no marks (this store owes none).
         self.assertEqual(store.storage["hs:cstore_pull"]["value"], {"floor": horizon, "owed": None})
 
+  def test_an_outsiders_delete_of_a_key_not_held_leaves_no_tombstone_and_cannot_raise_the_horizon(self):
+    """In 'report' and 'on', a stamped delete of a key not held from a sender that is neither a replication peer
+    nor in an oracle registry leaves no tombstone; the same delete from a replication peer or from a registry
+    member, and the outside sender's delete of a key held, leave one. 600 such deletes of new keys stamped 59 s
+    ahead then leave the real tombstones and the horizon as they were through the sweep (before, they evicted
+    every real tombstone and set the horizon 59 s ahead)."""
+    # Five real tombstones an hour old.
+    real = {"dl:real%d" % index: tombstone("real%d" % index, "peer1", [NOW_MS - 3_600_000 + index, "peer1"])
+            for index in range(5)}
+    # Each mode that stamps.
+    for mode in ("report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # The signed store (oracle registry "oracle", peers peer1 and peer2), holding a key of the outside sender.
+        store = make(mode, storage={"held": record("held", "v", "out"), **real}, signed=True)
+        # Deletes of keys not held from the outside sender, a replication peer and a registry member, and the
+        # outside sender's delete of the key it holds.
+        for key, sender in (("gone-out", "out"), ("gone-peer", "peer2"), ("gone-oracle", "oracle"), ("held", "out")):
+          # Each delete, stamped by its sender.
+          deliver(store, key, None, sender, [NOW_MS, sender])
+        # Only the outside sender's delete of a key not held left no tombstone; three new ones were counted.
+        self.assertEqual((sorted(key for key in store.storage if key.startswith("dl:") and key not in real),
+                          getattr(store, STATS)["plain/remote/tombstone_new"]),
+                         (["dl:gone-oracle", "dl:gone-peer", "dl:held"], 3))
+        # The flood: 600 deletes of new keys from the outside sender, stamped 59 s ahead.
+        for index in range(600):
+          # Each one.
+          deliver(store, "flood%d" % index, None, "out", [NOW_MS + 59_000, "out"])
+        # The sweep of the next CSTORE_STATS line.
+        store._ChainStoreBasePlugin__sweep_tombstones()
+        # Every real tombstone is held and the horizon is where it was (0: none was ever removed).
+        self.assertEqual((sorted(key for key in real if key in store.storage), store._ChainStoreBasePlugin__tomb_horizon),
+                         (sorted(real), 0))
+
   def test_start_drops_a_tombstone_whose_key_is_held_again(self):
     """on_init ('report') drops the tombstone of a key that is held again (rewritten under the previous release) and
     keeps a tombstone whose key is not held and a "dl:" record holding a value."""

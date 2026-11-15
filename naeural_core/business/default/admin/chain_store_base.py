@@ -3317,13 +3317,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (order switch 'on', or a re-send). An overwrite, a delete, a key of a
     protected namespace, a replication peer's store and a registry
     member's are never refused by it. The registries are read only for
-    such a store from a sender outside the replication peers, of a key not
-    held: one membership question per store, asked before the persistence
-    lock is taken (the key is checked again under it; a key another thread
-    deletes in between is not counted). While the block engine's copy of a
-    registry has expired and its remote call hangs, each such store waits
-    for that call (about 20 s) on the plugin thread, without the lock, and
-    the sender counts as outside the registries.
+    such a store, or such a delete, from a sender outside the replication
+    peers, of a key not held: one membership question per store, asked
+    before the persistence lock is taken (the key is checked again under
+    it; a key another thread deletes in between is not counted). While the
+    block engine's copy of a registry has expired and its remote call
+    hangs, each such store waits for that call (about 20 s) on the plugin
+    thread, without the lock, and the sender counts as outside the
+    registries.
 
     The order rule (``CSTORE_ORDER``, read once at start), after the
     namespace rules and before the token and readonly checks. 'off': no
@@ -3346,7 +3347,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     order rule takes as the held record: an older value arriving after it is
     ``older_than_delete``. A delete of a key not held, or a newer delete over
     a held tombstone, changes only the tombstone: held without a dirty mark
-    and saved at an orderly stop.
+    and saved at an orderly stop. A peer's delete of a key not held, outside
+    the protected namespaces, from a sender outside the replication peers
+    and the oracle registries leaves no tombstone and changes nothing (the
+    key is not held; a tombstone held for it stays as it is): such senders
+    could otherwise fill ``CSTORE_TOMBSTONE_CAP`` with deletes of keys
+    never written, evicting the real tombstones and raising the tombstone
+    horizon, the floor of every later catch-up request, to their own future
+    stamps. A copy of such a key that a peer still holds can then come back
+    by a sync or a catch-up, as for a delete this node never received.
 
     ``error`` is a call that raised before it changed the replica (a bad
     ``timeout`` or ``max_retries``, for example). A local write that changed
@@ -3465,10 +3474,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # Before, the rule read them under the lock, which every writer of the node waits for: a remote call once the
       # block engine's copy has expired (about 20 s for one that hangs, about 152 s with SDK 3.5.71).
       memo = self.__registry_memo() if self.__namespace_for_key(key, self.CS_REGISTRY_NAMESPACES) else {}
-      # For the new-key count below: a peer's store of a value outside the protected namespaces, from a sender outside
-      # the replication peers, of a key not held (read here without the lock; the count checks it again under it),
-      # whose sender is in neither registry. Asked here, before the lock; before, it was asked under it.
-      outsider = (local_sync_storage_op and value is not None and sender not in self.__chain_peers
+      # For the new-key count and the tombstone rule below: a peer's store (a value or a delete) outside the protected
+      # namespaces, from a sender outside the replication peers, of a key not held (read here without the lock; both
+      # check it again under it), whose sender is in neither registry. Asked here, before the lock; before, it was
+      # asked under it, and for values only.
+      outsider = (local_sync_storage_op and sender not in self.__chain_peers
                   and not self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES)
                   and key not in self.__chain_storage and not self.__registry_member(sender))
       if not wait:
@@ -3603,8 +3613,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # with debug off.
             debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
             self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
-          # The sender's membership was asked before the lock; the key is checked again here, under it.
-          if outsider and key not in self.__chain_storage:
+          # The sender's membership was asked before the lock; the key is checked again here, under it. A value only:
+          # an outsider's delete of a key not held creates nothing (below).
+          if outsider and value is not None and key not in self.__chain_storage:
             # A key this replica did not hold, created outside the protected namespaces by a peer's store whose
             # verified sender is in neither oracle registry: counted per sender, and refused only past the limit when
             # one is set. A sender among the replication peers is not counted, so the registries are read only for the
@@ -3617,13 +3628,20 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               return False
             # A new key this sender creates, in the count the limit reads.
             self.__cs_count(f"new_keys/{sender}")
+          if outsider and unchanged:
+            # Such a sender's delete of a key not held (checked under the lock: unchanged) leaves no tombstone, so
+            # it neither fills the tombstone cap nor raises the horizon its sweep keeps. Before, 600 deletes of new
+            # keys stamped 59 s ahead evicted every real tombstone and set the horizon, and with it the floor of
+            # every later catch-up request, 59 s ahead of the wall clock.
+            ver = None
           self.__set_key_value(
             key=key, value=value, owner=owner,
             local_sync_storage_op=local_sync_storage_op,
             readonly=readonly, token=token,
             peers=peers,
             include_default_peers=include_default_peers,
-            # The stamp the record keeps; None with the order switch 'off'.
+            # The stamp the record keeps; None with the order switch 'off', and for an outsider's delete of a key not
+            # held (above), which then leaves no tombstone.
             ver=ver,
           )
           # The record this write left: a wait=False write registers its re-sends below only while it is still held.

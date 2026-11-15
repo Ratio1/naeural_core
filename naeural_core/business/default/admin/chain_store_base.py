@@ -212,6 +212,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     "DEEPLOY_OPERATIONS", "DEEPLOY_NODE_OPERATIONS", "DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS",
     "DAUTH_JOB_SECRET_REVISIONS", NODE_KEY_ROTATIONS_HKEY,
   )
+  # The namespaces whose signed-record rule asks the oracle registries (a coordinator, or the publisher of a job's
+  # secrets, must be a member): a write or a merge of them reads both registries before it takes the persistence lock.
+  CS_REGISTRY_NAMESPACES = ("DEEPLOY_OPERATIONS", "DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS")
+  # Seconds a write made with wait=False waits for the persistence lock at most; held longer, it ends not_ready. Under
+  # a 0.35 CPU limit, while a merge held the lock, such a write took 2 ms (median) and 6 to 45 ms (99th percentile,
+  # three runs) with 1 ms, and 6 ms and 74 ms with 5 ms: a longer wait more often spans a pause of the CPU limit.
+  CS_NOWAIT_LOCK_S = 0.001
   # The signed sequence or revision each signed namespace carries in its values: the first step of the order rule.
   CS_SIGNED_FIELDS = {
     "DEEPLOY_OPERATIONS": "sequence", "DEEPLOY_NODE_OPERATIONS": "sequence", "DEEPLOY_DEPLOYED_JOBS": "revision",
@@ -1564,9 +1571,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     expired is the SDK's: an SDK that remembers no failure makes the remote call again at each question (about
     20 s for one that hangs: 10 s per try, two tries), and one that remembers it answers with the failure at once
     for three times as long as the read took. This code pays that cost once per store, which a failed read
-    refuses, and once per merge: a merge would ask once per signed record its replica lacks, under the
-    persistence lock, so it passes a memo. A memo is never kept beyond its merge, so a change of a registry is
-    read at the next one.
+    refuses, and once per merge, and never under the persistence lock: a write or a merge whose rules ask a
+    registry under the lock reads both registries into a memo before it takes the lock (``__registry_memo``),
+    and a merge would otherwise ask once per signed record its replica lacks. A memo is never kept beyond its
+    write or merge, so a change of a registry is read at the next one.
 
     Examples
     --------
@@ -1598,6 +1606,42 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       return eth_address in {item.lower() for item in allowed}
     except Exception:
       return False
+
+  def __registry_memo(self):
+    """
+    Read both oracle registries into a new memo of ``__registry_member``, before the persistence lock is taken.
+
+    The rules that run under the lock with this memo (the signed-record rule of ``CS_REGISTRY_NAMESPACES``) then
+    ask their questions from it and read no registry while the lock is held.
+
+    Returns
+    -------
+    dict
+      The memo: the dAuth registry and the oracle registry, each read once; a read that failed leaves its registry
+      with no member (fail closed), as ``__registry_member`` does.
+
+    Notes
+    -----
+    Two questions about this node: the first reads the dAuth registry alone, so a failure there (a question ends
+    at its first failed read) does not leave the oracle registry unread; the second reads the oracle registry and
+    takes the dAuth one from the memo. A fresh copy in the block engine costs a few microseconds per read; an
+    expired one costs the remote call (about 20 s for one that hangs), on the caller's thread and outside the
+    lock, where it held every writer of the node before.
+
+    Examples
+    --------
+    >>> memo = self.__registry_memo()                      # one read of each registry
+    >>> self.__registry_member("0xai_an_oracle", memo=memo)  # no read
+    True
+    """
+    # The memo the two questions fill.
+    memo = {}
+    # The dAuth registry alone, then the oracle registry (the dAuth one then comes from the memo).
+    for dauth_only in (True, False):
+      # One question about this node, through the memo.
+      self.__registry_member(self.ee_addr, dauth_only, memo)
+    # Both registries, for the caller's rules under the lock.
+    return memo
 
   def __secret_namespace(self, key):
     """Identify the protected mutable and revision-specific dAuth namespaces."""
@@ -2471,11 +2515,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     is the one whose index (``__hset_index``) ``hkey`` has, the prefix the
     records are selected by.
 
-    The registries this check and the signed-record rule ask are read at
-    most once per merge, each at the first copy that needs it
-    (``__registry_member`` with a memo), and a read that fails is not made
-    again for that merge: the copies whose rule needs that registry are
-    skipped, as each was before after a failing read of its own.
+    The registries this check and the signed-record rule ask are read once
+    per merge, before the persistence lock is taken, for a namespace of
+    ``CS_REGISTRY_NAMESPACES`` (``__registry_memo``; any other namespace
+    reads none), and a read that fails is not made again for that merge: the
+    copies whose rule needs that registry are skipped, as each was before
+    after a failing read of its own. No registry is read under the lock.
 
     Cost, under the persistence lock for the whole answer, measured on the
     node image's interpreter under a 0.35 CPU limit with real signature
@@ -2586,13 +2631,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     order = self.__cs_modes["order"]
     if not isinstance(snapshot, dict):
       return 0
-    # The registries as this merge reads them: each at most once, at its first use, for all the copies of the answer.
-    # Before, each signed copy the replica lacks read them again, under the lock below: with the block engine's copy
-    # expired and the remote call failing, one failing call per copy (about 20 s each for a call that hangs).
-    memo = {}
     # The prefix the records are selected by: the namespace's index, or none for a page of a catch-up, which names
     # no namespace.
     index = "" if hkey is None else self.__hset_index(hkey)
+    # The registries as this merge reads them, each once for all the copies of the answer: for a namespace whose
+    # signed-record rule asks them, both read here, before the persistence lock below. Before, each was read at the
+    # first copy that needed it, under the lock, which every writer of the node waits for (a remote call once the
+    # block engine's copy has expired: about 20 s for one that hangs). Another namespace reads none, nor does a page
+    # of a catch-up, which carries no record of a protected namespace.
+    memo = self.__registry_memo() if self.__namespace_for_key(index, self.CS_REGISTRY_NAMESPACES) else {}
     # The dAuth rule applies to the namespace of that index.
     if self.__secret_namespace(index) and not self.__registry_member(self.ee_addr, dauth_only=True, memo=memo):
       return 0
@@ -3100,7 +3147,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       Not allowed in the protected namespaces (``CS_PROTECTED_NAMESPACES``).
       Once this instance's plugin loop has ended (``done_loop``: a stop, or a
       restart before the next instance publishes its setter) it applies
-      nothing and returns False with the outcome ``not_ready``.
+      nothing and returns False with the outcome ``not_ready``. It waits for
+      the persistence lock at most ``CS_NOWAIT_LOCK_S`` (1 ms): when another
+      thread holds the lock longer (a merge, a save's copy) it applies
+      nothing and returns False with the outcome ``not_ready`` too, and its
+      caller writes again later.
 
     Returns
     -------
@@ -3130,16 +3181,22 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     plugin thread, whose later wait end (``unconfirmed``, ``overwritten``,
     ``refused_by_peers``) is counted as a blocking write's. A delete is
     queued once, as a blocking
-    delete, which does not wait either. The caller's thread takes, and may
-    wait for, the persistence lock for the checks and the apply, as for any
-    write, and once more to register the re-sends, which it does only while
-    the key still holds the record this write left (a newer write by another
-    thread in between owns the key's entry). Other threads hold that lock for
-    whole-store walks: a namespace sync's merge holds it for its whole answer,
-    with one signature check per signed record whose value is not the one
-    held (3 to 4 ms each at 0.35 core: 3 to 5 s measured for 1,000 records a
-    replica lacks), and the save holds it while it copies the replica;
-    a ``wait=False`` write waits for them as any write does.
+    delete, which does not wait either. Other threads hold the persistence
+    lock for whole-store walks: a namespace sync's merge holds it for its
+    whole answer, with one signature check per signed record whose value is
+    not the one held (3 to 4 ms each at 0.35 core: 4 to 5 s measured for
+    1,000 records a replica lacks), and the save holds it while it copies
+    the replica. A blocking write waits for them. A ``wait=False`` write
+    waits at most ``CS_NOWAIT_LOCK_S`` for the lock and then ends
+    ``not_ready``; once it has the lock it keeps it for the checks, the
+    apply, the queueing and the registration of its re-sends (made only
+    while the key still holds the record this write left: a newer write by
+    another thread in between owns the key's entry), and its count.
+
+    No registry is read while the lock is held: the signed-record rule of
+    ``CS_REGISTRY_NAMESPACES`` asks from a memo filled before the lock
+    (``__registry_memo``), and the new-key count's question (below) is
+    asked before it too.
 
     A write that leaves the replica as it was does not mark it for a save: a
     delete of a key this replica does not hold, and a local write whose value
@@ -3158,9 +3215,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     line, by the label ``<bucket>/<origin>/<outcome>``: the bucket is the
     first 14 characters of an ``hs:`` key (the prefix of its hash namespace)
     or ``plain``, the origin is ``local`` or ``remote``, and the outcome is
-    ``changed``, ``identical``, ``absent_delete``, a refusal word,
-    ``error``, or ``not_ready`` (a ``wait=False`` write after the plugin
-    loop ended, whose count no later line carries). ``changed`` says what happened to this replica: a local write
+    ``changed``, ``identical``, ``absent_delete``, a refusal word or
+    ``error``. A ``not_ready`` write (``wait=False`` after the plugin loop
+    ended, or with the lock busy beyond its bound) is not counted: no later
+    line would carry the first, and the second's count would wait for the
+    lock. ``changed`` says what happened to this replica: a local write
     that changed it and then was not confirmed, or raised while waiting, is
     still counted as ``changed``.
 
@@ -3224,10 +3283,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (order switch 'on', or a re-send). An overwrite, a delete, a key of a
     protected namespace, a replication peer's store and a registry
     member's are never refused by it. The registries are read only for
-    such a store from a sender outside the replication peers: one
-    membership question per store, asked under the persistence lock. While
-    the block engine's copy of a registry has expired and its remote call
-    hangs, each such store holds the lock for that call (about 20 s), and
+    such a store from a sender outside the replication peers, of a key not
+    held: one membership question per store, asked before the persistence
+    lock is taken (the key is checked again under it; a key another thread
+    deletes in between is not counted). While the block engine's copy of a
+    registry has expired and its remote call hangs, each such store waits
+    for that call (about 20 s) on the plugin thread, without the lock, and
     the sender counts as outside the registries.
 
     The order rule (``CSTORE_ORDER``, read once at start), after the
@@ -3288,6 +3349,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # Outcome counted once by the finally below: every way out sets its own word, so one left unset is an error
     # (wave 02 counted every other way out as "refused"); and how a local write's wait ended, when it failed.
     outcome, wait_end = "error", None
+    # True while this call holds the persistence lock it took within CS_NOWAIT_LOCK_S (wait=False only): released by
+    # the finally below, after the count.
+    held = False
     try:
       where = "FROM_LOCAL: " if not local_sync_storage_op else "FROM_REMOTE: "
       debug = debug or self.cfg_chain_store_debug
@@ -3363,8 +3427,30 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           # A target outside the dAuth registry would receive a secret.
           outcome = "refused_not_member"
           return False
+      # The registries the signed-record rule of these namespaces asks under the lock below, read here before it.
+      # Before, the rule read them under the lock, which every writer of the node waits for: a remote call once the
+      # block engine's copy has expired (about 20 s for one that hangs, about 152 s with SDK 3.5.71).
+      memo = self.__registry_memo() if self.__namespace_for_key(key, self.CS_REGISTRY_NAMESPACES) else {}
+      # For the new-key count below: a peer's store of a value outside the protected namespaces, from a sender outside
+      # the replication peers, of a key not held (read here without the lock; the count checks it again under it),
+      # whose sender is in neither registry. Asked here, before the lock; before, it was asked under it.
+      outsider = (local_sync_storage_op and value is not None and sender not in self.__chain_peers
+                  and not self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES)
+                  and key not in self.__chain_storage and not self.__registry_member(sender))
+      if not wait:
+        # A write that does not wait takes the lock within CS_NOWAIT_LOCK_S and keeps it to the end of the call (the
+        # finally below releases it), so its re-send registration and its count do not wait for the lock again.
+        held = self.__persistence_lock.acquire(timeout=self.CS_NOWAIT_LOCK_S)
+        if not held:
+          # Held longer by another thread (a merge holds it for its whole answer: about 5 s for 1,000 signed records a
+          # replica lacks, at 0.35 core): nothing is applied, under the word of a write the store cannot take now, and
+          # the caller writes again later. Before, the write waited for the whole hold.
+          outcome = "not_ready"
+          # The False of a write not applied.
+          return False
       with self.__persistence_lock:
-        if not self.__versioned_record(key, value):
+        # The signed-record rule, asking the registries from the memo read above.
+        if not self.__versioned_record(key, value, memo):
           # The signed-record rule of the namespace.
           outcome = "refused_versioned"
           # Not stored; from a peer, not confirmed.
@@ -3483,14 +3569,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # with debug off.
             debug_val = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
             self.P(f" === {where}{action_str} <{key}> = <{debug_val}> by {owner} (orig: {existing_owner}), is_remote={local_sync_storage_op}")
-          if (local_sync_storage_op and value is not None and key not in self.__chain_storage
-              and sender not in self.__chain_peers
-              and not self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES)
-              and not self.__registry_member(sender)):
+          # The sender's membership was asked before the lock; the key is checked again here, under it.
+          if outsider and key not in self.__chain_storage:
             # A key this replica did not hold, created outside the protected namespaces by a peer's store whose
             # verified sender is in neither oracle registry: counted per sender, and refused only past the limit when
             # one is set. A sender among the replication peers is not counted, so the registries are read only for the
-            # other senders' new keys.
+            # other senders' stores of a key not held.
             if 0 < self.__new_keys_max <= self.__cs_stats.get(f"new_keys/{sender}", 0):
               # With a limit set (CSTORE_NEW_KEYS_MAX above 0) and this sender's count of the current CSTORE_STATS
               # period at it: refused under its own word, not stored, not counted as a new key, and not confirmed.
@@ -3546,8 +3630,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             if value is not None:
               # A value is re-sent by the plugin thread (__maybe_resend_unwaited) on the schedule of the wait below,
               # while unconfirmed; a newer wait=False write of the key replaces the entry, and a later blocking write
-              # of another value or a delete ends it at the next lap (counted overwritten). The lock is held for this
-              # check and one dict operation only (the plugin thread walks the dict under it).
+              # of another value or a delete ends it at the next lap (counted overwritten). The lock (the plugin thread
+              # walks the dict under it) is already held by this call since its bounded wait: this takes it again at
+              # once.
               with self.__persistence_lock:
                 if self.__chain_storage.get(key) is mine:
                   # Registered only while the key holds this write's record: a newer write applied since this one's
@@ -3625,10 +3710,17 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       err_msg = f" === Error in _set_value for key {key}[Q:{self.input_queue_size}/{self.cfg_max_inputs_queue_size}]: {e}\n{self.trace_info()}"
       raise ValueError(err_msg)
     finally:
-      # Count this call once for the CSTORE_STATS line, by namespace bucket (the "hs:" prefix of one hash
-      # namespace, or "plain"), origin and outcome, through the one counting helper. Nothing here can raise for
-      # the valid key checked above.
-      self.__cs_count(outcome, key, "remote" if local_sync_storage_op else "local")
+      # A not_ready write is not counted: its count would take the lock it could not get (and one made after the
+      # plugin loop ended has no later line to be counted in).
+      if outcome != "not_ready":
+        # Count this call once for the CSTORE_STATS line, by namespace bucket (the "hs:" prefix of one hash
+        # namespace, or "plain"), origin and outcome, through the one counting helper. Nothing here can raise for
+        # the valid key checked above.
+        self.__cs_count(outcome, key, "remote" if local_sync_storage_op else "local")
+      if held:
+        # The hold this wait=False write took within its bound, released after its count and before anything a
+        # caller's argument could make raise (its result_info).
+        self.__persistence_lock.release()
       if wait_end is not None:
         # A local write whose wait failed: also counted by how it ended.
         self.__cs_count(wait_end, key, "local")

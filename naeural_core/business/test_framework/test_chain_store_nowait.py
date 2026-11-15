@@ -4,6 +4,10 @@ blocking write, an immediate return, and the store's own re-sends at the blockin
 """
 # The send queue a test interleaves a second writer into.
 import collections
+# Another thread that holds the persistence lock, or asks for it during a write.
+import threading
+# The wall time a write takes while the lock is held elsewhere.
+import time
 # The test framework.
 import unittest
 
@@ -16,6 +20,8 @@ from test_chain_store_order import BUCKET, KEY, NOW, NOW_MS, confirm, deliver, m
 
 # The table of the writes owed a re-send, by its private name.
 UNWAITED = "_ChainStoreBasePlugin__unwaited"
+# The store's persistence lock, by its private name.
+LOCK = "_ChainStoreBasePlugin__persistence_lock"
 
 
 def write(store, key, value, wait=False, **kwargs):
@@ -245,6 +251,129 @@ class TestNonBlockingWrite(unittest.TestCase):
     # False, not ready, nothing sent; nothing stored or owed.
     self.assertEqual((write(store, KEY, "v"), KEY in store.storage, getattr(store, UNWAITED)),
                      ((False, "not_ready", 0), False, {}))
+
+  def test_a_non_blocking_write_ends_not_ready_while_another_thread_holds_the_lock(self):
+    """While another thread holds the persistence lock (as a merge holds it for its whole answer), a wait=False write
+    returns False with the outcome not_ready within a fraction of a second, and stores, queues, owes and counts
+    nothing; once the lock is free the same write is stored and queued, and the lock is left free."""
+    # A writer, and its lock.
+    store = make("report")
+    # The lock the other thread holds.
+    lock = getattr(store, LOCK)
+    # Set once the other thread holds the lock, and to let it go.
+    taken, done = threading.Event(), threading.Event()
+
+    def hold():
+      """
+      Stand for a merge: hold the persistence lock until the test is done with it, 2 s at most.
+
+      Returns
+      -------
+      None
+      """
+      # The lock, as the merge's with statement takes it.
+      with lock:
+        # Held.
+        taken.set()
+        # Until the write returned (or 2 s, so a write that waits for the lock ends too).
+        done.wait(2)
+    # The holder, started and holding.
+    holder = threading.Thread(target=hold)
+    # Running.
+    holder.start()
+    # Held from here.
+    taken.wait()
+    # The caller's dict, and the wall time the write starts at.
+    info, started = {}, time.monotonic()
+    # The write, made while the lock is held.
+    result = store._set_value(KEY, "v", owner="node", wait=False, result_info=info)
+    # How long it took.
+    elapsed = time.monotonic() - started
+    # The holder lets go.
+    done.set()
+    # And ends.
+    holder.join()
+    # Not ready, at once; nothing stored, queued, owed or counted.
+    self.assertEqual((result, info, elapsed < 0.5, KEY in store.storage, len(store._ChainStoreBasePlugin__ops),
+                      getattr(store, UNWAITED), getattr(store, STATS)), (False, {"outcome": "not_ready"}, True,
+                                                                         False, 0, {}, {}))
+    # With the lock free, the same write is stored and queued.
+    self.assertEqual(write(store, KEY, "v"), (True, "changed", 1))
+    # Whether another thread then gets the lock at once: the writer let go of it.
+    free = []
+    # That thread: the lock within 0.5 s, given back at once (release() gives None).
+    checker = threading.Thread(target=lambda: free.append(lock.acquire(timeout=0.5) and lock.release() is None))
+    # Run.
+    checker.start()
+    # Ended.
+    checker.join()
+    # It got the lock.
+    self.assertEqual(free, [True])
+
+  def test_a_non_blocking_write_keeps_the_lock_from_its_apply_to_its_count(self):
+    """A thread that asks for the persistence lock while a wait=False write is between its apply and the
+    registration of its re-sends gets it only after the write registered them and counted itself; the write does
+    not wait for that thread a second time and ends at once, stored, queued and owed a re-send."""
+    # A writer.
+    store = make("report")
+    # The lock the other thread asks for.
+    lock = getattr(store, LOCK)
+    # What the other thread saw when it got the lock: the entry owed a re-send and the count.
+    seen = []
+
+    def take():
+      """
+      Stand for a merge that starts during the write: take the lock, note what the write had done, hold it 0.3 s.
+
+      Returns
+      -------
+      None
+      """
+      # Waits while the write holds the lock (2 s at most, so a write that never lets go fails instead of hanging).
+      got = lock.acquire(timeout=2)
+      # Whether it got the lock, and the write's entry and count as far as they exist now.
+      seen.append((got, list(getattr(store, UNWAITED)), dict(getattr(store, STATS))))
+      # Held a while, as a merge holds it.
+      time.sleep(0.3)
+      if got:
+        # Given back.
+        lock.release()
+    # The other thread, started when the write queues its store (after its apply, before its registration).
+    taker = threading.Thread(target=take)
+
+    class Queue(collections.deque):
+      """The send queue, which starts the other thread when the write queues its store and lets it ask for the lock."""
+
+      def append(self, op):
+        """
+        Queue ``op``, then start the thread that asks for the lock and give it 0.1 s to ask.
+
+        Parameters
+        ----------
+        op : dict
+          The store queued.
+
+        Returns
+        -------
+        None
+        """
+        # Queued.
+        super().append(op)
+        # The other thread asks for the lock now.
+        taker.start()
+        # Time for it to reach the lock (a lock let go here would be taken by it within this time).
+        time.sleep(0.1)
+    # The store's send queue.
+    store._ChainStoreBasePlugin__ops = Queue()
+    # The wall time the write starts at.
+    started = time.monotonic()
+    # The write: stored, queued and owed a re-send, in well under the other thread's 0.3 s hold.
+    self.assertEqual((store._set_value(KEY, "v", owner="node", wait=False), time.monotonic() - started < 0.3,
+                      list(getattr(store, UNWAITED))), (True, True, [KEY]))
+    # The other thread ends.
+    taker.join()
+    # It got the lock, only after the write's registration and count.
+    self.assertEqual(seen, [(True, [KEY], {BUCKET + "/local/changed": 1})])
 
   def test_a_delete_is_queued_once_and_owes_no_resend(self):
     """A wait=False delete returns True with its outcome (changed), sends one store and owes no re-send."""

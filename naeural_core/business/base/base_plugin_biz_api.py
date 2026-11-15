@@ -505,17 +505,21 @@ class _BasePluginAPIMixin:
       (every peer settled, one at least by a refusal answer) for a write applied here whose wait failed;
       ``error`` when the call raised (a value that is not JSON, a bad timeout, ``wait=False`` in a protected
       namespace, and so on); ``not_ready`` for a
-      ``wait=False`` call made before the chain store started, or after its plugin loop ended.
+      ``wait=False`` call made before the chain store started, after its plugin loop ended, or while the store's
+      persistence lock stayed held longer than the call waits for it (1 ms): nothing was stored, and the same
+      write can be made again later.
 
     wait : bool, optional
       True (the default) waits for the chain store to start and for the confirmations, as before. False runs
       every check and the local apply of a blocking write, queues the same store and returns without waiting
-      for any confirmation (it still takes the store's persistence lock, as any write does): True when
+      for any confirmation: True when
       the write was stored here and queued (the store re-sends it while it is unconfirmed, as the blocking wait
       would), False on a refusal, as a blocking write. It never waits for the store to start: before the store
       started, and after the chain-store plugin's loop ended (a stop, or a restart before the next instance
-      starts), it returns False with outcome ``not_ready`` and stores nothing. Refused (``error``) in the
-      protected namespaces, whose callers rely on the confirmation.
+      starts), it returns False with outcome ``not_ready`` and stores nothing. It waits at most 1 ms for the
+      store's persistence lock, which a namespace sync's merge holds for seconds: held longer, it returns False
+      with outcome ``not_ready`` and stores nothing as well, and the caller writes again later. Refused
+      (``error``) in the protected namespaces, whose callers rely on the confirmation.
 
     Returns
     -------
@@ -749,7 +753,8 @@ class _BasePluginAPIMixin:
       ``chainstore_set``. Default is None, which changes nothing.
     wait : bool, optional
       True (the default) waits for the confirmations; False returns without waiting for any confirmation once
-      the write is stored here and queued (it still takes the store's persistence lock), as in ``chainstore_set``.
+      the write is stored here and queued (it waits at most 1 ms for the store's persistence lock, else it ends
+      ``not_ready``), as in ``chainstore_set``.
 
     Returns
     -------

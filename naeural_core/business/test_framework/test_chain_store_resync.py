@@ -841,6 +841,118 @@ class TestMergeRegistryReads(unittest.TestCase):
     self.assertEqual(reads, ["dauth", "oracles"])
 
 
+class TestRegistryReadsOutsideTheLock(unittest.TestCase):
+  """No registry is read while the persistence lock is held, on any path whose rules ask a registry."""
+
+  def test_no_registry_is_read_while_the_persistence_lock_is_held(self):
+    """A local write and a peer's store of each of the three namespaces whose signed-record rule asks the registries,
+    a peer's store of a new key from a sender outside the replication peers, and a merge of each of the three
+    namespaces all read a registry, and none while the reading thread holds the persistence lock; also when the
+    dAuth registry's read fails, so the oracle registry must still be read before the lock. The same sender's
+    overwrite of a key held reads no registry at all."""
+    # A deployment operation, signed by the coordinator "oracle".
+    ops_key, ops = operation("x", 1)
+    # The field of job 7's pointer, and the field of job 8's current secrets.
+    job_key, secret_key = _hset_key("DEEPLOY_DEPLOYED_JOBS", "7"), _hset_key("DAUTH_JOB_SECRETS", "8")
+    # Job 8's secrets, published by the dAuth member "peer1" for the coordinator "oracle".
+    secret = {"job_id": "8", "deployment_revision": 1, "operation_id": "op", "coordinator": "oracle",
+              "EE_SENDER": "peer1", "EE_SIGN": "valid"}
+    # A plain key the replica holds, for the overwrite.
+    held_key = _hset_key("players", "held")
+    # Each path, as a call on a store.
+    paths = {
+      # A local write of an operation (blocking: one round of 0.1 s on the harness's clock).
+      "local operation": lambda store: store._set_value(ops_key, ops["value"], owner="node", timeout=.1,
+                                                        max_retries=0),
+      # A peer's store of a signed pointer, and of versioned secrets.
+      "peer pointer": lambda store: store._set_value(job_key, dict(SIGNED_POINTER), owner="oracle",
+                                                     local_sync_storage_op=True, sender="oracle"),
+      # The secrets.
+      "peer secrets": lambda store: store._set_value(secret_key, secret, owner="peer1", local_sync_storage_op=True,
+                                                     sender="peer1"),
+      # A new key from a sender outside the replication peers.
+      "peer new key": lambda store: store._set_value(_hset_key("players", "w"), "v", owner="worker",
+                                                     local_sync_storage_op=True, sender="worker"),
+      # The same sender's overwrite of a key held (no new-key question): the key is stored first.
+      "peer overwrite": lambda store: store.storage.update({held_key: record(held_key, "u", "worker")}) or (
+        store._set_value(held_key, "v", owner="worker", local_sync_storage_op=True, sender="worker")),
+      # A merge of each namespace.
+      "merge operations": lambda store: getattr(store, MERGE)("DEEPLOY_OPERATIONS", {ops_key: ops}),
+      # The pointers.
+      "merge pointers": lambda store: getattr(store, MERGE)("DEEPLOY_DEPLOYED_JOBS", {
+        job_key: record(job_key, dict(SIGNED_POINTER), "oracle")}),
+      # The secrets.
+      "merge secrets": lambda store: getattr(store, MERGE)("DAUTH_JOB_SECRETS", {
+        secret_key: record(secret_key, secret, "oracle")}),
+    }
+    # Each path, with the dAuth registry's read working and failing.
+    for (name, run), dauth_fails in itertools.product(paths.items(), (False, True)):
+      # One sub-test each.
+      with self.subTest(path=name, dauth_fails=dauth_fails):
+        # A dAuth member's replica in 'report'.
+        store = oracle("report")
+        # Its persistence lock.
+        lock = store._ChainStoreBasePlugin__persistence_lock
+        # Each registry read: the registry and whether the reading thread held the lock.
+        reads = []
+
+        def read(registry, members, fails=False):
+          """
+          Build a registry read that records whether the reading thread holds the persistence lock.
+
+          Parameters
+          ----------
+          registry : str
+            The registry's name, as recorded.
+          members : list of str
+            What the read returns.
+          fails : bool, optional
+            True for a read that raises, as the block engine lets a failed remote call out. False by default.
+
+          Returns
+          -------
+          callable
+            The read.
+
+          Examples
+          --------
+          >>> read("oracles", ["oracle"])()
+          ['oracle']
+          """
+
+          def registry_read():
+            """
+            Record the read with the lock's state, then return the members or raise.
+
+            Returns
+            -------
+            list of str
+              The members.
+
+            Raises
+            ------
+            RuntimeError
+              For a read that fails.
+            """
+            # The registry, and whether this thread holds the lock.
+            reads.append((registry, lock._is_owned()))
+            if fails:
+              # As the block engine lets the remote call's error out.
+              raise RuntimeError("registry call failed")
+            # The members.
+            return list(members)
+          # The read.
+          return registry_read
+        # The dAuth registry (working or failing) and the oracle registry.
+        store.bc.get_eth_dauth_oracles = read("dauth", ["node", "peer1"], dauth_fails)
+        # The oracle registry.
+        store.bc.get_eth_oracles = read("oracles", ["oracle"])
+        # The path.
+        run(store)
+        # Registries were read (none for the overwrite), and none while the lock was held.
+        self.assertEqual((bool(reads), [registry for registry, held in reads if held]), (name != "peer overwrite", []))
+
+
 class TestResyncStart(unittest.TestCase):
   """on_init leaves the resync ready for the first lap that finds a peer."""
 

@@ -586,9 +586,10 @@ class FastApiWebAppPlugin(BasePlugin):
     -----
     An exception raised here is logged in red and the monitor goes on admitting requests, as for ``on_request``.
     The work must stay short: requests wait at the door while it runs. A chain-store write with ``wait=False``
-    waits neither for confirmations nor for the plugin thread, but it does wait for the chain store's
-    persistence lock, which other threads hold for whole-store walks: a namespace sync's merge holds it for its
-    whole answer, with one signature check per signed record (about 3 s for 1,000 signed records at 0.35 core).
+    waits neither for confirmations nor for the plugin thread, and at most 1 ms for the chain store's
+    persistence lock, which other threads hold for whole-store walks (a namespace sync's merge holds it for its
+    whole answer, about 5 s for 1,000 signed records a replica lacks at 0.35 core): held longer, the write
+    stores nothing and ends ``not_ready``, and the caller writes again later.
 
     Examples
     --------

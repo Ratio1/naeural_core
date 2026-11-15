@@ -335,7 +335,10 @@ a read that failed: the copies whose rule needs that registry are then skipped. 
 engine keeps a registry for ten minutes; what a failed read costs after that is the SDK's
 (one that remembers no failure makes the remote call again at each question, about 20 s for
 a call that hangs). Without the memo a merge would ask once per signed copy the replica
-lacks.
+lacks. No registry is read under the persistence lock: a merge of `DEEPLOY_OPERATIONS`,
+`DEEPLOY_DEPLOYED_JOBS` or `DAUTH_JOB_SECRETS`, and a write to one of them, read both
+registries before taking it (any other namespace reads none), so a slow or failing read
+holds only the thread that makes it, not every writer of the node.
 
 In every merge, a caller's `hsync` included, a copy whose value is a dict equal to the one
 held under its key is not put through the signed-record rule while it leaves everything
@@ -452,9 +455,11 @@ did not hold, outside the protected namespaces (the five signed ones and
 `DAUTH_JOB_SECRET_REVISIONS`), counts `new_keys/<sender>` when its verified sender is
 neither one of this node's replication peers nor in an oracle registry. An overwrite, a
 delete and a refused store count nothing. The registries are read only for such a store
-from a sender outside the replication peers, once per store and under the persistence
-lock: while a registry's remote call hangs after the block engine's copy expired, each
-such store holds the lock for that call (about 20 s). The per-sender counts of a period show how
+from a sender outside the replication peers, of a key not held, once per store and before
+the persistence lock is taken: while a registry's remote call hangs after the block
+engine's copy expired, each such store waits for that call (about 20 s) on the plugin
+thread, without the lock. A key another thread deletes between that question and the lock
+is not counted. The per-sender counts of a period show how
 many keys a node outside the oracles adds, which is what a limit is set from.
 
 The limit is the number `CSTORE_NEW_KEYS_MAX` of the plugin config, read once at start
@@ -818,16 +823,26 @@ after the chain-store plugin's loop ended (a stop, or a restart before the next 
 publishes its setter), it stores nothing and returns `False` with the outcome
 `not_ready`. The record and the message are those of a blocking write.
 
+It waits at most `CS_NOWAIT_LOCK_S` (1 ms) for the chain store's persistence lock, which
+other threads hold for whole-store walks: a namespace sync's merge holds it for its whole
+answer, with one signature check per signed record whose value is not the one held (3 to
+4 ms each at 0.35 core, so 4 to 5 s for 1,000 records a replica lacks), and the save holds
+it while it copies the replica. Held longer, the write stores nothing and returns `False`
+with the outcome `not_ready`, and the caller writes again later; before, it waited for the
+whole hold. Once it has the lock it keeps it to its end (the apply, the queueing, the
+registration of its re-sends and its count), so it never waits for it twice. A `not_ready`
+write is not counted in `CSTORE_STATS`. Measured on the node image's interpreter under a
+0.35 CPU limit, while a merge of 1,000 signed records the replica lacked held the lock: the
+write took 2 ms (median) and 6 to 45 ms (99th percentile, three runs), where it waited
+4.9 s (median); in an idle store 0.1 to 0.2 ms. A node where a save or a merge holds the lock for more than 1 ms about
+1 % of the time sees about 1 % of such writes end `not_ready`.
+
 Web apps get a hook, `on_request_monitor_tick()`, run on the request monitor thread
 before each read of the server queue (about every 0.25 s while idle, and after each
 request); it does nothing in the base web app, and an exception in it is logged and does
-not stop the admission of requests. A non-blocking chain-store write from it does not
-wait for the plugin thread, which a hung endpoint can hold, but like any write it takes
-the chain store's persistence lock, which other threads hold for whole-store walks: a
-namespace sync's merge holds it for its whole answer, with one signature check per
-signed record whose value is not the one held (about 3 ms each at 0.35 core, so 3 s for
-1,000 records a replica lacks), and the save holds it
-while it copies the replica. The write waits for as long.
+not stop the admission of requests. A non-blocking chain-store write from it waits neither
+for the plugin thread, which a hung endpoint can hold, nor for more than 1 ms for the
+persistence lock (above).
 
 ## Cost line in the node log (`CSTORE_STATS`)
 
@@ -895,7 +910,7 @@ Labels in `counts`:
 - `saves_deferred` (save back-off `report` or `on`): periodic saves of a changed replica inside the back-off pause; skipped in `on`, made anyway in `report`, where `saves - saves_deferred` is what `on` would have saved.
 - `save_cpu_ms` (save back-off `report` or `on`): CPU milliseconds the periodic saves took on the save thread.
 
-A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to read the same word as `result_info["outcome"]` (the wait end when there is one, `not_ready` for a `wait=False` call before the store started or after its loop ended, `error` when the call raised); the returned bool is unchanged.
+A caller of `chainstore_set` or `chainstore_hset` can pass `result_info={}` to read the same word as `result_info["outcome"]` (the wait end when there is one, `not_ready` for a `wait=False` call before the store started, after its loop ended or while the persistence lock stayed held longer than 1 ms, `error` when the call raised); the returned bool is unchanged. A `not_ready` call is not counted in `counts`.
 
 ## Census line in the node log (`CSTORE_CENSUS`)
 

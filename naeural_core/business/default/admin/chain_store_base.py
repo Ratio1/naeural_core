@@ -110,7 +110,9 @@ _CONFIG = {
   "CSTORE_NEW_KEYS_MAX" : 0,
   # How many oracles the catch-up after a start asks, one after the other, for the records this node missed while it
   # was away (0: none). With CSTORE_HANDOFF not 'off' and this number above 0, each start keeps in the replica, per
-  # writer, the newest stamp it holds (the marks): what a catch-up of that start has to ask for.
+  # writer, the newest stamp it holds (the marks), and an oracle then asks that many others for what is stamped
+  # after them. The catch-up follows the CSTORE_HANDOFF switch: with 'off' a node neither asks nor answers, with
+  # 'report' it asks, answers and counts what it would change, with 'on' it applies it.
   "CSTORE_PULL_PEERS" : 2,
 
   'VALIDATION_RULES' : { 
@@ -196,6 +198,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   CS_PULL_PAGE_BYTES = 262_144
   # Seconds between two pages a node sends, whoever asks.
   CS_PULL_GAP = 8
+  # Seconds: how long the answer to a catch-up request is waited for, the pause after a series and before a new
+  # round over the oracles, and how long after the start an unfinished catch-up stops asking.
+  CS_PULL_TIMEOUT, CS_PULL_PAUSE, CS_PULL_GIVE_UP = 10, 120, 3600
   # The hand-off: seconds between two sweeps, re-sends per sweep, re-sends per record and peer before giving up,
   # the longest gap of the back-off, and how long before a lost peer was dropped its settlements are re-opened.
   CS_HANDOFF_INTERVAL, CS_HANDOFF_BUDGET, CS_HANDOFF_MAX_SENDS, CS_HANDOFF_MAX_GAP = 15, 32, 6, 3600
@@ -331,6 +336,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     key prefixes no page carries (the tombstones' own, the reserved key and the indexes of the six protected
     namespaces) and notes that no page was sent yet.
 
+    A start that takes marks also starts its catch-up (``__maybe_pull``), in memory only: no oracle asked yet,
+    the first request due at the first lap. A start that takes none runs no catch-up.
+
     The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
     and the plugin does not start, where it used to start empty and fail at its first save. A file that
     held a legitimately empty store is renamed too; that loses nothing. A store that is empty because there
@@ -385,8 +393,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       "order": self.cfg_cstore_order, "lean_confirm": self.cfg_cstore_lean_confirm,
       "handoff": self.cfg_cstore_handoff, "save_backoff": self.cfg_cstore_save_backoff,
     }
-    # Monotonic time before which the save back-off defers a save: none before the first save, which is immediate.
-    self.__save_resume = 0.0
+    # Monotonic time before which the save back-off defers a save: none before the first save, which is immediate;
+    # and the wall time the last save took, none yet (the catch-up paces its requests by it).
+    self.__save_resume = self.__save_took = 0.0
     # The replica is loaded: from here the SerializationManager saves it every CS_SAVE_INTERVAL seconds when
     # it changed. A full save took this plugin's thread 0.26 s on an idle node and 1.3 s on a busy one
     # (5 MB, 0.7 CPU), during which it confirmed no write; the thread no longer runs the save. Registered
@@ -492,7 +501,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # of the wall clock: no record stamped below it may come back by a catch-up. It is now kept across restarts, in
     # the reserved record (before, it started at 0 with each start); and the marks a catch-up still owes (None:
     # nothing owed), kept there too.
-    self.__tomb_horizon, self.__pull_owed = floor, owed
+    self.__tomb_horizon, self.__pull_owed, self.__pull = floor, owed, None
     if self.__cs_modes["handoff"] != "off" and self.__pull_peers > 0:
       # The marks of this start: per writer, the newest stamp time held that is not a future one. Taken here, before
       # the setter is published, so no write of this run can raise one first.
@@ -511,6 +520,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                "deleted on the network meanwhile are still held here, and no catch-up removes them", color='r')
       # The record as this start leaves it, in memory: it reaches the file with the next save of a changed replica.
       self.__pull_keep()
+      # The catch-up of this start (memory only): the oracle asked now, those tried in this round and in all, the
+      # series that ended and those among them with no partial page, the request in flight, the time of the next
+      # request and the start.
+      self.__pull = dict(peer=None, tried=set(), tries=0, done=0, full=0, request=None, next=0, start=self.time())
     # When this node sent its last page (none yet), and the key prefixes no page carries: the tombstones' own (a
     # tombstone travels under the key it deleted), the reserved key and the six protected namespaces.
     self.__pull_sent, self.__pull_skip = 0, (
@@ -563,7 +576,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     origin : str, optional
       Where the event came from, used only with ``key``: ``"local"`` or ``"remote"`` for a write, ``"hsync"``
       for a copy of a sync answer or a sync message, ``"confirm"`` for a confirmation, ``"resync"`` for the
-      store's own resync, ``"handoff"`` for the hand-off's re-sends.
+      store's own resync, ``"handoff"`` for the hand-off's re-sends, ``"pull<n>"`` for a copy of a page of the
+      n-th series of a catch-up.
     n : int, optional
       How much to add, 1 by default (a sum such as milliseconds can add more).
 
@@ -1448,7 +1462,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       changed, so the first call after the pause saves it.
 
     In ``'report'`` and ``'on'`` every save also adds its CPU time on the save thread, in milliseconds, to
-    ``save_cpu_ms``.
+    ``save_cpu_ms``, and its wall time d is kept: the catch-up after a start waits ten times d between two of
+    its requests (``__pull_take``). In ``'off'`` no clock is read, so d stays 0 there.
 
     Returns
     -------
@@ -1501,12 +1516,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__save_chain_storage()
     # The CPU milliseconds this save took on the save thread, summed per CSTORE_STATS line.
     self.__cs_count("save_cpu_ms", n=round(1000 * (thread_time() - cpu)))
+    # The wall time this save took, d, kept for the catch-up's pace as well (a float, read on the plugin thread).
+    self.__save_took = monotonic() - started
     if not deferred:
       # The next save waits until min(CSTORE_SAVE_MAX_GAP, 10 x d) after this one started, d being its wall time:
       # saves then take at most 10 % of the wall time while d is 3 s or less (at the 30 s default), and two save
       # starts are at most the ceiling plus one cadence (5 s) and the manager's check (1 s) apart for any d up
       # to the ceiling.
-      self.__save_resume = started + min(self.__save_max_gap, 10 * (monotonic() - started))
+      self.__save_resume = started + min(self.__save_max_gap, 10 * self.__save_took)
     return
 
 
@@ -1969,7 +1986,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       The composed key it came with. When given, a malformed stamp is counted as ``ver_invalid`` under its
       bucket; None (the default) counts nothing, for a second look at a stamp already counted.
     origin : str, optional
-      ``"remote"`` or ``"hsync"``: where the stamp came from, for that count.
+      ``"remote"``, ``"hsync"`` or ``"pull<n>"`` (a page of a catch-up): where the stamp came from, for that count.
 
     Returns
     -------
@@ -2068,7 +2085,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     sender : str or None
       The verified address of the node that sent a live remote write; not read for other origins.
     origin : str
-      ``"local"``, ``"remote"`` (a live store from a peer) or ``"hsync"`` (a record of a peer's sync answer).
+      ``"local"``, ``"remote"`` (a live store from a peer), ``"hsync"`` (a record of a peer's sync answer) or
+      ``"pull<n>"`` (a record of a page of a catch-up, judged as a sync copy and counted under its own origin).
 
     Returns
     -------
@@ -2109,7 +2127,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       if ver is not None:
         # A stamp taken: the clock moves up to it, and the lead of the stamp over the wall clock is kept for the line.
         self.__ver_clock, self.__ver_lead = max(self.__ver_clock, ver[0]), max(self.__ver_lead, ver[0] - now)
-      if held is None or (origin != "hsync" and held[self.CS_VALUE] == value):
+      if held is None or (origin in ("local", "remote") and held[self.CS_VALUE] == value):
         # Steps 3 and 4: nothing held, or an identical write.
         return None
       # Step 5: the namespace's signed field first (none outside the signed namespaces), then cs_rev; a copy of the
@@ -2171,7 +2189,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       The node making the write: this node for a local write, the verified sender for a remote one, the stamp's
       address (not verified) for a sync copy; None for an unstamped copy.
     origin : str
-      ``"local"``, ``"remote"`` or ``"hsync"``, for the count's label.
+      ``"local"``, ``"remote"``, ``"hsync"`` or ``"pull<n>"`` (a copy of a page of a catch-up), for the count's
+      label. A page's copy over a readonly record reaches here only under that record's owner: the catch-up skips
+      a copy for a record that is readonly for another owner.
 
     Returns
     -------
@@ -2413,16 +2433,25 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return snapshot
 
 
-  def __merge_hset_snapshot(self, hkey, snapshot):
+  def __merge_hset_snapshot(self, hkey, snapshot, origin="hsync", dry=False):
     """
     Merge one peer-exported snapshot into the local replica.
 
     Parameters
     ----------
-    hkey : str
-      Logical hash namespace being refreshed.
+    hkey : str or None
+      Logical hash namespace being refreshed; None for a page of a catch-up, which names no namespace: every
+      record of it is read, whatever its key.
     snapshot : dict
       Snapshot payload exported by a peer for ``hkey``.
+    origin : str, optional
+      The origin the copies are counted under: ``"hsync"`` (the default) for a namespace-sync answer,
+      ``"pull<n>"`` for a page of the n-th series of a catch-up.
+    dry : bool, optional
+      True runs every rule and count and changes nothing: no record is stored or removed, no stamp raised, no
+      mark set for a save. False (the default) merges. The one change it does not hold back is the removal of a
+      held payload of a revoked secret revision, which only a ``DAUTH_JOB_SECRET_REVISIONS`` copy reaches: the
+      catch-up, its only caller with True, drops such copies before the merge.
 
     Returns
     -------
@@ -2533,6 +2562,19 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     persistence lock. A merge that an exception ends at one copy has stored
     and marked the copies before it; the copies after it are not read.
 
+    A page of a catch-up (``__pull_take``) goes through the same rules, with
+    no namespace, under its own origin: each count above then carries
+    ``pull<n>`` where it says ``hsync``. A copy the order rule admits is also
+    counted by what it would change: ``<bucket>/pull<n>/same`` for a copy of
+    the record held (value, owner, readonly mark and token; sent for
+    nothing), else ``missing`` when neither a record nor a tombstone is held
+    under its key, ``newer`` when what is held carries a stamp and
+    ``over_legacy`` when it carries none. A copy the rule gives a word is
+    counted under that word only. With ``dry`` (the catch-up in 'report')
+    these counts are what a merge would do, and nothing is changed; the
+    order rule still moves the stamp clock up to a stamp it takes. A value
+    is copied only where it is stored, so a dry merge copies none.
+
     Examples
     --------
     >>> self.__merge_hset_snapshot("players", {key: record})
@@ -2546,12 +2588,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # Before, each signed copy the replica lacks read them again, under the lock below: with the block engine's copy
     # expired and the remote call failing, one failing call per copy (about 20 s each for a call that hangs).
     memo = {}
-    # The dAuth rule applies to the namespace of the index hkey has, the prefix the records are selected by below.
-    if self.__secret_namespace(self.__hset_index(hkey)) and not self.__registry_member(
-        self.ee_addr, dauth_only=True, memo=memo):
+    # The prefix the records are selected by: the namespace's index, or none for a page of a catch-up, which names
+    # no namespace.
+    index = "" if hkey is None else self.__hset_index(hkey)
+    # The dAuth rule applies to the namespace of that index.
+    if self.__secret_namespace(index) and not self.__registry_member(self.ee_addr, dauth_only=True, memo=memo):
       return 0
 
-    index = self.__hset_index(hkey)
     merged_fields = 0
     with self.__persistence_lock:
       for key, record in snapshot.items():
@@ -2568,7 +2611,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         value = record.get(self.CS_VALUE)
         # The copy's stamp, checked for form (a malformed one counts ver_invalid and is unstamped); none is read
         # with the order switch 'off'.
-        ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, "hsync")
+        ver = None if order == "off" else self.__ver_valid(record.get(self.CS_VER), key, origin)
         # The record held under the key ({} when none): a copy's value is compared with its value, and the record the
         # copy would be stored as with the whole of it.
         held = self.__chain_storage.get(key, {})
@@ -2582,9 +2625,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           # unstamped, it is skipped as before. In 'report' the rules below run and count, and a delete 'on' would
           # apply over a value held here is counted as ver_copy_delete.
           if (ver is not None and self.__versioned_record(key, None) and not self.__stale_revision(key, None, True)
-              and self.__ver_admit(key, None, ver, None, "hsync") is None and key in self.__chain_storage):
+              and self.__ver_admit(key, None, ver, None, origin) is None and key in self.__chain_storage):
             # The value 'on' would remove.
-            self.__cs_count("ver_copy_delete", key, "hsync")
+            self.__cs_count("ver_copy_delete", key, origin)
           continue
         # A copy whose value equals the one held under the key is not put through the signed-record rule here (one
         # signature check per record of a signed namespace): most such copies leave everything but the stamp as it is.
@@ -2640,12 +2683,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           word = self.__wire_refusal(key, value, record.get(self.CS_OWNER), readonly, token, ver)
           if word is not None:
             # Skipped and counted as a refused write is, under the key's bucket; the rest of the answer is merged.
-            self.__cs_count("refused_" + word, key, "hsync")
+            self.__cs_count("refused_" + word, key, origin)
             # Before the order rule, which then neither counts nor takes the stamp of a copy refused here.
             continue
         # The order rule's word for the copy (counted as ver_<word>; it also moves the clock up to a stamp taken),
         # None when admitted or with the order switch 'off'.
-        reason = None if order == "off" else self.__ver_admit(key, value, ver, None, "hsync")
+        reason = None if order == "off" else self.__ver_admit(key, value, ver, None, origin)
         # The record the copy is compared with: the key's, or for a delete the tombstone held for it.
         local_record = self.__chain_storage.get(self.CS_DEL + key if value is None else key)
         if isinstance(local_record, dict):
@@ -2654,11 +2697,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           same_readonly = local_record.get(self.CS_READONLY, False) == readonly
           same_token = local_record.get(self.CS_TOKEN, None) == token
           if same_owner and same_value and same_readonly and same_token:
-            if reason is None and ver is not None and ver > (local_record.get(self.CS_VER) or []):
+            if reason is None and ver is not None and ver > (local_record.get(self.CS_VER) or []) and not dry:
               # The same record with a newer stamp the rule admits: the stamp is raised in place, with no dirty mark
               # (nothing is saved for an equal copy), so it reaches the file with the next save or the save of an
               # orderly stop.
               local_record[self.CS_VER], self.__chain_storage_unmarked = ver, True
+            if reason is None and origin != "hsync":
+              # A page's copy of the record held: sent for nothing.
+              self.__cs_count("same", key, origin)
             continue
         if reason is not None and order == "on":
           # Older than the held record by the order rule (or a future, unstamped or losing copy): skipped in 'on'; in
@@ -2672,17 +2718,24 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           continue
         if order != "off":
           # The write-permission count, only counted; a copy's writer is its stamp's address, which nothing verifies.
-          self.__perm_count(key, value, record.get(self.CS_OWNER), token, ver and ver[1], "hsync")
+          self.__perm_count(key, value, record.get(self.CS_OWNER), token, ver and ver[1], origin)
+        if reason is None and origin != "hsync":
+          # A page's copy the order rule admits over what is held: the key's record, else the tombstone of its delete.
+          was = held or self.__chain_storage.get(self.CS_DEL + key)
+          # What the catch-up repairs, by what was held: nothing, a stamped record, or one without a stamp.
+          self.__cs_count("missing" if not was else "newer" if was.get(self.CS_VER) else "over_legacy", key, origin)
 
         # The copy lands under its key, a delete under "dl:" and its key; the other of the two goes, so a key and its
         # tombstone are never both held.
         name, other = (self.CS_DEL + key, key) if value is None else (key, self.CS_DEL + key)
         if value is None and key in self.__chain_storage:
           # In 'on' only: a delete a peer holds removes a value held here.
-          self.__cs_count("ver_copy_delete", key, "hsync")
+          self.__cs_count("ver_copy_delete", key, origin)
         if value is None and name not in self.__chain_storage:
           # A new tombstone, counted per bucket as a live delete's is.
-          self.__cs_count("tombstone_new", key, "hsync")
+          self.__cs_count("tombstone_new", key, origin)
+        if dry:
+          continue
         if value is None or self.__held_tombstone(key):
           # Dropped: the value a delete removes, or the tombstone a value replaces (only a tombstone, and not with
           # the order switch 'off'; another record under "dl:" stays).
@@ -4395,6 +4448,231 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     }}, peers=sender, include_default_peers=False)
 
 
+  def __maybe_pull(self):
+    """
+    The catch-up of this start: send the next request for the records this node missed while it was away, when due.
+
+    ``on_init`` leaves the marks this start owes (per writer, the newest stamp time held) and, with
+    ``CSTORE_HANDOFF`` not 'off' and ``CSTORE_PULL_PEERS`` above 0, the state of one catch-up. It runs series,
+    each with another oracle picked at random among the replication peers that are registry members; only a
+    registry member asks. A series is a chain of requests to one oracle, each for the page after the cursor of
+    the page before, until a page says no more follows. Each lap:
+
+    1. nothing owed (no catch-up, or it ended): nothing to do;
+    2. more inputs queued than one lap takes (``MAX_INPUTS_PER_ITERATION``): nothing is sent, and the wait of a
+       request in flight starts again, as its answer may be in the queue;
+    3. a request in flight, or the time of the next request not come: wait;
+    4. a request whose wait ended unanswered counts ``pull_no_answer`` and ends the series with that oracle;
+    5. ``CS_PULL_GIVE_UP`` (3600 s) after the start: the catch-up stops asking for this run, with one red line
+       when it had asked anyone; the marks stay owed in the replica, and the next start asks again;
+    6. no oracle in hand: pick one not tried in this round and start a series from the beginning; none left (or
+       this node in no registry): a new round after ``CS_PULL_PAUSE`` (120 s);
+    7. send ``SHSYNC_REQ {request_id, pull: {since, floor, after}}`` to that oracle and register it as the
+       store's own pending request, to be forgotten ``CS_PULL_TIMEOUT`` (10 s) later.
+
+    ``since`` is each owed mark less a margin of twice ``CSTORE_VER_MAX_AHEAD``, so each writer's stamps are
+    compared only with that writer's own mark, never with a wall clock or another writer's stamps. ``floor`` is
+    computed for each request: the larger of the tombstone horizon and now less ``CSTORE_TOMBSTONE_DAYS`` plus
+    the same margin; no record stamped below it is asked for, so a key whose delete this node no longer
+    remembers cannot come back. The seconds by which the floor lies above the lowest ``since`` are kept as the
+    period's largest ``pull<n>_cut_s`` (n: the series; present with 0 when nothing was cut): above 0, part of
+    what a mark asks for can no longer be asked for. The mark of a writer whose newest record is older than
+    the floor gives a cut too, although nothing may be missing from it.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Runs on the plugin thread from ``process``, every lap, after the peer refresh and before the resync's step.
+    A lap with nothing owed costs under a microsecond. The registries are read once for this node and once per
+    replication peer not tried yet when a series starts. A node of the previous release drops the request (it
+    names no namespace), so a series with it ends unanswered after the wait. A series restarted with another
+    oracle counts its pages under the same ``pull<n>`` again.
+
+    Examples
+    --------
+    >>> self.__maybe_pull()   # the first lap with an oracle among the replication peers: the first request goes
+    """
+    # The catch-up's state, and the wall clock its times are on.
+    pull, now = self.__pull, self.time()
+    # A request in flight: its entry is still pending (the resync's step forgets it when its wait is over).
+    waiting = pull is not None and pull["request"] in self.__pending_hsync
+    if pull is None or self.input_queue_size > self.cfg_max_inputs_per_iteration:
+      if waiting:
+        # The answer may wait in the long queue: its wait starts again.
+        self.__pending_hsync[pull["request"]][self.CS_UNTIL] = now + self.CS_PULL_TIMEOUT
+      return
+    if waiting or now < pull["next"]:
+      return
+    if pull["request"] is not None:
+      # The wait ended with no answer (an oracle that is away, or runs the previous release): counted, and the series
+      # with this oracle ends.
+      self.__cs_count("pull_no_answer")
+      # Nothing in flight, no oracle in hand.
+      pull["request"] = pull["peer"] = None
+    if now > pull["start"] + self.CS_PULL_GIVE_UP:
+      if pull["tries"]:
+        self.P(" === Chain storage: the catch-up of this start did not finish in {} s; what it owes stays in the "
+               "replica for the next start".format(self.CS_PULL_GIVE_UP), color='r')
+      # No more requests in this run; the reserved record keeps the marks.
+      self.__pull = None
+      return
+    if pull["peer"] is None:
+      # Who may be asked: the registry members among the replication peers not tried in this round, when this node
+      # is a registry member itself.
+      peers = [peer for peer in self.__chain_peers if peer not in pull["tried"] and self.__registry_member(peer)
+               ] if self.__registry_member(self.ee_addr) else []
+      if not peers:
+        # A new round over the oracles after the pause.
+        pull["tried"], pull["next"] = set(), now + self.CS_PULL_PAUSE
+        return
+      # A series with one of them, picked at random, from the beginning: no cursor, no partial page and no busy
+      # reply yet; one more oracle tried.
+      pull.update(peer=sample(peers, 1)[0], after=None, partial=False, busy=0, tries=pull["tries"] + 1)
+      # Not picked again in this round.
+      pull["tried"].add(pull["peer"])
+    # The floor of this request: nothing stamped below the horizon, or older than the tombstone life less the margin.
+    floor = max(self.__tomb_horizon, int(1000 * now) - self.__tomb_ms + 2 * self.__ver_ahead)
+    # The request: each owed mark less the margin, the floor and the cursor.
+    request = {"since": {writer: ms - 2 * self.__ver_ahead for writer, ms in self.__pull_owed.items()},
+               "floor": floor, "after": pull["after"]}
+    # The label of this series' cut.
+    label = "pull%d_cut_s" % (pull["done"] + 1)
+    # The seconds by which the floor lies above the lowest mark asked for, kept as the period's largest.
+    self.__cs_count(label, n=max(0, (floor - min(request["since"].values(), default=floor)) // 1000
+                                 - self.__cs_stats.get(label, 0)))
+    # The request's id, which the answer echoes.
+    pull["request"] = self.uuid()
+    # Registered as the store's own request: the oracle whose answer is taken, until when, and what was asked.
+    self.__pending_hsync[pull["request"]] = {
+      self.CS_PEERS: [pull["peer"]], self.CS_RESPONSE: None, self.CS_UNTIL: now + self.CS_PULL_TIMEOUT,
+      self.CS_PULL: request}
+    # The namespace-sync request message, with the catch-up's field and no namespace, to that oracle alone.
+    self.__send_data_to_chain_peers({self.CS_DATA: {
+      self.CS_OP: self.CS_HSYNC_REQ, self.CS_REQUEST_ID: pull["request"], self.CS_PULL: request,
+    }}, peers=pull["peer"], include_default_peers=False)
+
+
+  def __pull_take(self, request_id, request, data):
+    """
+    Take the answer to a catch-up request: a page of records, or a busy reply.
+
+    Parameters
+    ----------
+    request_id : str
+      The id of the pending request the answer echoes.
+    request : dict
+      What was asked: ``{"since", "floor", "after"}``, as kept with the pending request.
+    data : dict
+      The answer's body, as received from the oracle asked: its ``pull`` field and its ``snapshot``.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The answer ends the request's wait. Then:
+
+    - an answer that is not well formed (``pull`` not a dict with a number ``wait``, ``snapshot`` not a dict), or
+      a page that says more follows without a cursor past the one asked after, counts ``pull_refused`` and ends
+      the series with this oracle;
+    - a busy reply (``busy``): the same oracle is asked again after the wait; the third in a row ends the series;
+    - of a page, a record is dropped and counted ``pull_refused`` when it has no well-formed stamp, is stamped
+      below the floor, its writer's ``since`` or the cursor asked after, has a key of a protected namespace, a
+      ``"dl:"`` key or the reserved key, or carries a token; and dropped and counted ``<bucket>/pull<n>/held``
+      when the record held under its key has a token or is readonly for another owner (a live write is refused
+      there too);
+    - the rest goes through the merge of a namespace sync (``__merge_hset_snapshot``) under the origin
+      ``pull<n>`` (n: the series), with its size, depth, signed-record and order rules: applied with
+      ``CSTORE_HANDOFF`` 'on', only judged and counted in 'report';
+    - ``more``: the next page is asked after ``max(CS_PULL_GAP, wait, 10 x d)`` seconds, at most
+      ``CS_PULL_PAUSE``, d being the last save's wall time, so the saves the merged pages cause stay near a tenth
+      of the wall time (d is measured with ``CSTORE_SAVE_BACKOFF`` not 'off'; with it 'off' d is 0);
+    - else the series ended. A catch-up is complete after ``CSTORE_PULL_PEERS`` series without a partial page
+      (a page from an oracle that still owed a catch-up itself), or, once more than ``CSTORE_PULL_PEERS``
+      oracles have been tried, after that many series of any kind. Then nothing is owed any more: the marks
+      leave the reserved record (held without a dirty mark, so they reach the file with the next save or the
+      save of an orderly stop). Otherwise the next series starts after ``CS_PULL_PAUSE``.
+
+    Runs on the plugin thread, from the answer handler. Measured on the node image's interpreter under a 0.35
+    CPU limit for a full page of 255 records (261 KB): 19 to 24 ms of CPU judged only, 29 to 33 ms applied, and
+    84 to 98 ms of wall time either way (the limit's throttling included).
+
+    Examples
+    --------
+    >>> self.__pull_take("r1", {"since": {}, "floor": 0, "after": None}, {"pull": {...}, "snapshot": {...}})
+    """
+    # The catch-up's state, the answer's two fields and the wall clock.
+    pull, page, snapshot, now = self.__pull, data.get(self.CS_PULL), data.get(self.CS_SNAPSHOT), self.time()
+    # Answered: the request leaves the pending table, whatever the answer holds.
+    del self.__pending_hsync[request_id]
+    # Nothing in flight; and the cursor this page was asked after.
+    pull["request"], cursor = None, request["after"] or [0, ""]
+    # Well formed: the catch-up's field with a number of seconds to wait, and a dict of records.
+    good = isinstance(page, dict) and isinstance(snapshot, dict) and type(page.get("wait")) in (int, float)
+    # The busy replies in a row from this oracle.
+    pull["busy"] = pull["busy"] + 1 if good and page.get("busy") else 0
+    # The page's cursor, when it has a well-formed one.
+    top = self.__ver_valid(page.get("after")) if good else None
+    # Not usable: malformed, or more is said to follow without a cursor past the one asked after.
+    bad = not good or (not pull["busy"] and page.get("more") and not (top or []) > cursor)
+    if bad or pull["busy"] >= 3:
+      if bad:
+        # Counted; three busy replies in a row are not this counter's.
+        self.__cs_count("pull_refused")
+      # The series with this oracle ends; another one is picked at the next lap.
+      pull["peer"] = None
+      return
+    # When the next request goes: after the oracle's own gap, and ten times the last save's duration, so the saves
+    # the merged pages cause stay near a tenth of the wall time; at most one pause.
+    pull["next"] = now + min(max(self.CS_PULL_GAP, page["wait"], 10 * self.__save_took), self.CS_PULL_PAUSE)
+    if pull["busy"]:
+      return
+    # The origin the page's copies are counted under, and the stamp time none of them may lie below.
+    origin, low = "pull%d" % (pull["done"] + 1), max(request["floor"], cursor[0])
+    # Each record of the page, over a copy, so one can be dropped.
+    for key, record in list(snapshot.items()):
+      # Its stamp, when well formed.
+      ver = self.__ver_valid(record.get(self.CS_VER)) if isinstance(record, dict) else None
+      # The record held under its key.
+      held = self.__chain_storage.get(key, {})
+      if (ver is None or ver[0] < max(low, request["since"].get(ver[1], 0)) or key.startswith(self.__pull_skip)
+          or record.get(self.CS_TOKEN) is not None):
+        # Not what was asked for, or what no page may carry: dropped and counted.
+        del snapshot[key]
+        # One per record.
+        self.__cs_count("pull_refused")
+      elif held.get(self.CS_TOKEN) is not None or (
+          held.get(self.CS_READONLY) and held.get(self.CS_OWNER) != record.get(self.CS_OWNER)):
+        # Held with a token, or readonly for another owner: a live write is refused there, so is the copy.
+        del snapshot[key]
+        # Counted under the key's bucket and the series.
+        self.__cs_count("held", key, origin)
+    # The rest through the merge of a namespace sync, with no namespace: applied in 'on', only judged in 'report'.
+    self.__merge_hset_snapshot(None, snapshot, origin, self.__cs_modes["handoff"] != "on")
+    # A page from an oracle that still owes a catch-up itself makes the series a partial one.
+    pull["partial"] = pull["partial"] or bool(page.get("partial"))
+    if page.get("more"):
+      # The next request asks for what follows this page.
+      pull["after"] = top
+      return
+    # The series ended: one more, and one more without a partial page when it had none.
+    pull["done"], pull["full"] = pull["done"] + 1, pull["full"] + (not pull["partial"])
+    # No oracle in hand; the next series after the pause.
+    pull["peer"], pull["next"] = None, now + self.CS_PULL_PAUSE
+    if pull["full"] >= self.__pull_peers or (pull["tries"] > self.__pull_peers and pull["done"] >= self.__pull_peers):
+      # Enough series: nothing is owed any more, and this run asks no more.
+      self.__pull = self.__pull_owed = None
+      # The reserved record without the marks.
+      self.__pull_keep()
+      # Held without a dirty mark: saved with the next save, or at an orderly stop. Set after the record is written,
+      # so a save that copies the replica in between does not clear the mark of a change it did not copy.
+      self.__chain_storage_unmarked = True
+
+
   def __exec_hsync_response(self, data, sender=None):
     """
     Take one peer's snapshot answer for a pending request: recorded for a waiting caller, or merged at once.
@@ -4444,6 +4722,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     An answer whose ``request_id`` is not a str (a number, a list, a dict), which no node of this release sends,
     is dropped and counted as ``plain/hsync/refused_malformed``; an id that cannot be hashed raised here before.
 
+    The answer to a catch-up request (a pending entry that carries ``pull``, registered by ``__maybe_pull``)
+    names no namespace: once it is known to come from the oracle asked, it is taken by ``__pull_take``, before
+    the namespace checks.
+
     An answer for a Tunnels Manager namespace is taken only from an oracle
     registry member (either registry); another sender's answer is dropped and
     the sync keeps waiting. From the answer of a sender outside the registries
@@ -4474,6 +4756,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     allowed_peers = pending.get(self.CS_PEERS, [])
     if sender not in allowed_peers:
       return
+    if self.CS_PULL in pending:
+      # The answer to a catch-up request, from the oracle asked (it names no namespace): taken by its own step.
+      return self.__pull_take(request_id, pending[self.CS_PULL], data)
 
     hkey = data.get(self.CS_HKEY, None)
     if hkey != pending.get(self.CS_HKEY, None):
@@ -4622,7 +4907,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   
   def process(self):
     """
-    Run one plugin lap: refresh the replication peers when due, send the resync's next request when due
+    Run one plugin lap: refresh the replication peers when due, send the next request of the catch-up of this
+    start when due (``__maybe_pull``), send the resync's next request when due
     (``__maybe_resync``), run the hand-off's sweep when due
     (``__maybe_handoff``), queue the due re-sends of writes made with ``wait=False``
     (``__maybe_resend_unwaited``) and send the queued writes.
@@ -4670,6 +4956,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     >>> self.process()   # one lap of the plugin loop; every 300 s it also logs the CSTORE_STATS line
     """
     self.__maybe_refresh_chain_peers()
+    # The catch-up of this start: its next request when due. Before the resync's step, which forgets the requests
+    # whose wait is over, so a wait this step starts again is not ended on the same lap.
+    self.__maybe_pull()
     # The resync of the signed namespaces: its next request when due, and its requests whose wait is over forgotten.
     self.__maybe_resync()
     # The hand-off's sweep, when due, before the queued stores go out, so its re-sends leave on this lap.

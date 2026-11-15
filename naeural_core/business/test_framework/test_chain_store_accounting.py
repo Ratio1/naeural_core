@@ -350,7 +350,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  # The catch-up's number and the marks it still owes.
                  "pull_peers", "pull_owed",
                  # The time of the last page sent and the key prefixes no page carries.
-                 "pull_sent", "pull_skip"):
+                 "pull_sent", "pull_skip",
+                 # The catch-up's state and the last save's duration.
+                 "pull", "save_took"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"

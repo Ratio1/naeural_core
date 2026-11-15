@@ -321,8 +321,11 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self.cfg_cstore_new_keys_max = self._ChainStoreBasePlugin__new_keys_max = 0
     # The oracles a catch-up asks, as the config gives it and as on_init reads it.
     self.cfg_cstore_pull_peers = self._ChainStoreBasePlugin__pull_peers = 2
-    # No marks owed, as on_init leaves a store that keeps none (every switch 'off', or a replica without the record).
-    self._ChainStoreBasePlugin__pull_owed = None
+    # No marks owed and no catch-up running, as on_init leaves a store that keeps none (every switch 'off', or a
+    # replica without the record).
+    self._ChainStoreBasePlugin__pull_owed = self._ChainStoreBasePlugin__pull = None
+    # No save made yet, so no duration of one for the catch-up's pace.
+    self._ChainStoreBasePlugin__save_took = 0.0
     # How many inputs one lap takes, as the plugin config gives it: with more than that waiting, no page is sent.
     self.cfg_max_inputs_per_iteration = 32
     # No page sent yet, and the key prefixes no page carries, as on_init computes them: the tombstones' own, the

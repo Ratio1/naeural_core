@@ -323,6 +323,12 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self.cfg_cstore_pull_peers = self._ChainStoreBasePlugin__pull_peers = 2
     # No marks owed, as on_init leaves a store that keeps none (every switch 'off', or a replica without the record).
     self._ChainStoreBasePlugin__pull_owed = None
+    # How many inputs one lap takes, as the plugin config gives it: with more than that waiting, no page is sent.
+    self.cfg_max_inputs_per_iteration = 32
+    # No page sent yet, and the key prefixes no page carries, as on_init computes them: the tombstones' own, the
+    # reserved key and the indexes of the six protected namespaces.
+    self._ChainStoreBasePlugin__pull_sent, self._ChainStoreBasePlugin__pull_skip = 0, (
+      "dl:", "hs:cstore_pull", *map(_hset_index, ChainStoreBasePlugin.CS_PROTECTED_NAMESPACES))
     # The hand-off's state as on_init leaves it at time 0: an empty table, the first sweep at 300 s, nothing pending.
     self._ChainStoreBasePlugin__handoff, self._ChainStoreBasePlugin__handoff_next = {}, 300.0
     # Nothing pending.

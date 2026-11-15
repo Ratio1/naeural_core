@@ -187,6 +187,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   # under "hs:" but not of a namespace's form ("hs:", 10 hex digits, ":"), so no namespace sync, list or census
   # reaches it; no write may name it.
   CS_PULL_KEY = "hs:cstore_pull"
+  # The catch-up's field in a namespace-sync request (the marks, the floor and the cursor) and in its answer (the
+  # cursor, whether more follows, and the answering node's state).
+  CS_PULL = "pull"
+  # The most bytes of records one page of a catch-up answer carries, each counted as CS_MAX_RECORD_BYTES counts a
+  # record. A page always takes its first record, so a record larger than this travels alone, and a page carries at
+  # most the larger of the two numbers.
+  CS_PULL_PAGE_BYTES = 262_144
+  # Seconds between two pages a node sends, whoever asks.
+  CS_PULL_GAP = 8
   # The hand-off: seconds between two sweeps, re-sends per sweep, re-sends per record and peer before giving up,
   # the longest gap of the back-off, and how long before a lost peer was dropped its settlements are re-opened.
   CS_HANDOFF_INTERVAL, CS_HANDOFF_BUDGET, CS_HANDOFF_MAX_SENDS, CS_HANDOFF_MAX_GAP = 15, 32, 6, 3600
@@ -317,6 +326,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     says so when the newest mark is older than ``CSTORE_TOMBSTONE_DAYS``: keys deleted on the network meanwhile
     are still held here. With the switch 'off' or the number 0 nothing is taken or written, and what the
     record holds stays as it is.
+
+    For the pages this node answers catch-up requests with (``__pull_page``), the start also computes once the
+    key prefixes no page carries (the tombstones' own, the reserved key and the indexes of the six protected
+    namespaces) and notes that no page was sent yet.
 
     The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
     and the plugin does not start, where it used to start empty and fail at its first save. A file that
@@ -498,6 +511,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                "deleted on the network meanwhile are still held here, and no catch-up removes them", color='r')
       # The record as this start leaves it, in memory: it reaches the file with the next save of a changed replica.
       self.__pull_keep()
+    # When this node sent its last page (none yet), and the key prefixes no page carries: the tombstones' own (a
+    # tombstone travels under the key it deleted), the reserved key and the six protected namespaces.
+    self.__pull_sent, self.__pull_skip = 0, (
+      self.CS_DEL, self.CS_PULL_KEY, *map(self.__hset_index, self.CS_PROTECTED_NAMESPACES))
 
     memory[self.CS_STORAGE_MEM] = self.__chain_storage
     memory[self.CS_GETTER] = self._get_value
@@ -4211,6 +4228,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ``plain/hsync/refused_invalid_key``. A request without a str
     ``request_id`` or ``hkey`` is dropped uncounted, as before.
 
+    A request that carries the catch-up's field (``pull``, a dict) names no
+    namespace and is answered by ``__pull_page`` with a page of records in
+    stamp order; a node of the previous release drops it at the ``hkey``
+    check, with no answer and no log line.
+
     Examples
     --------
     >>> self.__exec_hsync_request({"request_id": "r1", "hkey": "players"}, peers="0xai_any")  # answered
@@ -4220,6 +4242,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     hkey = data.get(self.CS_HKEY, None)
     if not isinstance(request_id, str) or len(request_id) == 0:
       return
+    if isinstance(data.get(self.CS_PULL), dict):
+      # A catch-up request (it names no namespace, so a node of the previous release drops it at the next check).
+      return self.__pull_page(request_id, data[self.CS_PULL], peers)
     if not isinstance(hkey, str) or len(hkey) == 0:
       return
     if hkey.encode("utf-8", "ignore") != hkey.encode("utf-8", "surrogatepass"):
@@ -4261,6 +4286,113 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       include_default_peers=False,
     )
     return
+
+
+  def __pull_page(self, request_id, request, sender):
+    """
+    Answer one catch-up request with a page of the records the asking oracle may have missed, oldest stamp first.
+
+    The request carries ``since`` (per writer, the stamp time in ms from which that writer's records are wanted;
+    a writer not named: from 0), ``floor`` (a stamp time below which nothing may be sent) and ``after`` (the
+    cursor ``[ms, stored key]`` of the last record of the page before, or None for the first page). The page
+    holds the records of this replica, tombstones included, that
+
+    - carry a stamp and no token;
+    - are outside the six protected namespaces (``CS_PROTECTED_NAMESPACES``), which no page ever carries;
+    - are stamped at or above ``floor`` and at or above their writer's ``since``;
+    - come after the cursor in the order (stamp time, stored key),
+
+    in that order, each with the fields of a namespace-sync answer (``CS_EXPORT_FIELDS``), a tombstone under the
+    key it deleted with value None. Records are added while the page stays within ``CS_PULL_PAGE_BYTES``
+    (262,144), each counted as the record size cap counts it (compact JSON, a non-ASCII character as itself, in
+    UTF-8 bytes); the first record is always taken, so a record larger than the page travels alone and a page
+    holds at most ``max(CS_PULL_PAGE_BYTES, CS_MAX_RECORD_BYTES)`` bytes of records. The answer is a
+    ``SHSYNC_RESP`` with the request's id, the records as ``snapshot`` and ``pull``: ``after`` (the cursor of
+    its last record, or the request's when it holds none), ``more`` (records are left), ``partial`` (this node
+    still owes a catch-up itself, so it may lack records) and ``wait`` (seconds before it sends another page).
+
+    Parameters
+    ----------
+    request_id : str
+      The request's id, echoed in the answer.
+    request : dict
+      The request's ``pull`` field, as received.
+    sender : str
+      The verified address of the asking node; the answer goes to it alone.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    - With ``CSTORE_HANDOFF`` 'off' nothing is answered and nothing counted.
+    - A request from a sender outside the oracle registries, or whose ``since`` is not a map to ints, ``floor``
+      not an int or ``after`` not a cursor (None, or a list of an int and a str), is not answered and counts
+      ``pull_refused``. The registries are read once per request.
+    - A page goes out at most every ``CS_PULL_GAP`` (8) seconds, whoever asks, and none while more inputs wait
+      in the queue than one lap takes (``MAX_INPUTS_PER_ITERATION``): the answer is then a busy reply,
+      ``{"busy": true, "wait": 8}`` with no record.
+    - Each page counts ``pull_answered``. No state is kept per asking node.
+
+    Runs on the plugin thread. One walk of a copy of the replica's items without the persistence lock (records
+    are stored whole), one sort of the candidates and one JSON encoding per record taken. The values are not
+    copied: a record's value is replaced, never changed in place, and a store queued for sending shares it the
+    same way. A stamped record under ``"dl:"`` is always a tombstone (a write to such a key is refused, and a
+    record with a value held there from before stamps existed never takes one). The largest message is a page of
+    one record at the size cap: with ``CS_MAX_RECORD_BYTES`` 524,288, encrypted as the comm thread sends it, it
+    took 735 KB on the wire for the content that compresses worst (a mix of one- to four-byte characters), 70 %
+    of a broker packet of 1 MiB; a plaintext that does not compress at all would take 77 %.
+
+    Examples
+    --------
+    >>> self.__pull_page("r1", {"since": {"0xai_w": 1700000000000}, "floor": 1699400000000, "after": None}, "0xai_o")
+    """
+    if self.__cs_modes["handoff"] == "off":
+      return
+    # The marks, the floor and the cursor of the request.
+    since, floor, after = request.get("since"), request.get("floor"), request.get("after")
+    if not (isinstance(since, dict) and all(type(ms) is int for ms in since.values()) and type(floor) is int
+            and (after is None or self.__ver_valid(after) is not None) and self.__registry_member(sender)):
+      # Not a request this node answers: its fields are not of the form the walk below compares, or its sender is
+      # in neither oracle registry. Counted, not answered.
+      self.__cs_count("pull_refused")
+      return
+    # The wall clock the gap between two pages is on; the page's records; and the busy reply, sent when no page is.
+    now, snapshot, page = self.time(), {}, {"busy": True, "wait": self.CS_PULL_GAP}
+    if now >= self.__pull_sent + self.CS_PULL_GAP and self.input_queue_size <= self.cfg_max_inputs_per_iteration:
+      # The candidates in the order of the pages: stamp time, then stored key (a tombstone's is "dl:" and its key).
+      found = sorted(
+        (record[self.CS_VER][0], key, record) for key, record in list(self.__chain_storage.items())
+        if record.get(self.CS_VER) is not None and record.get(self.CS_TOKEN) is None
+        and record[self.CS_VER][0] >= max(since.get(record[self.CS_VER][1], 0), floor)
+        and (after is None or [record[self.CS_VER][0], key] > after)
+        and not key.removeprefix(self.CS_DEL).startswith(self.__pull_skip))
+      # The bytes taken so far, and the cursor of the last record taken.
+      size, last = 0, after
+      # Oldest first.
+      for ms, key, record in found:
+        # The fields a merge reads, as a namespace-sync answer carries them.
+        entry = {field: record[field] for field in self.CS_EXPORT_FIELDS if field in record}
+        # Its bytes on the wire, counted as the record size cap counts a record (which also counts the token).
+        size += len(self.json_dumps({key.removeprefix(self.CS_DEL): entry}, sort_keys=False, ensure_ascii=False,
+                                    check_circular=False).encode("utf-8"))
+        if snapshot and size > self.CS_PULL_PAGE_BYTES:
+          break
+        # Taken, a tombstone under the key it deleted; the first record always.
+        snapshot[key.removeprefix(self.CS_DEL)], last = entry, [ms, key]
+      # The page: its cursor, whether a candidate is left, whether this node still owes a catch-up itself, and when
+      # it sends the next page.
+      page = {"after": last, "more": bool(found) and last != list(found[-1][:2]),
+              "partial": self.__pull_owed is not None, "wait": self.CS_PULL_GAP}
+      # The next page not before the gap.
+      self.__pull_sent = now
+      # One page sent.
+      self.__cs_count("pull_answered")
+    # The page, or the busy reply, to the asking node alone.
+    self.__send_data_to_chain_peers({self.CS_DATA: {
+      self.CS_OP: self.CS_HSYNC_RESP, self.CS_REQUEST_ID: request_id, self.CS_SNAPSHOT: snapshot, self.CS_PULL: page,
+    }}, peers=sender, include_default_peers=False)
 
 
   def __exec_hsync_response(self, data, sender=None):

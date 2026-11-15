@@ -689,6 +689,41 @@ the node's address. One red line also says when the newest mark of a start is ol
 A node of the previous release keeps the record in its file, reads it nowhere, and takes a
 peer's store to that key like any other; the repair above is for that case.
 
+**The request and its answer.** A catch-up request is the namespace sync's request message
+with a `pull` field and no `hkey`: `SHSYNC_REQ {op, request_id, pull: {since, floor, after}}`.
+`since` maps a writer to the stamp time from which its records are wanted (a writer not
+named: from 0), `floor` is a stamp time below which nothing may be sent, and `after` is the
+cursor `[ms, stored key]` of the last record of the page before (`null` for the first). With
+`CSTORE_HANDOFF` not `off`, a node answers a sender that is in an oracle registry with one
+page, `SHSYNC_RESP {op, request_id, snapshot, pull: {after, more, partial, wait}}`, sent to
+that sender alone:
+
+- The page holds the records that carry a stamp and no token, lie outside the six protected
+  namespaces (never paged: their rules read a whole namespace), are stamped at or above the
+  floor and their writer's `since`, and come after the cursor, ordered by stamp time and then
+  stored key. Each travels with the five fields of a sync answer; a tombstone travels under
+  the key it deleted, with value `None`. The values are not copied for the page.
+- Records are added while the page stays within `CS_PULL_PAGE_BYTES` (262,144), each counted
+  as the size cap counts a record (compact JSON, non-ASCII characters as themselves, UTF-8
+  bytes). The first record is always taken, so a record larger than a page travels alone
+  and a page holds at most the larger of that bound and the size cap of one record
+  (`CS_MAX_RECORD_BYTES`, 524,288). That worst page, one record at the cap of content that
+  compresses worst, took 735 KB on the wire through the SDK's
+  encryption: 70 % of a broker packet of 1 MiB (77 % is the bound for a plaintext that does
+  not compress at all).
+- `after` is the cursor of the page's last record, `more` says records are left, `partial`
+  says the answering node still owes a catch-up itself (its replica holds marks), and `wait`
+  is the seconds before it sends another page.
+- A node sends one page per `CS_PULL_GAP` (8 s), whoever asks, and none while more inputs
+  wait in its queue than one lap takes: the answer is then a busy reply,
+  `pull: {busy: true, wait: 8}` with no record. It keeps no state per asking node.
+- A request whose fields have another form, or whose sender is in neither registry, gets no
+  answer and counts `pull_refused`; each page counts `pull_answered`. With `CSTORE_HANDOFF`
+  `off` nothing is answered or counted.
+
+A node of the previous release drops such a request at its `hkey` check: no answer, no log
+line, no change.
+
 ### Non-blocking write (`wait=False`)
 
 `chainstore_set(..., wait=False)` and `chainstore_hset(..., wait=False)` (no switch; a
@@ -773,6 +808,7 @@ Labels in `counts`:
 - `plain/hsync/refused_malformed`, `plain/remote/refused_malformed`: a namespace-sync answer whose `request_id` is not a str, and a message whose `CHAIN_STORE_DATA` is not a dict; both dropped. Each of these six inputs used to raise out of the payload handler, which ends the plugin's lap; any count of them points at a sender that forges or corrupts messages.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
 - `pull_h_future`: removed tombstones stamped too far ahead of the wall clock to raise the tombstone horizon (above); expected 0.
+- `pull_answered`: pages this node sent in answer to catch-up requests. `pull_refused`: catch-up requests it did not answer for their form or their sender (above); expected 0.
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
 - `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers taken, and records those answers inserted or replaced.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.

@@ -348,7 +348,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  # The limit of new keys per outside sender.
                  "new_keys_max",
                  # The catch-up's number and the marks it still owes.
-                 "pull_peers", "pull_owed"):
+                 "pull_peers", "pull_owed",
+                 # The time of the last page sent and the key prefixes no page carries.
+                 "pull_sent", "pull_skip"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"

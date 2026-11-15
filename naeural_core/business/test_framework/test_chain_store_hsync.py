@@ -349,6 +349,8 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     # The resync of the signed namespaces as on_init leaves it: due at the first lap that finds a peer, at its first
     # namespace.
     self._ChainStoreBasePlugin__resync_next, self._ChainStoreBasePlugin__resync_turn = 0, 0
+    # No namespace owed a second request, as on_init leaves it.
+    self._ChainStoreBasePlugin__resync_again = []
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)

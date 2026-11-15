@@ -343,8 +343,8 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  "peer_back", "stamped_peers",
                  # The writes made with wait=False owed a re-send, and the hour of the last census line.
                  "unwaited", "census_hour",
-                 # The resync's next request time and the turn of its namespaces.
-                 "resync_next", "resync_turn",
+                 # The resync's next request time, the turn of its namespaces and those owed a second request.
+                 "resync_next", "resync_turn", "resync_again",
                  # The limit of new keys per outside sender.
                  "new_keys_max",
                  # The catch-up's number and the marks it still owes.

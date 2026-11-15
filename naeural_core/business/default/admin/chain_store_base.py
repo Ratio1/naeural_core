@@ -559,6 +559,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The resync of the signed namespaces: the time of its next request (0: the first lap that finds a replication
     # peer) and the turn of the namespace it asks then, in memory only.
     self.__resync_next, self.__resync_turn = 0, 0
+    # The namespaces whose last request got no answer taken, owed one more request before the next turn's namespace.
+    self.__resync_again = []
     self.__maybe_refresh_chain_peers()
     return
   
@@ -938,6 +940,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     until (``CS_RESYNC_GAP`` after it), and ``__exec_hsync_response`` merges the answer of each asked peer when
     it arrives, not only the first. Each request counts ``<bucket>/resync/asked`` under its namespace's bucket.
 
+    When a request's wait is over, each asked peer whose answer was not taken (none came, it came later, or the
+    answer handler dropped it, which it counts as ``dropped_<word>``) counts ``<bucket>/resync/unanswered``.
+    When no answer of a request was taken at all, its namespace is asked again at the next turn, before the
+    namespace whose turn it is, and that turn comes at most ``CS_RESYNC_GAP`` later (after a round's last
+    request it was a pause away): a namespace whose answers were lost is asked again 60 to 135 s after its first
+    request instead of a round (about 30 minutes) later. Such a second request is not repeated, so a
+    namespace is asked at most twice per round.
+
     Returns
     -------
     None
@@ -948,9 +958,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     pending request whose ``until`` has passed, whoever registered it, so a later answer is not taken; the entry of
     a blocking sync (``_hsync``) has no ``until`` and is left to its caller. A lap with nothing pending and no
     request due costs one copy of the (empty) pending table and two comparisons (under 1 microsecond, measured
-    on the node image's interpreter under a 0.35 CPU limit). The registries are read once for this node and
-    once per replication peer at each request, never between requests, and at most once more for each answer's
-    merge. Merging one answer of 1,000 signed operations (2.7 MB of JSON), under the same limit and with real
+    on the node image's interpreter under a 0.35 CPU limit). A request whose wait ends adds one count and, when
+    no answer of it was taken, one more request at the next turn: at most five more requests per round, each
+    to at most two peers, and none on a network where the answers arrive. The registries are read once for this
+    node and once per replication peer at each request, never between requests, and at most once more for each
+    answer's merge. Merging one answer of 1,000 signed operations (2.7 MB of JSON), under the same limit and with real
     signature checks: 1.1 to 1.8 s of CPU and 3 to 5 s of wall time when the replica lacks them all (one
     signature check per record: the first answers after an absence), and 0.02 to 0.08 s of CPU and 0.1 to 0.3 s
     of wall time when it holds them all (no signature check: every later answer). For that time this thread
@@ -971,17 +983,33 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     for request_id in [name for name, entry in list(self.__pending_hsync.items())
                        if entry.get(self.CS_UNTIL, now) < now]:
       # Forgotten: an answer that comes later is not taken.
-      del self.__pending_hsync[request_id]
+      entry = self.__pending_hsync.pop(request_id)
+      if self.CS_HKEY in entry and entry[self.CS_PEERS]:
+        # A resync request (a catch-up's names no namespace) with asked peers whose answer was not taken in its wait:
+        # none came, it came later, or the answer handler dropped it. Counted per such peer, under the namespace's
+        # bucket; before, nothing told an answer that never came.
+        self.__cs_count("unanswered", self.__hset_index(entry[self.CS_HKEY]), "resync", n=len(entry[self.CS_PEERS]))
+        if len(entry[self.CS_PEERS]) == entry["asked"] and not entry["again"]:
+          # No answer of it was taken at all: the namespace is asked again at the next turn, before the next
+          # namespace, where it waited for the next round (about 30 minutes). Once per round: a request that is itself
+          # such a second one is not asked again.
+          self.__resync_again.append(entry[self.CS_HKEY])
+          # That turn at most one gap away: after a round's last request the next one was a pause away.
+          self.__resync_next = min(self.__resync_next, now + self.CS_RESYNC_GAP)
     if now < self.__resync_next or not self.__chain_peers:
       return
-    # The namespace whose turn it is.
-    hkey = self.CS_RESYNC_NAMESPACES[self.__resync_turn]
-    # The next namespace's turn.
-    self.__resync_turn = (self.__resync_turn + 1) % len(self.CS_RESYNC_NAMESPACES)
-    # When it is asked: one gap later within a round, one pause later once the round ended (the turn is back at the
-    # first namespace), stretched or shortened by up to a quarter at random.
-    self.__resync_next = now + (self.CS_RESYNC_GAP if self.__resync_turn else self.CS_RESYNC_PAUSE) * (
-      0.75 + random() / 2)
+    # Whether this turn asks a namespace again (its last request got no answer taken).
+    again = bool(self.__resync_again)
+    # The namespace asked now: the first one owed a second request, else the one whose turn it is.
+    hkey = self.__resync_again.pop(0) if again else self.CS_RESYNC_NAMESPACES[self.__resync_turn]
+    if not again:
+      # The next namespace's turn.
+      self.__resync_turn = (self.__resync_turn + 1) % len(self.CS_RESYNC_NAMESPACES)
+    # When it is asked: one gap later within a round or while a namespace is owed a second request, one pause later
+    # once the round ended (the turn is back at the first namespace), stretched or shortened by up to a quarter at
+    # random.
+    self.__resync_next = now + (self.CS_RESYNC_GAP if self.__resync_turn or self.__resync_again
+                                else self.CS_RESYNC_PAUSE) * (0.75 + random() / 2)
     if not self.__registry_member(self.ee_addr, dauth_only=hkey == "DAUTH_JOB_SECRETS"):
       return
     # The two namespaces dAuth servers write are answered only by dAuth registry members.
@@ -998,6 +1026,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # the response slot a blocking sync fills.
     self.__pending_hsync[request_id] = {
       self.CS_HKEY: hkey, self.CS_PEERS: peers, self.CS_RESPONSE: None, self.CS_UNTIL: now + self.CS_RESYNC_GAP,
+      # How many peers were asked (the peers list loses each one whose answer is taken), and whether this request is
+      # a namespace's second one of the round, in memory only: read when the wait is over.
+      "asked": len(peers), "again": again,
     }
     # The request a caller's sync sends, to those peers alone.
     self.__send_data_to_chain_peers({self.CS_DATA: {
@@ -4767,6 +4798,40 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       self.__chain_storage_unmarked = True
 
 
+  def __resync_dropped(self, pending, word):
+    """
+    Count an answer to one of the store's own resync requests that the answer handler drops, under why.
+
+    Parameters
+    ----------
+    pending : dict
+      The pending entry the answer's id names.
+    word : str
+      Why it is dropped: ``no_sender`` (no verified sender), ``not_asked`` (a sender that is not among the asked
+      peers whose answer is still awaited: a node not asked, or a second answer of a peer already taken),
+      ``other_namespace`` (the answer names another namespace than the one asked), ``not_member`` (a registry
+      rule of the namespace refuses the sender, or this node) or ``malformed`` (a snapshot that is not a dict).
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Counted as ``<bucket>/resync/dropped_<word>`` under the bucket of the namespace asked, only for an entry of
+    the resync (``__maybe_resync``: it has a namespace and ``until``); a blocking sync's entry and a catch-up's
+    count nothing here. Read in the ``CSTORE_STATS`` line beside ``asked``, ``answered`` and ``unanswered``: an
+    answer that reached the handler and was dropped shows here, one that never reached it only as
+    ``unanswered``. An answer that arrives after its request's wait finds no entry and is not counted here.
+
+    Examples
+    --------
+    >>> self.__resync_dropped(pending, "not_asked")   # counts "hs:<10 hex digits>:/resync/dropped_not_asked"
+    """
+    if self.CS_UNTIL in pending and self.CS_HKEY in pending:
+      # A resync request's answer, under the bucket of the namespace asked.
+      self.__cs_count("dropped_" + word, self.__hset_index(pending[self.CS_HKEY]), "resync")
+
   def __exec_hsync_response(self, data, sender=None):
     """
     Take one peer's snapshot answer for a pending request: recorded for a waiting caller, or merged at once.
@@ -4811,7 +4876,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     present with 0 when it changed nothing), under the namespace's bucket. An answer whose merge raises is counted
     as answered and its peer stays off the request; the records it stored before the exception are marked for the
     save (the merge marks each change as it makes it) and are not in ``merged``. An answer that comes after the
-    wait finds no entry and is dropped like any answer to an unknown request.
+    wait finds no entry and is dropped like any answer to an unknown request; its peer was counted
+    ``unanswered`` when the wait ended (``__maybe_resync``). Every other answer to such a request that this
+    method drops is counted ``<bucket>/resync/dropped_<word>`` by why (``__resync_dropped``: ``no_sender``,
+    ``not_asked``, ``other_namespace``, ``not_member``, ``malformed``); before, these drops were not counted.
 
     An answer whose ``request_id`` is not a str (a number, a list, a dict), which no node of this release sends,
     is dropped and counted as ``plain/hsync/refused_malformed``; an id that cannot be hashed raised here before.
@@ -4845,37 +4913,44 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if pending is None or pending.get(self.CS_RESPONSE, None) is not None:
       return
     if not isinstance(sender, str) or len(sender) == 0:
-      return
+      # Dropped, and counted when it answers the store's own resync request (so is each early return below).
+      return self.__resync_dropped(pending, "no_sender")
 
     allowed_peers = pending.get(self.CS_PEERS, [])
     if sender not in allowed_peers:
-      return
+      # A node not asked, or a second answer of a peer whose answer was taken.
+      return self.__resync_dropped(pending, "not_asked")
     if self.CS_PULL in pending:
       # The answer to a catch-up request, from the oracle asked (it names no namespace): taken by its own step.
       return self.__pull_take(request_id, pending[self.CS_PULL], data)
 
     hkey = data.get(self.CS_HKEY, None)
     if hkey != pending.get(self.CS_HKEY, None):
-      return
+      # An answer for another namespace than the one asked.
+      return self.__resync_dropped(pending, "other_namespace")
 
     # The index hkey has (a str: it equals the pending sync's): the merge selects the records by it, so the namespace
     # rules below are applied to it.
     index = self.__hset_index(hkey)
     if self.__secret_namespace(index):
       if not self.__registry_member(sender, dauth_only=True) or not self.__registry_member(self.ee_addr, dauth_only=True):
-        return
+        # The dAuth rule of the secrets refuses the sender or this node.
+        return self.__resync_dropped(pending, "not_member")
     # The key rotations are written only by dAuth servers: an answer for the namespace of this index is taken only
     # from a dAuth registry member.
     if self.__namespace_for_key(index, (NODE_KEY_ROTATIONS_HKEY,)):
       if not self.__registry_member(sender, dauth_only=True):
-        return
+        # Not from a dAuth registry member.
+        return self.__resync_dropped(pending, "not_member")
     # The Tunnels Manager namespaces are written only by plugins that run on oracles: an answer for them is taken
     # only from an oracle registry member, so another sender's answer does not end the wait of the sync.
     if self.__namespace_for_key(index, TUNNELS_MANAGER_HKEYS) and not self.__registry_member(sender):
-      return
+      # Not from an oracle registry member.
+      return self.__resync_dropped(pending, "not_member")
     snapshot = data.get(self.CS_SNAPSHOT, {})
     if not isinstance(snapshot, dict):
-      return
+      # A snapshot that is not a dict.
+      return self.__resync_dropped(pending, "malformed")
     # Unversioned deployed-job pointers are written only by plugins that run on oracles: from the answer of a sender
     # outside the registries the merge gets only the other records (a signed pointer keeps its own check there).
     if self.__namespace_for_key(index, ("DEEPLOY_DEPLOYED_JOBS",)) and not self.__registry_member(sender):

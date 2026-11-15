@@ -2296,6 +2296,11 @@ class Orchestrator(DecentrAIObject,
   def _collect_admin_pipeline_inputs_once(self, running_streams=None):
     """Collect and enqueue one admin-pipeline input snapshot.
 
+    The admin pipeline's capture is started when needed, its inputs are taken, built into one input per admin
+    plugin instance the business manager knows, and queued for their plugins. While the business manager knows no
+    admin instance yet (the admin bootstrap is still creating the plugins), the capture is started but its inputs
+    are left in it: the bootstrap's own collection, or the next one after it, takes them.
+
     Parameters
     ----------
     running_streams : dict or None, optional
@@ -2304,7 +2309,23 @@ class Orchestrator(DecentrAIObject,
     Returns
     -------
     int
-        Number of admin deliveries queued.
+        Number of admin deliveries queued; 0 while no admin instance is known.
+
+    Notes
+    -----
+    The collection thread starts before the admin bootstrap and runs every
+    ``ADMIN_PIPELINE_DISPATCH_POLL_SECONDS``. Before, it took the capture's inputs from the start and, with no
+    admin instance known, routed them nowhere, with no count and no log line: a node's first answers, such as
+    the answers to the chain store's first resync request, sent while the last admin plugins were still being
+    created (4 s on a node at 0.35 CPU), were lost. The capture keeps what arrives meanwhile in its own bounded
+    queue; when that is full, the listener behind it drops its oldest messages, as at any other time.
+
+    Examples
+    --------
+    >>> self._collect_admin_pipeline_inputs_once()   # during the admin bootstrap: nothing taken
+    0
+    >>> self._collect_admin_pipeline_inputs_once()   # after it: one delivery per admin plugin with inputs
+    3
     """
     if not self.cfg_admin_pipeline_async_dispatch:
       return 0
@@ -2320,6 +2341,10 @@ class Orchestrator(DecentrAIObject,
 
     with self.__capture_manager_lock:
       self._capture_manager.ensure_stream_capture(admin_stream_config, verbose=False)
+      if not self._business_manager._admin_instance_hashes:
+        # No admin instance known yet (the admin bootstrap is creating them): the inputs stay in the capture until
+        # one is, instead of being taken and routed to no plugin.
+        return 0
       dct_captures = self._capture_manager.get_single_stream_captured_data(
         ct.CONST_ADMIN_PIPELINE_NAME
       )

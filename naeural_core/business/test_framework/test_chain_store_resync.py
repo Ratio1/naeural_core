@@ -215,6 +215,40 @@ def lap(store, at):
   return [(sorted(sent["node_addr"]), sent["data"]["CHAIN_STORE_DATA"]) for sent in store.sent_payloads[before:]]
 
 
+def lap_answered(store, at):
+  """
+  Run the resync step of ``store`` at ``at`` seconds, as ``lap`` does, and answer each request it sent.
+
+  Each request is answered, with no record, by the first peer it went to, through the payload handler: an answer
+  is taken, so no namespace is owed a second request when the wait ends.
+
+  Parameters
+  ----------
+  store : _ChainStoreRuntimeHarness
+    The store.
+  at : float
+    Seconds after ``NOW``.
+
+  Returns
+  -------
+  list of tuple
+    What ``lap`` returns: one ``(sorted recipients, body)`` per message the step sent.
+
+  Examples
+  --------
+  >>> lap_answered(oracle("report"), 0)
+  [(['oracle', 'peer1'], {'op': 'SHSYNC_REQ', 'request_id': 'r1', 'hkey': 'DEEPLOY_OPERATIONS'})]
+  """
+  # What the step sent.
+  sent = lap(store, at)
+  # Each request.
+  for to, body in sent:
+    # Answered by its first recipient, with no record.
+    answer(store, body["request_id"], to[0], body["hkey"], [])
+  # As lap gives it.
+  return sent
+
+
 def answer(store, request_id, sender, hkey, records):
   """
   Deliver one sync answer to ``store`` through its payload handler, as the network does.
@@ -272,10 +306,10 @@ class TestResyncRequests(unittest.TestCase):
   """An oracle asks two registry members among its peers for one signed namespace per request, round after round."""
 
   def test_a_round_asks_the_five_namespaces_one_gap_apart_then_pauses(self):
-    """With no random stretch a round asks DEEPLOY_OPERATIONS, DEEPLOY_NODE_OPERATIONS, DEEPLOY_DEPLOYED_JOBS,
-    DAUTH_JOB_SECRETS and NODE_KEY_ROTATIONS 60 s apart, each of registry members only (the two dAuth-written ones
-    of dAuth members only), then pauses 1800 s; nothing is asked, and no turn used, while there is no peer; each
-    wait is stretched by 0.75 to 1.25 at random."""
+    """With no random stretch, and each request answered, a round asks DEEPLOY_OPERATIONS, DEEPLOY_NODE_OPERATIONS,
+    DEEPLOY_DEPLOYED_JOBS, DAUTH_JOB_SECRETS and NODE_KEY_ROTATIONS 60 s apart, each of registry members only (the
+    two dAuth-written ones of dAuth members only), then pauses 1800 s; nothing is asked, and no turn used, while
+    there is no peer; each wait is stretched by 0.75 to 1.25 at random."""
     # The wait's random factor fixed at 1: random() gives 0.5, and the wait is its length times 0.75 + 0.5 / 2.
     with mock.patch.dict(GLOBALS, {"random": lambda: 0.5}):
       # A dAuth member with no peer yet.
@@ -284,8 +318,9 @@ class TestResyncRequests(unittest.TestCase):
       self.assertEqual((lap(store, 0), getattr(store, TURN)), ([], 0))
       # Its peers appear: a dAuth member, an oracle, and a node in neither registry.
       store._ChainStoreBasePlugin__chain_peers = ["peer1", "oracle", "peer2"]
-      # The laps of a round and the first of the next: who is asked for what, and nothing in between.
-      asked = [(at, [(to, body["hkey"]) for to, body in lap(store, at)])
+      # The laps of a round and the first of the next, each request answered (an unanswered one is asked again):
+      # who is asked for what, and nothing in between.
+      asked = [(at, [(to, body["hkey"]) for to, body in lap_answered(store, at)])
                for at in (10, 69, 70, 130, 190, 250, 310, 2049, 2050)]
       # The members among the peers; only the dAuth member for the two namespaces dAuth servers write.
       both, dauth = ["oracle", "peer1"], ["peer1"]
@@ -295,20 +330,24 @@ class TestResyncRequests(unittest.TestCase):
         (190, [(dauth, NAMESPACES[3])]), (250, [(dauth, NAMESPACES[4])]), (310, []), (2049, []),
         (2050, [(both, NAMESPACES[0])]),
       ])
+      # The waits that ended: the three namespaces asked of both members had one peer not taken each; the two asked
+      # of the dAuth member alone, whose answer was taken, count nothing.
+      self.assertEqual({label: count for label, count in resync_counts(store).items() if label.endswith("unanswered")},
+                       {_hset_index(name) + "/resync/unanswered": 1 for name in NAMESPACES[:3]})
     # The shortest and the longest wait after a request: 0.75 and (just under) 1.25 times the gap.
     for draw, wait in ((0.0, 45.0), (0.999, 74.97)):
       # One sub-test each.
       with self.subTest(draw=draw), mock.patch.dict(GLOBALS, {"random": lambda: draw}):
         # A fresh oracle with its peers.
         store = oracle("report")
-        # Its first request.
-        lap(store, 0)
+        # Its first request, answered.
+        lap_answered(store, 0)
         # The next one is due after the stretched gap.
         self.assertAlmostEqual(getattr(store, NEXT) - NOW, wait, places=3)
         # The turn of the round's last namespace.
         setattr(store, TURN, 4)
-        # Its request, at the lap it is due: the round ends.
-        lap(store, wait)
+        # Its request, at the lap it is due (the first one's wait may be over then: it was answered): the round ends.
+        lap_answered(store, wait)
         # The pause to the next round is stretched by the same factor: 30 gaps long, so 30 times that wait.
         self.assertAlmostEqual(getattr(store, NEXT) - NOW - wait, 30 * wait, places=3)
 
@@ -349,8 +388,9 @@ class TestResyncRequests(unittest.TestCase):
     with mock.patch.dict(GLOBALS, {"random": lambda: 0.5}):
       # "oracle" is in the oracle registry only; its peers are the two dAuth members and an outsider.
       store = oracle("report", address="oracle", peers=("node", "peer1", "peer2"))
-      # The namespaces of one round's requests, lap by lap.
-      asked = [[(to, body["hkey"]) for to, body in lap(store, at)] for at in (0, 60, 120, 180, 240)]
+      # The namespaces of one round's requests, lap by lap, each request answered (an unanswered one is asked
+      # again).
+      asked = [[(to, body["hkey"]) for to, body in lap_answered(store, at)] for at in (0, 60, 120, 180, 240)]
       # The secrets' lap sends nothing; the key rotations are asked of the dAuth members.
       self.assertEqual(asked, [[(["node", "peer1"], name)] if name != "DAUTH_JOB_SECRETS" else []
                                for name in NAMESPACES])
@@ -540,6 +580,105 @@ class TestResyncAnswers(unittest.TestCase):
     self.assertEqual([body["hkey"] for _, body in lap(store, 0) if body["op"] == "SHSYNC_REQ"], ["NODE_KEY_ROTATIONS"])
     # Only the rotation with a valid proof was merged.
     self.assertEqual(sorted(store.storage), [good])
+
+
+class TestResyncDropsAndSecondRequests(unittest.TestCase):
+  """Every dropped answer to a resync request is counted by why, and a namespace no answer of which was taken is
+  asked again at the next turn, once per round."""
+
+  def test_each_answer_the_handler_drops_is_counted_by_why_and_each_peer_not_taken_as_unanswered(self):
+    """Answers to the store's own resync requests that the answer handler drops are counted under the namespace's
+    bucket as dropped_no_sender, dropped_not_asked (a node not asked, a second answer of a peer taken),
+    dropped_other_namespace, dropped_malformed and dropped_not_member; when the wait ends, each asked peer whose
+    answer was not taken counts unanswered; a blocking sync's and a catch-up's dropped answers count nothing."""
+    # An oracle whose messages are only recorded; no random stretch.
+    store = oracle("report")
+    # No random stretch: the requests 60 s apart.
+    patcher = mock.patch.dict(GLOBALS, {"random": lambda: 0.5})
+    # In force for this test.
+    patcher.start()
+    # Put back after it.
+    self.addCleanup(patcher.stop)
+    # The answer handler, by its private name.
+    handle = getattr(store, "_ChainStoreBasePlugin__exec_hsync_response")
+    # Its first request (r1, DEEPLOY_OPERATIONS) to both peers.
+    lap(store, 0)
+    # A blocking sync's entry: its dropped answers are not the resync's.
+    store.pending_hsync["caller"] = {store.CS_HKEY: "players", store.CS_PEERS: ["peer1"], store.CS_RESPONSE: None}
+    # No verified sender.
+    handle({"request_id": "r1", "hkey": "DEEPLOY_OPERATIONS", "snapshot": {}}, sender=None)
+    # A node not asked.
+    answer(store, "r1", "peer2", "DEEPLOY_OPERATIONS", [])
+    # Another namespace than the one asked.
+    answer(store, "r1", "peer1", "DEEPLOY_NODE_OPERATIONS", [])
+    # A snapshot that is not a dict.
+    handle({"request_id": "r1", "hkey": "DEEPLOY_OPERATIONS", "snapshot": ["x"]}, sender="peer1")
+    # peer1's good answer, taken, then a second one from it.
+    answer(store, "r1", "peer1", "DEEPLOY_OPERATIONS", [operation("x", 1)])
+    # The second: not awaited any more.
+    answer(store, "r1", "peer1", "DEEPLOY_OPERATIONS", [operation("y", 1)])
+    # A node not asked answers the blocking sync: not counted.
+    answer(store, "caller", "peer2", "players", [])
+    # The entry of a catch-up request, as __maybe_pull registers it (no namespace; its wait ends at 10 s).
+    store.pending_hsync["pull"] = {store.CS_PEERS: ["oracle"], store.CS_RESPONSE: None, "until": NOW + 10,
+                                   "pull": {"since": {}, "floor": 0, "after": None}}
+    # A node not asked answers it: the catch-up has counters of its own, nothing is counted here.
+    answer(store, "pull", "peer2", "DEEPLOY_OPERATIONS", [])
+    # The key rotations' turn, 60 s later: asked of the dAuth member peer1 (r2).
+    setattr(store, TURN, 4)
+    # Its request.
+    lap(store, 60)
+    # peer1 has left the dAuth registry since.
+    store.bc.get_eth_dauth_oracles = lambda: ["node"]
+    # Its answer is refused by the namespace's registry rule.
+    answer(store, "r2", "peer1", "NODE_KEY_ROTATIONS", [])
+    # Both waits over (r1 at 60, r2 at 120): "oracle" never answered r1, and peer1's answer to r2 was not taken.
+    lap(store, 120.5)
+    # The bucket of the key rotations.
+    rot = _hset_index("NODE_KEY_ROTATIONS")
+    # Each drop by why, the answer taken, and the peers not taken.
+    self.assertEqual(resync_counts(store), {
+      OPS_BUCKET + "/resync/asked": 1, OPS_BUCKET + "/resync/answered": 1, OPS_BUCKET + "/resync/merged": 1,
+      OPS_BUCKET + "/resync/dropped_no_sender": 1, OPS_BUCKET + "/resync/dropped_not_asked": 2,
+      OPS_BUCKET + "/resync/dropped_other_namespace": 1, OPS_BUCKET + "/resync/dropped_malformed": 1,
+      OPS_BUCKET + "/resync/unanswered": 1, rot + "/resync/asked": 1, rot + "/resync/dropped_not_member": 1,
+      rot + "/resync/unanswered": 1})
+
+  def test_a_namespace_no_answer_of_which_was_taken_is_asked_again_at_the_next_turn_once_per_round(self):
+    """With no answer taken, DEEPLOY_OPERATIONS is asked again at the turn after its wait ended, before the next
+    namespace, and that second request, also unanswered, is not repeated; a namespace one of whose answers was
+    taken is not asked again; after the round's last request an unanswered namespace is asked again one gap after
+    its wait ended, not after the pause, and so is a second one owed at the same time; then the pause."""
+    # No random stretch: gaps of 60 s, a pause of 1800 s.
+    with mock.patch.dict(GLOBALS, {"random": lambda: 0.5}):
+      # An oracle whose peers (peer1, a dAuth member, and "oracle") never answer unless told.
+      store = oracle("report")
+      # The namespaces asked at each lap.
+      asked = {}
+      # Each lap, until the round's third namespace.
+      for at in (0, 60, 60.5, 120, 120.5, 180, 180.5, 240, 240.5):
+        # What it asks.
+        asked[at] = [body["hkey"] for _, body in lap(store, at)]
+      # One answer to DEEPLOY_DEPLOYED_JOBS (r5, asked at 240), from peer1, is taken.
+      answer(store, "r5", "peer1", "DEEPLOY_DEPLOYED_JOBS", [])
+      # The rest of the round, its second requests and the next round's first.
+      for at in (300, 300.5, 360, 360.5, 420, 420.5, 480.5, 2280, 2280.5):
+        # What it asks.
+        asked[at] = [body["hkey"] for _, body in lap(store, at)]
+    # The names, shorter.
+    ops, node_ops, jobs, secrets, rotations = NAMESPACES
+    # Each unanswered namespace once more, one turn later, never a third time; DEEPLOY_DEPLOYED_JOBS, answered by
+    # one peer, not again; the last two second requests one gap apart after the round's end, then the pause.
+    self.assertEqual(asked, {
+      0: [ops], 60: [node_ops], 60.5: [], 120: [ops], 120.5: [], 180: [node_ops], 180.5: [], 240: [jobs],
+      240.5: [], 300: [secrets], 300.5: [], 360: [rotations], 360.5: [], 420: [], 420.5: [secrets],
+      480.5: [rotations], 2280: [], 2280.5: [ops]})
+    # Every asked peer not taken counted: two per request of the namespaces asked of both peers (one for the request
+    # peer1 answered), one per request of those asked of the dAuth member only.
+    self.assertEqual({label.split("/")[0]: count for label, count in resync_counts(store).items()
+                      if label.endswith("/unanswered")}, {
+      _hset_index(ops): 4, _hset_index(node_ops): 4, _hset_index(jobs): 1, _hset_index(secrets): 2,
+      _hset_index(rotations): 2})
 
 
 class TestMergeOfTheValueHeld(unittest.TestCase):

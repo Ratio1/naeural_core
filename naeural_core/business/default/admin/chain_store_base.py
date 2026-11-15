@@ -108,6 +108,10 @@ _CONFIG = {
   # line. 0, the default, refuses none: the keys are only counted (new_keys/<sender>), and a later release can set the
   # number from those counts.
   "CSTORE_NEW_KEYS_MAX" : 0,
+  # How many oracles the catch-up after a start asks, one after the other, for the records this node missed while it
+  # was away (0: none). With CSTORE_HANDOFF not 'off' and this number above 0, each start keeps in the replica, per
+  # writer, the newest stamp it holds (the marks): what a catch-up of that start has to ask for.
+  "CSTORE_PULL_PEERS" : 2,
 
   'VALIDATION_RULES' : { 
     **NetworkProcessorPlugin.CONFIG['VALIDATION_RULES'],
@@ -179,6 +183,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   # save. The deepest value known in use is a deployment's secret record (one pipeline configuration per node), 10
   # levels as its writer builds it; the values of the store's own tests are nested 2 levels at most.
   CS_MAX_DEPTH = 64
+  # The reserved key under which the replica keeps the tombstone horizon and the marks a catch-up still owes. It is
+  # under "hs:" but not of a namespace's form ("hs:", 10 hex digits, ":"), so no namespace sync, list or census
+  # reaches it; no write may name it.
+  CS_PULL_KEY = "hs:cstore_pull"
   # The hand-off: seconds between two sweeps, re-sends per sweep, re-sends per record and peer before giving up,
   # the longest gap of the back-off, and how long before a lost peer was dropped its settlements are re-opened.
   CS_HANDOFF_INTERVAL, CS_HANDOFF_BUDGET, CS_HANDOFF_MAX_SENDS, CS_HANDOFF_MAX_GAP = 15, 32, 6, 3600
@@ -232,8 +240,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     read). Then the counters of the ``CSTORE_STATS`` line start, the wave 03 switches (``CSTORE_ORDER``,
     ``CSTORE_LEAN_CONFIRM``, ``CSTORE_HANDOFF``, ``CSTORE_SAVE_BACKOFF``) are read once into the mode table
     every later step reads, the save back-off's ceiling ``CSTORE_SAVE_MAX_GAP``, the stamp bound
-    ``CSTORE_VER_MAX_AHEAD``, the hand-off's numbers ``CSTORE_HANDOFF_FIRST_S`` and ``CSTORE_HANDOFF_WINDOW``
-    and the limit of new keys per outside sender ``CSTORE_NEW_KEYS_MAX``
+    ``CSTORE_VER_MAX_AHEAD``, the hand-off's numbers ``CSTORE_HANDOFF_FIRST_S`` and ``CSTORE_HANDOFF_WINDOW``,
+    the limit of new keys per outside sender ``CSTORE_NEW_KEYS_MAX`` and the catch-up's number
+    ``CSTORE_PULL_PEERS``
     are read once too, and the flush of a changed replica is registered with the
     SerializationManager, which runs it on a thread kept for this save every ``CS_SAVE_INTERVAL`` seconds, so
     this plugin's thread no longer runs the save. A switch set
@@ -259,8 +268,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     TypeError
       When ``CSTORE_SAVE_MAX_GAP`` is not a number nor a str (``None``, a list); the start stops the same way.
       A str that is not a number raises ValueError instead; a numeric str such as ``"30"`` is taken. The same
-      holds for the hand-off's numbers (``float`` and ``int``), for ``CSTORE_NEW_KEYS_MAX`` (``int``) and for
-      ``CSTORE_VER_MAX_AHEAD`` and
+      holds for the hand-off's numbers (``float`` and ``int``), for ``CSTORE_NEW_KEYS_MAX`` and
+      ``CSTORE_PULL_PEERS`` (``int``) and for ``CSTORE_VER_MAX_AHEAD`` and
       ``CSTORE_TOMBSTONE_DAYS`` (``float``, then milliseconds as an int): ``"60"`` and ``"7"`` are taken as 60 and
       7, ``"soon"`` raises ValueError and ``None`` TypeError.
     OverflowError
@@ -292,6 +301,22 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     The resync of the signed namespaces (``__maybe_resync``) starts due, at its first namespace: the first lap
     that finds a replication peer sends its first request.
+
+    The reserved record (``CS_PULL_KEY``, ``"hs:cstore_pull"``) is read once the store this instance uses is
+    known: its ``floor`` becomes the tombstone horizon and its ``owed`` the marks a catch-up still owes. A
+    replica without the record starts with the horizon 0 and nothing owed. A field of another form is repaired,
+    with one red line each: a horizon that is not an int, or lies more than ``CSTORE_VER_MAX_AHEAD`` ahead of
+    the wall clock, becomes that bound (the safe end: no record stamped before this start may then come back
+    by a catch-up); marks that are not a map of writer to int are dropped. With ``CSTORE_HANDOFF`` not 'off'
+    and ``CSTORE_PULL_PEERS`` above 0 the marks of this start are then taken, before the setter is published,
+    so no write of this run can raise one: per writer, the newest stamp time held that is not a future one
+    (one walk of the replica, 2.8 ms of CPU for 5,700 records under a 0.35 CPU limit). What this start owes is
+    those marks or, while marks are still owed from an earlier start, the lower of the two per writer; a writer
+    either side lacks is left out, as a writer without a mark is one all of whose records are owed. The record
+    is written back in memory (it reaches the file with the next save of a changed replica), and one red line
+    says so when the newest mark is older than ``CSTORE_TOMBSTONE_DAYS``: keys deleted on the network meanwhile
+    are still held here. With the switch 'off' or the number 0 nothing is taken or written, and what the
+    record holds stays as it is.
 
     The rename is one of those steps: when it fails (the cache folder cannot be written) this method raises
     and the plugin does not start, where it used to start empty and fail at its first save. A file that
@@ -374,9 +399,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__handoff_window = int(self.cfg_cstore_handoff_window)
     # The limit of new keys per outside sender and CSTORE_STATS period, read once as well (0: they are only counted).
     self.__new_keys_max = int(self.cfg_cstore_new_keys_max)
-    # The newest stamp of a tombstone this node removed (expired or past the cap), at most CSTORE_VER_MAX_AHEAD ahead
-    # of the wall clock: no record stamped below it may come back by a later catch-up. 0 until the first removal.
-    self.__tomb_horizon = 0
+    # How many oracles a catch-up asks after a start, read once as well (0 or less: none, and no marks are kept).
+    self.__pull_peers = int(self.cfg_cstore_pull_peers)
     # The switches set to anything but the three modes, by config key; checked after the registration, so the
     # on_close that follows a failed start still finds the registration it removes.
     bad_modes = {
@@ -434,6 +458,46 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                   and record.get(self.CS_VALUE) is None and key[len(self.CS_DEL):] in self.__chain_storage]:
         # Removed from memory; the file keeps it until the next save, and the next start drops it again.
         del self.__chain_storage[key]
+
+    # What the replica keeps under the reserved key: the tombstone horizon and the marks a catch-up still owes (0 and
+    # none on a replica that never held the record).
+    saved = self.__chain_storage.get(self.CS_PULL_KEY, {}).get(self.CS_VALUE, {"floor": 0, "owed": None})
+    # Its two fields; a value that is not a dict has neither (a node of the previous release takes a peer's store to
+    # this key).
+    floor, owed = (saved.get("floor"), saved.get("owed")) if isinstance(saved, dict) else (None, None)
+    if type(floor) is not int or floor > limit:
+      self.P(" === Chain storage: the saved tombstone horizon is not a stamp time up to now; set to now, so no "
+             "record stamped before this start may come back by a catch-up", color='r')
+      # Not trusted, so the safe end: the bound of a stamp that is not a future one, as of this start.
+      floor = limit
+    if owed is not None and not (isinstance(owed, dict) and all(type(ms) is int for ms in owed.values())):
+      self.P(" === Chain storage: the saved catch-up marks are not a map of writer to stamp time; dropped",
+             color='r')
+      # Not trusted: nothing is owed from an earlier start.
+      owed = None
+    # The newest stamp of a tombstone this node removed (expired or past the cap), at most CSTORE_VER_MAX_AHEAD ahead
+    # of the wall clock: no record stamped below it may come back by a catch-up. It is now kept across restarts, in
+    # the reserved record (before, it started at 0 with each start); and the marks a catch-up still owes (None:
+    # nothing owed), kept there too.
+    self.__tomb_horizon, self.__pull_owed = floor, owed
+    if self.__cs_modes["handoff"] != "off" and self.__pull_peers > 0:
+      # The marks of this start: per writer, the newest stamp time held that is not a future one. Taken here, before
+      # the setter is published, so no write of this run can raise one first.
+      marks = {}
+      # Each stamp held (a record that is not a dict has none, as the walk of the stamp clock above takes it).
+      for ver in (record.get(self.CS_VER) for record in self.__chain_storage.values() if isinstance(record, dict)):
+        if ver is not None and marks.get(ver[1], 0) < ver[0] <= limit:
+          # The newest of this writer so far.
+          marks[ver[1]] = ver[0]
+      # What this start owes: its marks, or, while an earlier start's marks are still owed, the lower of the two per
+      # writer. A writer either side lacks is left out: without a mark, all its records are owed.
+      self.__pull_owed = marks if owed is None else {
+        writer: min(ms, marks[writer]) for writer, ms in owed.items() if writer in marks}
+      if max(marks.values(), default=limit) < limit - self.__ver_ahead - self.__tomb_ms:
+        self.P(" === Chain storage: the newest stamped record held is older than CSTORE_TOMBSTONE_DAYS: keys "
+               "deleted on the network meanwhile are still held here, and no catch-up removes them", color='r')
+      # The record as this start leaves it, in memory: it reaches the file with the next save of a changed replica.
+      self.__pull_keep()
 
     memory[self.CS_STORAGE_MEM] = self.__chain_storage
     memory[self.CS_GETTER] = self._get_value
@@ -518,7 +582,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     left alone). With the order switch 'off', or ``CSTORE_TOMBSTONE_DAYS`` 0, every tombstone is removed; else
     those stamped more than ``CSTORE_TOMBSTONE_DAYS`` ago, and the oldest beyond ``CSTORE_TOMBSTONE_CAP``. Each
     removal raises the horizon (the newest removed stamp that is at most ``CSTORE_VER_MAX_AHEAD`` ahead of the
-    wall clock) in the same hold of the persistence lock. The removed ones are counted as
+    wall clock) in the same hold of the persistence lock, and a sweep that removed any writes the reserved
+    record again with the horizon (``__pull_keep``) in that hold, so no save holds a removal without the horizon
+    it raised. A removed tombstone stamped further ahead than that leaves the horizon as it is and counts
+    ``pull_h_future``: its delete is not covered by the horizon. The removed ones are counted as
     ``tombstones_dropped`` and mark the replica for a save; those left as ``tombstones_held``.
 
     Returns
@@ -556,6 +623,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         if ver[0] <= now + self.__ver_ahead:
           # The horizon rises with it, in the same lock hold; a future stamp is left out of it.
           self.__tomb_horizon = max(self.__tomb_horizon, ver[0])
+        else:
+          # A removed tombstone stamped too far ahead to raise the horizon: counted, as its delete is not covered.
+          self.__cs_count("pull_h_future")
+      if cut:
+        # The horizon into the reserved record in the same lock hold, so no save holds a removal without it.
+        self.__pull_keep()
     if cut:
       # Saved by the next flush; counted for the line.
       self.__chain_storage_dirty = True
@@ -564,6 +637,39 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     if len(tombs) > cut:
       # How many are held, for the line this sweep precedes.
       self.__cs_count("tombstones_held", n=len(tombs) - cut)
+
+
+  def __pull_keep(self):
+    """
+    Write the reserved record: the tombstone horizon and the marks a catch-up still owes.
+
+    The record under ``CS_PULL_KEY`` (``"hs:cstore_pull"``) has the fields of a record synced from a peer (owner
+    this node, ``confirms`` -1) and the value ``{"floor": <horizon in ms>, "owed": <{writer: ms} or None>}``. It
+    is replaced whole, never changed in place: a save pickles the records outside the persistence lock.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Takes the persistence lock (re-entrant: the tombstone sweep calls it inside its own hold). It marks nothing
+    for a save: the sweep marks the replica for its removals, and the record otherwise reaches the file with the
+    next save of a changed replica. The key is under ``"hs:"`` but not of a namespace's form, so no namespace
+    sync, list or census reaches the record; ``_set_value`` and ``__exec_store`` refuse a write that names it.
+    A node of the previous release keeps the record in its file and reads it nowhere.
+
+    Examples
+    --------
+    >>> self.__pull_keep()
+    >>> self.__chain_storage["hs:cstore_pull"]["value"]
+    {'floor': 1700000000000, 'owed': None}
+    """
+    # Under the lock the saves copy the records under.
+    with self.__persistence_lock:
+      # A new record each time, with the fields of a record synced from a peer.
+      self.__set_key_value(self.CS_PULL_KEY, {"floor": self.__tomb_horizon, "owed": self.__pull_owed}, self.ee_addr,
+                           local_sync_storage_op=True)
 
 
   def __maybe_handoff(self):
@@ -2936,7 +3042,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ------
     ValueError
       If ``key`` is invalid (not a str, empty, or starting with ``"dl:"``,
-      the prefix of the tombstones), if ``timeout`` or ``max_retries`` fail
+      the prefix of the tombstones, or with ``"hs:cstore_pull"``, the key of
+      the store's own catch-up record), if ``timeout`` or ``max_retries`` fail
       validation, if ``wait`` is False for a key of a protected namespace
       (counted ``error``), or if the underlying storage/update flow raises an
       error.
@@ -3102,9 +3209,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     if not isinstance(key, str) or len(key) == 0:
       raise ValueError("Key must be a non-empty string.")
-    if key.startswith(self.CS_DEL):
-      # Reserved for the tombstones of deletes: no write may name such a key (a remote one is dropped by __exec_store).
-      raise ValueError(f"Keys starting with {self.CS_DEL!r} are reserved for the chain store's deletes.")
+    if key.startswith((self.CS_DEL, self.CS_PULL_KEY)):
+      # Reserved for the tombstones of deletes and for the store's own catch-up record: no write may name such a key
+      # (a remote one is dropped by __exec_store).
+      raise ValueError(f"Keys starting with {self.CS_DEL!r} or {self.CS_PULL_KEY!r} are reserved for the chain store.")
     # Outcome counted once by the finally below: every way out sets its own word, so one left unset is an error
     # (wave 02 counted every other way out as "refused"); and how a local write's wait ended, when it failed.
     outcome, wait_end = "error", None
@@ -3789,7 +3897,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     A store whose key starts with ``"dl:"``, the prefix of the tombstones, is dropped unconfirmed and counted
     as ``<bucket>/remote/refused_invalid_key`` under the bucket of the key after the prefix; ``_set_value``
-    would raise for it, and a raise here would stall the plugin loop. So is a store or a delete whose key is
+    would raise for it, and a raise here would stall the plugin loop. So is a store or a delete that names the
+    reserved key of the store's own catch-up record (``CS_PULL_KEY``), counted under that key's first 14
+    characters. So is a store or a delete whose key is
     not a non-empty str (a number, a list, a dict, a missing or empty key), which no node of this release
     sends: counted as ``plain/remote/refused_invalid_key``. And so is a store or a delete, from a registry
     member to a dAuth registry member, of a ``DAUTH_JOB_SECRET_REVISIONS`` key whose field part does not decode
@@ -3821,9 +3931,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       with self.__persistence_lock:
         # A plain increment of one counter; one label per bucket.
         self.__cs_stats[label] = self.__cs_stats.get(label, 0) + 1
-    if not isinstance(key, str) or not key or key.startswith(self.CS_DEL):
+    if not isinstance(key, str) or not key or key.startswith((self.CS_DEL, self.CS_PULL_KEY)):
       # A key no store may name: one that is not a non-empty str (a number, a list, a missing key), or one reserved for
-      # tombstones. _set_value raises for each, and a raise here leaves the plugin loop, which then sleeps, so one such
+      # tombstones or for the store's own catch-up record (a peer's store there would set this node's horizon and
+      # marks). _set_value raises for each, and a raise here leaves the plugin loop, which then sleeps, so one such
       # store would stall every write here: it is dropped unconfirmed and counted, under the bucket of the key after
       # the tombstones' prefix, or under "plain" for a key that is not a str.
       self.__cs_count("refused_invalid_key", key.removeprefix(self.CS_DEL) if isinstance(key, str) else "", "remote")
@@ -4394,10 +4505,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (and reset) under the persistence lock, then logged outside it as one JSON object with sorted keys::
 
       CSTORE_STATS {"counts":{...},"handoff_pending":0,"lost_inputs":0,"modes":{"handoff":"report",
-                    "lean_confirm":"report","order":"report","save_backoff":"report"},"period_s":300,
-                    "queue_peak":0,"stamp_lead_max_s":0.0}
+                    "lean_confirm":"report","order":"report","pull_peers":2,"save_backoff":"report"},
+                    "period_s":300,"pull_owed":0,"queue_peak":0,"stamp_lead_max_s":0.0}
 
-    (one line in the log). ``modes`` is the table of the wave 03 switches read once by ``on_init``.
+    (one line in the log). ``modes`` is the table of the wave 03 switches read once by ``on_init``, with the
+    catch-up's number ``CSTORE_PULL_PEERS`` as ``pull_peers``. ``pull_owed`` is 1 while the replica holds marks
+    a catch-up still owes and 0 when it holds none.
     ``stamp_lead_max_s`` is the largest lead over this node's wall clock, in seconds, of a version stamp the
     order rule took in the period (a peer's clock ahead of this one, plus the transit time); 0 when none led.
     ``handoff_pending`` is the number of the hand-off's pairs (an own record and a target) not settled at its
@@ -4448,12 +4561,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # Also the mode of each wave 03 switch, read once at start, so a line says whether each rule counted in it
       # acted ('on') or was only evaluated ('report').
       self.P("CSTORE_STATS " + self.json_dumps({
-        "period_s": round(now - self.__cs_stats_last), "counts": counts, "modes": self.__cs_modes,
+        "period_s": round(now - self.__cs_stats_last), "counts": counts,
+        # The switches, and with them the number of oracles a catch-up asks.
+        "modes": {**self.__cs_modes, "pull_peers": self.__pull_peers},
         "queue_peak": self.__cs_stats_queue_peak, "lost_inputs": lost - self.__cs_stats_lost,
         # In seconds, 0 when no stamp taken led the wall clock (always with the order switch 'off').
         "stamp_lead_max_s": round(lead / 1000, 1),
         # The hand-off's pairs left pending by its last sweep (0 with it 'off'): the size of its in-memory table.
         "handoff_pending": self.__handoff_pending,
+        # 1 while the replica holds marks a catch-up still owes, 0 when it holds none.
+        "pull_owed": int(self.__pull_owed is not None),
       }, sort_keys=True))
       # The next line is measured from here.
       self.__cs_stats_last, self.__cs_stats_queue_peak, self.__cs_stats_lost = now, 0, lost

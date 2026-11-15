@@ -319,6 +319,10 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__handoff_first, self._ChainStoreBasePlugin__handoff_window = 300.0, 8
     # The limit of new keys per outside sender as the config gives it and as on_init reads it: 0, they are only counted.
     self.cfg_cstore_new_keys_max = self._ChainStoreBasePlugin__new_keys_max = 0
+    # The oracles a catch-up asks, as the config gives it and as on_init reads it.
+    self.cfg_cstore_pull_peers = self._ChainStoreBasePlugin__pull_peers = 2
+    # No marks owed, as on_init leaves a store that keeps none (every switch 'off', or a replica without the record).
+    self._ChainStoreBasePlugin__pull_owed = None
     # The hand-off's state as on_init leaves it at time 0: an empty table, the first sweep at 300 s, nothing pending.
     self._ChainStoreBasePlugin__handoff, self._ChainStoreBasePlugin__handoff_next = {}, 300.0
     # Nothing pending.

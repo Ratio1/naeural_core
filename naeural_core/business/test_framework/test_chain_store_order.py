@@ -978,7 +978,8 @@ class TestTombstones(unittest.TestCase):
   def test_the_sweep_removes_expired_and_surplus_tombstones_and_raises_the_horizon(self):
     """At each CSTORE_STATS line the tombstones older than CSTORE_TOMBSTONE_DAYS and the oldest past
     CSTORE_TOMBSTONE_CAP go, counted, the replica marked; the horizon is the newest removed stamp that is not a
-    future one; 'off' and a life of 0 days remove every tombstone; a "dl:" record that is not a tombstone stays."""
+    future one, and the sweep writes it into the reserved record; a removed future one is counted; 'off' and a life
+    of 0 days remove every tombstone; a "dl:" record that is not a tombstone stays."""
     # Tombstones 8 days, 1 day and 1 s old, and one 2 min ahead; and a "dl:" record holding a value.
     stamps = {"a": NOW_MS - 8 * DAY_MS, "b": NOW_MS - DAY_MS, "c": NOW_MS - 1000, "d": NOW_MS + 120_000}
     # As held.
@@ -998,11 +999,19 @@ class TestTombstones(unittest.TestCase):
         store._ChainStoreBasePlugin__tomb_cap, store._ChainStoreBasePlugin__tomb_ms = cap, days * DAY_MS
         # The sweep.
         store._ChainStoreBasePlugin__sweep_tombstones()
-        # What is left, the horizon, the mark and the counts.
-        self.assertEqual((sorted(store.storage), store._ChainStoreBasePlugin__tomb_horizon, getattr(store, DIRTY),
-                          getattr(store, STATS)),
-                         (sorted(["dl:x"] + ["dl:" + name for name in left]), horizon, True,
-                          {"tombstones_dropped": 4 - len(left), **({"tombstones_held": len(left)} if left else {})}))
+        # The keys left: the record that is no tombstone, the tombstones kept, and the store's own record, which the
+        # sweep wrote.
+        keys = sorted(["dl:x", "hs:cstore_pull"] + ["dl:" + name for name in left])
+        # The counts: those removed and those held, and the removed tombstone stamped too far ahead ("d"), which does
+        # not raise the horizon.
+        counts = {"tombstones_dropped": 4 - len(left), **({"tombstones_held": len(left)} if left else {}),
+                  **({} if "d" in left else {"pull_h_future": 1})}
+        # What the sweep left: the keys, the horizon, the mark for a save and the counts.
+        found = (sorted(store.storage), store._ChainStoreBasePlugin__tomb_horizon, getattr(store, DIRTY), getattr(store, STATS))
+        # As expected.
+        self.assertEqual(found, (keys, horizon, True, counts))
+        # The record holds the horizon as the sweep left it, and no marks (this store owes none).
+        self.assertEqual(store.storage["hs:cstore_pull"]["value"], {"floor": horizon, "owed": None})
 
   def test_start_drops_a_tombstone_whose_key_is_held_again(self):
     """on_init ('report') drops the tombstone of a key that is held again (rewritten under the previous release) and
@@ -1032,8 +1041,8 @@ class TestTombstones(unittest.TestCase):
     store._now, store.bc = NOW, SimpleNamespace(get_whitelist=lambda with_prefix=False: [])
     # The real on_init.
     store.on_init()
-    # Only the tombstone of the held key is gone.
-    self.assertEqual(sorted(store.storage), sorted([KEY, "dl:b", "x", "dl:x"]))
+    # Only the tombstone of the held key is gone; the start added the store's own record (the horizon and the marks).
+    self.assertEqual(sorted(store.storage), sorted([KEY, "dl:b", "x", "dl:x", "hs:cstore_pull"]))
 
   def test_an_orderly_stop_saves_a_tombstone_held_without_a_dirty_mark(self):
     """The tombstone of a delete of a key not held is not saved by the periodic flush but is saved at an orderly

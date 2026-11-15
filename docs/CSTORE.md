@@ -655,6 +655,40 @@ Records: an own record also carries `default_peers`; a remote record carries
 this node's lists, which nothing read). A `False` from a blocking write with the
 hand-off `on` means "not confirmed yet": the store keeps delivering it.
 
+### Catch-up after a start (`CSTORE_PULL_PEERS`)
+
+A node that was away misses the records written meanwhile. For the catch-up that asks other
+oracles for them, the replica keeps one record of its own under the reserved key
+`hs:cstore_pull`, with the value `{"floor": <ms>, "owed": {<writer>: <ms>} | null}`:
+
+- `floor` is the tombstone horizon: the newest stamp of a tombstone this node removed at a
+  sweep (expired, or past the cap), in every mode of every switch. No record stamped below
+  it may come back by a catch-up, as the delete that removed it is forgotten here. The
+  sweep writes the record in the lock hold of its removals, so a save never holds a removal
+  without the horizon it raised, and a start reads it back. A removed tombstone stamped
+  more than `CSTORE_VER_MAX_AHEAD` ahead of the wall clock does not raise it and is counted
+  `pull_h_future`.
+- `owed` are the marks of a start whose catch-up has not finished: per writer, the newest
+  stamp time the replica held at that start (stamps more than `CSTORE_VER_MAX_AHEAD` ahead
+  left out), taken before any write of the run can raise one. A start takes them with
+  `CSTORE_HANDOFF` not `off` and `CSTORE_PULL_PEERS` (default 2, read once at start) above
+  0. While marks are still owed from an earlier start, the new ones are the lower of the
+  two per writer; a writer either side lacks is left out, which means all its records are
+  owed. With the switch `off` or the number 0 a start takes none and writes nothing.
+
+The key is under `hs:` but not of a namespace's form (`hs:`, 10 hex digits, `:`), so no
+namespace sync, list or census reaches the record; a read of that exact key returns it.
+No write may name it: a local one raises, and a peer's store or delete is dropped and
+counted `hs:cstore_pull/remote/refused_invalid_key`. A start repairs a record of another
+form, with one red line per field: a horizon that is not an int, or lies past the bound of
+a stamp that is not a future one, becomes that bound, and marks that are not a map of
+writer to int are dropped. The owner field is not read, so the record survives a change of
+the node's address. One red line also says when the newest mark of a start is older than
+`CSTORE_TOMBSTONE_DAYS`: keys deleted on the network meanwhile are still held on that node.
+
+A node of the previous release keeps the record in its file, reads it nowhere, and takes a
+peer's store to that key like any other; the repair above is for that case.
+
 ### Non-blocking write (`wait=False`)
 
 `chainstore_set(..., wait=False)` and `chainstore_hset(..., wait=False)` (no switch; a
@@ -691,7 +725,7 @@ Every `CS_STATS_INTERVAL` (300 s) the chain-store plugin loop writes one line to
 the node log, one JSON object with sorted keys:
 
 ```text
-CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"handoff_pending":<n>,"lost_inputs":<n>,"modes":{"handoff":"report","lean_confirm":"report","order":"report","save_backoff":"report"},"period_s":300,"queue_peak":<n>,"stamp_lead_max_s":<s>}
+CSTORE_STATS {"counts":{"hs:<hash>:/remote/changed":<n>,"hs:<hash>:/remote_non_peer":<n>,"plain/local/identical":<n>,"saves":<n>},"handoff_pending":<n>,"lost_inputs":<n>,"modes":{"handoff":"report","lean_confirm":"report","order":"report","pull_peers":2,"save_backoff":"report"},"period_s":300,"pull_owed":<n>,"queue_peak":<n>,"stamp_lead_max_s":<s>}
 ```
 
 The line is written also when nothing was counted, so a missing line means the
@@ -704,9 +738,10 @@ Fields:
 - `counts`: the counters of that period, by label (below); only labels seen in the period appear.
 - `queue_peak`: the largest number of inputs still waiting in the plugin's input queue when a loop lap reached the chain-store step in the period. The lap has taken its inputs by then, so a queue that filled up shows in `lost_inputs`, not here.
 - `lost_inputs`: how much the plugin's `lost_inputs_count` grew: inputs that arrived while the input queue was full, when the queue drops its oldest input.
-- `modes`: the mode of each wave 03 switch of the plugin config (`CSTORE_ORDER`, `CSTORE_LEAN_CONFIRM`, `CSTORE_HANDOFF`, `CSTORE_SAVE_BACKOFF`), read once at start: `off` (wave 02 behaviour), `report` (the rule runs and is counted, nothing acts on it) or `on` (the rule acts). Any other value stops the plugin's start. The same table is in every line until the next start.
+- `modes`: the mode of each wave 03 switch of the plugin config (`CSTORE_ORDER`, `CSTORE_LEAN_CONFIRM`, `CSTORE_HANDOFF`, `CSTORE_SAVE_BACKOFF`), read once at start: `off` (wave 02 behaviour), `report` (the rule runs and is counted, nothing acts on it) or `on` (the rule acts). Any other value stops the plugin's start. With them `pull_peers`, the number `CSTORE_PULL_PEERS` as read at start. The same table is in every line until the next start.
 - `stamp_lead_max_s`: the largest lead over this node's wall clock, in seconds, of a version stamp the order rule took in the period (a peer's clock ahead of this one, plus transit); 0 when none led, and always with `CSTORE_ORDER` `off`.
 - `handoff_pending`: the hand-off's pairs (own record, target) not settled at its last sweep; 0 with `CSTORE_HANDOFF` `off`.
+- `pull_owed`: 1 while the replica holds marks a catch-up still owes (above), 0 when it holds none.
 
 Labels in `counts`:
 
@@ -734,9 +769,10 @@ Labels in `counts`:
 - `<bucket>/<origin>/tombstone_new`: a delete that left a new tombstone; `<origin>` also `hsync` in `on`.
 - `<bucket>/confirm/disagree_own`, `<bucket>/confirm/disagree_other` (`CSTORE_LEAN_CONFIRM` `report` on the receivers): a full confirmation with a stamp that the value rule and the stamp rule judge apart (above).
 - `<bucket>/<origin>/perm_readonly`, `<bucket>/<origin>/delete_foreign` (`CSTORE_ORDER` `report` or `on`): the write-permission count (above); counts only.
-- `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`. Under the bucket of `DAUTH_JOB_SECRET_REVISIONS`, a store or delete from a registry member whose key's field part does not decode (base64 without its padding, bytes that are not UTF-8, a lone surrogate), dropped unconfirmed: the revocation rules decode that part. Under the bucket `plain`, a message dropped because a peer put something unusable where a key belongs, which no node of this release sends: `plain/remote/refused_invalid_key` for a store or delete whose key is not a non-empty str, `plain/confirm/refused_invalid_key` for a confirmation or refusal answer whose key is not a str, `plain/hsync/refused_invalid_key` for a namespace-sync request whose `hkey` holds a surrogate code point (U+D800 to U+DFFF), which UTF-8 does not encode.
+- `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`. Under `hs:cstore_pull`, a store or delete that names the store's own catch-up record, dropped. Under the bucket of `DAUTH_JOB_SECRET_REVISIONS`, a store or delete from a registry member whose key's field part does not decode (base64 without its padding, bytes that are not UTF-8, a lone surrogate), dropped unconfirmed: the revocation rules decode that part. Under the bucket `plain`, a message dropped because a peer put something unusable where a key belongs, which no node of this release sends: `plain/remote/refused_invalid_key` for a store or delete whose key is not a non-empty str, `plain/confirm/refused_invalid_key` for a confirmation or refusal answer whose key is not a str, `plain/hsync/refused_invalid_key` for a namespace-sync request whose `hkey` holds a surrogate code point (U+D800 to U+DFFF), which UTF-8 does not encode.
 - `plain/hsync/refused_malformed`, `plain/remote/refused_malformed`: a namespace-sync answer whose `request_id` is not a str, and a message whose `CHAIN_STORE_DATA` is not a dict; both dropped. Each of these six inputs used to raise out of the payload handler, which ends the plugin's lap; any count of them points at a sender that forges or corrupts messages.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
+- `pull_h_future`: removed tombstones stamped too far ahead of the wall clock to raise the tombstone horizon (above); expected 0.
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
 - `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers taken, and records those answers inserted or replaced.
 - `<bucket>/remote_non_peer`: a store received from a sender that is not in this node's replication peers, counted before any check of the write.

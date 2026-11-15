@@ -33,21 +33,48 @@ BUCKET = _hset_index("players")  # "hs:" + 10 hex digits + ":", 14 characters
 
 def modes():
   """
-  Give the mode table every harness starts with: each wave 03 switch in the harness's mode.
+  Give the ``modes`` field a ``CSTORE_STATS`` line of any harness shows: each switch in the harness's mode, and the
+  catch-up's number.
 
   Returns
   -------
   dict
     ``{"order", "lean_confirm", "handoff", "save_backoff"}`` each mapped to ``_ChainStoreRuntimeHarness.CSTORE_MODE``
-    ('off', or 'report' in the report-mode run), as the ``modes`` of a ``CSTORE_STATS`` line shows it.
+    ('off', or 'report' in the report-mode run), and ``"pull_peers"`` 2, the harness's ``CSTORE_PULL_PEERS``.
 
   Examples
   --------
   >>> modes()
-  {'order': 'off', 'lean_confirm': 'off', 'handoff': 'off', 'save_backoff': 'off'}
+  {'order': 'off', 'lean_confirm': 'off', 'handoff': 'off', 'save_backoff': 'off', 'pull_peers': 2}
   """
-  # Read at call time, so the report-mode run, which sets the harness's mode for each test, gets 'report'.
-  return dict.fromkeys(("order", "lean_confirm", "handoff", "save_backoff"), _ChainStoreRuntimeHarness.CSTORE_MODE)
+  # Read at call time, so the report-mode run, which sets the harness's mode for each test, gets 'report'; with them
+  # the number of oracles a catch-up asks, which the line shows beside the switches.
+  return {**dict.fromkeys(("order", "lean_confirm", "handoff", "save_backoff"), _ChainStoreRuntimeHarness.CSTORE_MODE),
+          "pull_peers": 2}
+
+
+def loaded(store):
+  """
+  Give the records a store holds, without the record the store keeps for itself.
+
+  Parameters
+  ----------
+  store : _ChainStoreRuntimeHarness
+    A store, started or not.
+
+  Returns
+  -------
+  dict
+    Its replica without the reserved record (the tombstone horizon and the marks of a start), which ``on_init``
+    writes with the hand-off switch not 'off': what the replica file and the writes gave.
+
+  Examples
+  --------
+  >>> loaded(started_store_with_an_empty_file)
+  {}
+  """
+  # Every record but the store's own.
+  return {key: record for key, record in store.storage.items() if key != store.CS_PULL_KEY}
 
 
 def reported(counts):
@@ -319,7 +346,9 @@ class _StartHarness(_ChainStoreRuntimeHarness, _PluginBase):
                  # The resync's next request time and the turn of its namespaces.
                  "resync_next", "resync_turn",
                  # The limit of new keys per outside sender.
-                 "new_keys_max"):
+                 "new_keys_max",
+                 # The catch-up's number and the marks it still owes.
+                 "pull_peers", "pull_owed"):
       delattr(self, "_ChainStoreBasePlugin__" + name)
     self.log = SimpleNamespace(get_data_folder=lambda: data_folder)
     self._persistence_fld = "/chain_store"
@@ -632,6 +661,8 @@ class TestCounters(unittest.TestCase):
       "stamp_lead_max_s": 0.0,
       # No hand-off pair pending: the store holds no own stamped record.
       "handoff_pending": 0,
+      # No marks owed: this harness was not started, so it keeps none.
+      "pull_owed": 0,
     })
     # The counters start again.
     self.assertEqual(getattr(store, STATS), {})
@@ -649,6 +680,8 @@ class TestCounters(unittest.TestCase):
       "period_s": 300, "counts": {}, "queue_peak": 3, "lost_inputs": 0, "modes": modes(), "stamp_lead_max_s": 0.0,
       # No hand-off pair pending: the store holds no own stamped record.
       "handoff_pending": 0,
+      # No marks owed, as in the first line.
+      "pull_owed": 0,
     })
 
 
@@ -1235,18 +1268,33 @@ class TestStart(unittest.TestCase):
     return store
 
   def test_an_unreadable_file_is_kept_aside_and_the_store_starts_empty(self):
+    """A replica file that cannot be read is renamed, with its bytes, and named in one red line; the store starts
+    with no record of the file and its save is registered."""
+    # A file that is no pickle.
     with open(os.path.join(self.cache_folder, "object.pickle"), "wb") as stream:
+      # Its bytes.
       stream.write(b"not a pickle")
+    # The start.
     store = self.start()
-    self.assertEqual(store.storage, {})
+    # No record came from the file.
+    self.assertEqual(loaded(store), {})
+    # What the cache folder holds now.
     names = os.listdir(self.cache_folder)
+    # One file.
     self.assertEqual(len(names), 1)
+    # Under the name of a kept file, with the UTC time of the start.
     self.assertRegex(names[0], r"^object\.pickle\.unreadable-\d{14}$")
+    # Its content.
     with open(os.path.join(self.cache_folder, names[0]), "rb") as stream:
+      # The bytes of the file that could not be read.
       self.assertEqual(stream.read(), b"not a pickle")
+    # The red lines of the start.
     red = [msg for msg, color in store.lines if color == "r"]
+    # One.
     self.assertEqual(len(red), 1)
+    # It names the kept file.
     self.assertIn(names[0], red[0])
+    # The save was registered once, at the store's cadence.
     self.assertEqual(self.registered, [store.CS_SAVE_INTERVAL])
 
   def test_a_file_holding_an_empty_store_is_kept_aside_too(self):
@@ -1300,6 +1348,8 @@ class TestStart(unittest.TestCase):
       "stamp_lead_max_s": 0.0,
       # No hand-off pair pending: the store holds no own stamped record.
       "handoff_pending": 0,
+      # The start kept its marks (none: the replica was empty) unless the hand-off switch is 'off'.
+      "pull_owed": int(_ChainStoreRuntimeHarness.CSTORE_MODE != "off"),
     })
     # No census line: the start's hour has not ended.
     self.assertEqual([msg for msg, _ in store.lines if msg.startswith("CSTORE_CENSUS ")], [])
@@ -1332,18 +1382,31 @@ class TestStart(unittest.TestCase):
     self.assertEqual(order, ["old", "new"])
 
   def test_no_file_renames_nothing_and_logs_nothing_red(self):
+    """A start with no replica file holds no record, creates no file and logs no red line."""
+    # The start, in an empty cache folder.
     store = self.start()
-    self.assertEqual(store.storage, {})
+    # No record.
+    self.assertEqual(loaded(store), {})
+    # No file.
     self.assertEqual(os.listdir(self.cache_folder), [])
+    # No red line.
     self.assertEqual([msg for msg, color in store.lines if color == "r"], [])
 
   def test_a_good_file_is_loaded_and_kept(self):
+    """A replica file that holds a record is loaded, kept under its name, and logs no red line."""
+    # One record, as a replica file holds it.
     record = {"key": "key", "value": "v", "owner": "node", "readonly": False, "token": None}
+    # The replica file.
     with open(os.path.join(self.cache_folder, "object.pickle"), "wb") as stream:
+      # Holding that record.
       pickle.dump({"key": record}, stream)
+    # The start.
     store = self.start()
-    self.assertEqual(store.storage, {"key": record})
+    # The record is held.
+    self.assertEqual(loaded(store), {"key": record})
+    # The file is still there, under its name.
     self.assertEqual(os.listdir(self.cache_folder), ["object.pickle"])
+    # No red line.
     self.assertEqual([msg for msg, color in store.lines if color == "r"], [])
 
 

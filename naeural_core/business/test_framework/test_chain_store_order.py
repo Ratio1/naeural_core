@@ -1047,6 +1047,37 @@ class TestTombstones(unittest.TestCase):
         self.assertEqual((sorted(key for key in real if key in store.storage), store._ChainStoreBasePlugin__tomb_horizon),
                          (sorted(real), 0))
 
+  def test_an_outsiders_delete_of_a_key_stored_before_the_lock_leaves_a_tombstone(self):
+    """The sender's membership is asked before the persistence lock, for a key not held then; when another thread
+    stores the key in between, the outside sender's stamped delete removes a key held, so it leaves a tombstone."""
+    # The signed store (oracle registry "oracle", peers peer1 and peer2), in 'on'.
+    store = make("on", signed=True)
+
+    def stored_meanwhile():
+      """
+      Stand for the oracle registry's read, during which another thread stores the key.
+
+      Returns
+      -------
+      list of str
+        The oracle registry.
+
+      Examples
+      --------
+      >>> stored_meanwhile()
+      ['oracle']
+      """
+      # Another writer's record of the key, stored while the question runs.
+      store.storage["raced"] = record("raced", "v", "peer1", [NOW_MS - 1000, "peer1"])
+      # The registry.
+      return ["oracle"]
+    # The oracle registry's read.
+    store.bc.get_eth_oracles = stored_meanwhile
+    # The outside sender's stamped delete of the key, not held when it arrives.
+    store._set_value("raced", None, owner="out", local_sync_storage_op=True, sender="out", ver=[NOW_MS, "out"])
+    # The key is removed and its tombstone holds the delete's stamp.
+    self.assertEqual(("raced" in store.storage, store.storage["dl:raced"]["ver"]), (False, [NOW_MS, "out"]))
+
   def test_start_drops_a_tombstone_whose_key_is_held_again(self):
     """on_init ('report') drops the tombstone of a key that is held again (rewritten under the previous release) and
     keeps a tombstone whose key is not held and a "dl:" record holding a value."""

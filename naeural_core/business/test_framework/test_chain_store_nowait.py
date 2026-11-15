@@ -373,6 +373,48 @@ class TestNonBlockingWrite(unittest.TestCase):
     # It got the lock.
     self.assertEqual(free, [True])
 
+  def test_a_blocking_write_waits_for_the_lock_another_thread_holds(self):
+    """A blocking write made while another thread holds the persistence lock longer than the wait=False bound is not
+    bounded: it waits for the lock, returns only after the holder let it go, and is stored and sent (here
+    unconfirmed, as the peers never answer); it never ends not_ready."""
+    # A writer whose peers never answer, and its lock.
+    store = make("report")
+    # The lock the other thread holds.
+    lock = getattr(store, LOCK)
+    # The order of the holder's release and the write's return, and the event set once the holder holds the lock.
+    order, taken = [], threading.Event()
+
+    def hold():
+      """
+      Stand for a merge: hold the persistence lock 0.2 s (200 times the wait=False bound), then note the release.
+
+      Returns
+      -------
+      None
+      """
+      # The lock, as the merge's with statement takes it.
+      with lock:
+        # Held.
+        taken.set()
+        # Longer than the bound.
+        time.sleep(0.2)
+        # Noted just before the with statement lets go.
+        order.append("released")
+    # The holder.
+    holder = threading.Thread(target=hold)
+    # Running.
+    holder.start()
+    # Held from here.
+    taken.wait()
+    # The blocking write (one round of 0.1 s, no retry), made while the lock is held: stored, sent, unconfirmed.
+    self.assertEqual(write(store, KEY, "v", wait=True), (False, "unconfirmed", 1))
+    # Noted when the write returned.
+    order.append("returned")
+    # The holder ends.
+    holder.join()
+    # The write returned after the release, and its record is stored.
+    self.assertEqual((order, store.storage[KEY]["value"]), (["released", "returned"], "v"))
+
   def test_a_non_blocking_write_keeps_the_lock_from_its_apply_to_its_count(self):
     """A thread that asks for the persistence lock while a wait=False write is between its apply and the
     registration of its re-sends gets it only after the write registered them and counted itself; the write does

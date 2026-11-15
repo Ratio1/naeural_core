@@ -553,6 +553,44 @@ class TestUnencodable(unittest.TestCase):
 class TestNewKeysPerSender(unittest.TestCase):
   """New keys created by a sender outside the replication peers and the oracle registries are counted per sender."""
 
+  def test_a_key_stored_between_the_sender_question_and_the_lock_is_not_a_new_key(self):
+    """The new-key count asks the sender's membership before the persistence lock, for a key not held then; a key
+    another thread stores in between is held once the lock is taken, so the store overwrites it and is not counted
+    as a new key of the sender."""
+    # The signed store: replication peers peer1 and peer2, dAuth registry node and peer1, oracle registry oracle.
+    store = node("report", signed=True)
+    # The key a sender outside the replication peers and the registries stores.
+    key = _hset_key("players", "raced")
+
+    def stored_meanwhile():
+      """
+      Stand for the oracle registry's read, during which another thread stores the key.
+
+      Returns
+      -------
+      list of str
+        The oracle registry.
+
+      Examples
+      --------
+      >>> stored_meanwhile()
+      ['oracle']
+      """
+      # Another writer's record of the key, stored while the question runs.
+      store.storage[key] = record(key, "other", "peer1")
+      # The registry.
+      return ["oracle"]
+    # The oracle registry's read.
+    store.bc.get_eth_oracles = stored_meanwhile
+    # The caller's dict.
+    info = {}
+    # The store of a sender in neither registry, for a key not held when it arrives.
+    store._set_value(key, "v", owner="worker", local_sync_storage_op=True, sender="worker", result_info=info)
+    # The new-key counts.
+    new_keys = [label for label in getattr(store, STATS) if label.startswith("new_keys")]
+    # Stored over the other record, and not counted as a new key of the sender.
+    self.assertEqual((info, store.storage[key]["value"], new_keys), ({"outcome": "changed"}, "v", []))
+
   def test_only_a_new_key_from_a_sender_outside_the_peers_and_the_registries_is_counted(self):
     """A peer's store that creates a key outside the protected namespaces counts new_keys/<sender> when its sender is
     neither a replication peer nor in a registry, and is applied; an overwrite, a delete, a refused store, a key of

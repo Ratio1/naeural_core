@@ -589,8 +589,9 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
   def test_each_answer_the_handler_drops_is_counted_by_why_and_each_peer_not_taken_as_unanswered(self):
     """Answers to the store's own resync requests that the answer handler drops are counted under the namespace's
     bucket as dropped_not_asked (a node not asked, a second answer of a peer taken), dropped_other_namespace,
-    dropped_malformed and dropped_not_member; when the wait ends, each asked peer whose answer was not taken counts
-    unanswered; a blocking sync's and a catch-up's dropped answers count nothing."""
+    dropped_malformed and dropped_not_member (by the dAuth rule of the secrets and by that of the key rotations);
+    when the wait ends, each asked peer whose answer was not taken counts unanswered; a blocking sync's and a
+    catch-up's dropped answers count nothing."""
     # An oracle whose messages are only recorded; no random stretch.
     store = oracle("report")
     # No random stretch: the requests 60 s apart.
@@ -622,18 +623,24 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
                                    "pull": {"since": {}, "floor": 0, "after": None}}
     # A node not asked answers it: the catch-up has counters of its own, nothing is counted here.
     answer(store, "pull", "peer2", "DEEPLOY_OPERATIONS", [])
-    # The key rotations' turn, 60 s later: asked of the dAuth member peer1 (r2).
-    setattr(store, TURN, 4)
-    # Its request.
+    # The secrets' turn, 60 s later, then the key rotations' 60 s after it: each asked of the dAuth member peer1
+    # (r2, r3).
+    setattr(store, TURN, 3)
+    # The secrets' request.
     lap(store, 60)
+    # The key rotations' request.
+    lap(store, 120)
     # peer1 has left the dAuth registry since.
     store.bc.get_eth_dauth_oracles = lambda: ["node"]
-    # Its answer is refused by the namespace's registry rule.
-    answer(store, "r2", "peer1", "NODE_KEY_ROTATIONS", [])
-    # Both waits over (r1 at 60, r2 at 120): "oracle" never answered r1, and peer1's answer to r2 was not taken.
-    lap(store, 120.5)
-    # The bucket of the key rotations.
-    rot = _hset_index("NODE_KEY_ROTATIONS")
+    # Its answer to the secrets is refused by their dAuth rule.
+    answer(store, "r2", "peer1", "DAUTH_JOB_SECRETS", [])
+    # Its answer to the key rotations is refused by theirs.
+    answer(store, "r3", "peer1", "NODE_KEY_ROTATIONS", [])
+    # Every wait over (r1 at 60, r2 at 120, r3 at 180): "oracle" never answered r1, and peer1's answers to r2 and r3
+    # were not taken.
+    lap(store, 180.5)
+    # The buckets of the secrets and of the key rotations.
+    sec, rot = _hset_index("DAUTH_JOB_SECRETS"), _hset_index("NODE_KEY_ROTATIONS")
     # Each drop by why, the answer taken, and the peers not taken.
     self.assertEqual(resync_counts(store), {
       OPS_BUCKET + "/resync/asked": 1, OPS_BUCKET + "/resync/answered": 1, OPS_BUCKET + "/resync/merged": 1,
@@ -641,6 +648,8 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
       OPS_BUCKET + "/resync/dropped_not_asked": 2,
       OPS_BUCKET + "/resync/dropped_other_namespace": 1, OPS_BUCKET + "/resync/dropped_malformed": 1,
       OPS_BUCKET + "/resync/unanswered": 1, rot + "/resync/asked": 1, rot + "/resync/dropped_not_member": 1,
+      # The secrets' request, its answer refused by their own dAuth rule, and peer1 not taken.
+      sec + "/resync/asked": 1, sec + "/resync/dropped_not_member": 1, sec + "/resync/unanswered": 1,
       rot + "/resync/unanswered": 1})
 
   def test_a_namespace_no_answer_of_which_was_taken_is_asked_again_at_the_next_turn_once_per_round(self):

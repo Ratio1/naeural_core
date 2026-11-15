@@ -46,6 +46,8 @@ from test_chain_store_size_cap import nested
 
 # The reserved key the store keeps its own record under.
 RESERVED = "hs:cstore_pull"
+# The key prefixes no page carries, as on_init computes them, by their private name.
+SKIP = "_ChainStoreBasePlugin__pull_skip"
 # The marks a catch-up still owes, the tombstone horizon and the tombstone cap, by their private names.
 OWED, HORIZON, CAP = ("_ChainStoreBasePlugin__pull_owed", "_ChainStoreBasePlugin__tomb_horizon",
                       "_ChainStoreBasePlugin__tomb_cap")
@@ -731,8 +733,8 @@ class TestResponder(_StartCase):
 
   def test_a_page_holds_the_records_from_the_marks_and_the_floor_after_the_cursor_in_stamp_order(self):
     """A page holds the stamped records at or above the floor and their writer's mark, after the cursor, ordered
-    by stamp time and then stored key; a writer the request does not name is sent from the floor; the last page
-    says no more follows and each page counts pull_answered."""
+    by stamp time and then stored key; a writer the request does not name is sent from the floor, and so is a named
+    writer whose mark lies below it; the last page says no more follows and each page counts pull_answered."""
     # Records by their offset in ms from a base time: w1 at 100, 200, 300; w2 at 150, 250; w3 at 50, 260, 260.
     base = NOW_MS - 600_000
     # Their keys: plain keys named after the writer and the offset, two of w3 at the same stamp time.
@@ -759,18 +761,22 @@ class TestResponder(_StartCase):
         # A mark exactly at a record's stamp time sends that record; a floor exactly at one sends it too.
         self.assertEqual(page(store, {"w1": base + 300, "w2": base + 250, "w3": base + 261}, base + 250)[0],
                          ["w2@250", "w1@300"])
+        # Marks below the floor for every writer named: the floor still binds them, nothing below it is sent.
+        self.assertEqual(page(store, {"w1": base, "w2": base, "w3": base}, base + 250)[0],
+                         ["w2@250", "w3@260a", "w3@260b", "w1@300"])
         # Each record travels with the five fields a merge reads, as a namespace-sync answer carries them.
         (_, body), = ask(store, {"since": {"w1": base + 300, "w2": NOW_MS, "w3": NOW_MS}, "floor": 0, "after": None})
         # The one record of that page.
         self.assertEqual(body["snapshot"], {"w1@300": {"key": "w1@300", "value": "w1@300", "owner": "w1",
                                                         "readonly": False, "ver": [base + 300, "w1"]}})
-        # Five pages were sent.
-        self.assertEqual(getattr(store, STATS), {"pull_answered": 5})
+        # Six pages were sent.
+        self.assertEqual(getattr(store, STATS), {"pull_answered": 6})
 
   def test_no_page_carries_a_record_of_a_protected_namespace_a_token_or_an_unstamped_record(self):
     """A node that holds, in each of the six protected namespaces, a stamped record and a tombstone (in the secret
     revisions a payload, its revocation marker and its redacted copy), a token record, an unstamped record and
-    its own reserved record sends none of them: a page holds only the ordinary stamped records."""
+    its own reserved record sends none of them: a page holds only the ordinary stamped records; a store started
+    through on_init computes the same prefixes as the harness the asker's tests use."""
     # One stamped record and one tombstone per protected namespace.
     held = {}
     # Each of the six.
@@ -808,6 +814,9 @@ class TestResponder(_StartCase):
         store.bc = oracle(mode).bc
         # The same three records.
         self.assertEqual(page(store)[0], [KEY, "plain", "gone"])
+        # The prefixes on_init computed are those of the harness, which the asker's tests drop a page's records by
+        # (the "dl:" key of a forged page among them).
+        self.assertEqual(getattr(store, SKIP), getattr(oracle(mode), SKIP))
 
   def test_a_tombstone_travels_under_the_key_it_deleted_and_the_cursor_names_the_stored_key(self):
     """A tombstone is sent under the key it deleted, with value None and its stamp; pages are ordered and cut by
@@ -835,8 +844,10 @@ class TestResponder(_StartCase):
     of a page is always taken."""
     # 40 records of 23 KB, one ms apart.
     held = {"k%02d" % index: record("k%02d" % index, "x" * 23_000, "w1", [NOW_MS + index, "w1"]) for index in range(40)}
-    # The answering oracle.
-    store, after, sizes = oracle("report", held), None, []
+    # The answering oracle, and each record its page builds encode, counted through its encoder.
+    store, after, sizes, encoded = oracle("report", held), None, [], []
+    # The encoder, counting each call.
+    store.json_dumps = lambda value, **kwargs: encoded.append(value) or json.dumps(value, **kwargs)
     # Page after page, until one says no more follows (at most ten: a paging that never ends fails here).
     for _ in range(10):
       # The next page.
@@ -847,9 +858,10 @@ class TestResponder(_StartCase):
         break
       # The next request asks after this page.
       after = body["pull"]["after"]
-    # 11, 11, 11 and 7 records, each page within the bound.
-    self.assertEqual(([count for count, _ in sizes], all(size <= store.CS_PULL_PAGE_BYTES for _, size in sizes)),
-                     ([11, 11, 11, 7], True))
+    # 11, 11, 11 and 7 records, each page within the bound; each build stops at the first record that does not fit
+    # (12 + 12 + 12 + 7 encoded), so a page never skips a record for a later one, nor walks past its bound.
+    self.assertEqual(([count for count, _ in sizes], all(size <= store.CS_PULL_PAGE_BYTES for _, size in sizes),
+                      len(encoded)), ([11, 11, 11, 7], True, 43))
     # Two records that fill a page to the byte, and a third: the two go together, the third alone.
     held = {"p%d" % index: record("p%d" % index, None, "w1", [NOW_MS + index, "w1"]) for index in range(3)}
     # Each value sized so that its record counts half the page's bound.

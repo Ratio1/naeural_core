@@ -1082,7 +1082,9 @@ class TestTombstones(unittest.TestCase):
     """In 'report' and 'on', a sender outside the replication peers and the registries that writes 600 keys and
     deletes them, stamped 58 and 59 s ahead, removes every key but leaves only 32 tombstones; the 5 real ones and
     the horizon are as they were after the sweep (before, the 600 tombstones evicted every real one at the cap and
-    set the horizon 59 s ahead). A replication peer's and a registry member's deletes are not limited."""
+    set the horizon 59 s ahead). A replication peer's and a registry member's deletes are not limited. Each delete
+    names a new owner, which the sender chooses itself, so the limit holds by the verified sender and the writer in
+    the stamp, not by the owner field."""
     # Five real tombstones an hour old.
     real = {"dl:real%d" % index: tombstone("real%d" % index, "peer1", [NOW_MS - 3_600_000 + index, "peer1"])
             for index in range(5)}
@@ -1098,8 +1100,9 @@ class TestTombstones(unittest.TestCase):
           for index in range(count):
             # Its write, stamped 58 s ahead.
             deliver(store, "%s%d" % (sender, index), "x", sender, [NOW_MS + 58_000, sender])
-            # Its delete, stamped 59 s ahead.
-            deliver(store, "%s%d" % (sender, index), None, sender, [NOW_MS + 59_000, sender])
+            # Its delete, stamped 59 s ahead, naming a new owner each time: a limit that compared the stamp with the
+            # owner, or counted tombstones by their owner, would let all 600 leave one.
+            deliver(store, "%s%d" % (sender, index), None, sender, [NOW_MS + 59_000, sender], owner="w%d" % index)
         # The tombstones each sender's deletes left, by the writer of their stamp.
         held = {sender: sum(key.startswith("dl:" + sender) for key in store.storage) for sender in ("out", "peer2", "oracle")}
         # Every key removed; 32 tombstones of the outside sender, every one of the others.
@@ -1115,14 +1118,17 @@ class TestTombstones(unittest.TestCase):
     """An outside sender's delete of a key held leaves a tombstone while the replica holds fewer than 32 stamped
     with its address: its 32nd delete leaves one, its 33rd removes the key and leaves none, and after the sweep
     removes its expired tombstones its next delete leaves one again; in 'report', which takes a delete stamped as
-    another writer's, such a delete removes the key and leaves no tombstone, also while the sender holds none."""
+    another writer's, such a delete removes the key and leaves no tombstone, also while the sender holds none and
+    when it names that writer as owner too. The rule is for deletes only: the sender's value store of a key not
+    held, while it holds 32 tombstones, keeps its stamp."""
     # The outside sender's 34 keys, written an hour ago, and a key of peer1.
     held = {"k%d" % index: record("k%d" % index, "v", "out", [NOW_MS - 3_600_000, "out"]) for index in range(34)}
     # The signed store in 'report', holding them.
     store = make("report", storage={**held, "p": record("p", "v", "peer1", [NOW_MS - 3_600_000, "peer1"])}, signed=True)
     # First, while it holds no tombstone, the sender's delete of peer1's key, stamped as peer1's own ('report' takes
-    # it, counting ver_origin).
-    deliver(store, "p", None, "out", [NOW_MS - 2000, "peer1"])
+    # it, counting ver_origin) and naming peer1 as owner: the stamp is checked against the verified sender, not
+    # against the owner the sender wrote.
+    deliver(store, "p", None, "out", [NOW_MS - 2000, "peer1"], owner="peer1")
     # Removed, and no tombstone.
     self.assertEqual(("p" in store.storage, "dl:p" in store.storage), (False, False))
     # Its first 32 deletes, each stamped by the sender.
@@ -1135,6 +1141,10 @@ class TestTombstones(unittest.TestCase):
     deliver(store, "k32", None, "out", [NOW_MS, "out"])
     # The key is removed, and no tombstone was left for it.
     self.assertEqual(("k32" in store.storage, "dl:k32" in store.storage), (False, False))
+    # The sender's value store of a key not held, while it holds 32 tombstones.
+    deliver(store, "fresh", "v", "out", [NOW_MS, "out"])
+    # Stored with its stamp: the limit takes the stamp of a delete only.
+    self.assertEqual(store.storage["fresh"]["ver"], [NOW_MS, "out"])
     # Eight days later the sweep removes the 32 expired tombstones.
     store._now = NOW + 8 * 86_400
     # The sweep.

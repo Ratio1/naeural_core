@@ -1395,11 +1395,13 @@ class TestRequester(_StartCase):
     """With CSTORE_PULL_PEERS 2 the catch-up asks one oracle, 120 s later another, and then nothing is owed: the
     marks leave the reserved record without a dirty mark of their own; with 1 it is done after one series. A
     series with a partial page (its oracle still owes a catch-up itself) counts only once one series more than
-    the number ended."""
+    the number ended: two series with the number 1, three with the number 2."""
     # One record of w1 the asking oracle lacks, held by both others.
     held = {"a": record("a", "v", "w1", [NOW_MS - 5000, "w1"])}
     # Each case: the number, which of the two answering oracles still owes a catch-up, and when each series runs.
     cases = ((2, (), [(0, "peer1"), (120, "oracle")]), (1, (), [(0, "peer1")]),
+             # Both partial with the number 1: the second series ends it, so the limit follows the number.
+             (1, ("peer1", "oracle"), [(0, "peer1"), (120, "oracle")]),
              # Both partial: neither series counts until a third series ended, in the next round.
              (2, ("peer1", "oracle"), [(0, "peer1"), (120, "oracle"), (360, "peer1")]),
              # One partial, one not: one series without a partial page is not enough for the number 2.

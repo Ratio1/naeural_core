@@ -991,8 +991,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     it arrives, not only the first. Each request counts ``<bucket>/resync/asked`` under its namespace's bucket.
     While more inputs are queued than one lap takes (``MAX_INPUTS_PER_ITERATION``), each lap sets ``until`` one
     gap after it again, as a catch-up request's wait starts again: answers that wait in a long queue are still
-    taken once handled, and the namespace is not asked a second time meanwhile. The next namespace is still
-    asked at its turn.
+    taken once handled, and the namespace is not asked a second time within the round meanwhile. The next
+    namespace is still asked at its turn, and a queue long for more than a round asks the namespace again in the
+    next round while the first request is still held.
 
     When a request's wait is over, each asked peer whose answer was not taken (none came, it came later, or the
     answer handler dropped it, which it counts as ``dropped_<word>``) counts ``<bucket>/resync/unanswered``.
@@ -1001,7 +1002,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     request it was a pause away); a second namespace owed at that turn is asked at the turn after it. A
     namespace whose answers were lost is so asked again 60 to 150 s after its first request (at most 120 s when
     no other namespace is owed then) instead of a round (about 30 minutes) later. Such a second request is not
-    repeated, so a namespace is asked at most twice per round.
+    repeated, so a namespace is asked at most twice per round, and a namespace already owed one is not owed it
+    again: when a long queue held the requests of several rounds and none was answered, they end together and
+    owe at most five second requests, one per namespace.
 
     Returns
     -------
@@ -1014,8 +1017,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     a blocking sync (``_hsync``) has no ``until`` and is left to its caller. A lap with nothing pending and no
     request due costs one copy of the (empty) pending table and two comparisons (under 1 microsecond, measured
     on the node image's interpreter under a 0.35 CPU limit); a lap with a long queue walks a second copy of the
-    table (a few entries). A request whose wait ends adds one count and, when
-    no answer of it was taken, one more request at the next turn: at most five more requests per round, each
+    table (a few entries; five more per round while the queue stays long and no answer comes: 215 after 24 h,
+    about 70 microseconds per lap under a 2 CPU limit). A request whose wait ends adds one count and, when
+    no answer of it was taken and its namespace is not owed already, one more request at the next turn: at most
+    five more requests per round, each
     to at most two peers, and none on a network where the answers arrive. The registries are read once for this
     node and once per replication peer at each request, never between requests, and at most once more for each
     answer's merge. Merging one answer of 1,000 signed operations (2.7 MB of JSON), under the same limit and with real
@@ -1054,10 +1059,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         # none came, it came later, or the answer handler dropped it. Counted per such peer, under the namespace's
         # bucket; before, nothing told an answer that never came.
         self.__cs_count("unanswered", self.__hset_index(entry[self.CS_HKEY]), "resync", n=len(entry[self.CS_PEERS]))
-        if len(entry[self.CS_PEERS]) == entry["asked"] and not entry["again"]:
+        if (len(entry[self.CS_PEERS]) == entry["asked"] and not entry["again"]
+            and entry[self.CS_HKEY] not in self.__resync_again):
           # No answer of it was taken at all: the namespace is asked again at the next turn, before the next
           # namespace, where it waited for the next round (about 30 minutes). Once per round: a request that is itself
-          # such a second one is not asked again.
+          # such a second one is not asked again. Once in all: a namespace already owed is not added again. Before,
+          # after a queue long for 24 h with no answer, the 215 requests held ended together and each added its
+          # namespace: 58 to 60 requests an hour for 3 hours, each namespace 12 times an hour; now five second
+          # requests, and 14 to 16 requests an hour as with a queue never long (90 in 6 h).
           self.__resync_again.append(entry[self.CS_HKEY])
           # That turn at most one gap away: after a round's last request the next one was a pause away.
           self.__resync_next = min(self.__resync_next, now + self.CS_RESYNC_GAP)

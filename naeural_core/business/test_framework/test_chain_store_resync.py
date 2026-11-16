@@ -730,6 +730,29 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
     self.assertEqual(store.pending_hsync.get("caller"), {store.CS_HKEY: "players", store.CS_PEERS: ["peer1"],
                                                         store.CS_RESPONSE: None})
 
+  def test_after_a_queue_long_for_two_rounds_each_unanswered_namespace_is_asked_again_once(self):
+    """While the input queue stays long for two rounds and no peer answers, the ten requests of those rounds stay
+    pending; once the queue is short they end together, and each namespace is asked again once, one gap apart,
+    then the pause: five second requests, not one per ended request (before, ten, each namespace twice)."""
+    # No random stretch: gaps of 60 s, a pause of 1800 s.
+    with mock.patch.dict(GLOBALS, {"random": lambda: 0.5}):
+      # An oracle whose peers never answer.
+      store = oracle("report")
+      # The queue is long from the start.
+      store.input_queue_size = store.cfg_max_inputs_per_iteration + 1
+      # Laps every 5 s through two rounds (0 to 240 s and 2,040 to 2,280 s), the requests held.
+      first = [body["hkey"] for at in range(0, 2400, 5) for _, body in lap(store, at)]
+      # Every request still pending when the queue gets short.
+      held = len(store.pending_hsync)
+      # The queue is short again.
+      store.input_queue_size = 0
+      # Laps every 5 s until just before the next round: when each request goes, and for which namespace.
+      later = {at: body["hkey"] for at in range(2400, 4500, 5) for _, body in lap(store, at)}
+    # Two rounds asked and held; their waits end at 2,460 s, and each namespace is asked again once from 2,520 s, one
+    # gap apart, then nothing until the next round, a pause (1,800 s) after the last of them.
+    self.assertEqual((first, held, later),
+                     (list(NAMESPACES) * 2, 10, {2520 + 60 * turn: hkey for turn, hkey in enumerate(NAMESPACES)}))
+
 
 class TestMergeOfTheValueHeld(unittest.TestCase):
   """A sync copy whose value is the one held is not checked by the signed-record rule again."""

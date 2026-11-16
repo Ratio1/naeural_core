@@ -304,7 +304,8 @@ that finds a replication peer.
   answers are merged, not only the first. While more inputs wait in the queue than one lap
   takes, those 60 s start again at each lap, as a catch-up request's wait does: answers that
   wait in a long queue are still taken once handled, and the namespace is not asked a second
-  time meanwhile (the next namespace is still asked at its turn).
+  time within the round meanwhile (the next namespace is still asked at its turn, and a queue
+  long for more than a round asks it again in the next round).
 - A request no answer of which was taken by the end of its wait (none came, or each was
   dropped) is asked again at the next turn, before the next namespace, and that turn comes
   at most 60 s later (after a round's last request it was a pause away); a second namespace
@@ -312,7 +313,10 @@ that finds a replication peer.
   asked again 60 to 150 s after its first request (at most 120 s when no other namespace is
   owed then) instead of a round (about 30 minutes) later. A second request is not repeated,
   so a namespace is asked at most twice per round. This adds at most five requests per
-  round, each to at most two peers, and none while the answers arrive.
+  round, each to at most two peers, and none while the answers arrive. A namespace already
+  owed a second request is not owed it again: requests of several rounds that a long queue
+  held, all unanswered, end together and owe at most five second requests, one per
+  namespace.
 - Only records whose value carries the namespace's signed field (`sequence`, `revision`,
   `deployment_revision`) are taken, and every record of the key rotations, whose merge
   checks each proof. A pointer of the old form (a plain CID without a revision) that was

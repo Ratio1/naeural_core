@@ -390,6 +390,99 @@ class TestThread(unittest.TestCase):
     # ...and its duration is in the log, since it adds to the time the node needs to stop.
     self.assertEqual(len([line for line in log.lines if "last save" in line and "at stop took" in line]), 1)
 
+  def test_the_last_saves_asked_at_the_start_of_the_close_run_before_the_stop(self):
+    """start_last_saves() makes an at_stop save run once and end while the other saves go on; stop() adds no run."""
+    # One entry per run of each save, and a signal when the at_stop save has run.
+    last_runs, plain_runs, ran = [], [], threading.Event()
+
+    def last_save():
+      """
+      Count a run of the save registered for the stop and say it happened.
+
+      Returns
+      -------
+      None
+      """
+      # One more run.
+      last_runs.append(1)
+      # The run was made.
+      ran.set()
+
+    def plain_save():
+      """
+      Count a run of the save that has no run at stop.
+
+      Returns
+      -------
+      None
+      """
+      # One more run.
+      plain_runs.append(1)
+
+    # A log that keeps its lines, to find the line about the last run.
+    log = _Log()
+    # The node's manager, as Orchestrator.startup() makes it.
+    manager = SerializationManager.start(log)
+    # A cadence far away, as the network monitor's 600 s: the only run seen here is the last one.
+    manager.register(last_save, every=3600, at_stop=True)
+    # A save without a last run, due every second, as the chain store's periodic save.
+    manager.register(plain_save, every=1)
+    # The first step of the node's close; stop() is not called yet.
+    manager.start_last_saves()
+    # The last run is made within the thread's next one-second check, long before any stop.
+    self.assertTrue(ran.wait(3))
+    # The at_stop save's thread, the first one started: it ends after its last run.
+    manager._threads[0].join(3)
+    # Ended: no periodic run of that save follows.
+    self.assertFalse(manager._threads[0].is_alive())
+    # Runs of the other save so far.
+    before = len(plain_runs)
+    # Two more of its one-second cadences, while the node would be closing its plugins.
+    time.sleep(2.5)
+    # The save without a last run kept its cadence: the close did not stop it.
+    self.assertGreater(len(plain_runs), before)
+    # The last step of the close.
+    manager.stop(timeout=5)
+    # Still one run of the at_stop save: the stop did not add a second one.
+    self.assertEqual(last_runs, [1])
+    # And one line with its duration.
+    self.assertEqual(len([line for line in log.lines if "last save" in line and "at stop took" in line]), 1)
+
+  def test_a_registration_made_after_the_last_saves_were_asked_gets_no_last_run(self):
+    """An owner that registers with at_stop once the close began gets neither a run at once nor one at the stop."""
+    # One entry per run of the save.
+    runs = []
+
+    def save():
+      """
+      Count a run of the late owner's save.
+
+      Returns
+      -------
+      None
+      """
+      # One more run.
+      runs.append(1)
+
+    # The node's manager, whose close has begun when the owner arrives.
+    manager = SerializationManager.start(_Log())
+    # The first step of the close.
+    manager.start_last_saves()
+    # A late owner asks for the periodic save and for the last run.
+    manager.register(save, every=100, at_stop=True)
+    # Longer than the thread's first one-second check, where a last run would be made.
+    time.sleep(1.5)
+    # No run at once: it would be a save one second after the registration, beside the close.
+    self.assertEqual(runs, [])
+    # Asking again changes nothing.
+    manager.start_last_saves()
+    # The last step of the close.
+    manager.stop(timeout=5)
+    # No run at the stop either, and the thread ended.
+    self.assertEqual(runs, [])
+    # The late registration's thread.
+    self.assertFalse(manager._threads[-1].is_alive())
+
   def test_a_save_not_registered_for_the_stop_gets_no_run_at_stop(self):
     """Without at_stop nothing changes: stop() ends the thread and the save is not run."""
     # One entry per run of the save.

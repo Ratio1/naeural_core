@@ -510,6 +510,31 @@ class FastApiWebAppPlugin(BasePlugin):
     return
 
   def on_init(self):
+    """
+    Start the plugin: register its endpoints, start the local process manager, then start the web server.
+
+    The endpoints are registered first. A process manager is started on the loopback interface at a free
+    port; it holds the two queues through which the web server process and this plugin exchange requests and
+    answers. The request buffers, the monitor's state and the profiling counters are created, the base start
+    renders and launches the web server, and the request monitor thread starts last.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The manager's key is 32 random bytes written as hex text, new at every start. The web server gets it
+    through its rendered template (``manager_auth``), in a private temporary folder. Before, the key was the
+    same constant on every node, in the source and in the log, while the key is the only check the manager
+    makes before it unpickles what a local client sends.
+
+    Examples
+    --------
+    >>> plugin.on_init()
+    >>> len(plugin.manager_auth), plugin.manager_port == plugin._manager.address[1]
+    (64, True)
+    """
     self.__uvicorn_server_started = False
     # Register all endpoint methods.
     self._init_endpoints()
@@ -517,7 +542,9 @@ class FastApiWebAppPlugin(BasePlugin):
   
 
     # FIXME: move to setup_manager method
-    self.manager_auth = b'abc'
+    # A key of this start alone: 32 random bytes as hex text (bytes, as the manager and the template need).
+    # It was the constant b'abc' on every node.
+    self.manager_auth = os.urandom(32).hex().encode()
     self._manager = get_server_manager(self.manager_auth)
     self._server_queue = self._manager.get_server_queue()
     self._client_queue = self._manager.get_client_queue()

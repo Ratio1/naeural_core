@@ -13,7 +13,8 @@ from time import perf_counter, time
 from collections import deque
 from naeural_core import DecentrAIObject
 from naeural_core import Logger
-from threading import Lock, Thread
+# Event: the stop signal a comm thread can wait on, so a reconnect back-off ends the moment stop() is called.
+from threading import Event, Lock, Thread
 
 from naeural_core.bc import DefaultBlockEngine
 from naeural_core.main.net_mon import NetworkMonitor
@@ -36,13 +37,22 @@ from ..message_buffer import ObservableMessageBuffer
 
 
 RUN_ON_THREAD = True
-MAX_MESSAGE_LEN = 1024 * 1024 * 2  # 2MB
+# The largest message handed to the transport, in bytes of its UTF-8 text. The brokers the nodes use accept a
+# packet of at most 1 MB (1,048,576 bytes, a common broker default), counted in bytes and including the topic
+# and the packet header: 1,000,000 leaves 48,576 bytes for those, also where a bridge between brokers
+# lengthens the topic. It was 2 MiB of characters, so a message above the brokers' limit was handed over and
+# the broker then closed the communicator's connection, with no line that named the message.
+# The margin has a price: a message of more than 1,000,000 bytes that still fitted a packet with its topic
+# and header (a band of about 48 KB of sizes) was delivered before and is now dropped with the red line.
+MAX_MESSAGE_LEN = 1_000_000
 
 _CONFIG = {
 
   'LOG_SEND_COMMANDS': True,
   
-  'ENCRYPTED_COMMS': False,       # if True, all comms are end-to-end encrypted
+  # If True, payloads are end-to-end encrypted for their destination too. Commands do not read it: a command a
+  # node sends is always encrypted for its receiver (see _prepare_command).
+  'ENCRYPTED_COMMS': False,
 
   'DEBUG_LOG_PAYLOADS': False,
   'DEBUG_LOG_PAYLOADS_PIPELINES': [],
@@ -121,6 +131,63 @@ class BaseCommThread(
                loop_resolution=50,
                **kwargs
                ):
+    """
+    Communicator thread base: prepare the buffers, the connection flags and the stop signals of one channel pair.
+
+    Builds the send and receive buffers for the communicator type, merges the configuration (defaults, then the
+    node environment) and validates it, and takes the managers it needs from the shared memory. No thread is
+    started here: ``start`` does that.
+
+    Parameters
+    ----------
+    log : Logger
+      The node logger.
+    shmem : dict
+      The node's shared objects; ``heavy_ops_manager``, ``network_monitor`` and ``io_formatter_manager`` are read.
+    signature : str
+      Name of the communicator plugin, used in its log prefix.
+    comm_type : str
+      Communicator type (``DEFAULT``, ``COMMANDCONTROL``, ``HEARTBEATS``, ``NOTIFICATIONS`` or the same with
+      the ``L_`` prefix of a local communicator); it selects the loop ``start`` runs and the buffer kinds.
+    default_config : dict
+      The plugin's default configuration.
+    upstream_config : dict
+      Configuration received from the communication manager.
+    environment_variables : dict, optional
+      Node environment configuration merged over the defaults. Default None (nothing merged).
+    send_channel_name : str, optional
+      Name of the channel this communicator publishes to. Default None.
+    recv_channel_name : str, optional
+      Name of the channel this communicator reads from; None disables receiving. Default None.
+    timers_section : str, optional
+      Section name for this communicator's timers. Default ``'comms'``.
+    extra_receive_buffer : int, optional
+      Slots added to the receive buffer's capacity. Default 0.
+    loop_resolution : int, optional
+      Laps per second of the communicator loop. Default 50.
+    **kwargs
+      Passed to the base object constructor.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Two stop signals are created, ``_stop`` (read by the loops at the top of each lap) and ``_stop_event`` (what
+    a waiting thread sleeps on). ``stop`` is the only place that sets either, and it sets both: a caller that
+    set ``_stop`` alone would leave a thread waiting out a reconnect back-off, and ``stop`` joins that thread
+    without a time limit.
+
+    Examples
+    --------
+    >>> comm = MQTTCommThread(
+    ...   log=log, shmem=shmem, signature='MQTT', comm_type='HEARTBEATS',
+    ...   default_config=MQTTCommThread.CONFIG, upstream_config={},
+    ... )
+    >>> comm._stop, comm._stop_event.is_set()
+    (False, False)
+    """
     self._signature = signature
     self._comm_type = comm_type
     self._config = None
@@ -212,6 +279,9 @@ class BaseCommThread(
     self._bandwidth_mutex = False
 
     self._stop = False
+    # Set by stop() together with _stop. A comm thread waits on it instead of sleeping, so the wait after a failed
+    # connect burst (50 s by default) ends when the node closes; before, stop() joined a thread that slept on.
+    self._stop_event = Event()
     self._thread_stopped = False
     self._thread_logs = deque()
     self._thread = None
@@ -911,8 +981,22 @@ class BaseCommThread(
 
     Parameters
     ----------
-    jsonpayload : dict
-        the payload that leaves the execution engine.
+    jsonpayload : str
+        JSON text of the message that was published (a payload or a command).
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A command is recognised by the payload path it does not carry. Its ``ACTION`` field cannot tell any more:
+    commands leave encrypted, so the action is inside the encrypted body. Read by its action, every published
+    command would end in the ``Failed debug`` line below, in error color and with the whole envelope.
+
+    Examples
+    --------
+    >>> self.payload_debugger(message)   # send_wrapper(), after a publish, when DEBUG_LOG_PAYLOADS is on
     """
     pipelines = [x.upper() for x in self.cfg_debug_log_payloads_pipelines]  # constraint pipelines to upper
     signatures = [x.upper() for x in self.cfg_debug_log_payloads_signatures]  # constrain signatures to upper
@@ -927,8 +1011,9 @@ class BaseCommThread(
     
     show = True
     try:    
-      has_action = data.get(ct.COMMS.COMM_SEND_MESSAGE.K_ACTION, None) is not None
-      if has_action:
+      # Only a payload carries a payload path; a command has none, and its action is no longer readable here.
+      is_command = ct.PAYLOAD_DATA.EE_PAYLOAD_PATH not in data
+      if is_command:
         # this is a SEND command message
         pass
       else:
@@ -959,9 +1044,33 @@ class BaseCommThread(
     ----------
     message : str
         message to be validated.
+
+    Returns
+    -------
+    bool
+        True when the message may be published: its UTF-8 text is at most ``MAX_MESSAGE_LEN`` bytes.
+
+    Raises
+    ------
+    UnicodeEncodeError
+        For a text UTF-8 cannot encode (a lone surrogate). The transport raises the same for such a text;
+        ``send_wrapper`` reports it and the message stays pending, as before.
+
+    Notes
+    -----
+    The size is counted in bytes, as a broker counts a packet. Counted in characters, a text with characters
+    outside ASCII was taken for up to four times smaller than it is on the wire.
+
+    Examples
+    --------
+    >>> self._check_send_message("a" * 1_000_000), self._check_send_message("a" * 1_000_001)
+    (True, False)
+    >>> self._check_send_message("\u20ac" * 400_000)   # 400,000 characters, 1,200,000 bytes
+    False
     """
     
-    if len(message) > MAX_MESSAGE_LEN:
+    # Bytes of the UTF-8 text, which is what goes on the wire; before, the number of characters.
+    if len(message.encode()) > MAX_MESSAGE_LEN:
       return False
     return True
     
@@ -996,8 +1105,11 @@ class BaseCommThread(
     Returns
     -------
     is_ok : int
-      `0` on send failure, or the number of bytes successfully published across
-      all transport sends for the serialized message.
+      `0` when the caller keeps the message for a retry: the publish to one of its targets failed, or a
+      step of this method raised (signing, serializing, the size check). `1` when the serialized message is
+      larger than ``MAX_MESSAGE_LEN`` bytes: it is dropped with a red line and the caller must not keep it.
+      Otherwise the length of the serialized text (in characters, which are bytes for ASCII text) times the
+      number of targets it was published to.
 
     Notes
     -----
@@ -1006,6 +1118,11 @@ class BaseCommThread(
     failed destinations so the comm loop can retry those targets without
     re-broadcasting to the successful ones.
 
+    Examples
+    --------
+    >>> delivered = self.send_wrapper(msg, send_to=retry_send_to)   # a comm loop, for the message it took
+    >>> delivered > 0   # published, or dropped for its size: the loop takes its next message
+    True
     """
     is_ok = 0
     self._last_send_retry_targets = None
@@ -1083,7 +1200,8 @@ class BaseCommThread(
           is_ok = published_bytes
       else:
         self.P("Message size {:,.1f} KB was dropped for pipeline {}".format(
-          len(message) / 1024, signed_data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>")
+          # The size the check compared: bytes of the UTF-8 text, not characters.
+          len(message.encode()) / 1024, signed_data.get(ct.PAYLOAD_DATA.EE_PAYLOAD_PATH, "<Unknown path>")
           ), color='r'
         )
         self._last_send_outcome = 'terminal_dropped_oversize'
@@ -1152,7 +1270,37 @@ class BaseCommThread(
     return
 
   def stop(self):
+    """
+    Stop this communicator: end its thread, then discard what is still queued.
+
+    Sets both stop signals, closes the buffers that can be closed, stops the heartbeat ingress worker (it drains
+    for at most 10 s), then waits for the comm thread without a time limit and clears both buffers.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The join has no time limit, so everything the comm thread can wait on must end when stop is asked. The
+    reconnect back-off (50 s by default) does: the thread waits on ``_stop_event``, which is set here. Before,
+    that back-off was a plain sleep, and a node whose only broker was down when it closed stayed in this join
+    for up to 50 s per communicator (100 s for the heartbeat and command loops, which reconnect twice in a
+    lap); the node's close reached no plugin in that time. A connect attempt that is already running when stop
+    is asked is not cut short; it ends at the client's own connect timeout.
+
+    This method is the only place that sets ``_stop`` or ``_stop_event``.
+
+    Examples
+    --------
+    >>> comm.stop()                       # CommunicationManager.close(), for each communicator
+    >>> comm._stop, comm._stop_event.is_set()
+    (True, True)
+    """
     self._stop = True
+    # Wake the comm thread if it is waiting out a failed connect burst: it returns from the wait at once, sees
+    # _stop at the top of its next lap and ends, so the join below does not wait for the rest of the back-off.
+    self._stop_event.set()
     close_send_buffer = getattr(self._send_buff, 'close', None)
     if callable(close_send_buffer):
       close_send_buffer(discard=False)
@@ -1580,7 +1728,49 @@ class BaseCommThread(
     
     return dct_output
 
-  def _prepare_command(self, command, receiver_address=None):
+  def _prepare_command(self, command, receiver_address):
+    """
+    Build the outgoing form of a command: its action and payload encrypted for the receiver.
+
+    The command is copied, so the caller's object is not changed. ``ACTION`` and ``PAYLOAD`` are taken out of
+    the copy, written as one JSON text and encrypted for ``receiver_address`` with this node's key; the
+    outgoing command holds the remaining fields (the routing ones), this node's address as sender, the
+    encrypted text and the flag that says so.
+
+    Parameters
+    ----------
+    command : dict
+      The command as queued: routing fields plus ``ACTION`` and ``PAYLOAD``.
+    receiver_address : str
+      Address of the node the command is for; its public key is read from it.
+
+    Returns
+    -------
+    dict or None
+      The outgoing command, or None when the command has no ``ACTION`` or ``PAYLOAD`` field (logged in red).
+
+    Raises
+    ------
+    Exception
+      When the command cannot be encrypted: no receiver address, an address no key can be read from, or text
+      that cannot be encoded. Nothing is returned then, so nothing readable is published; the command loop
+      drops that command with one red line and goes on with the next.
+
+    Notes
+    -----
+    Before, a command was encrypted only when ``ENCRYPTED_COMMS`` was set, and it is off by default: commands
+    (pipeline configurations with their environment values among them) left readable for every client of
+    the brokers, on a topic any of them may subscribe to. There is no unencrypted form any more and no
+    setting for one. Receivers need no change: they have always decrypted a command that says it is
+    encrypted (the commands of SDK clients arrive this way), and they still accept an unencrypted one from a
+    sender of an earlier release.
+
+    Examples
+    --------
+    >>> out = self._prepare_command(command, receiver_addr)   # the command loop, before it publishes
+    >>> out['EE_IS_ENCRYPTED'], 'ACTION' in out, 'PAYLOAD' in out
+    (True, False, False)
+    """
     try:
       command = deepcopy(command)
       critical_data = {
@@ -1591,26 +1781,22 @@ class BaseCommThread(
       self.P("Failed to prepare command {}:\n{}".format(exc, self.json_dumps(command, indent=3)), color='r')
       return None
 
-    encrypt_payload = self.cfg_encrypted_comms
-
-    if encrypt_payload and receiver_address is not None:
-      # encrypt the payload
-      str_data = self.log.safe_json_dumps(critical_data, ensure_ascii=False)
-      str_enc_data = self.bc_engine.encrypt(
-        plaintext=str_data,
-        receiver_address=receiver_address,
-        #compressed=True, # default is True
-        #embed_compressed=True, # default is True - data will be 13:end instead of 12:end due to compression flag
-      )
-      critical_data = {
-        ct.COMMS.COMM_SEND_MESSAGE.K_EE_IS_ENCRYPTED: True,
-        ct.COMMS.COMM_SEND_MESSAGE.K_EE_ENCRYPTED_DATA: str_enc_data,
-      }
-    else:
-      critical_data[ct.COMMS.COMM_SEND_MESSAGE.K_EE_IS_ENCRYPTED] = False
-      if encrypt_payload:
-        critical_data[ct.COMMS.COMM_SEND_MESSAGE.K_EE_ENCRYPTED_DATA] = "ERROR: No receiver address found!"
-    # endif encrypted payload
+    # The action and the payload as one JSON text: the part of a command that is encrypted.
+    str_data = self.log.safe_json_dumps(critical_data, ensure_ascii=False)
+    # Always encrypted for the receiver, whatever ENCRYPTED_COMMS says; before, only with that setting, which
+    # is off by default. A failure raises (no address, an address without a key): there is no unencrypted
+    # form to fall back to.
+    str_enc_data = self.bc_engine.encrypt(
+      plaintext=str_data,
+      receiver_address=receiver_address,
+      #compressed=True, # default is True
+      #embed_compressed=True, # default is True - data will be 13:end instead of 12:end due to compression flag
+    )
+    # What leaves in place of the action and the payload: the flag receivers read, and the encrypted text.
+    critical_data = {
+      ct.COMMS.COMM_SEND_MESSAGE.K_EE_IS_ENCRYPTED: True,
+      ct.COMMS.COMM_SEND_MESSAGE.K_EE_ENCRYPTED_DATA: str_enc_data,
+    }
 
     dct_outgoing = {
       **command,

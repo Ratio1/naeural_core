@@ -6,7 +6,8 @@ IMPORTANT:
 import json
 import os
 from copy import deepcopy
-from time import time
+# sleep: the poll of the wait for the last heartbeat at the node's close.
+from time import sleep, time
 
 import numpy as np
 
@@ -670,6 +671,53 @@ class CommunicationManager(Manager, _ConfigHandlerMixin):
         self.__select_communicators_and_send(message, ct.COMMS.COMMUNICATION_HEARTBEATS, local_only=False)
       # endif
     # endif
+    return
+
+  def wait_heartbeats_sent(self, timeout):
+    """
+    Wait until the heartbeat communicator's thread has taken every queued heartbeat, for a bounded time.
+
+    The orderly stop calls this right after it queued the SHUTDOWN heartbeat and before the communicators are
+    stopped: a communicator that is stopped discards what is still in its queue, while a message its thread
+    has already taken is sent in the same lap when the communicator has its connection. The queue is polled
+    every 0.1 s.
+
+    Parameters
+    ----------
+    timeout : int or float
+      Longest time to wait, in seconds.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    This replaces a fixed 5 s sleep at every orderly stop; the thread takes a queued heartbeat within one lap
+    (20 ms at the default loop resolution) when its previous message was delivered, so the wait normally ends
+    at its first or second poll. The thread takes no new heartbeat while it holds one it could not send (no
+    broker connection, or a failed publish): when the time is up and a heartbeat is still queued for that
+    reason, one red line says so and the close goes on; the heartbeat is then discarded when the communicator
+    stops.
+
+    Only the queue is watched. A heartbeat the thread took while the communicator had no connection is held
+    and tried again each lap; this wait returns at once for it, with no line, and it is lost if the
+    communicator stops before the connection is back.
+
+    Examples
+    --------
+    >>> self._comm_manager.wait_heartbeats_sent(timeout=5)   # Orchestrator._maybe_gracefull_stop()
+    """
+    # The queue the heartbeat communicator's thread takes from; the SHUTDOWN heartbeat was appended to it.
+    queued = self._dct_comm_plugins[ct.COMMS.COMMUNICATION_HEARTBEATS]._send_buff
+    # The wait ends at this time at the latest.
+    deadline = time() + timeout
+    # Until the thread took everything or the time is up.
+    while len(queued) > 0 and time() < deadline:
+      # A short poll: the thread takes a message within one lap.
+      sleep(0.1)
+    if len(queued) > 0:
+      self.P("Last heartbeat not sent after {}s; closing without it.".format(timeout), color='r')
     return
 
   def close(self):

@@ -1284,10 +1284,21 @@ class BaseWebAppPlugin(
     Returns
     -------
     None
+
+    Notes
+    -----
+    The first log line names the template keys and prints none of their values. The values include the key of
+    the plugin's local process manager and whatever a deployment put in its template arguments, and printing
+    the whole dict also cost about 20 KB of log at every web app start. The manager's address is logged where
+    the manager starts and each endpoint where it is registered.
+
+    Examples
+    --------
+    >>> self.initialize_assets(src_dir=None, dst_dir=self.script_temp_dir, jinja_args=self.jinja_args)
     """
 
     # now copy the assets to the destination
-    self.P(f'Copying assets from {src_dir} to {dst_dir} with keys {jinja_args}')
+    self.P(f'Copying assets from {src_dir} to {dst_dir} with keys {sorted(jinja_args)}')
 
     if src_dir is not None:
       env = Environment(loader=FileSystemLoader('.'))

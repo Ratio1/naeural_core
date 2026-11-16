@@ -2,7 +2,8 @@ import copy
 import json
 import unittest
 from collections import deque
-from threading import Lock
+# Lock: the stand-in's buffer locks. Event: the stop signal the real constructor creates and stop() sets.
+from threading import Event, Lock
 
 from naeural_core import constants as ct
 from naeural_core.comm.base.base_comm_thread import BaseCommThread
@@ -80,15 +81,27 @@ def _command(command_id="cmd-1"):
 class TestCommandPreparationImmutability(unittest.TestCase):
 
   def test_prepare_command_does_not_mutate_original_envelope(self):
+    """Preparing a command leaves the caller's command as it was; the prepared copy holds the body encrypted."""
+    # The payload encryption setting is off, its default: a command is encrypted all the same.
     harness = _CommandHarness()
+    # The caller's command.
     original = _command()
+    # A copy to compare with afterwards.
     expected = copy.deepcopy(original)
 
+    # The outgoing form of the command.
     prepared = harness._prepare_command(original, receiver_address="0xai_NODE")
 
+    # The caller's command still has its action and payload.
     self.assertEqual(original, expected)
-    self.assertEqual(prepared["ACTION"], expected["ACTION"])
-    self.assertEqual(prepared["PAYLOAD"], expected["PAYLOAD"])
+    # The prepared one has neither in the clear.
+    self.assertFalse("ACTION" in prepared or "PAYLOAD" in prepared)
+    # It says it is encrypted.
+    self.assertIs(prepared["EE_IS_ENCRYPTED"], True)
+    # The stand-in engine "encrypts" by prefixing the receiver, so the body can be read back here.
+    body = json.loads(prepared["EE_ENCRYPTED_DATA"].split("encrypted:0xai_NODE:", 1)[1])
+    # The encrypted body is exactly the caller's action and payload.
+    self.assertEqual(body, {"ACTION": expected["ACTION"], "PAYLOAD": expected["PAYLOAD"]})
 
   def test_repeated_preparation_uses_exact_same_original_content(self):
     harness = _CommandHarness(encrypted=True)
@@ -132,22 +145,46 @@ class TestCommandQueueAdmission(unittest.TestCase):
     self.assertEqual(queued["PAYLOAD"]["VALUES"], [1, 2, 3])
 
   def test_closed_command_buffer_rejects_post_stop_admission(self):
+    """After stop(), both stop signals are set and a command sent late is refused and counted as closed."""
+    # A command communicator stand-in with the observable send buffer the real one uses.
     harness = _CommandHarness(capacity=2, observable=True)
+    # stop() also closes the receive buffer.
     harness._recv_buff = ObservableMessageBuffer(capacity=1)
+    # The two stop signals as the real constructor creates them: not stopping.
     harness._stop = False
+    # The event a comm thread waits on during a reconnect back-off; stop() sets it.
+    harness._stop_event = Event()
+    # No heartbeat ingress worker on this stand-in.
     harness._stop_heartbeat_ingress_worker = lambda **kwargs: None
 
     class _ThreadProbe:
       def join(self):
+        """
+        Stand in for the comm thread's join.
+
+        The thread has already ended, so the join returns at once.
+
+        Returns
+        -------
+        None
+        """
         return
 
+    # The comm thread stop() joins.
     harness._thread = _ThreadProbe()
 
+    # The real stop of the base communicator.
     BaseCommThread.stop(harness)
 
+    # Both signals: the loops read the flag, a thread in a back-off waits on the event.
+    self.assertTrue(harness._stop and harness._stop_event.is_set())
+    # A command sent after the stop is refused.
     self.assertFalse(harness.send(_command("late-command")))
+    # The buffer's own counters after the refused send.
     snapshot = harness._send_buff.snapshot()
+    # Nothing was queued.
     self.assertEqual(snapshot.depth, 0)
+    # The refusal is counted as "closed", not as "full".
     self.assertEqual(snapshot.rejected_closed, 1)
 
   def test_dequeued_retry_is_visible_without_exposing_command_payload(self):

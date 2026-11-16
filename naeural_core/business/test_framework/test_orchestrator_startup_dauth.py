@@ -92,5 +92,112 @@ class TestStartupDauth(unittest.TestCase):
     self.assertEqual((warned, reloads), (True, 0))
 
 
+class TestStartupDauthBackoff(unittest.TestCase):
+  """The pause after a round that brought no variables grows from round to round, and a stop request ends it."""
+
+  def _run(self, answers, stop_after_slices=None, random_part=5, moving_clock=False):
+    """
+    Run the start-up dAuth rounds with the given answers and record the pause after each round.
+
+    Parameters
+    ----------
+    answers : list
+      What ``dauth_autocomplete`` returns, one per round: ``{}`` for no variables (a busy oracle or a refusal).
+    stop_after_slices : int, optional
+      Ask the node to stop once this many seconds of pause have been slept. Default None: no stop.
+    random_part : int, optional
+      The random part of every pause, in seconds; the first pause is 15 s plus this. Default 5.
+    moving_clock : bool, optional
+      Replace the module's clock with one that every slept second moves, so the 900 s time limit is reached
+      in the test. Default False: the real clock, on which the whole run takes no time.
+
+    Returns
+    -------
+    tuple
+      ``(pauses, lines)``: the seconds slept after each round that was followed by a pause, and the lines logged.
+    """
+    # The method needs only the fields set here.
+    eng = Orchestrator.__new__(Orchestrator)
+    # The node's name, sent with the request.
+    eng.config_data = {ct.CONFIG_STARTUP_v2.K_EE_ID: "node-1"}
+    # The network name of the first log line.
+    eng._Orchestrator__evm_network = "mainnet"
+    # No stop requested yet.
+    eng._return_code = None
+    # The seconds slept since the last request, and the pauses of the finished rounds.
+    slept, pauses = [], []
+    # Each request closes the pause that preceded it.
+    eng._blockchain_manager = _Dauth(answers, on_call=lambda: pauses.append(sum(slept)) or slept.clear())
+    # The lines the method logs.
+    lines = []
+    # Record each line.
+    eng.P = lambda msg, **kwargs: lines.append(msg)
+    # The config reload after a granted answer is not read here.
+    eng.log = SimpleNamespace(reload_config=lambda: None)
+
+    def fake_sleep(seconds):
+      """
+      Record a sleep instead of waiting, and ask for the stop when the test wants one.
+
+      Parameters
+      ----------
+      seconds : int or float
+        The length of the sleep.
+
+      Returns
+      -------
+      None
+      """
+      # One more piece of the current pause.
+      slept.append(seconds)
+      # The moving clock advances by the time slept.
+      clock[0] += seconds
+      if stop_after_slices is not None and len(slept) == stop_after_slices:
+        # What the SIGTERM handler calls.
+        eng.request_stop()
+
+    # The moving clock: only sleeping moves it, a round takes no time on it.
+    clock = [1_000_000.0]
+    # The module's clock: the real one, or the moving one.
+    module_time = (lambda: clock[0]) if moving_clock else orchestrator_module.time
+    # That clock, no real waiting, and the random part of every pause fixed: with 5 s the first pause is 15 + 5 = 20 s.
+    with mock.patch.object(orchestrator_module, "time", module_time), \
+         mock.patch.object(orchestrator_module, "sleep", fake_sleep), \
+         mock.patch.object(orchestrator_module.np.random, "randint", lambda low, high: random_part):
+      # The start-up dAuth rounds, with these three names replaced.
+      eng._check_and_complete_environment_variables()
+    # The pause after the last round, when one was slept and no request followed it.
+    pauses.append(sum(slept))
+    # The first entry is the time before the first request, always 0: dropped.
+    return pauses[1:], lines
+
+  def test_the_pause_doubles_after_each_empty_round_up_to_300_seconds(self):
+    """Six rounds without variables are followed by pauses of 20, 40, 80, 160, 300 and 300 s, not six of 20 s."""
+    # Six empty answers, then the variables.
+    pauses, lines = self._run([{}] * 6 + [{"EE_SUPERVISOR": "false"}])
+    # Doubling from the first pause, capped at 300 s; the last entry is 0, as nothing follows the granted round.
+    self.assertEqual(pauses, [20, 40, 80, 160, 300, 300, 0])
+    # Each retry line says when the next request comes.
+    self.assertIn("next try in 160s", [line for line in lines if "Retrying dAuth" in line][3])
+
+  def test_the_pause_in_progress_ends_at_the_time_limit(self):
+    """With no variables in any round, the wait ends at the 900 s limit: the sixth pause is cut from 300 s to 165 s."""
+    # Empty answers for more rounds than can be made; first pause 15 + 14 = 29 s, on a clock that sleeping moves.
+    pauses, lines = self._run([{}] * 10, random_part=14, moving_clock=True)
+    # Rounds at 0, 29, 87, 203, 435 and 735 s; the pause after the sixth round ends at 900 s, not at 1035 s.
+    self.assertEqual(pauses, [29, 58, 116, 232, 300, 165])
+    # No seventh round was made at the limit, and the node says that it goes on without dAuth variables.
+    self.assertTrue(any("could not retrieve dAuth (6 rounds in 900.0s" in line for line in lines))
+
+  def test_a_stop_request_ends_the_pause_in_progress(self):
+    """A stop asked 3 s into a 20 s pause ends the pause there, and no further request is sent."""
+    # Answers for three rounds; only the first is asked.
+    pauses, lines = self._run([{}, {}, {"EE_SUPERVISOR": "false"}], stop_after_slices=3)
+    # One pause, cut at the third second.
+    self.assertEqual(pauses, [3])
+    # The node goes on without dAuth variables and says so.
+    self.assertTrue(any("could not retrieve dAuth" in line for line in lines))
+
+
 if __name__ == "__main__":
   unittest.main()

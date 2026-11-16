@@ -99,6 +99,12 @@ class DeploymentLifecycle:
     self.records = {}
     self.plugins = {}
     self._published = {}
+    # Attempt key -> (snapshot, final) of the last report write a chain store refused: the snapshot is reported
+    # once, and one refused for a reason no higher sequence can clear (final) is not written again while it is
+    # unchanged. Before, such a snapshot was bumped, saved, signed and refused again at every pass, once a second.
+    self._refused = {}
+    # The log method start() receives; publish() reports a refused snapshot through it.
+    self._report = None
     self._stop = threading.Event()
     self._thread = None
     self._cleanup = None
@@ -539,6 +545,36 @@ class DeploymentLifecycle:
         CStore runtime setter; bounded waits and explicit peers are supplied.
     signer : callable
         Blockchain signing function accepting add_data and use_digest.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    RuntimeError
+        After every record had its publication opportunity, when observing a workload failed.
+
+    Notes
+    -----
+    A write that ends in a refusal (the setter's outcome word starts with ``refused_``) is reported in one red
+    line per snapshot: the attempt, its sequence, the word, and whether the record's node address is this
+    node's. What follows depends on whether a higher sequence can clear the refusal:
+
+    - it cannot for ``refused_token`` and ``refused_readonly`` (the stored record belongs to another writer)
+      and for ``refused_versioned`` on a record whose node address is not this node's (the signed-record rule
+      refuses the address itself): that snapshot is not bumped, saved, signed or written again until it
+      changes or the node restarts;
+    - it can for ``refused_versioned`` at the node's own address (the store holds the record at a higher
+      sequence, which the bumps catch up with) and it may for a refusal by the peers: those keep the retry of
+      every pass, as a write that was only left unconfirmed does.
+
+    Before, every refused snapshot was retried at every pass for good: one sequence bump, one journal save
+    with its two fsyncs, one signature and one refused write per second, with no line in the log.
+
+    Examples
+    --------
+    >>> lifecycle.publish(setter, signer)   # the reporter thread, once a second
     """
     with self.lock:
       pending = []
@@ -566,6 +602,9 @@ class DeploymentLifecycle:
           continue
         fingerprint = {name: value for name, value in record.items() if name not in ("sequence", "updated_at")}
         if self._published.get(key) == fingerprint:
+          continue
+        if self._refused.get(key) == (fingerprint, True):
+          # Refused for a reason no higher sequence can clear, and unchanged since: no bump, save, sign or write.
           continue
         record["sequence"] += 1
         record["updated_at"] = time.time()
@@ -595,16 +634,36 @@ class DeploymentLifecycle:
       field = key + "|" + self.node_addr
       prefix = "hs:" + hashlib.sha256(OBSERVATION_HKEY.encode()).hexdigest()[:10] + ":"
       success = True
+      # The setter writes here how the last write ended (its outcome word), on every path.
+      info = {}
       for field_name in (field + "|" + str(record["sequence"] % 8), field):
         storage_key = prefix + base64.urlsafe_b64encode(field_name.encode()).decode()
         # One unconfirmed write already fails the snapshot; skip the second wait.
         success = success and setter(storage_key, record, owner=self.node_addr, readonly=True,
                                      peers=peers, include_default_peers=False,
-                                     timeout=PUBLISH_TIMEOUT, max_retries=0)
+                                     # result_info: the outcome word tells a refusal from a write that was only
+                                     # left unconfirmed.
+                                     timeout=PUBLISH_TIMEOUT, max_retries=0, result_info=info)
       if success:
         self._published[key] = fingerprint
         if ready:
           ready_reported.append(key)
+      elif info["outcome"].startswith("refused_"):
+        # Whether the record carries this node's address: with another one, the signed-record rule refuses it
+        # whatever its sequence.
+        own = record["node_addr"] == self.node_addr
+        # Final: the stored record has another token or owner, or the address is not this node's. A refusal at
+        # the node's own address (the store holds a higher sequence) or by the peers keeps its retry.
+        final = info["outcome"] in ("refused_token", "refused_readonly") or (
+          info["outcome"] == "refused_versioned" and not own)
+        if self._refused.get(key) != (fingerprint, final):
+          # Remembered first, so each refused snapshot is reported once, not at every pass.
+          self._refused[key] = (fingerprint, final)
+          # One red line: the attempt, its sequence, the store's word, whether the address is this node's (the
+          # address itself is not printed), and what happens next.
+          self._report("Deployment report {} (sequence {}) was refused by the chain store: {}; node address {}; {}.".format(
+            key, record["sequence"], info["outcome"], "matches" if own else "differs",
+            "not retried until the report changes" if final else "retried each pass"), color='r')
     if ready_reported:
       # Persist the end of reporting so a node restart does not re-announce it.
       with self.lock:
@@ -617,10 +676,37 @@ class DeploymentLifecycle:
       raise RuntimeError("Deployment workload observation failed; retrying.")
 
   def start(self, setter_provider, signer, report_error, cleanup=None):
-    """Start an independent bounded publication worker once CStore is ready."""
+    """
+    Start an independent bounded publication worker once CStore is ready.
+
+    The worker runs ``publish`` once a second for as long as the chain-store setter is available. Calling this
+    again while the worker exists does nothing.
+
+    Parameters
+    ----------
+    setter_provider : callable
+        Returns the chain-store setter, or None while the chain store is not ready.
+    signer : callable
+        Blockchain signing function, passed to ``publish``.
+    report_error : callable
+        Log method taking a text and a ``color`` keyword. It gets the throttled "publication failed" line
+        (at most one per 60 s) and one red line per report snapshot the chain store refuses.
+    cleanup : callable, optional
+        Workload cleanup used when an aborted attempt's plugin is gone. Default None.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> lifecycle.start(lambda: shmem.get("__chain_storage_set"), blockchain_manager.sign, self.P)
+    """
     if self._thread is not None:
       return
     self._cleanup = cleanup
+    # publish() reports a refused snapshot through the same log method as the worker's errors.
+    self._report = report_error
     def run():
       last_error_report = 0
       while not self._stop.wait(1):

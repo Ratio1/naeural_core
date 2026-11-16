@@ -84,10 +84,46 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.writes = []
 
   def publish(self, succeed=True):
+    """
+    Run one publication pass with a setter that confirms every write, or leaves every write unconfirmed.
+
+    Parameters
+    ----------
+    succeed : bool, optional
+      True (the default): the setter stores and confirms. False: the write is not confirmed by the peers.
+
+    Returns
+    -------
+    dict
+      The record of the last write the pass made.
+    """
     def setter(key, value, **kwargs):
+      """
+      Record a write and answer as the chain-store setter does: the bool, and the outcome word for the caller.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        Whether the write was stored and confirmed.
+      """
+      # Every write of the test, with its options.
       self.writes.append((key, deepcopy(value), kwargs))
+      # The word of the way out, which the real setter sets on every path: stored, or not confirmed by the peers.
+      kwargs["result_info"]["outcome"] = "changed" if succeed else "unconfirmed"
+      # The bool the real setter returns.
       return succeed
+    # One pass of the reporter, with a signer that stamps the record.
     self.lifecycle.publish(setter, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"))
+    # The last record written.
     return self.writes[-1][1]
 
   def test_rejects_spoofed_coordinator_and_unvalidated_commands(self):
@@ -1316,6 +1352,340 @@ class StrictPersistenceTest(unittest.TestCase):
         written = stream.read()
     self.assertEqual(len(writes), 1)
     self.assertEqual(written, pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+
+
+class RefusedReportTest(unittest.TestCase):
+  """A report write the node's own chain store refuses: reported once, and retried only when a retry can help."""
+
+  def setUp(self):
+    """
+    Create a journal with one admitted attempt, written by a node whose address is "node".
+
+    Returns
+    -------
+    None
+    """
+    # A folder for the journal, removed after the test.
+    self.directory = tempfile.TemporaryDirectory()
+    # Removed even when the test fails.
+    self.addCleanup(self.directory.cleanup)
+    # The journal file.
+    self.path = os.path.join(self.directory.name, "journal.json")
+    # The node, at the address its records are written under.
+    self.lifecycle = DeploymentLifecycle(self.path, "node")
+    # One attempt admitted from its coordinator.
+    self.lifecycle.admit(config(), "oracle", True)
+    # The storage keys the setter was called with, and the lines the lifecycle reported with their color.
+    self.calls, self.lines = [], []
+
+  def use(self, node_addr="node"):
+    """
+    Load the journal as a node with the given address would after a restart, and catch its report lines.
+
+    Parameters
+    ----------
+    node_addr : str, optional
+      The node's current address. Default "node", the address the journal's records carry.
+
+    Returns
+    -------
+    None
+    """
+    # A new process: nothing is remembered about earlier refusals.
+    self.lifecycle = DeploymentLifecycle(self.path, node_addr)
+    # What start() sets from the business manager's log method.
+    self.lifecycle._report = lambda text, color=None: self.lines.append((text, color))
+
+  def passes(self, outcome, count=1):
+    """
+    Run publication passes whose every write ends with the given outcome word.
+
+    Parameters
+    ----------
+    outcome : str
+      The chain-store outcome word of each write; "changed" stores and confirms, any other word fails it.
+    count : int, optional
+      Number of passes. Default 1.
+
+    Returns
+    -------
+    None
+    """
+    def setter(key, value, **kwargs):
+      """
+      Count the write and answer with the outcome under test, as the chain-store setter does.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        True only for the outcome "changed".
+      """
+      # One more write attempt, with the sequence it carried.
+      self.calls.append(value["sequence"])
+      # The word of the way out.
+      kwargs["result_info"]["outcome"] = outcome
+      # Stored and confirmed only for "changed".
+      return outcome == "changed"
+    # The passes, one after another as the reporter thread makes them.
+    for _ in range(count):
+      # One pass of the reporter thread, with a signer that stamps the record.
+      self.lifecycle.publish(setter, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"))
+
+  def sequence(self):
+    """
+    The sequence of the attempt as the journal file holds it.
+
+    Returns
+    -------
+    int
+      The persisted sequence.
+    """
+    # The journal as it is on disk.
+    with open(self.path, encoding="utf-8") as stream:
+      # The journal is one JSON mapping of records.
+      return json.load(stream)["operation|deploy"]["sequence"]
+
+  def test_a_refusal_no_sequence_can_clear_is_reported_once_and_not_written_again(self):
+    """A record written under another node address is refused once: one red line, then no bump, save or write."""
+    # The node now runs with another address than the one its journal record carries.
+    self.use(node_addr="node-now")
+    # Five passes of the reporter; the store refuses the record by the signed-record rule.
+    self.passes("refused_versioned", count=5)
+    # One write attempt in five passes; before, one per pass.
+    self.assertEqual(len(self.calls), 1)
+    # The sequence was bumped for that one attempt only, and the journal was not saved again.
+    self.assertEqual(self.sequence(), self.calls[0])
+    # One red line.
+    self.assertEqual([color for _, color in self.lines], ['r'])
+    # It names the attempt, the sequence, the reason word, that the address differs and that it is not retried.
+    for part in ("operation|deploy", "sequence {}".format(self.calls[0]), "refused_versioned", "differs", "not retried"):
+      # Each part is in the one line.
+      self.assertIn(part, self.lines[0][0])
+    # The coordinator stops the attempt: the snapshot changes.
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    # Three more passes with the same refusal.
+    self.passes("refused_versioned", count=3)
+    # Exactly one new attempt for the changed snapshot, and one new line.
+    self.assertEqual((len(self.calls), len(self.lines)), (2, 2))
+
+  def test_a_token_or_readonly_refusal_is_not_written_again(self):
+    """A record refused for the stored token or for another owner's readonly mark is final at the node's own address."""
+    # The two words that say the stored record belongs to another writer.
+    for outcome in ("refused_token", "refused_readonly"):
+      # Each word is reported on its own.
+      with self.subTest(outcome=outcome):
+        # The node at the address of its record, in a new process.
+        self.use()
+        # No write counted yet for this word.
+        self.calls.clear()
+        # Four passes with this refusal.
+        self.passes(outcome, count=4)
+        # One write attempt.
+        self.assertEqual(len(self.calls), 1)
+        # Reported once, with the word, as final.
+        self.assertTrue(outcome in self.lines[-1][0] and "not retried" in self.lines[-1][0])
+
+  def test_a_refusal_a_higher_sequence_can_clear_keeps_its_retry_and_is_reported_once(self):
+    """At the node's own address a signed-record refusal is retried every pass with a higher sequence; one red line."""
+    # The node at the address of its record.
+    self.use()
+    # Four passes: the store holds this record at a higher sequence, which the bumps can catch up with.
+    self.passes("refused_versioned", count=4)
+    # One attempt per pass, each with the next sequence.
+    self.assertEqual(self.calls, [self.calls[0] + step for step in range(4)])
+    # One red line for the four refusals, which says the write is retried.
+    self.assertEqual(len(self.lines), 1)
+    # The address matches, and the retry goes on.
+    self.assertTrue("matches" in self.lines[0][0] and "retried each pass" in self.lines[0][0])
+    # The next pass catches up: the write is stored and confirmed.
+    self.passes("changed")
+    # Two more writes (the recent slot and the current snapshot), and nothing after that for this snapshot.
+    written = len(self.calls)
+    # A further pass.
+    self.passes("changed")
+    # Published: not written again.
+    self.assertEqual(len(self.calls), written)
+
+  def test_a_peer_refusal_keeps_its_retry_and_an_unconfirmed_write_is_not_reported(self):
+    """A refusal by the peers is retried and reported once; a write that only went unconfirmed is retried silently."""
+    # The node at the address of its record.
+    self.use()
+    # Three passes whose write the peers do not confirm.
+    self.passes("unconfirmed", count=3)
+    # Retried every pass, with no line: nothing was refused.
+    self.assertEqual((len(self.calls), self.lines), (3, []))
+    # Three passes whose write the peers refuse.
+    self.passes("refused_by_peers", count=3)
+    # Still retried every pass, and reported once.
+    self.assertEqual((len(self.calls), len(self.lines)), (6, 1))
+
+  def test_a_refusal_for_want_of_a_target_peer_keeps_its_retry_and_is_reported_once(self):
+    """A write refused because it has no peer to go to is not one of the final refusals: retried every pass, one red line."""
+    # The node at the address of its record.
+    self.use()
+    # Three passes whose write the store refuses for want of a target peer.
+    self.passes("refused_no_peers", count=3)
+    # One attempt per pass, and one line for the three refusals.
+    self.assertEqual((len(self.calls), len(self.lines)), (3, 1))
+    # The line names the word and says that the write is retried.
+    self.assertTrue("refused_no_peers" in self.lines[0][0] and "retried each pass" in self.lines[0][0])
+
+  def test_the_reporter_thread_writes_the_refusal_line_through_the_log_method_given_to_start(self):
+    """Started with start(), the reporter thread reports a refused report in one red line and does not fail its pass."""
+    # The stop event of the reporter, and the signal this test waits on.
+    from threading import Event
+
+    class QuickTick(Event):
+      """
+      The reporter's stop event with a tick of 10 ms in place of the reporter's one second.
+
+      Parameters
+      ----------
+      None
+
+      Returns
+      -------
+      None
+      """
+
+      def wait(self, timeout=None):
+        """
+        Wait 10 ms for the stop, whatever time the reporter asks for.
+
+        Parameters
+        ----------
+        timeout : float, optional
+          The time the caller asked for; not used. Default None.
+
+        Returns
+        -------
+        bool
+          Whether the stop was asked.
+        """
+        # The same wait, shortened.
+        return Event.wait(self, 0.01)
+
+    # The node now runs with another address than the one its journal record carries.
+    self.lifecycle = DeploymentLifecycle(self.path, "node-now")
+    # The reporter makes a pass every 10 ms.
+    self.lifecycle._stop = QuickTick()
+    # Set when the reporter begins its third pass; one entry per pass.
+    third_pass, passes = Event(), []
+
+    def setter(key, value, **kwargs):
+      """
+      Count the write and refuse it by the signed-record rule, as the chain store does for another node address.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        False: the write was refused.
+      """
+      # One more write attempt.
+      self.calls.append(value["sequence"])
+      # The word of the signed-record rule.
+      kwargs["result_info"]["outcome"] = "refused_versioned"
+      # Refused.
+      return False
+
+    def provider():
+      """
+      Count the reporter's pass and hand out the setter, as the shared memory does once the chain store is ready.
+
+      Returns
+      -------
+      callable
+        The refusing setter.
+      """
+      # One more pass.
+      passes.append(1)
+      if len(passes) == 3:
+        # Two passes are complete.
+        third_pass.set()
+      # The setter of this pass.
+      return setter
+
+    # Started as the business manager starts it: a setter provider, a signer and its log method.
+    self.lifecycle.start(provider, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"),
+                         lambda text, color=None: self.lines.append((text, color)))
+    # Stopped also when an assertion below fails.
+    self.addCleanup(self.lifecycle.close)
+    # The reporter reaches its third pass.
+    self.assertTrue(third_pass.wait(10))
+    # Stopped before its lines are read.
+    self.lifecycle.close()
+    # One write in all its passes: the refusal is final.
+    self.assertEqual(len(self.calls), 1)
+    # One red line and nothing else; without the log method the pass failed and wrote "publication failed".
+    self.assertEqual([color for _, color in self.lines], ['r'])
+    # It is the refusal line.
+    self.assertTrue("refused_versioned" in self.lines[0][0] and "not retried" in self.lines[0][0])
+
+  def test_a_refused_record_does_not_hold_back_another_record_s_end_of_reporting(self):
+    """In one pass, one attempt is refused for good and another is confirmed ready: the second one's end is saved."""
+    # A second attempt, of another app, on the same node.
+    second = config()
+    # Its own app name and operation.
+    second["NAME"], second["DEEPLOY_OPERATION"]["operation_id"] = "app-two", "second"
+    # Admitted from the same coordinator.
+    self.lifecycle.admit(second, "oracle", True)
+    # Its workload is ready.
+    self.lifecycle.attach(second, "WORKER", "worker", plugin(ready=True))
+    # The lifecycle's report lines.
+    self.lifecycle._report = lambda text, color=None: self.lines.append((text, color))
+
+    def setter(key, value, **kwargs):
+      """
+      Refuse the first attempt's record for its token and confirm the second attempt's.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        True for the second attempt's record.
+      """
+      # The second attempt is the one that is stored.
+      stored = value["operation_id"] == "second"
+      # The outcome word of each.
+      kwargs["result_info"]["outcome"] = "changed" if stored else "refused_token"
+      # The bool the real setter returns.
+      return stored
+    # One pass with both records pending.
+    self.lifecycle.publish(setter, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"))
+    # The journal as it is on disk.
+    with open(self.path, encoding="utf-8") as stream:
+      # The journal after the pass.
+      saved = json.load(stream)
+    # The confirmed ready attempt has its end of reporting persisted.
+    self.assertTrue(saved["second|deploy"]["ready_reported"])
+    # The refused one was reported.
+    self.assertEqual(len(self.lines), 1)
 
 
 if __name__ == "__main__":

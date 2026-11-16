@@ -813,8 +813,12 @@ line, no change.
   not `off`; with it `off` the wait is `max(8 s, the answer's wait)`.
 - A series ends at a page with no more to follow; the next one starts 120 s later, and so
   does a new round when every oracle was tried. The catch-up is complete after
-  `CSTORE_PULL_PEERS` series without a `partial` page, or, once more oracles than that have
-  been tried, after that many series of any kind. Then the marks leave the reserved record
+  `CSTORE_PULL_PEERS` series without a `partial` page, or after one series more than that of
+  any kind. A series counts only when it ended with its last page, so an oracle that never
+  answers (one of the previous release) brings the end no closer: during a rolling update,
+  two partial series and two such oracles do not end it, and the next round asks again 240 s
+  after the last series (the pause after a series, then the pause before a new round). Then
+  the marks leave the reserved record
   (held without a dirty mark of their own: they reach the file with the next save or the
   save of an orderly stop; a crash before it only makes the next start ask again).
 - 3600 s after the start an unfinished catch-up stops asking for that run, with one red

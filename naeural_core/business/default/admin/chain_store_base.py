@@ -4783,8 +4783,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       ``CS_PULL_PAUSE``, d being the last save's wall time, so the saves the merged pages cause stay near a tenth
       of the wall time (d is measured with ``CSTORE_SAVE_BACKOFF`` not 'off'; with it 'off' d is 0);
     - else the series ended. A catch-up is complete after ``CSTORE_PULL_PEERS`` series without a partial page
-      (a page from an oracle that still owed a catch-up itself), or, once more than ``CSTORE_PULL_PEERS``
-      oracles have been tried, after that many series of any kind. Then nothing is owed any more: the marks
+      (a page from an oracle that still owed a catch-up itself), or after ``CSTORE_PULL_PEERS`` + 1 series of
+      any kind; a series counts only when it ended with its last page, so an oracle that never answers (one of
+      the previous release) brings the end no closer. Then nothing is owed any more: the marks
       leave the reserved record (held without a dirty mark, so they reach the file with the next save or the
       save of an orderly stop). Otherwise the next series starts after ``CS_PULL_PAUSE``.
 
@@ -4854,7 +4855,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     pull["done"], pull["full"] = pull["done"] + 1, pull["full"] + (not pull["partial"])
     # No oracle in hand; the next series after the pause.
     pull["peer"], pull["next"] = None, now + self.CS_PULL_PAUSE
-    if pull["full"] >= self.__pull_peers or (pull["tries"] > self.__pull_peers and pull["done"] >= self.__pull_peers):
+    # Enough series: CSTORE_PULL_PEERS without a partial page, or one more than that of any kind; only a series that
+    # ended with its last page counts. Before, every oracle asked counted towards the second limit, also one that never
+    # answered, so during a rolling update two partial series ended the catch-up once two oracles of the previous
+    # release had dropped the request.
+    if pull["full"] >= self.__pull_peers or pull["done"] > self.__pull_peers:
       # Enough series: nothing is owed any more, and this run asks no more.
       self.__pull = self.__pull_owed = None
       # The reserved record without the marks.

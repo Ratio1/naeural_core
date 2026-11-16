@@ -1394,13 +1394,13 @@ class TestRequester(_StartCase):
   def test_a_catch_up_runs_as_many_series_as_the_number_says_with_a_pause_between_them(self):
     """With CSTORE_PULL_PEERS 2 the catch-up asks one oracle, 120 s later another, and then nothing is owed: the
     marks leave the reserved record without a dirty mark of their own; with 1 it is done after one series. A
-    series with a partial page (its oracle still owes a catch-up itself) counts only once more oracles have been
-    tried than the number."""
+    series with a partial page (its oracle still owes a catch-up itself) counts only once one series more than
+    the number ended."""
     # One record of w1 the asking oracle lacks, held by both others.
     held = {"a": record("a", "v", "w1", [NOW_MS - 5000, "w1"])}
     # Each case: the number, which of the two answering oracles still owes a catch-up, and when each series runs.
     cases = ((2, (), [(0, "peer1"), (120, "oracle")]), (1, (), [(0, "peer1")]),
-             # Both partial: neither series counts until a third oracle was tried, in the next round.
+             # Both partial: neither series counts until a third series ended, in the next round.
              (2, ("peer1", "oracle"), [(0, "peer1"), (120, "oracle"), (360, "peer1")]),
              # One partial, one not: one series without a partial page is not enough for the number 2.
              (2, ("peer1",), [(0, "peer1"), (120, "oracle"), (360, "peer1")]))
@@ -1443,6 +1443,44 @@ class TestRequester(_StartCase):
         # number, and counted its cut.
         self.assertEqual(pull_counts(store), {label: count for index in range(1, len(series) + 1) for label, count in (
           ("pull%d_cut_s" % index, 0), ("plain/pull%d/missing" % index, 1))})
+
+  def test_oracles_that_drop_the_request_do_not_let_two_partial_series_end_the_catch_up(self):
+    """During a rolling update two oracles of the previous release drop the request (each counts pull_no_answer
+    after 10 s) and two new ones answer with partial pages: after those two series the catch-up is not complete
+    (before, the four oracles tried let the two partial series end it at 144 s); it asks again in the next round,
+    240 s after the last series (the pause after a series, then the pause before a new round), the old oracles
+    first again, and is complete when a third series ends (here peer1's, still partial, at 407 s); the marks
+    stay owed until then."""
+    # An oracle with one mark, whose replication peers are two oracles of the previous release and two new ones.
+    store = asking("report", owed={"w1": NOW_MS - 600_000}, peers=("old1", "old2", "peer1", "oracle"))
+    # The two old ones are in the oracle registry with "oracle" (peer1 is a dAuth registry member).
+    store.bc.get_eth_oracles = lambda: ["oracle", "old1", "old2"]
+    # Who was asked when, and when the catch-up ended.
+    events = []
+    # Laps every half second for up to an hour.
+    for at in [half / 2 for half in range(2 * 3600)]:
+      # The requests of this lap.
+      for peers, _ in lap(store, at):
+        # Who.
+        events.append((at, peers[0]))
+        if peers[0] in ("peer1", "oracle"):
+          # A new oracle answers one second later with its only page: partial, as it still owes a catch-up itself.
+          reply(store, peers[0], {"a": record("a", "v", "w1", [NOW_MS - 5000, "w1"])}, at=at + 1, partial=True)
+      if getattr(store, PULL) is None:
+        # The catch-up ended: complete when nothing is owed any more.
+        events.append((at, "complete" if getattr(store, OWED) is None else "stopped"))
+        # Done.
+        break
+      if at == 200:
+        # Between the rounds: two partial series ended, and the catch-up still runs with the marks owed.
+        self.assertEqual((getattr(store, PULL)["done"], getattr(store, PULL)["full"], getattr(store, OWED)),
+                         (2, 0, {"w1": NOW_MS - 600_000}))
+    # The first round: the old oracles unanswered, the new ones partial; the next round 240 s after the last series,
+    # the old ones again, then peer1's third series ends the catch-up.
+    self.assertEqual(events, [(0, "old1"), (11, "old2"), (22, "peer1"), (143, "oracle"), (384, "old1"), (395, "old2"),
+                              (406, "peer1"), (406, "complete")])
+    # Each old oracle counted twice as unanswered.
+    self.assertEqual(pull_counts(store)["pull_no_answer"], 4)
 
   def test_the_cleared_marks_stay_marked_when_a_save_copies_the_replica_as_the_catch_up_ends(self):
     """A save that copies the replica as the catch-up completes, before the record without the marks is written,

@@ -17,6 +17,8 @@ from naeural_core.main.net_mon import NetworkMonitor
 # Runs the periodic state saves (chain store, network monitor), each on a background thread of its own.
 from naeural_core.main.serialization_manager import SerializationManager
 from naeural_core.main.command_handlers import ExecutionEngineCommandHandlers
+# The nodes that send no start-up dAuth request (VPN deployments and seed nodes): the dAuth warning leaves them out.
+from naeural_core.main.orchestrator_mixins.managers_init import node_keeps_authorized_addrs
 from naeural_core.main.orchestrator_mixins import (
   _ValidateConfigStartupMixin,
   _ManagersInitMixin,
@@ -382,8 +384,10 @@ class Orchestrator(DecentrAIObject,
     last try a failure that is not "busy", such as a refused connection, a connect timeout or a status like
     530), or dAuth is not used on this deployment (with a VPN the SDK returns None without sending a
     request). A warning is logged when the node continues without dAuth variables at the time limit, after
-    a stop request, or because a later round ended on None. A None in the first round is not warned here,
-    as before: it is the normal answer on a VPN deployment. A stop request does not interrupt the request
+    a stop request, or because a round ended on None on a node that asks dAuth, the first round included
+    (before, a first-round None was not warned, so a worker whose only round failed ran with no allowed
+    senders without a word). A VPN deployment and a seed node, which get None in the first round without a
+    request (``node_keeps_authorized_addrs``), are not warned. A stop request does not interrupt the request
     in progress; it ends the pause in progress within a second.
 
     An empty dict is also what a refusal looks like here (a node key that is not linked to a license, a
@@ -444,11 +448,13 @@ class Orchestrator(DecentrAIObject,
           sleep(1)
     # endwhile not done
 
-    # Warn also when a later round ended on None: an earlier round got an empty dict (for example from a busy
-    # oracle), and this round gave up on a failure that is not "busy". The node then runs on its local
-    # environment until it restarts, and the log must say so. Do not warn for a None in the first round: a VPN
-    # deployment also gets None there, without sending any request.
-    if not done or (dct_env_output is None and tries > 1):
+    # Warn also when a round ended on None on a node that asks dAuth: the round gave up on a failure that is not
+    # "busy" (a refused connection, a status like 530). The node then runs on its local environment, with no allowed
+    # senders from dAuth, until it restarts, and the log must say so. The first round too: before, a None there was
+    # never warned, so a worker whose only round failed refused every oracle command without a word. A VPN deployment
+    # and a seed node get None in the first round without sending any request (node_keeps_authorized_addrs: the
+    # nodes that keep their allowed senders across restarts), and are not warned.
+    if not done or (dct_env_output is None and (tries > 1 or not node_keeps_authorized_addrs())):
       self.P(f'WARNING: <{self.eth_address}> could not retrieve dAuth ({tries} rounds in {time() - start_ts:.1f}s, '
              f'limit {CHECK_AND_COMPLETE_TIMEOUT}s). Continuing with local environment...')
 
@@ -537,6 +543,40 @@ class Orchestrator(DecentrAIObject,
 
 
   def _init_all_processes(self):
+    """
+    Start the node's processes: blockchain identity, start-up dAuth, network monitor, managers and threads.
+
+    In order: the main-loop data handler and the application monitor; the private blockchain engine and the reset
+    of the allowed senders (before dAuth, which fills them again); the EVM network and the node's location; the
+    start-up dAuth (``_check_and_complete_environment_variables``) and the supervisor flag it may set; the network
+    monitor; the managers (config, comm, capture, serving, business and the others) and the runtime secret
+    resolver; then the threads: asynchronous communication, the admin pipeline's input collection when
+    configured, and the node oracle refresh.
+
+    The node oracle refresh runs only on a node that receives peer heartbeats. On a node whose heartbeat receive
+    the comm manager removed (a non-supervisor in oracle-only heartbeat mode) it is not started, with one yellow
+    line saying why: no oracle maps to a node address there, so before it failed at every pass (every 15 minutes,
+    a red traceback each time). Such a node's allowed senders are those dAuth gave it at start, so when that list
+    is empty one red line says that every oracle command will be refused until the node restarts.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+      When the node has no address after the blockchain engine started.
+
+    Notes
+    -----
+    Runs once, from ``main_loop`` before its first lap. The check of the allowed senders reads the
+    allowed-senders file once, only on a node that starts no oracle refresh.
+
+    Examples
+    --------
+    >>> self._init_all_processes()   # a worker in oracle-only heartbeat mode: "Node oracle refresh not started: ..."
+    """
     self._data_handler = MainLoopDataHandler(log=self.log, owner=self, DEBUG=self.DEBUG)
     self._app_monitor = ApplicationMonitor(log=self.log, owner=self)
 
@@ -606,13 +646,27 @@ class Orchestrator(DecentrAIObject,
     if self.cfg_admin_pipeline_async_dispatch:
       self._start_admin_pipeline_collection_thread()
 
-    self._thread_node_oracle_refresh = Thread(
-      target=self.node_oracle_refresh_loop,
-      args=(),
-      name=ct.THREADS_PREFIX + 'node_oracle_refresh',
-      daemon=True,
-    )
-    self._thread_node_oracle_refresh.start()
+    if self._comm_manager.should_register_local_self_heartbeat:
+      # True only when the comm manager removed this node's heartbeat receive (a non-supervisor in oracle-only
+      # heartbeat mode): no peer heartbeat fills its node table, so no registry oracle maps to a node address and the
+      # refresh fails at every pass. Before, workers found 0 of 14 every 15 minutes and logged a red traceback each
+      # time, about 96 a day; the allowed senders of such a node are the ones dAuth gave it at start.
+      self.P("Node oracle refresh not started: this node receives no peer heartbeats (oracle-only heartbeat mode), so "
+             "no oracle maps to a node address here; the allowed senders are those dAuth gave at start.", color='y')
+      if not self.whitelist:
+        self.P("No allowed command senders after start-up dAuth, and no oracle refresh on this node: every oracle "
+               "command is refused until the node restarts and dAuth answers.", color='r')
+    else:
+      # A node that receives peer heartbeats refreshes its oracles as before, every CHECK_NODE_ORACLES_EVERY seconds on
+      # a thread of its own.
+      self._thread_node_oracle_refresh = Thread(
+        target=self.node_oracle_refresh_loop,
+        args=(),
+        name=ct.THREADS_PREFIX + 'node_oracle_refresh',
+        daemon=True,
+      )
+      # Started; the stop joins it.
+      self._thread_node_oracle_refresh.start()
 
     if False:
       self._thread_logger_debugger = Thread(

@@ -59,11 +59,30 @@ class TestStartupDauth(unittest.TestCase):
     self.assertEqual(max_tries, [5, 2])
     self.assertEqual((warned, reloads), (True, 0))
 
-  def test_none_in_the_first_round_is_not_reported(self):
-    # What a VPN deployment gets from the SDK, without a request: nothing went wrong, so no warning at every start.
-    max_tries, warned, reloads = self._run([None])
+  def test_none_in_the_first_round_is_not_reported_on_a_vpn_deployment_or_a_seed_node(self):
+    """A VPN deployment and a seed node get None in the first round from the SDK without sending a request:
+    nothing went wrong, so no warning at every start."""
+    # Such a node: it keeps its allowed senders across restarts and asks no dAuth.
+    with mock.patch.object(orchestrator_module, "node_keeps_authorized_addrs", lambda: True):
+      # One round, ending on None.
+      max_tries, warned, reloads = self._run([None])
+    # One round of five tries.
     self.assertEqual(max_tries, [5])
+    # No warning and no config reload.
     self.assertEqual((warned, reloads), (False, 0))
+
+  def test_none_in_the_first_round_is_reported_on_a_node_that_asks_dauth(self):
+    """A node that asks dAuth and whose first round ends on None (no oracle reachable, or a failure that is not
+    "busy" on the last try) runs on its local environment with no allowed senders from dAuth, and is warned;
+    before, only a None after an earlier round was."""
+    # A worker: it asks dAuth at every start.
+    with mock.patch.object(orchestrator_module, "node_keeps_authorized_addrs", lambda: False):
+      # One round, ending on None.
+      max_tries, warned, reloads = self._run([None])
+    # One round of five tries.
+    self.assertEqual(max_tries, [5])
+    # The warning, and no config reload.
+    self.assertEqual((warned, reloads), (True, 0))
 
   def test_a_stop_request_ends_the_wait_after_the_round_in_progress(self):
     # SIGTERM during start-up calls request_stop(); no new round starts after it.

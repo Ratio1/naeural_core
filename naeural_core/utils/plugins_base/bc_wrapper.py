@@ -493,22 +493,46 @@ class BCWrapper:
 
   def get_oracles(self, include_eth_addrs: bool = False, wait_interval: int = 15):
     """
-    Get the oracles node addresses via the current network smart contract and the
-    current available network nodes.
-    
+    Get the oracles' node addresses from the oracle registry and the nodes this node knows.
+
+    Reads the registry's EVM addresses (``get_eth_oracles``) and maps each to a node address through the epochs
+    manager's table, which heartbeats fill. At least half of them must map, waiting up to ``wait_interval``
+    seconds for more; else one red line with the traceback is logged and what mapped is returned. A failed
+    registry read is logged the same way and gives empty lists.
+
+    Parameters
+    ----------
+    include_eth_addrs : bool, optional
+      Also return the EVM addresses that mapped (the dAuth server's whitelist uses them). Default False.
+    wait_interval : int, optional
+      Seconds to wait for more addresses to map when fewer than half did, checked every 2 s; 0 makes one
+      pass. Default 15.
+
     Returns
-    -------    
-    list, list : oracles, oracles_names
-    
+    -------
+    tuple
+      ``(oracles, names)``: the node addresses that mapped and their aliases; with ``include_eth_addrs``,
+      ``(oracles, names, found)`` with the EVM addresses that mapped. Lists, empty when nothing mapped or the
+      registry could not be read.
+
+    Notes
+    -----
+    Every error is caught and logged here, so the caller never sees one. ``found`` is set before the registry
+    read: before, a failed read on the dAuth server's path (``include_eth_addrs=True``) raised
+    UnboundLocalError at the return instead of giving empty lists.
+
+    Examples
+    --------
+    >>> wl, names, found = bc.get_oracles(include_eth_addrs=True)   # registry read failed: ([], [], [])
     """
-    wl, names, eth_oracles = [], [], []
+    # The results, empty until something maps; found among them, so a failed registry read returns them all.
+    wl, names, eth_oracles, found = [], [], [], []
     try:
       eth_oracles = self.get_eth_oracles()
       n_oracles = len(eth_oracles)
       if n_oracles == 0:
         msg = "No oracles found in the smart-contracts!"
         raise Exception(msg)
-      found = []
       min_converted_thr = int(n_oracles * 0.5)
       _done = False
       _check_start = time()

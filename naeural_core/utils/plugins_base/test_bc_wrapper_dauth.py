@@ -43,6 +43,20 @@ class BCWrapperDauthTests(unittest.TestCase):
       payload=payload, network="testnet", request_timeout=(2, 5),
     )
 
+  def test_a_failed_registry_read_gives_empty_oracle_lists_also_with_the_evm_addresses(self):
+    """On the dAuth server's path (include_eth_addrs=True) a registry read that fails logs one red line with the
+    error and gives three empty lists; before, the return raised UnboundLocalError on the EVM address list."""
+    # A block engine whose registry read fails.
+    engine = SimpleNamespace(web3_get_oracles=Mock(side_effect=RuntimeError("registry read failed")))
+    # The lines the wrapper logs through its owner.
+    lines = []
+    # The wrapper the plugins get; its owner records the lines.
+    wrapper = BCWrapper(engine, owner=SimpleNamespace(P=lambda msg, **kwargs: lines.append((msg, kwargs.get("color")))))
+    # The call of the dAuth server's whitelist, one pass.
+    self.assertEqual(wrapper.get_oracles(include_eth_addrs=True, wait_interval=0), ([], [], []))
+    # One red line, naming the failure.
+    self.assertEqual([(color, "registry read failed" in msg) for msg, color in lines], [("r", True)])
+
 
 if __name__ == "__main__":
   unittest.main()

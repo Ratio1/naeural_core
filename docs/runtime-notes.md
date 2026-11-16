@@ -122,6 +122,14 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 - `ct.PLUGIN_SEARCH.BLOCKED_BIZ_PLUGINS` (remote code execution plugins) are never instantiated, on
   any network, even from saved pipeline configs. Deeploy operations that include them fail with
   `CONFIGURATION_REJECTED`.
+- Irregular-zone filtering reuses the target Polygon/LineString only within a
+  multi-box call containing plain builtin numeric TLBR coordinates. Polygon
+  boxes, NumPy/custom inputs and effectful subclasses retain the scalar path:
+  closing a four-point polygon can mutate an aliased target. Empty batches do
+  not inspect target geometry, open targets remain lines, and no target cache
+  survives a call. In the controlled E2 image, run
+  `python3 -m unittest naeural_core.business.test_framework.test_irregular_target_reuse`
+  against the installed candidate wheel and real NumPy/Shapely dependencies.
 - Plugin lookup walks the filesystem and runs code safety checks on first use per signature
   (SDK `_PluginsManagerMixin._get_plugin_by_name`). `Manager.plugin_locations_cache` keeps results,
   including failures, for the process lifetime, so new or changed plugin files need a restart.

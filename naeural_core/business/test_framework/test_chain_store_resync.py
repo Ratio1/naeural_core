@@ -688,6 +688,43 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
       _hset_index(ops): 4, _hset_index(node_ops): 4, _hset_index(jobs): 1, _hset_index(secrets): 2,
       _hset_index(rotations): 2})
 
+  def test_a_long_input_queue_starts_the_wait_again_and_no_namespace_is_asked_twice_while_its_answers_wait(self):
+    """While more inputs are queued than one lap takes, each lap starts the wait of a resync request again: the
+    request for DEEPLOY_OPERATIONS, whose two answers wait in the queue past its 60 s, is neither forgotten nor
+    asked a second time while the next namespaces are asked at their turns, and once the queue is short both
+    queued answers are taken (before, the wait ended at 60 s: both answers were dropped and counted unanswered,
+    and the namespace was asked again at 120 s)."""
+    # No random stretch: the requests 60 s apart.
+    with mock.patch.dict(GLOBALS, {"random": lambda: 0.5}):
+      # An oracle whose peers (peer1 and "oracle") answer only when told.
+      store = oracle("report")
+      # Its first request (r1, DEEPLOY_OPERATIONS), to both peers.
+      asked = {0: [body["hkey"] for _, body in lap(store, 0)]}
+      # From 30 s on, more inputs wait in the queue than one lap takes; the answers of r1 among them.
+      store.input_queue_size = store.cfg_max_inputs_per_iteration + 1
+      # Laps across r1's 60 s and past the next two turns.
+      for at in (30, 60, 60.5, 90, 120, 120.5):
+        # What each asks.
+        asked[at] = [body["hkey"] for _, body in lap(store, at)]
+      # The names, shorter.
+      ops, node_ops, jobs = NAMESPACES[:3]
+      # The next namespaces at their turns and never DEEPLOY_OPERATIONS again; r1 still waits, until one gap after the
+      # last lap.
+      self.assertEqual(({at: hkeys for at, hkeys in asked.items() if hkeys}, store.pending_hsync.get("r1", {}).get("until")),
+                       ({0: [ops], 60: [node_ops], 120: [jobs]}, NOW + 180.5))
+      # The queue is short again: the lap takes its inputs, the two queued answers of r1 among them.
+      store.input_queue_size = 0
+      # peer1's answer.
+      answer(store, "r1", "peer1", "DEEPLOY_OPERATIONS", [operation("x", 1)])
+      # The other peer's, with the same record.
+      answer(store, "r1", "oracle", "DEEPLOY_OPERATIONS", [operation("x", 1)])
+      # The wait of r1 ends at the next lap past it: nothing is owed for it, so no second request.
+      later = [body["hkey"] for _, body in lap(store, 181)]
+    # Both answers taken and one record merged; no peer unanswered and no second request for DEEPLOY_OPERATIONS.
+    self.assertEqual(({label: count for label, count in resync_counts(store).items() if label.startswith(OPS_BUCKET)},
+                      ops in later), ({OPS_BUCKET + "/resync/asked": 1, OPS_BUCKET + "/resync/answered": 2,
+                                       OPS_BUCKET + "/resync/merged": 1}, False))
+
 
 class TestMergeOfTheValueHeld(unittest.TestCase):
   """A sync copy whose value is the one held is not checked by the signed-record rule again."""

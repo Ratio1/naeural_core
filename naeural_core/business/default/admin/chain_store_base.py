@@ -939,6 +939,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     No caller waits for the answers: the request is registered with ``until``, the time its answers are taken
     until (``CS_RESYNC_GAP`` after it), and ``__exec_hsync_response`` merges the answer of each asked peer when
     it arrives, not only the first. Each request counts ``<bucket>/resync/asked`` under its namespace's bucket.
+    While more inputs are queued than one lap takes (``MAX_INPUTS_PER_ITERATION``), each lap sets ``until`` one
+    gap after it again, as a catch-up request's wait starts again: answers that wait in a long queue are still
+    taken once handled, and the namespace is not asked a second time meanwhile. The next namespace is still
+    asked at its turn.
 
     When a request's wait is over, each asked peer whose answer was not taken (none came, it came later, or the
     answer handler dropped it, which it counts as ``dropped_<word>``) counts ``<bucket>/resync/unanswered``.
@@ -959,7 +963,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     pending request whose ``until`` has passed, whoever registered it, so a later answer is not taken; the entry of
     a blocking sync (``_hsync``) has no ``until`` and is left to its caller. A lap with nothing pending and no
     request due costs one copy of the (empty) pending table and two comparisons (under 1 microsecond, measured
-    on the node image's interpreter under a 0.35 CPU limit). A request whose wait ends adds one count and, when
+    on the node image's interpreter under a 0.35 CPU limit); a lap with a long queue walks a second copy of the
+    table (a few entries). A request whose wait ends adds one count and, when
     no answer of it was taken, one more request at the next turn: at most five more requests per round, each
     to at most two peers, and none on a network where the answers arrive. The registries are read once for this
     node and once per replication peer at each request, never between requests, and at most once more for each
@@ -980,6 +985,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     """
     # The wall clock the requests and their waits are timed on.
     now = self.time()
+    if self.input_queue_size > self.cfg_max_inputs_per_iteration:
+      # More inputs queued than one lap takes: the answers of a resync request may wait in the queue, so its wait
+      # starts again, as a catch-up request's does. Before, a 60 s wait could end with both answers still queued:
+      # they were dropped once handled, and the namespace was asked a second time, doubling the answers an
+      # overloaded node takes. Over a copy of the table: a blocking sync registers its entry on its caller's thread.
+      for entry in list(self.__pending_hsync.values()):
+        if self.CS_HKEY in entry and self.CS_UNTIL in entry:
+          # A resync request (a blocking sync's entry has no "until", a catch-up's no namespace): one gap from now.
+          entry[self.CS_UNTIL] = now + self.CS_RESYNC_GAP
     # Each pending request the store made itself whose wait is over (a blocking sync's entry has no such time).
     for request_id in [name for name, entry in list(self.__pending_hsync.items())
                        if entry.get(self.CS_UNTIL, now) < now]:

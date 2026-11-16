@@ -301,7 +301,10 @@ that finds a replication peer.
   any release answers it as it answers a caller's sync.
 - No caller waits. The answer of each asked peer is merged on the plugin thread when it
   arrives, once per peer, until 60 s after the request; a later answer is dropped. Both
-  answers are merged, not only the first.
+  answers are merged, not only the first. While more inputs wait in the queue than one lap
+  takes, those 60 s start again at each lap, as a catch-up request's wait does: answers that
+  wait in a long queue are still taken once handled, and the namespace is not asked a second
+  time meanwhile (the next namespace is still asked at its turn).
 - A request no answer of which was taken by the end of its wait (none came, or each was
   dropped) is asked again at the next turn, before the next namespace, and that turn comes
   at most 60 s later (after a round's last request it was a pause away); a second namespace

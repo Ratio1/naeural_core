@@ -219,13 +219,13 @@ collects confirmations again. Confirmation counts use distinct authenticated
 transport senders from the actual target set. These are replica acknowledgments,
 not consensus, CAS, or distributed locking.
 
-Save back-off (`CSTORE_SAVE_BACKOFF`, `off` / `report` / `on`, wave 03 default
+Save back-off (`CSTORE_SAVE_BACKOFF`, `off` / `report` / `on`, default
 `report`; ceiling `CSTORE_SAVE_MAX_GAP`, 30 s): after a save of d seconds the next
 save waits until `min(CSTORE_SAVE_MAX_GAP, 10 * d)` after that save started, on the
 monotonic clock. The first save after a start and the save at an orderly stop are
 immediate. A save of 0.26 s keeps the 5 s cadence; 1.93 s spaces the saves about
 21 s apart; 3 s or more, 30 to 35 s. In `on` a crash can then lose the writes of up
-to `CSTORE_SAVE_MAX_GAP` + 5 s + 1 s + d; `report` saves as `off` (wave 02) and only
+to `CSTORE_SAVE_MAX_GAP` + 5 s + 1 s + d; `report` saves as `off` (as the previous release) and only
 counts what `on` would defer. The network monitor's own save is not affected.
 
 The writer's local copy is applied before broadcast. Self is excluded from the
@@ -799,47 +799,50 @@ line, no change.
   series.
 - The rest goes through the merge of `hsync`, with no namespace and every rule of it (the
   size cap, the depth bound, the signed-record and `cs_rev` rules, the order rule), counted
-  under the origin `pull<n>`, n being the number of the series. `on` applies it; `report`
-  runs the same rules and counts and changes nothing. A copy the order rule admits is
-  counted by what it changes: `missing` (nothing held under its key), `newer` (a stamped
-  record or tombstone held), `over_legacy` (a record without a stamp held: the stamped copy
-  replaces it, also when the unstamped one was written later), or `same` (the record held:
-  sent for nothing). A delete copy is counted as in a sync answer (`ver_copy_delete` when it
-  removes, or would remove, a value held); only with `CSTORE_ORDER` `on`, where a sync
-  applies deletes, is it also counted by what it changes.
+  under the origin `pull<n>`: `pull1` for the first series, `pull2` for every later one.
+  `on` applies it; `report` runs the same rules and counts and changes nothing. A copy the
+  order rule admits is counted by what it changes: `missing` (nothing held under its key),
+  `newer` (a stamped record or tombstone held), `over_legacy` (a record without a stamp
+  held: the stamped copy replaces it, also when the unstamped one was written later), or
+  `same` (the record held: sent for nothing). A delete copy is counted as in a sync answer
+  (`ver_copy_delete` when it removes, or would remove, a value held); only with
+  `CSTORE_ORDER` `on`, where a sync applies deletes, is it also counted by what it changes.
+  So with every switch `report`, `missing` + `newer` + `over_legacy` counts value repairs
+  only: a reader of those sums sees no delete repair until `CSTORE_ORDER` is `on`.
 - After a page with more to follow the next request waits `max(8 s, the answer's wait,
   10 x d)`, at most 120 s, d being the last save's wall time, so the saves the merged pages
   cause stay near a tenth of the wall time. d is measured only with `CSTORE_SAVE_BACKOFF`
   not `off`; with it `off` the wait is `max(8 s, the answer's wait)`.
-- A series ends at a page with no more to follow; the next one starts 120 s later, and so
-  does a new round when every oracle was tried. The catch-up is complete after
-  `CSTORE_PULL_PEERS` series without a `partial` page, or after one series more than that of
-  any kind. A series counts only when it ended with its last page, so an oracle that never
-  answers (one of the previous release) brings the end no closer: during a rolling update,
-  two partial series and two such oracles do not end it, and the next round asks again 240 s
-  after the last series (the pause after a series, then the pause before a new round). Then
-  the marks leave the reserved record
-  (held without a dirty mark of their own: they reach the file with the next save or the
-  save of an orderly stop; a crash before it only makes the next start ask again).
+- A series ends at a page with no more to follow; the next one starts 120 s later, and when
+  every oracle of the round was tried a new round starts 120 s after that. The catch-up is
+  complete after `CSTORE_PULL_PEERS` series without a `partial` page, or after one series
+  more than that of any kind. A series counts only when it ended with its last page, so an
+  oracle that never answers (one of the previous release) brings the end no closer: during a
+  rolling update, two partial series and two such oracles do not end it, and the next round
+  asks again 240 s after the last series. Then the marks leave the reserved record (held
+  without a dirty mark of their own: they reach the file with the next save or the save of
+  an orderly stop; a crash before it only makes the next start ask again).
 - 3600 s after the start an unfinished catch-up stops asking for that run, with one red
   line when it had asked anyone. Its marks stay in the record, so the next start asks from
   them again, within what its own floor still allows.
 
 Counters: `pull_no_answer`, `pull_refused`, `<bucket>/pull<n>/<outcome>` (the merge's counts
 under the catch-up's origins, and `held`), and `pull<n>_cut_s`: the largest number of
-seconds, in the period, by which the floor of a request of series n lay above the newest
-mark it asked from, about when the node stopped receiving (present with 0 when nothing was
-cut). A cut above 0 means the node was away longer than what may still be asked for, so part
-of what it missed could no longer be asked for. A writer whose mark lies below the floor
-gives no cut: its records stamped below the floor were written while the node still
-received, so a loss of them is not what a restart's catch-up repairs.
+seconds, in the period, by which the floor of a request of series n (1, or 2 for every later
+series) lay above the newest mark it asked from, about when the node stopped receiving
+(present with 0 when nothing was cut). A cut above 0 means the node was away longer than
+what may still be asked for, so part of what it missed could no longer be asked for. A
+writer whose mark lies below the floor gives no cut: its records stamped below the floor
+were written while the node still received, so a loss of them is not what a restart's
+catch-up repairs.
 
 What it does not reach: records without a stamp, the six protected namespaces (the signed
 five have the resync above), records with a token, records stamped below the floor (older
 than the tombstone life, or than a tombstone this node removed at its cap), records a writer
 stamped more than 120 s below its own newer ones (a wall clock set back while it ran), and
 records no oracle asked holds. A node that is in no registry never asks, so the marks of its
-starts stay owed (`pull_owed` 1 in its `CSTORE_STATS` lines).
+starts stay owed (`pull_owed` 1 in its `CSTORE_STATS` lines): a reader of `pull_owed` reads
+it on oracles only.
 
 Cost, on the node image's interpreter under a 0.35 CPU limit, with a replica of 5,700
 records (5.8 MB): a lap with nothing owed, under a microsecond; the marks of a start, 2 to
@@ -911,7 +914,7 @@ Fields:
 - `counts`: the counters of that period, by label (below); only labels seen in the period appear.
 - `queue_peak`: the largest number of inputs still waiting in the plugin's input queue when a loop lap reached the chain-store step in the period. The lap has taken its inputs by then, so a queue that filled up shows in `lost_inputs`, not here.
 - `lost_inputs`: how much the plugin's `lost_inputs_count` grew: inputs that arrived while the input queue was full, when the queue drops its oldest input.
-- `modes`: the mode of each wave 03 switch of the plugin config (`CSTORE_ORDER`, `CSTORE_LEAN_CONFIRM`, `CSTORE_HANDOFF`, `CSTORE_SAVE_BACKOFF`), read once at start: `off` (wave 02 behaviour), `report` (the rule runs and is counted, nothing acts on it) or `on` (the rule acts). Any other value stops the plugin's start. With them `pull_peers`, the number `CSTORE_PULL_PEERS` as read at start. The same table is in every line until the next start.
+- `modes`: the mode of each of the store's switches in the plugin config (`CSTORE_ORDER`, `CSTORE_LEAN_CONFIRM`, `CSTORE_HANDOFF`, `CSTORE_SAVE_BACKOFF`), read once at start: `off` (the previous release's behaviour), `report` (the rule runs and is counted, nothing acts on it) or `on` (the rule acts). Any other value stops the plugin's start. With them `pull_peers`, the number `CSTORE_PULL_PEERS` as read at start. The same table is in every line until the next start.
 - `stamp_lead_max_s`: the largest lead over this node's wall clock, in seconds, of a version stamp the order rule took in the period (a peer's clock ahead of this one, plus transit); 0 when none led, and always with `CSTORE_ORDER` `off`.
 - `handoff_pending`: the hand-off's pairs (own record, target) not settled at its last sweep; 0 with `CSTORE_HANDOFF` `off`.
 - `pull_owed`: 1 while the replica holds marks a catch-up still owes (above), 0 when it holds none.
@@ -924,7 +927,7 @@ Labels in `counts`:
   - `changed`: the write was stored and changed this replica, so the replica will be saved. It says what happened here: a local write that changed the replica and then was not confirmed by the peers is still counted as `changed`.
   - `identical`: the value was already stored (a remote copy of it, or a local write with the same value, owner and readonly); the replica is not saved for it, but a local one is still broadcast and confirmed.
   - `absent_delete`: a delete of a key this replica does not hold; the replica is not saved for it.
-  - `refused_<reason>`: a refused write, one word per rule (before wave 03 all of them, and errors, were one `refused` label; a parser sums the labels that start with `refused_`):
+  - `refused_<reason>`: a refused write, one word per rule (the previous release counted all of them, and errors, as one `refused` label; a parser sums the labels that start with `refused_`):
     - `refused_no_peers`: a local write with no target peer. The node's own address is never a peer, so on a seed whose whitelist holds only itself every write ends here at once (it used to wait 3 x 10 s).
     - `refused_oracle_only`: a Tunnels Manager write, or an unversioned deployed-job pointer, from a sender outside the oracle registries (remote), or a local Tunnels Manager write with no oracle registry member among its targets.
     - `refused_not_member`: a dAuth or key-rotation write refused by the registry-membership rules: locally (this node, or a target, outside the registry the namespace needs) or remotely (the sender outside it, or this node outside the dAuth registry; these remote drops were not counted before).
@@ -946,9 +949,9 @@ Labels in `counts`:
 - `plain/hsync/refused_malformed`, `plain/remote/refused_malformed`: a namespace-sync answer whose `request_id` is not a str, and a message whose `CHAIN_STORE_DATA` is not a dict; both dropped. Each of these six inputs used to raise out of the payload handler, which ends the plugin's lap; any count of them points at a sender that forges or corrupts messages.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
 - `pull_h_future`: removed tombstones stamped too far ahead of the wall clock to raise the tombstone horizon (above); expected 0.
-- `pull_answered`: pages this node sent in answer to catch-up requests. `pull_refused`: catch-up requests it did not answer for their form or their sender, answers of another form, and records of a page it was not asked for or may not take (above); expected 0.
+- `pull_answered`: pages this node sent in answer to catch-up requests. `pull_refused`: one count of three kinds, summed: catch-up requests it did not answer for their form or their sender (as the answering node), answers of another form, and records of a page it was not asked for or may not take (as the asking node) (above); expected 0, and the count alone does not tell which kind.
 - `pull_no_answer`: catch-up requests not answered within 10 s (an oracle that is away, runs the previous release, or has `CSTORE_HANDOFF` `off`).
-- `pull<n>_cut_s`: seconds by which the floor of a request of series n lay above the newest mark it asked from, the largest of the period (above).
+- `pull<n>_cut_s`: seconds by which the floor of a request of series n (1, or 2 for every later series) lay above the newest mark it asked from, the largest of the period (above).
 - `<bucket>/pull<n>/missing`, `newer`, `over_legacy`, `same`, `held`, and the merge's own labels (`ver_<word>`, `refused_too_large`, `refused_too_deep`, `refused_unencodable`, `ver_copy_delete`, `tombstone_new`, `perm_readonly`, `delete_foreign`) under the origin `pull<n>`: what the pages of series n of a catch-up changed, or in `report` would change (above).
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
 - `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers taken, and records those answers inserted or replaced. `<bucket>/resync/unanswered`: asked peers whose answer was not taken when a request's wait ended (a request with none taken is asked again once). `<bucket>/resync/dropped_<word>` (`not_asked`, `other_namespace`, `not_member`, `malformed`): answers to these requests the answer handler dropped, by why.

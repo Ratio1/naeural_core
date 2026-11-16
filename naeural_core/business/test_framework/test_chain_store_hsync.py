@@ -230,8 +230,8 @@ class _OldNetmonStub:
 
 
 class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
-  # The mode of every wave 03 switch in a harness: 'off' runs these suites as wave 02 behaviour; the report-mode run
-  # in test_chain_store_switches.py sets 'report' here for each of its tests.
+  # The mode of every switch of the store in a harness: 'off' runs these suites as the previous release behaves; the
+  # report-mode run in test_chain_store_switches.py sets 'report' here for each of its tests.
   CSTORE_MODE = "off"
 
   def __init__(self, ee_addr, default_peers=None, storage=None):
@@ -253,8 +253,8 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
 
     Notes
     -----
-    Every wave 03 switch is in the class's ``CSTORE_MODE``: both as the ``cfg_cstore_*`` value on_init reads and
-    in the mode table on_init would build from them. The save back-off has its 30 s ceiling and no pause yet.
+    Every switch of the store is in the class's ``CSTORE_MODE``: both as the ``cfg_cstore_*`` value on_init reads
+    and in the mode table on_init would build from them. The save back-off has its 30 s ceiling and no pause yet.
 
     Examples
     --------

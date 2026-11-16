@@ -56,7 +56,7 @@ DAY_MS = 86_400_000
 
 def make(mode, address="node", peers=("peer1", "peer2"), storage=None, signed=False):
   """
-  Build a chain store with every wave 03 switch in ``mode``, at the tests' wall clock.
+  Build a chain store with every switch of the store in ``mode``, at the tests' wall clock.
 
   Parameters
   ----------

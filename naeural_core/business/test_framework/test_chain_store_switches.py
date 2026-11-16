@@ -1,9 +1,9 @@
 """
-Offline tests of the chain store's wave 03 switches and of its one counting helper, and the report-mode run of the
+Offline tests of the chain store's switches and of its one counting helper, and the report-mode run of the
 chain-store suites.
 
 The suites in test_chain_store_hsync.py and test_chain_store_accounting.py run as they are with every switch 'off'
-(the harness default, wave 02 behaviour). This module runs each of their test classes a second time, as a class
+(the harness default, the previous release's behaviour). This module runs each of their test classes a second time, as a class
 named ``Report<name>``, with every switch of every harness in 'report'.
 """
 # The data folder of a started store.

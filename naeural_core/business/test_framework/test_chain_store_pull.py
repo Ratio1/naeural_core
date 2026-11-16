@@ -1439,10 +1439,10 @@ class TestRequester(_StartCase):
         # Nothing is owed: no catch-up, no marks, the record without them, held without a dirty mark.
         self.assertEqual((getattr(store, PULL), getattr(store, OWED), store.storage[RESERVED]["value"],
                           getattr(store, UNMARKED), getattr(store, DIRTY)), (None, None, {"floor": 0, "owed": None}, True, False))
-        # Each series judged the record it was sent ('report': the replica lacks it at every series), under its own
-        # number, and counted its cut.
-        self.assertEqual(pull_counts(store), {label: count for index in range(1, len(series) + 1) for label, count in (
-          ("pull%d_cut_s" % index, 0), ("plain/pull%d/missing" % index, 1))})
+        # Each series judged the record it was sent ('report': the replica lacks it at every series) and counted its
+        # cut: the first under pull1, every later one under pull2 (a third series adds no pull3 label).
+        self.assertEqual(pull_counts(store), {"pull1_cut_s": 0, "plain/pull1/missing": 1, **(
+          {"pull2_cut_s": 0, "plain/pull2/missing": len(series) - 1} if len(series) > 1 else {})})
 
   def test_oracles_that_drop_the_request_do_not_let_two_partial_series_end_the_catch_up(self):
     """During a rolling update two oracles of the previous release drop the request (each counts pull_no_answer
@@ -1479,8 +1479,10 @@ class TestRequester(_StartCase):
     # the old ones again, then peer1's third series ends the catch-up.
     self.assertEqual(events, [(0, "old1"), (11, "old2"), (22, "peer1"), (143, "oracle"), (384, "old1"), (395, "old2"),
                               (406, "peer1"), (406, "complete")])
-    # Each old oracle counted twice as unanswered.
-    self.assertEqual(pull_counts(store)["pull_no_answer"], 4)
+    # Each old oracle counted twice as unanswered; the three series judged the record, the first under pull1 and the
+    # two later ones under pull2.
+    self.assertEqual(pull_counts(store), {"pull_no_answer": 4, "pull1_cut_s": 0, "plain/pull1/missing": 1,
+                                          "pull2_cut_s": 0, "plain/pull2/missing": 2})
 
   def test_the_cleared_marks_stay_marked_when_a_save_copies_the_replica_as_the_catch_up_ends(self):
     """A save that copies the replica as the catch-up completes, before the record without the marks is written,

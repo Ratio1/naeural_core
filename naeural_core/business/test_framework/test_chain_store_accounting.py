@@ -563,7 +563,7 @@ class TestCounters(unittest.TestCase):
     with self.assertRaises(ValueError):
       # The call.
       store._set_value("key", "v", owner="node", timeout=-1)
-    # Counted as an error (wave 02 counted it as "refused").
+    # Counted as an error (the previous release counted it as "refused").
     self.assertEqual(getattr(store, STATS), {"plain/local/error": 1})
 
     def failing_sleep(seconds):
@@ -923,7 +923,7 @@ class TestOracleOnlyNamespaces(unittest.TestCase):
     self.assertEqual(
       (store._set_value(key, {"token": "t"}, owner="node"), key in store.storage, len(getattr(store, OPS)),
        getattr(store, STATS)),
-      # Its word; wave 02 counted it as "refused".
+      # Its word; the previous release counted it as "refused".
       (False, False, 0, {key[:14] + "/local/refused_oracle_only": 1}))
 
 
@@ -962,7 +962,7 @@ class TestRefusalReasons(unittest.TestCase):
     info = {}
     # Real time before the write.
     started = time.monotonic()
-    # The write, as a plugin makes it (wave 02: 3 waits of 10 s, then False).
+    # The write, as a plugin makes it (the previous release: 3 waits of 10 s, then False).
     result = store._set_value("key", "v", owner="node", result_info=info)
     # Real time it took.
     elapsed = time.monotonic() - started

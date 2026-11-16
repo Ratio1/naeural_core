@@ -216,7 +216,8 @@ def flush_at(store, clock, at, changed=True):
 
 
 class TestSaveBackoff(unittest.TestCase):
-  """The save back-off defers saves in 'on', only counts them in 'report' and is wave 02 in 'off'."""
+  """The save back-off defers saves in 'on', only counts them in 'report' and saves as the previous release in
+  'off'."""
 
   def setUp(self):
     """Replace the module's clocks by a fake clock for the test."""
@@ -265,7 +266,7 @@ class TestSaveBackoff(unittest.TestCase):
     # Saved at 0 s and at 31 s, the first call past 30 s.
     self.assertEqual((store.save_starts, getattr(store, STATS)["saves_deferred"]), ([0.0, 31.0], 4))
 
-  def test_report_saves_as_wave_02_and_counts_what_on_would_defer(self):
+  def test_report_saves_as_the_previous_release_and_counts_what_on_would_defer(self):
     """'report', a 1.93 s save: every call saves; the count follows the 'on' schedule, which no save restarts."""
     # Saves of 1.93 s.
     store = make_store("report", self.clock, 1.93)
@@ -279,14 +280,15 @@ class TestSaveBackoff(unittest.TestCase):
                      ([0.0, 5.0, 10.0, 15.0, 20.0, 25.0], 4))
 
   def test_off_saves_at_every_call_and_reads_no_clock(self):
-    """'off' is wave 02: a 10 s save sets no pause, nothing new is counted and no clock is read."""
+    """'off' saves as the previous release: a 10 s save sets no pause, nothing new is counted and no clock is
+    read."""
     # Saves of 10 s.
     store = make_store("off", self.clock, 10.0)
     # Three calls.
     for at in (0.0, 11.0, 16.0):
       # One call.
       flush_at(store, self.clock, at)
-    # Every call saved; only the wave 02 count; the store never read the clock.
+    # Every call saved; only the count the previous release made; the store never read the clock.
     self.assertEqual((store.save_starts, getattr(store, STATS), self.clock.reads), ([0.0, 11.0, 16.0], {"saves": 3}, 0))
 
   def test_a_call_on_an_unchanged_store_counts_nothing_and_the_pause_is_measured_in_time(self):

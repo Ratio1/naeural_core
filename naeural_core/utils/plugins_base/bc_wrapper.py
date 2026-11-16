@@ -515,6 +515,12 @@ class BCWrapper:
       ``(oracles, names, found)`` with the EVM addresses that mapped. Lists, empty when nothing mapped or the
       registry could not be read.
 
+    Raises
+    ------
+    Exception
+      Raised inside when the registry lists no oracle or fewer than half of them map, and caught and logged
+      here with any other error: none reaches the caller.
+
     Notes
     -----
     Every error is caught and logged here, so the caller never sees one. ``found`` is set before the registry

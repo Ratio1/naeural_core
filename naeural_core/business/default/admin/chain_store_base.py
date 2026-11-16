@@ -77,9 +77,9 @@ _CONFIG = {
   
   "CHAIN_PEERS_REFRESH_INTERVAL" : 60,
 
-  # The wave 03 switches of the store. Each is 'off' (wave 02 behaviour), 'report' (the rule runs and is counted in
-  # the CSTORE_STATS line, nothing acts on it) or 'on' (the rule acts). on_init reads them once and stops the start
-  # on any other value; wave 03 ships all four in 'report', and a later release changes only these defaults.
+  # The switches of the store. Each is 'off' (the previous release's behaviour), 'report' (the rule runs and is
+  # counted in the CSTORE_STATS line, nothing acts on it) or 'on' (the rule acts). on_init reads them once and stops
+  # the start on any other value; this release ships all four in 'report', and a later one changes only these defaults.
   # Ordering of writes (version stamps and deletes that stick).
   "CSTORE_ORDER" : "report",
   # How far, in seconds, a stamp may run ahead of this node's wall clock: a stamp further ahead is a future one, and
@@ -263,7 +263,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     Load the stored replica, publish the chain-store API to the other plugins and start the periodic save.
 
     The replica is read from this plugin's cache file (an empty store when there is none or it cannot be
-    read). Then the counters of the ``CSTORE_STATS`` line start, the wave 03 switches (``CSTORE_ORDER``,
+    read). Then the counters of the ``CSTORE_STATS`` line start, the store's switches (``CSTORE_ORDER``,
     ``CSTORE_LEAN_CONFIRM``, ``CSTORE_HANDOFF``, ``CSTORE_SAVE_BACKOFF``) are read once into the mode table
     every later step reads, the save back-off's ceiling ``CSTORE_SAVE_MAX_GAP``, the stamp bound
     ``CSTORE_VER_MAX_AHEAD``, the hand-off's numbers ``CSTORE_HANDOFF_FIRST_S`` and ``CSTORE_HANDOFF_WINDOW``,
@@ -363,7 +363,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Examples
     --------
-    >>> plugin.on_init()   # every switch 'report', the wave 03 default
+    >>> plugin.on_init()   # every switch 'report', the default
     >>> plugin.on_init()   # with CSTORE_SAVE_BACKOFF set to 'ON'
     Traceback (most recent call last):
     ValueError: Chain-store switches must be 'off', 'report' or 'on', got: {'CSTORE_SAVE_BACKOFF': 'ON'}
@@ -399,7 +399,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The UTC hour of the last CSTORE_CENSUS line, the start's hour at first: the census runs at the first lap after
     # each full hour, not right after start.
     self.__census_hour = int(self.time() // 3600)
-    # The wave 03 switches, read once here so the code never reads them from the config again: a config change
+    # The store's switches, read once here so the code never reads them from the config again: a config change
     # acts at the next start, where it is checked again. Each CSTORE_STATS line carries this table as "modes".
     self.__cs_modes = {
       "order": self.cfg_cstore_order, "lean_confirm": self.cfg_cstore_lean_confirm,
@@ -590,8 +590,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     origin : str, optional
       Where the event came from, used only with ``key``: ``"local"`` or ``"remote"`` for a write, ``"hsync"``
       for a copy of a sync answer or a sync message, ``"confirm"`` for a confirmation, ``"resync"`` for the
-      store's own resync, ``"handoff"`` for the hand-off's re-sends, ``"pull<n>"`` for a copy of a page of the
-      n-th series of a catch-up.
+      store's own resync, ``"handoff"`` for the hand-off's re-sends, ``"pull<n>"`` for a copy of a page of a
+      catch-up (``pull1`` of its first series, ``pull2`` of any later one).
     n : int, optional
       How much to add, 1 by default (a sum such as milliseconds can add more).
 
@@ -1512,10 +1512,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     The first save after a start is immediate, and so is the save of an orderly stop (``on_close`` saves
     directly, not through this method).
 
-    - ``'off'``: wave 02, every call that finds the store changed saves; no clock is read, nothing new counted.
-    - ``'report'``: every such call saves, as in wave 02. A call inside the pause counts ``saves_deferred`` (the
-      save ``'on'`` would have skipped) and its save does not restart the pause, so the counts follow the
-      ``'on'`` schedule: ``saves - saves_deferred`` is what ``'on'`` would have saved.
+    - ``'off'``: as the previous release, every call that finds the store changed saves; no clock is read,
+      nothing new counted.
+    - ``'report'``: every such call saves, as in the previous release. A call inside the pause counts
+      ``saves_deferred`` (the save ``'on'`` would have skipped) and its save does not restart the pause, so the
+      counts follow the ``'on'`` schedule: ``saves - saves_deferred`` is what ``'on'`` would have saved.
     - ``'on'``: a call inside the pause counts ``saves_deferred`` and returns without saving; the store stays
       changed, so the first call after the pause saves it.
 
@@ -1539,8 +1540,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     apart; any save of 3 s up to 30 s, 30 to 35 s (the pause is rounded up to the manager's 5 s cadence).
     Saves then take at most 10 % of the wall time while d is 3 s or less. In ``'on'``, writes accepted after a
     save starts reach the disk at the next save, so a crash can lose those of up to ``CSTORE_SAVE_MAX_GAP`` +
-    5 s (the cadence) + 1 s (the manager's check) + d, against 5 s + 1 s + d in wave 02. A failed save also
-    sets the pause from its own duration and is retried after it.
+    5 s (the cadence) + 1 s (the manager's check) + d, against 5 s + 1 s + d in the previous release. A failed
+    save also sets the pause from its own duration and is retried after it.
 
     The cost in ``'report'`` and ``'on'``: one clock read and one comparison per call that finds the store
     changed, and three clock reads, two counts and one ``min`` per save; nothing per write.
@@ -1555,7 +1556,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The back-off's mode, read once at start.
     mode = self.__cs_modes["save_backoff"]
     if mode == "off":
-      # Wave 02: every call that finds the store changed saves, and no clock is read. The cadence is the manager's:
+      # As the previous release: every call that finds the store changed saves, and no clock is read. The cadence is
+      # the manager's:
       # it calls this every CS_SAVE_INTERVAL seconds.
       self.__save_chain_storage()
       return
@@ -1996,7 +1998,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     Notes
     -----
-    Acts from the wave 03 release with no switch: today only the Tunnels Manager credentials carry
+    Acts from this release on, with no switch: today only the Tunnels Manager credentials carry
     ``cs_rev`` (the signed client time of the update). A live write refused here is counted as
     ``refused_cs_rev`` and not confirmed, as every refused remote write. A delete (``value`` None) is a live
     write without ``cs_rev`` and is applied; a snapshot carries a delete only as a tombstone copy, which the
@@ -2543,7 +2545,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       Snapshot payload exported by a peer for ``hkey``.
     origin : str, optional
       The origin the copies are counted under: ``"hsync"`` (the default) for a namespace-sync answer,
-      ``"pull<n>"`` for a page of the n-th series of a catch-up.
+      ``"pull<n>"`` for a page of a catch-up (``pull1`` of its first series, ``pull2`` of any later one).
     dry : bool, optional
       True runs every rule and count and changes nothing: no record is stored or removed, no stamp raised, no
       mark set for a save. False (the default) merges. The one change it does not hold back is the removal of a
@@ -3277,8 +3279,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     that changed it and then was not confirmed, or raised while waiting, is
     still counted as ``changed``.
 
-    The refusal words, one per way out that refuses the write (wave 02
-    counted them all, and ``error``, as ``refused``):
+    The refusal words, one per way out that refuses the write (the previous
+    release counted them all, and ``error``, as ``refused``):
 
     - ``refused_no_peers``: a local write with no target peer (the node's own
       address is never one);
@@ -3419,7 +3421,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # (a remote one is dropped by __exec_store).
       raise ValueError(f"Keys starting with {self.CS_DEL!r} or {self.CS_PULL_KEY!r} are reserved for the chain store.")
     # Outcome counted once by the finally below: every way out sets its own word, so one left unset is an error
-    # (wave 02 counted every other way out as "refused"); and how a local write's wait ended, when it failed.
+    # (the previous release counted every other way out as "refused"); and how a local write's wait ended, when it
+    # failed.
     outcome, wait_end = "error", None
     # True while this call holds the persistence lock it took within CS_NOWAIT_LOCK_S (wait=False only): released by
     # the finally below, after the count.
@@ -4662,8 +4665,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     computed for each request: the larger of the tombstone horizon and now less ``CSTORE_TOMBSTONE_DAYS`` plus
     the same margin; no record stamped below it is asked for, so a key whose delete this node no longer
     remembers cannot come back. The seconds by which the floor lies above the highest ``since`` (the newest
-    mark, about when this node stopped receiving) are kept as the period's largest ``pull<n>_cut_s`` (n: the
-    series; present with 0 when nothing was cut): above 0, this node was away longer than what may still be
+    mark, about when this node stopped receiving) are kept as the period's largest ``pull<n>_cut_s`` (n: 1 for
+    the first series, 2 for every later one; present with 0 when nothing was cut): above 0, this node was away
+    longer than what may still be
     asked for, so part of what it missed can no longer be asked for. A writer whose mark lies below the floor
     gives no cut: its records stamped below the floor were written while this node still received, so a loss of
     them is not what a restart's catch-up repairs.
@@ -4727,8 +4731,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The request: each owed mark less the margin, the floor and the cursor.
     request = {"since": {writer: ms - 2 * self.__ver_ahead for writer, ms in self.__pull_owed.items()},
                "floor": floor, "after": pull["after"]}
-    # The label of this series' cut.
-    label = "pull%d_cut_s" % (pull["done"] + 1)
+    # The label of this series' cut: pull1 for the first series, pull2 for every later one, so a catch-up adds two
+    # labels at most to the line. Before, each series added its own (pull3, pull4, ... within the hour).
+    label = "pull%d_cut_s" % min(pull["done"] + 1, 2)
     # The seconds by which the floor lies above the newest mark asked for (how far this node's time away went past
     # what may still be asked), kept as the period's largest. Before, the lowest mark: a writer quiet for longer than
     # the tombstone life gave a cut at every start (86,640 s for one 8 days quiet), although nothing was missing.
@@ -4777,8 +4782,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       when the record held under its key has a token or is readonly for another owner (a live write is refused
       there too);
     - the rest goes through the merge of a namespace sync (``__merge_hset_snapshot``) under the origin
-      ``pull<n>`` (n: the series), with its size, depth, signed-record and order rules: applied with
-      ``CSTORE_HANDOFF`` 'on', only judged and counted in 'report';
+      ``pull<n>`` (n: 1 for the first series, 2 for any later one), with its size, depth, signed-record and
+      order rules: applied with ``CSTORE_HANDOFF`` 'on', only judged and counted in 'report';
     - ``more``: the next page is asked after ``max(CS_PULL_GAP, wait, 10 x d)`` seconds, at most
       ``CS_PULL_PAUSE``, d being the last save's wall time, so the saves the merged pages cause stay near a tenth
       of the wall time (d is measured with ``CSTORE_SAVE_BACKOFF`` not 'off'; with it 'off' d is 0);
@@ -4823,8 +4828,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     pull["next"] = now + min(max(self.CS_PULL_GAP, page["wait"], 10 * self.__save_took), self.CS_PULL_PAUSE)
     if pull["busy"]:
       return
-    # The origin the page's copies are counted under, and the stamp time none of them may lie below.
-    origin, low = "pull%d" % (pull["done"] + 1), max(request["floor"], cursor[0])
+    # The origin the page's copies are counted under (pull1 for the first series, pull2 for every later one, as the
+    # cut's label), and the stamp time none of them may lie below.
+    origin, low = "pull%d" % min(pull["done"] + 1, 2), max(request["floor"], cursor[0])
     # Each record of the page, over a copy, so one can be dropped.
     for key, record in list(snapshot.items()):
       # Its stamp, when well formed.
@@ -5169,7 +5175,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                     "lean_confirm":"report","order":"report","pull_peers":2,"save_backoff":"report"},
                     "period_s":300,"pull_owed":0,"queue_peak":0,"stamp_lead_max_s":0.0}
 
-    (one line in the log). ``modes`` is the table of the wave 03 switches read once by ``on_init``, with the
+    (one line in the log). ``modes`` is the table of the store's switches read once by ``on_init``, with the
     catch-up's number ``CSTORE_PULL_PEERS`` as ``pull_peers``. ``pull_owed`` is 1 while the replica holds marks
     a catch-up still owes and 0 when it holds none.
     ``stamp_lead_max_s`` is the largest lead over this node's wall clock, in seconds, of a version stamp the
@@ -5222,8 +5228,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # The clock and the plugin's count of lost inputs, read once: for this line and as the start of the next one.
       now, lost = self.time(), self.lost_inputs_count
       # One JSON object with sorted keys on one line, built and logged outside the lock.
-      # Also the mode of each wave 03 switch, read once at start, so a line says whether each rule counted in it
-      # acted ('on') or was only evaluated ('report').
+      # Also the mode of each of the store's switches, read once at start, so a line says whether each rule counted in
+      # it acted ('on') or was only evaluated ('report').
       self.P("CSTORE_STATS " + self.json_dumps({
         "period_s": round(now - self.__cs_stats_last), "counts": counts,
         # The switches, and with them the number of oracles a catch-up asks.

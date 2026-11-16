@@ -1018,7 +1018,8 @@ class TestTombstones(unittest.TestCase):
     nor in an oracle registry leaves no tombstone; the same delete from a replication peer or from a registry
     member, and the outside sender's delete of a key held, leave one. 600 such deletes of new keys stamped 59 s
     ahead then leave the real tombstones and the horizon as they were through the sweep (before, they evicted
-    every real tombstone and set the horizon 59 s ahead)."""
+    every real tombstone and set the horizon 59 s ahead), and none of them counts as a withheld tombstone (a delete
+    of a key not held is counted as absent_delete)."""
     # Five real tombstones an hour old.
     real = {"dl:real%d" % index: tombstone("real%d" % index, "peer1", [NOW_MS - 3_600_000 + index, "peer1"])
             for index in range(5)}
@@ -1043,9 +1044,10 @@ class TestTombstones(unittest.TestCase):
           deliver(store, "flood%d" % index, None, "out", [NOW_MS + 59_000, "out"])
         # The sweep of the next CSTORE_STATS line.
         store._ChainStoreBasePlugin__sweep_tombstones()
-        # Every real tombstone is held and the horizon is where it was (0: none was ever removed).
-        self.assertEqual((sorted(key for key in real if key in store.storage), store._ChainStoreBasePlugin__tomb_horizon),
-                         (sorted(real), 0))
+        # Every real tombstone is held, the horizon is where it was (0: none was ever removed), and nothing of the
+        # sender is counted as withheld.
+        self.assertEqual((sorted(key for key in real if key in store.storage), store._ChainStoreBasePlugin__tomb_horizon,
+                          getattr(store, STATS).get("tombstones_withheld/out")), (sorted(real), 0, None))
 
   def test_an_outsiders_delete_of_a_key_stored_before_the_lock_leaves_a_tombstone(self):
     """The sender's membership is asked before the persistence lock, for a key not held then; when another thread
@@ -1119,8 +1121,9 @@ class TestTombstones(unittest.TestCase):
     with its address: its 32nd delete leaves one, its 33rd removes the key and leaves none, and after the sweep
     removes its expired tombstones its next delete leaves one again; in 'report', which takes a delete stamped as
     another writer's, such a delete removes the key and leaves no tombstone, also while the sender holds none and
-    when it names that writer as owner too. The rule is for deletes only: the sender's value store of a key not
-    held, while it holds 32 tombstones, keeps its stamp."""
+    when it names that writer as owner too. Each delete of a key held that leaves none is counted for the sender.
+    The rule is for deletes only: the sender's value store of a key not held, while it holds 32 tombstones, keeps
+    its stamp."""
     # The outside sender's 34 keys, written an hour ago, and a key of peer1.
     held = {"k%d" % index: record("k%d" % index, "v", "out", [NOW_MS - 3_600_000, "out"]) for index in range(34)}
     # The signed store in 'report', holding them.
@@ -1139,8 +1142,10 @@ class TestTombstones(unittest.TestCase):
     self.assertEqual(sum(key.startswith("dl:k") for key in store.storage), 32)
     # The 33rd delete.
     deliver(store, "k32", None, "out", [NOW_MS, "out"])
-    # The key is removed, and no tombstone was left for it.
-    self.assertEqual(("k32" in store.storage, "dl:k32" in store.storage), (False, False))
+    # The key is removed, and no tombstone was left for it; the two deletes of a key held that left none (the one
+    # stamped as peer1's and this one) are counted for the sender.
+    self.assertEqual(("k32" in store.storage, "dl:k32" in store.storage, getattr(store, STATS)["tombstones_withheld/out"]),
+                     (False, False, 2))
     # The sender's value store of a key not held, while it holds 32 tombstones.
     deliver(store, "fresh", "v", "out", [NOW_MS, "out"])
     # Stored with its stamp: the limit takes the stamp of a delete only.
@@ -1153,6 +1158,62 @@ class TestTombstones(unittest.TestCase):
     deliver(store, "k33", None, "out", [NOW_MS + 8 * DAY_MS, "out"])
     # The only tombstone held.
     self.assertEqual(sorted(key for key in store.storage if key.startswith("dl:")), ["dl:k33"])
+
+  def test_in_on_the_sweep_keeps_32_tombstones_per_outside_writer_also_of_those_sync_copies_brought(self):
+    """With the order switch 'on' a sync answer's delete copies give three writers outside the replication peers and
+    the registries 192 tombstones each (32 from each of six oracles): the sweep keeps each one's 32 newest, removes
+    the others without raising the horizon, marks the replica and counts them per writer, so the 5 real tombstones
+    stay (before, the 701 tombstones evicted every real one at the cap of 570 and raised the horizon); the 40 of a
+    replication peer, of a registry member and of this node (in neither registry) all stay. In 'report', which
+    stores no delete copy, the sweep reads no registry."""
+    # Five real tombstones an hour old.
+    real = {"dl:real%d" % index: tombstone("real%d" % index, "peer1", [NOW_MS - 3_600_000 + index, "peer1"])
+            for index in range(5)}
+    # The tombstones each writer's copies bring: three outside writers, a replication peer, a registry member, and
+    # this node, whose address w0 is in neither registry.
+    brought = {"out0": 192, "out1": 192, "out2": 192, "peer2": 40, "oracle": 40, "w0": 40}
+    # Each mode that stamps.
+    for mode in ("report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # The signed store of w0 (oracle registry "oracle", dAuth registry node and peer1, peers peer1 and peer2).
+        store = make(mode, address="w0", storage=dict(real), signed=True)
+        # One sync answer of the players namespace: each writer's deletes one second apart, index 0 the newest, in
+        # the fields an export sends.
+        answer = {_hset_key("players", "%s-%d" % (writer, index)): {
+          field: data for field, data in tombstone(_hset_key("players", "%s-%d" % (writer, index)), writer,
+                                                   [NOW_MS - 1000 * index, writer]).items()
+          if field in store.CS_EXPORT_FIELDS} for writer, count in brought.items() for index in range(count)}
+        # Merged: in 'on' every copy leaves a tombstone, in 'report' none.
+        getattr(store, MERGE)("players", answer)
+        # The registry reads from here on, and the replica not yet marked by the sweep.
+        reads, store._ChainStoreBasePlugin__chain_storage_dirty = [], False
+        # Each registry read recorded, with the members of the signed store.
+        store.bc.get_eth_dauth_oracles = lambda: reads.append("dauth") or ["node", "peer1"]
+        # The oracle registry.
+        store.bc.get_eth_oracles = lambda: reads.append("oracles") or ["oracle"]
+        # The sweep of the next CSTORE_STATS line.
+        store._ChainStoreBasePlugin__sweep_tombstones()
+        # The tombstone keys of the players namespace left of each writer, by the writer in their stamp.
+        left = {writer: sorted(key for key, held in store.storage.items()
+                               if key.startswith("dl:hs:") and held["ver"][1] == writer) for writer in brought}
+        if mode == "report":
+          # No copy stored, no registry read, the real tombstones held.
+          self.assertEqual(({writer: len(keys) for writer, keys in left.items()}, reads, sorted(key for key in real if key in store.storage)),
+                           (dict.fromkeys(brought, 0), [], sorted(real)))
+          continue
+        # Each outside writer keeps its 32 newest (indexes 0 to 31), the others every one.
+        self.assertEqual(left, {writer: sorted("dl:" + _hset_key("players", "%s-%d" % (writer, index))
+                                               for index in range(32 if writer.startswith("out") else count))
+                                for writer, count in brought.items()})
+        # The real tombstones held, the horizon not raised (0: none was ever removed), the replica marked, both
+        # registries read once, and the removals counted per writer with no other removal.
+        self.assertEqual((sorted(key for key in real if key in store.storage), store._ChainStoreBasePlugin__tomb_horizon,
+                          getattr(store, DIRTY), sorted(reads),
+                          {label: count for label, count in getattr(store, STATS).items() if label.startswith("tombstones")}),
+                         (sorted(real), 0, True, ["dauth", "oracles"], {
+                           "tombstones_withheld/out0": 160, "tombstones_withheld/out1": 160,
+                           "tombstones_withheld/out2": 160, "tombstones_held": 221}))
 
   def test_start_drops_a_tombstone_whose_key_is_held_again(self):
     """on_init ('report') drops the tombstone of a key that is held again (rewritten under the previous release) and

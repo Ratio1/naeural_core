@@ -1037,8 +1037,9 @@ class TestRegistryReadsOutsideTheLock(unittest.TestCase):
     """A local write and a peer's store of each of the three namespaces whose signed-record rule asks the registries,
     a peer's store of a new key from a sender outside the replication peers, and a merge of each of the three
     namespaces all read a registry, and none while the reading thread holds the persistence lock; also when the
-    dAuth registry's read fails, so the oracle registry must still be read before the lock. The same sender's
-    overwrite of a key held reads no registry at all."""
+    dAuth registry's read fails, so the oracle registry must still be read before the lock. So does the tombstone
+    sweep in 'on', which asks about an outside writer's tombstones under the lock. The same sender's overwrite of a
+    key held reads no registry at all."""
     # A deployment operation, signed by the coordinator "oracle".
     ops_key, ops = operation("x", 1)
     # The field of job 7's pointer, and the field of job 8's current secrets.
@@ -1048,6 +1049,8 @@ class TestRegistryReadsOutsideTheLock(unittest.TestCase):
               "EE_SENDER": "peer1", "EE_SIGN": "valid"}
     # A plain key the replica holds, for the overwrite.
     held_key = _hset_key("players", "held")
+    # Forty tombstones of a writer outside the replication peers and the registries, for the sweep.
+    outside = {"dl:t%d" % index: record("t%d" % index, None, "worker", [NOW_MS - index, "worker"]) for index in range(40)}
     # Each path, as a call on a store.
     paths = {
       # A local write of an operation (blocking: one round of 0.1 s on the harness's clock).
@@ -1073,6 +1076,11 @@ class TestRegistryReadsOutsideTheLock(unittest.TestCase):
       # The secrets.
       "merge secrets": lambda store: getattr(store, MERGE)("DAUTH_JOB_SECRETS", {
         secret_key: record(secret_key, secret, "oracle")}),
+      # The tombstone sweep with the order switch 'on', over 40 tombstones of a writer outside the peers and the
+      # registries, which it asks the registries about.
+      "sweep in on": lambda store: store._ChainStoreBasePlugin__cs_modes.update(order="on") or store.storage.update(
+        # The outside writer's tombstones, then the sweep.
+        outside) or store._ChainStoreBasePlugin__sweep_tombstones(),
     }
     # Each path, with the dAuth registry's read working and failing.
     for (name, run), dauth_fails in itertools.product(paths.items(), (False, True)):

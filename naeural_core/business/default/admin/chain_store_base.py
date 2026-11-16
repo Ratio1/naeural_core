@@ -215,10 +215,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   # The namespaces whose signed-record rule asks the oracle registries (a coordinator, or the publisher of a job's
   # secrets, must be a member): a write or a merge of them reads both registries before it takes the persistence lock.
   CS_REGISTRY_NAMESPACES = ("DEEPLOY_OPERATIONS", "DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS")
-  # The live tombstones one writer outside the replication peers and the oracle registries may hold: its deletes past
-  # this number leave none. 18 such writers can then evict every other tombstone at the cap (CSTORE_TOMBSTONE_CAP,
-  # 570); before, one could, with 600 deletes of keys it had just written. On four production oracles an outside
-  # writer held 173 keys at most (median 6 to 26), and none of the keys outside writers held was deleted in 4.5 days.
+  # The tombstones one writer outside the replication peers and the oracle registries may hold: its deletes past this
+  # number leave none, and with the order switch 'on' each sweep removes its oldest past it (the delete copies of
+  # sync answers and catch-up pages bring up to this number from each oracle). 18 such writers can then evict every
+  # other tombstone at the cap (CSTORE_TOMBSTONE_CAP, 570); before, one could, with 600 deletes of keys it had just
+  # written. On four production oracles an outside writer held 173 keys at most (median 6 to 26), and none of the keys
+  # outside writers held was deleted in 4.5 days; keys written and deleted between two readings were not seen, so the
+  # deletes past the number are counted (tombstones_withheld/<writer>).
   CS_OUTSIDE_TOMBS = 32
   # Seconds a write made with wait=False waits for the persistence lock at most; held longer, it ends not_ready. Under
   # a 0.35 CPU limit, while a merge held the lock, such a write took 2 ms (median) and 6 to 45 ms (99th percentile,
@@ -621,7 +624,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
   def __sweep_tombstones(self):
     """
-    Remove the tombstones that expired or are past the cap, and count those held, once per ``CSTORE_STATS`` line.
+    Remove the tombstones that expired, are past the cap or past an outside writer's number, and count those held.
 
     A tombstone is a record under ``"dl:" + key`` with value None and a stamp (any other ``"dl:"`` record is
     left alone). With the order switch 'off', or ``CSTORE_TOMBSTONE_DAYS`` 0, every tombstone is removed; else
@@ -633,6 +636,14 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ``pull_h_future``: its delete is not covered by the horizon. The removed ones are counted as
     ``tombstones_dropped`` and mark the replica for a save; those left as ``tombstones_held``.
 
+    With the order switch 'on', before the rest, a writer (the address in a tombstone's stamp) other than this
+    node, outside the replication peers and in neither oracle registry keeps only its ``CS_OUTSIDE_TOMBS`` newest
+    tombstones: the older ones are removed without raising the horizon, mark the replica for a save and count
+    ``tombstones_withheld/<writer>``. Its live deletes leave no tombstone past that number (``__exec_store``),
+    but in 'on' the delete copies of sync answers and catch-up pages are stored too, up to that number from each
+    oracle the writer deleted on; so k such writers hold at most ``CS_OUTSIDE_TOMBS`` k tombstones after each
+    sweep, and 18 of them are needed to evict the others at a cap of 570.
+
     Returns
     -------
     None
@@ -643,20 +654,54 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     tombstone after the next line. One walk of the replica and one sort of its tombstones under the lock (1.2 to
     1.4 ms of CPU for 6,000 records with 570 tombstones, measured on the node image's interpreter). A removed
     tombstone no longer stops an older copy of its key: a peer away longer than the tombstone's life, or past the
-    cap, can bring the key back.
+    cap, can bring the key back. In 'on' it reads both registries first, outside the lock (the block engine's
+    copy, or a remote call once that copy has expired); a read that fails leaves its registry with no member, so
+    a member of it that is not a replication peer then keeps only that number too. Between two sweeps a merge
+    can add more such tombstones; only a sweep evicts at the cap, and it removes them first. Grouping the
+    tombstones by writer added no measurable time: one sweep in 'on' of 6,000 records with 570 tombstones of 20
+    writers took 1.51 ms of CPU at the median against 1.56 ms before, under a 0.35 CPU limit (3 x 100 sweeps).
 
     Examples
     --------
     >>> self.__sweep_tombstones()   # 600 tombstones, cap 570, none expired: the 30 oldest removed
+    >>> self.__sweep_tombstones()   # 'on', 192 of an outside writer's: its 160 oldest removed, horizon unchanged
     """
     # The wall clock in ms.
     now = int(1000 * self.time())
+    # Both registries, read before the lock, only with the order switch 'on': only there are the delete copies of sync
+    # answers and catch-up pages stored, which give a writer outside the peers and the registries up to
+    # CS_OUTSIDE_TOMBS tombstones from each oracle it deleted on. Before, 3 such writers deleting on 6 oracles held
+    # 576 here, evicted every other tombstone at the cap and set the horizon 59 s ahead.
+    memo = self.__registry_memo() if self.__cs_modes["order"] == "on" else None
     # The removals and the horizon under one hold of the lock, so no save holds one without the other.
     with self.__persistence_lock:
       # The tombstones held, by stamp, oldest first.
       tombs = sorted((record[self.CS_VER], key) for key, record in self.__chain_storage.items()
                      if key.startswith(self.CS_DEL) and record.get(self.CS_VALUE) is None
                      and isinstance(record.get(self.CS_VER), list))
+      # The keys of each writer's tombstones, by the writer in their stamp.
+      writers = {}
+      # Newest first.
+      for ver, key in reversed(tombs):
+        # Appended in that order.
+        writers.setdefault(ver[1], []).append(key)
+      # Each writer, with the order switch 'on' (else memo is None): only one past the number is asked about.
+      for writer, keys in writers.items():
+        if (memo is not None and len(keys) > self.CS_OUTSIDE_TOMBS and writer != self.ee_addr
+            and writer not in self.__chain_peers and not self.__registry_member(writer, memo=memo)):
+          # A writer outside this node, its peers and both registries keeps its CS_OUTSIDE_TOMBS newest tombstones, as
+          # its own deletes here leave none past that number; the older ones go before the cap is applied.
+          for key in keys[self.CS_OUTSIDE_TOMBS:]:
+            # Removed without raising the horizon, which such a writer's stamps must not move, as for its deletes that
+            # leave no tombstone.
+            del self.__chain_storage[key]
+          # Counted per writer for the line, to be read before the order switch goes 'on' on the network: a writer
+          # that deletes this much may be a legitimate one.
+          self.__cs_count("tombstones_withheld/" + writer, n=len(keys) - self.CS_OUTSIDE_TOMBS)
+          # Saved by the next flush.
+          self.__chain_storage_dirty = True
+      # The tombstones left, oldest first.
+      tombs = [(ver, key) for ver, key in tombs if key in self.__chain_storage]
       # How many of the oldest go: all with the order switch 'off' or no tombstone life; else the expired ones and
       # those beyond the cap, whichever is more.
       cut = len(tombs) if self.__cs_modes["order"] == "off" or not self.__tomb_ms else max(
@@ -3382,11 +3427,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     only while the replica holds fewer than ``CS_OUTSIDE_TOMBS`` (32)
     tombstones stamped with the sender's address, and only when the
     delete's stamp names the sender ('report' takes a delete stamped as
-    another writer's): k such senders then hold at most 32 k tombstones,
-    so 18 of them are needed to evict every other tombstone at the cap
-    (570) and raise the horizon, where one sender could before by writing
-    keys and deleting them. Counting them is one walk of the replica, made
-    only for such a sender's delete of a key held.
+    another writer's); each such delete that leaves none counts
+    ``tombstones_withheld/<sender>``. With the order switch 'on' the delete
+    copies of sync answers and catch-up pages bring such a sender's
+    tombstones from every oracle it deleted on, and the tombstone sweep
+    removes its oldest past 32 (``__sweep_tombstones``): k such senders
+    then hold at most 32 k tombstones after each sweep, so 18 of them are
+    needed to evict every other tombstone at the cap (570) and raise the
+    horizon, where one sender could before by writing keys and deleting
+    them. Counting them is one walk of the replica, made only for such a
+    sender's delete of a key held.
 
     ``error`` is a call that raised before it changed the replica (a bad
     ``timeout`` or ``max_retries``, for example). A local write that changed
@@ -3672,14 +3722,19 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # deletes of keys never written, or of keys the sender had just written, evicted every real tombstone and
             # set the horizon, and with it the floor of every later catch-up request, 59 s ahead of the wall clock.
             ver = None
+            if not unchanged:
+              # A delete of a key held that leaves no tombstone, counted per sender as the sweep counts the ones it
+              # removes past the number: the sizes measured were keys held, which miss keys written and deleted
+              # between two readings, so this tells whether a legitimate writer deletes past the number.
+              self.__cs_count("tombstones_withheld/" + sender)
           self.__set_key_value(
             key=key, value=value, owner=owner,
             local_sync_storage_op=local_sync_storage_op,
             readonly=readonly, token=token,
             peers=peers,
             include_default_peers=include_default_peers,
-            # The stamp the record keeps; None with the order switch 'off', and for an outsider's delete of a key not
-            # held (above), which then leaves no tombstone.
+            # The stamp the record keeps; None with the order switch 'off', and for an outsider's delete that leaves no
+            # tombstone (above).
             ver=ver,
           )
           # The record this write left: a wait=False write registers its re-sends below only while it is still held.

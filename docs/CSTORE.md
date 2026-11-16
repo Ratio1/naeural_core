@@ -557,13 +557,18 @@ A copy of such a key that a peer still holds can come back by a sync or a catch-
 a delete this node never received. Such a sender's delete of a key held removes the key and
 leaves a tombstone only while the replica holds fewer than `CS_OUTSIDE_TOMBS` (32, no
 setting) tombstones stamped with the sender's address, and only when the delete's stamp
-names the sender (`report` takes a delete stamped as another writer's). k such senders hold
-at most 32 k tombstones, so 18 of them are needed to evict every other tombstone at the cap
-and raise the horizon; before, one sender could, by writing keys and then deleting them. On
-four production oracles an outside writer held at most 173 keys (median 6 to 26 per
-oracle), and none of the keys outside writers held was deleted over 4.5 days. Counting a
-sender's tombstones is one walk of the replica, made only for such a sender's delete of a
-key held.
+names the sender (`report` takes a delete stamped as another writer's); each such delete
+that leaves none counts `tombstones_withheld/<sender>`. With `CSTORE_ORDER` `on` the delete
+copies of sync answers and catch-up pages also bring such a writer's tombstones, up to 32
+from each oracle it deleted on, so the sweep (below) keeps only its 32 newest. k such
+writers then hold at most 32 k tombstones after each sweep, so 18 of them are needed to
+evict every other tombstone at the cap and raise the horizon; before, one sender could, by
+writing keys and then deleting them, and with `on` 3 senders deleting on 6 oracles could.
+On four production oracles an outside writer held at most 173 keys (median 6 to 26 per
+oracle), and none of the keys outside writers held was deleted over 4.5 days; those
+readings miss keys written and deleted between them, which the `tombstones_withheld`
+counts show. Counting a sender's tombstones is one walk of the replica, made only for such
+a sender's delete of a key held.
 
 - Reads never see it: `get` and `hget` of the key return `None`; `hlist`, `hkeys` and
   `hgetall` match only `hs:` keys. No write may name a `dl:` key: a local one raises, a
@@ -578,7 +583,11 @@ key held.
 - At each `CSTORE_STATS` line the sweep removes tombstones older than
   `CSTORE_TOMBSTONE_DAYS` (7) and the oldest past `CSTORE_TOMBSTONE_CAP` (570), or all
   of them with `CSTORE_ORDER` `off` or 0 days. A key whose tombstone was removed can come
-  back from a peer that still holds it.
+  back from a peer that still holds it. With `CSTORE_ORDER` `on` it first reads both
+  registries (outside the persistence lock) and removes, for each writer in a tombstone's
+  stamp other than this node that is neither a replication peer nor in a registry, its
+  tombstones past the 32 newest, without raising the horizon (counted
+  `tombstones_withheld/<writer>`); the cap applies to what is left.
 - At start a tombstone whose key is held again (rewritten under the previous release)
   is dropped. A tombstone of a key not held, or a newer stamp on one, is not marked for
   the periodic save; the save at an orderly stop writes it.
@@ -948,6 +957,7 @@ Labels in `counts`:
 - `<bucket>/remote/refused_invalid_key`: a store for a `dl:` key, dropped; the bucket is that of the key after `dl:`. Under `hs:cstore_pull`, a store or delete that names the store's own catch-up record, dropped. Under the bucket of `DAUTH_JOB_SECRET_REVISIONS`, a store or delete from a registry member whose key's field part does not decode (base64 without its padding, bytes that are not UTF-8, a lone surrogate), dropped unconfirmed: the revocation rules decode that part. Under the bucket `plain`, a message dropped because a peer put something unusable where a key belongs, which no node of this release sends: `plain/remote/refused_invalid_key` for a store or delete whose key is not a non-empty str, `plain/confirm/refused_invalid_key` for a confirmation or refusal answer whose key is not a str, `plain/hsync/refused_invalid_key` for a namespace-sync request whose `hkey` holds a surrogate code point (U+D800 to U+DFFF), which UTF-8 does not encode.
 - `plain/hsync/refused_malformed`, `plain/remote/refused_malformed`: a namespace-sync answer whose `request_id` is not a str, and a message whose `CHAIN_STORE_DATA` is not a dict; both dropped. Each of these six inputs used to raise out of the payload handler, which ends the plugin's lap; any count of them points at a sender that forges or corrupts messages.
 - `tombstones_held`, `tombstones_dropped`: tombstones left and removed by the sweep before the line.
+- `tombstones_withheld/<writer>` (`CSTORE_ORDER` `report` or `on`): tombstones of a writer outside the replication peers and the registries that this node did not keep because of the number of 32 (above): its deletes of a key held that left none (also one stamped as another writer's), and in `on` the sweep's removals of its tombstones past its 32 newest. To be read before `CSTORE_ORDER` goes `on`: a writer that deletes this much may be a legitimate one, whose missed deletes `on` could bring back.
 - `pull_h_future`: removed tombstones stamped too far ahead of the wall clock to raise the tombstone horizon (above); expected 0.
 - `pull_answered`: pages this node sent in answer to catch-up requests. `pull_refused`: one count of three kinds, summed: catch-up requests it did not answer for their form or their sender (as the answering node), answers of another form, and records of a page it was not asked for or may not take (as the asking node) (above); expected 0, and the count alone does not tell which kind.
 - `pull_no_answer`: catch-up requests not answered within 10 s (an oracle that is away, runs the previous release, or has `CSTORE_HANDOFF` `off`).

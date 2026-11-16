@@ -18,8 +18,22 @@ class _FakeBCWrapper:
 
 class _FakeBlockchainManager:
   def __init__(self, whitelist=None):
+    """
+    Stand for the node's blockchain engine: its allowed senders, the batches added to them, and its network.
+
+    Parameters
+    ----------
+    whitelist : list of str, optional
+      The allowed senders it starts with; none by default.
+
+    Returns
+    -------
+    None
+    """
     self.whitelist = list(whitelist or [])
     self.added_batches = []
+    # A network other than "VPN": the refresh and its apply skip a VPN fleet, and read this before anything else.
+    self.evm_network = "mainnet"
 
   def _add_prefix(self, addr):
     return addr if addr.startswith("0xai_") else "0xai_" + addr
@@ -46,7 +60,19 @@ class _FakeThread:
   def is_alive(self):
     return self._alive
 
-  def join(self):
+  def join(self, timeout=None):
+    """
+    Stand for ``Thread.join``: the thread is joined at once and is no longer alive.
+
+    Parameters
+    ----------
+    timeout : float, optional
+      The bound the stop passes; not waited for.
+
+    Returns
+    -------
+    None
+    """
     self.joined = True
     self._alive = False
     return
@@ -59,7 +85,24 @@ class TestOrchestratorNodeOracleRefresh(unittest.TestCase):
   LOCK_ATTR = "_Orchestrator__node_oracle_refresh_lock"
 
   def _make_orchestrator(self, whitelist=None, oracles=None):
+    """
+    Build an orchestrator with only what the oracle refresh, its apply and the stop read.
+
+    Parameters
+    ----------
+    whitelist : list of str, optional
+      The allowed senders of its blockchain engine; none by default.
+    oracles : list, optional
+      What its block engine wrapper's ``get_oracles`` finds: addresses, or (address, alias) pairs; none by default.
+
+    Returns
+    -------
+    Orchestrator
+      The orchestrator, its log lines recorded in ``_messages`` as (text, color, other keyword arguments).
+    """
     orchestrator = Orchestrator.__new__(Orchestrator)
+    # The stop reads the admin pipeline's poll seconds from the config: none set, so its default.
+    orchestrator.config_data = {}
     orchestrator._blockchain_manager = _FakeBlockchainManager(whitelist=whitelist)
     orchestrator._bc = _FakeBCWrapper(oracles or [])
     orchestrator._last_oracle_update = 0

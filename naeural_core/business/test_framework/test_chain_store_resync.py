@@ -693,11 +693,13 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
     request for DEEPLOY_OPERATIONS, whose two answers wait in the queue past its 60 s, is neither forgotten nor
     asked a second time while the next namespaces are asked at their turns, and once the queue is short both
     queued answers are taken (before, the wait ended at 60 s: both answers were dropped and counted unanswered,
-    and the namespace was asked again at 120 s)."""
+    and the namespace was asked again at 120 s); a blocking sync's entry gets no wait and stays pending."""
     # No random stretch: the requests 60 s apart.
     with mock.patch.dict(GLOBALS, {"random": lambda: 0.5}):
       # An oracle whose peers (peer1 and "oracle") answer only when told.
       store = oracle("report")
+      # A blocking sync's entry: its caller waits for it, so it never gets a wait of the resync's.
+      store.pending_hsync["caller"] = {store.CS_HKEY: "players", store.CS_PEERS: ["peer1"], store.CS_RESPONSE: None}
       # Its first request (r1, DEEPLOY_OPERATIONS), to both peers.
       asked = {0: [body["hkey"] for _, body in lap(store, 0)]}
       # From 30 s on, more inputs wait in the queue than one lap takes; the answers of r1 among them.
@@ -724,6 +726,9 @@ class TestResyncDropsAndSecondRequests(unittest.TestCase):
     self.assertEqual(({label: count for label, count in resync_counts(store).items() if label.startswith(OPS_BUCKET)},
                       ops in later), ({OPS_BUCKET + "/resync/asked": 1, OPS_BUCKET + "/resync/answered": 2,
                                        OPS_BUCKET + "/resync/merged": 1}, False))
+    # The blocking sync's entry is still pending as its caller left it, with no wait of the resync's.
+    self.assertEqual(store.pending_hsync.get("caller"), {store.CS_HKEY: "players", store.CS_PEERS: ["peer1"],
+                                                        store.CS_RESPONSE: None})
 
 
 class TestMergeOfTheValueHeld(unittest.TestCase):

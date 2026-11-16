@@ -147,15 +147,27 @@ def boxes_are_intersecting(tlbr_box1, tlbr_box2):
   return True
 
 
-def intersect_box_irregular_target(box, target_area):
+def intersect_box_irregular_target(box, target_area, *, _target_geometry_cache=None):
   """
-  This method calculates the intersection percent between a `box` (TLBR area) and a
-  polygon/non-regular area
-  
-  The `box` argument can be provided either in a simple TLBR list format or
-  as a polygon format.
-  
-  The method returns the intersection percent between provided shapes.
+  Return the fraction of a box covered by an irregular target.
+
+  Parameters
+  ----------
+  box : list
+      TLBR coordinates or polygon points. A four-point polygon list is closed
+      in place, preserving the legacy input-mutation behavior.
+  target_area : list
+      Target points. Equal endpoints select a Polygon; otherwise a LineString
+      is used, not an implicitly closed area.
+  _target_geometry_cache : list or None, optional
+      Internal single-slot holder for one batch of proven plain, non-mutating
+      TLBR inputs. Other callers must leave this unset. No cross-call cache.
+
+  Returns
+  -------
+  float or int
+      Intersection area divided by box area, or integer zero for zero-area
+      boxes. Invalid input retains the legacy exception and mutation order.
   """
   
   if not isinstance(box[0], list):
@@ -173,10 +185,18 @@ def intersect_box_irregular_target(box, target_area):
   elif len(box) == 4:# box[-1] != box[0]
     box.append(box[0])
   box = np.array(box).astype(np.float64)
-  if target_area[0] == target_area[-1]:
-    target_area_shapely = Polygon(target_area)
-  else:
-    target_area_shapely = LineString(target_area)
+  target_area_shapely = (
+    _target_geometry_cache[0] if _target_geometry_cache is not None else None
+  )
+  if target_area_shapely is None:
+    # Build lazily after box normalization: malformed boxes must still fail
+    # before inspecting the target, and an empty batch must not inspect it.
+    if target_area[0] == target_area[-1]:
+      target_area_shapely = Polygon(target_area)
+    else:
+      target_area_shapely = LineString(target_area)
+    if _target_geometry_cache is not None:
+      _target_geometry_cache[0] = target_area_shapely
   box_shapely = Polygon(box)
   intersect = box_shapely.intersection(target_area_shapely)
   if box_shapely.area == 0:
@@ -203,13 +223,59 @@ def intersect_box_regular_target(lst_boxes_tlbr, target_area):
 # def filter_boxes_irregular_target(lst_box, target_area, prc_intersect):
 def keep_boxes_inside_irregular_target_area(lst_box, target_area, prc_intersect):
   """
-  This method filter a list of boxes described by their TLBR values with a target area
-  non-rectangular. 
-  The filtering steps takes into account `prc_intersect` and only the boxes with intersection
-  over the the `prc_intersect` will be kept.
+  Keep detections whose target overlap is at least the given threshold.
+
+  Parameters
+  ----------
+  lst_box : list of dict
+      Detections with ``TLBR_POS`` coordinates, in input order.
+  target_area : list
+      Irregular target points, with legacy open/closed endpoint semantics.
+  prc_intersect : float
+      Inclusive minimum intersection fraction; comparison is unchanged.
+
+  Returns
+  -------
+  tuple[list, numpy.ndarray]
+      Selected detections and their intersection fractions, retaining order,
+      duplicate identities and NumPy's original inferred result dtype.
+
+  Notes
+  -----
+  Plain numeric TLBR batches reuse target construction within this call only.
+  Polygon boxes, array/custom inputs and effectful numeric subclasses use the
+  scalar path, preserving alias mutations and conversion/exception ordering.
   """
-  
-  l = [intersect_box_irregular_target(x['TLBR_POS'], target_area) for x in lst_box]
+
+  # Only inspect exact builtin containers/scalars here. Pre-validating or
+  # converting arbitrary inputs could run user code before the first box, or
+  # hide a target mutation caused by closing an aliased four-point polygon.
+  reuse_target = (
+    type(lst_box) is list
+    and len(lst_box) > 1
+    and type(target_area) in (list, tuple)
+    and all(
+      type(point) in (list, tuple)
+      and all(type(value) in (int, float) for value in point)
+      for point in target_area
+    )
+    and all(
+      type(row) is dict
+      # Even an exact dict can run a custom key's __eq__ during lookup. Check
+      # keys without looking up values before visiting any later detection.
+      and all(type(key) is str for key in row)
+      and type(row.get('TLBR_POS')) in (list, tuple)
+      and all(type(value) in (int, float) for value in row['TLBR_POS'])
+      for row in lst_box
+    )
+  )
+  target_cache = [None] if reuse_target else None
+  l = [
+    intersect_box_irregular_target(
+      x['TLBR_POS'], target_area, _target_geometry_cache=target_cache,
+    )
+    for x in lst_box
+  ]
   arr_intersect = np.array(l)
   sel = arr_intersect >= prc_intersect
   intersect_values = arr_intersect[sel]

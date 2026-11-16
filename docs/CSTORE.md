@@ -472,9 +472,9 @@ did not hold, outside the protected namespaces (the five signed ones and
 `DAUTH_JOB_SECRET_REVISIONS`), counts `new_keys/<sender>` when its verified sender is
 neither one of this node's replication peers nor in an oracle registry. An overwrite, a
 delete and a refused store count nothing (such a sender's delete of a key not held leaves
-no tombstone either: see the tombstones below). The registries are read only for such a
-store or delete from a sender outside the replication peers, of a key not held, once per
-store and before
+no tombstone either, and its deletes of keys held leave at most 32: see the tombstones
+below). The registries are read only for such a store of a key not held, or a delete of
+any key, from a sender outside the replication peers, once per store and before
 the persistence lock is taken: while a registry's remote call hangs after the block
 engine's copy expired, each such store waits for that call (about 20 s) on the plugin
 thread, without the lock. A key another thread deletes between that question and the lock
@@ -554,7 +554,16 @@ count above counts) leaves no tombstone and changes nothing. Such senders could 
 `CSTORE_VER_MAX_AHEAD` ahead: the sweep then evicts every real tombstone and raises the
 tombstone horizon, and with it the floor of every later catch-up request, to their stamps.
 A copy of such a key that a peer still holds can come back by a sync or a catch-up, as for
-a delete this node never received.
+a delete this node never received. Such a sender's delete of a key held removes the key and
+leaves a tombstone only while the replica holds fewer than `CS_OUTSIDE_TOMBS` (32, no
+setting) tombstones stamped with the sender's address, and only when the delete's stamp
+names the sender (`report` takes a delete stamped as another writer's). k such senders hold
+at most 32 k tombstones, so 18 of them are needed to evict every other tombstone at the cap
+and raise the horizon; before, one sender could, by writing keys and then deleting them. On
+four production oracles an outside writer held at most 173 keys (median 6 to 26 per
+oracle), and none of the keys outside writers held was deleted over 4.5 days. Counting a
+sender's tombstones is one walk of the replica, made only for such a sender's delete of a
+key held.
 
 - Reads never see it: `get` and `hget` of the key return `None`; `hlist`, `hkeys` and
   `hgetall` match only `hs:` keys. No write may name a `dl:` key: a local one raises, a

@@ -215,6 +215,11 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
   # The namespaces whose signed-record rule asks the oracle registries (a coordinator, or the publisher of a job's
   # secrets, must be a member): a write or a merge of them reads both registries before it takes the persistence lock.
   CS_REGISTRY_NAMESPACES = ("DEEPLOY_OPERATIONS", "DEEPLOY_DEPLOYED_JOBS", "DAUTH_JOB_SECRETS")
+  # The live tombstones one writer outside the replication peers and the oracle registries may hold: its deletes past
+  # this number leave none. 18 such writers can then evict every other tombstone at the cap (CSTORE_TOMBSTONE_CAP,
+  # 570); before, one could, with 600 deletes of keys it had just written. On four production oracles an outside
+  # writer held 173 keys at most (median 6 to 26), and none of the keys outside writers held was deleted in 4.5 days.
+  CS_OUTSIDE_TOMBS = 32
   # Seconds a write made with wait=False waits for the persistence lock at most; held longer, it ends not_ready. Under
   # a 0.35 CPU limit, while a merge held the lock, such a write took 2 ms (median) and 6 to 45 ms (99th percentile,
   # three runs) with 1 ms, and 6 ms and 74 ms with 5 ms: a longer wait more often spans a pause of the CPU limit.
@@ -3332,10 +3337,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     (order switch 'on', or a re-send). An overwrite, a delete, a key of a
     protected namespace, a replication peer's store and a registry
     member's are never refused by it. The registries are read only for
-    such a store, or such a delete, from a sender outside the replication
-    peers, of a key not held: one membership question per store, asked
-    before the persistence lock is taken (the key is checked again under
-    it; a key another thread deletes in between is not counted). While the
+    such a store of a key not held, or a delete of any key, from a sender
+    outside the replication peers: one membership question per store,
+    asked before the persistence lock is taken (the key is checked again
+    under it; a key another thread deletes in between is not counted). While the
     block engine's copy of a registry has expired and its remote call
     hangs, each such store waits for that call (about 20 s) on the plugin
     thread, without the lock, and the sender counts as outside the
@@ -3370,7 +3375,16 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     never written, evicting the real tombstones and raising the tombstone
     horizon, the floor of every later catch-up request, to their own future
     stamps. A copy of such a key that a peer still holds can then come back
-    by a sync or a catch-up, as for a delete this node never received.
+    by a sync or a catch-up, as for a delete this node never received. Such
+    a sender's delete of a key held removes the key and leaves a tombstone
+    only while the replica holds fewer than ``CS_OUTSIDE_TOMBS`` (32)
+    tombstones stamped with the sender's address, and only when the
+    delete's stamp names the sender ('report' takes a delete stamped as
+    another writer's): k such senders then hold at most 32 k tombstones,
+    so 18 of them are needed to evict every other tombstone at the cap
+    (570) and raise the horizon, where one sender could before by writing
+    keys and deleting them. Counting them is one walk of the replica, made
+    only for such a sender's delete of a key held.
 
     ``error`` is a call that raised before it changed the replica (a bad
     ``timeout`` or ``max_retries``, for example). A local write that changed
@@ -3489,13 +3503,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # Before, the rule read them under the lock, which every writer of the node waits for: a remote call once the
       # block engine's copy has expired (about 20 s for one that hangs, about 152 s with SDK 3.5.71).
       memo = self.__registry_memo() if self.__namespace_for_key(key, self.CS_REGISTRY_NAMESPACES) else {}
-      # For the new-key count and the tombstone rule below: a peer's store (a value or a delete) outside the protected
-      # namespaces, from a sender outside the replication peers, of a key not held (read here without the lock; both
-      # check it again under it), whose sender is in neither registry. Asked here, before the lock; before, it was
-      # asked under it, and for values only.
+      # For the new-key count and the tombstone rules below: a peer's store outside the protected namespaces, from a
+      # sender outside the replication peers whose sender is in neither registry, of a value whose key is not held
+      # (read here without the lock; the count checks it again under it) or of a delete of any key. Asked here,
+      # before the lock; before, it was asked under it, for values only, and then for deletes of a key not held.
       outsider = (local_sync_storage_op and sender not in self.__chain_peers
                   and not self.__namespace_for_key(key, self.CS_PROTECTED_NAMESPACES)
-                  and key not in self.__chain_storage and not self.__registry_member(sender))
+                  # A delete of any key (before, only of a key not held, so writing keys and then deleting them left
+                  # a tombstone each); a value only of a key not held.
+                  and (value is None or key not in self.__chain_storage) and not self.__registry_member(sender))
       if not wait:
         # A write that does not wait takes the lock within CS_NOWAIT_LOCK_S and keeps it to the end of the call (the
         # finally below releases it), so its re-send registration and its count do not wait for the lock again.
@@ -3643,11 +3659,15 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
               return False
             # A new key this sender creates, in the count the limit reads.
             self.__cs_count(f"new_keys/{sender}")
-          if outsider and unchanged:
-            # Such a sender's delete of a key not held (checked under the lock: unchanged) leaves no tombstone, so
-            # it neither fills the tombstone cap nor raises the horizon its sweep keeps. Before, 600 deletes of new
-            # keys stamped 59 s ahead evicted every real tombstone and set the horizon, and with it the floor of
-            # every later catch-up request, 59 s ahead of the wall clock.
+          if outsider and value is None and ver is not None and (unchanged or ver[1] != sender or sum(
+              (record.get(self.CS_VER) or [0, ""])[1] == sender for name, record in self.__chain_storage.items()
+              if name.startswith(self.CS_DEL)) >= self.CS_OUTSIDE_TOMBS):
+            # Such a sender's delete leaves no tombstone when the key is not held (checked under the lock: unchanged),
+            # when its stamp names another writer ('report' takes such a delete), or when the sender already holds
+            # CS_OUTSIDE_TOMBS tombstones (one walk of the replica, made only for such a sender's delete of a key held),
+            # so such senders can neither fill the tombstone cap nor raise the horizon its sweep keeps. Before, 600
+            # deletes of keys never written, or of keys the sender had just written, evicted every real tombstone and
+            # set the horizon, and with it the floor of every later catch-up request, 59 s ahead of the wall clock.
             ver = None
           self.__set_key_value(
             key=key, value=value, owner=owner,

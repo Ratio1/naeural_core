@@ -1901,31 +1901,35 @@ class TestRequester(_StartCase):
 
   def test_the_floor_of_each_request_is_the_horizon_or_the_tombstone_life_and_what_it_cuts_is_counted(self):
     """Each request's floor is the larger of the tombstone horizon and now less the tombstone life plus 120 s,
-    computed anew for each; the seconds by which it lies above the lowest mark asked for are kept as the
-    period's largest pull<n>_cut_s of the series; a replica with no marks cuts nothing."""
+    computed anew for each; the seconds by which it lies above the newest mark asked for are kept as the
+    period's largest pull<n>_cut_s of the series; a replica with no marks cuts nothing, and neither does a writer
+    quiet for 8 days beside a mark of 10 minutes ago."""
     # The horizon after a sweep dropped a tombstone stamped 30 minutes ago, and marks of 60 and 10 minutes ago.
     horizon, owed = NOW_MS - 1_800_000, {"w1": NOW_MS - 3_600_000, "w2": NOW_MS - 600_000}
     # No tombstone removed: the floor is the life's, and it cuts nothing of marks an hour old.
     store = asking("report", owed=owed)
     # The first request.
     self.assertEqual(([pull["floor"] for _, pull in lap(store, 0)], pull_counts(store)), ([FLOOR], {"pull1_cut_s": 0}))
-    # With the horizon: the floor is the horizon, 1,920 s above w1's mark less the margin.
+    # With the horizon: the floor is the horizon, below the newest mark (w2's) less the margin: no cut, although it
+    # lies 1,920 s above w1's.
     store = asking("report", owed=owed)
     # The horizon, as the sweep leaves it.
     setattr(store, HORIZON, horizon)
     # The first request.
-    self.assertEqual(([pull["floor"] for _, pull in lap(store, 0)], pull_counts(store)), ([horizon], {"pull1_cut_s": 1920}))
+    self.assertEqual(([pull["floor"] for _, pull in lap(store, 0)], pull_counts(store)), ([horizon], {"pull1_cut_s": 0}))
     # A page with more to follow; meanwhile a sweep raises the horizon to 10 minutes ago.
     reply(store, "peer1", {"a": record("a", "v", "w2", [NOW_MS - 5000, "w2"])}, after=[NOW_MS - 5000, "a"], more=True)
     # Raised.
     setattr(store, HORIZON, NOW_MS - 600_000)
-    # The next request of the series carries the new floor, and the larger cut replaces the smaller.
-    self.assertEqual(([pull["floor"] for _, pull in lap(store, 8)], pull_counts(store)["pull1_cut_s"]), ([NOW_MS - 600_000], 3120))
+    # The next request of the series carries the new floor, 120 s above w2's mark less the margin, and the larger cut
+    # replaces the smaller.
+    self.assertEqual(([pull["floor"] for _, pull in lap(store, 8)], pull_counts(store)["pull1_cut_s"]), ([NOW_MS - 600_000], 120))
     # The series ends; the next one, 120 s later, counts its cut under its own number.
     reply(store, "peer1")
     # The second series' first request: the horizon still governs, and the cut of series 1 stays as it was.
     self.assertEqual(([peers for peers, _ in lap(store, 128)], pull_counts(store)["pull2_cut_s"], pull_counts(store)["pull1_cut_s"]),
-                     ([["oracle"]], 3120, 3120))
+                     # 120 s each: the horizon's 10 minutes ago against w2's mark less the margin.
+                     ([["oracle"]], 120, 120))
     # A tombstone older than the horizon held again (a sync brought it): the horizon, and the floor, stay.
     store = asking("on", {"dl:x": tombstone("x", "w1", [NOW_MS - 3_000_000, "w1"])}, owed=owed)
     # The horizon from an earlier sweep.
@@ -1938,12 +1942,34 @@ class TestRequester(_StartCase):
     store = asking("report")
     # The request.
     self.assertEqual((lap(store, 0), pull_counts(store)), ([(["peer1"], {"since": {}, "floor": FLOOR, "after": None})], {"pull1_cut_s": 0}))
-    # The mark of a writer whose newest record is 8 days old lies a day and 4 minutes below the floor: a cut, too.
-    store = asking("report", owed={"w1": NOW_MS - 8 * DAY_MS})
+    # A writer whose newest record is 8 days old, beside one of 10 minutes ago: its mark lies a day and 4 minutes
+    # below the floor, but the newest mark does not, so this node was not away past the floor.
+    store = asking("report", owed={"w1": NOW_MS - 8 * DAY_MS, "w2": NOW_MS - 600_000})
     # The request.
     lap(store, 0)
-    # One day and twice the margin.
-    self.assertEqual(pull_counts(store), {"pull1_cut_s": 86_400 + 240})
+    # No cut (86,640 s when the cut was measured from the lowest mark).
+    self.assertEqual(pull_counts(store), {"pull1_cut_s": 0})
+
+  def test_the_cut_is_measured_from_the_newest_mark_so_a_quiet_writer_gives_none_and_a_long_absence_does(self):
+    """pull1_cut_s is the seconds by which the floor lies above the newest mark less the margin, about when this
+    node stopped receiving: a writer quiet for 8 days beside a live one gives no cut; this node away 7 days and an
+    hour (its newest mark that old) gives 3,840 s whatever quiet writers it holds, and away 8 days 86,640 s."""
+    # Each case: the marks, and the cut its first request counts.
+    cases = (({"quiet": NOW_MS - 8 * DAY_MS, "live": NOW_MS - 600_000}, 0),
+             # Away 7 days and an hour: an hour and twice the margin past the floor.
+             ({"quiet": NOW_MS - 8 * DAY_MS, "live": NOW_MS - LIFE - 3_600_000}, 3_600 + 240),
+             # Away 8 days, the only writer: a day and twice the margin.
+             ({"quiet": NOW_MS - 8 * DAY_MS}, 86_400 + 240))
+    # Each case.
+    for owed, cut in cases:
+      # One sub-test each.
+      with self.subTest(owed=owed):
+        # An oracle that owes these marks and removed no tombstone.
+        store = asking("report", owed=owed)
+        # The first request, with the floor of the tombstone life.
+        self.assertEqual([pull["floor"] for _, pull in lap(store, 0)], [FLOOR])
+        # The cut, from the newest mark.
+        self.assertEqual(pull_counts(store), {"pull1_cut_s": cut})
 
   def test_a_key_whose_delete_this_node_forgot_does_not_come_back_by_a_catch_up(self):
     """A node that deleted a key and removed its tombstone at a sweep asks nothing stamped below that tombstone:

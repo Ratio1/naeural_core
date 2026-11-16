@@ -811,10 +811,12 @@ line, no change.
 
 Counters: `pull_no_answer`, `pull_refused`, `<bucket>/pull<n>/<outcome>` (the merge's counts
 under the catch-up's origins, and `held`), and `pull<n>_cut_s`: the largest number of
-seconds, in the period, by which the floor of a request of series n lay above the lowest
-mark it asked from (present with 0 when nothing was cut). A cut above 0 means part of what
-a mark asks for could no longer be asked for; a writer whose newest record is older than the
-floor gives one too, although nothing may be missing from it.
+seconds, in the period, by which the floor of a request of series n lay above the newest
+mark it asked from, about when the node stopped receiving (present with 0 when nothing was
+cut). A cut above 0 means the node was away longer than what may still be asked for, so part
+of what it missed could no longer be asked for. A writer whose mark lies below the floor
+gives no cut: its records stamped below the floor were written while the node still
+received, so a loss of them is not what a restart's catch-up repairs.
 
 What it does not reach: records without a stamp, the six protected namespaces (the signed
 five have the resync above), records with a token, records stamped below the floor (older
@@ -930,7 +932,7 @@ Labels in `counts`:
 - `pull_h_future`: removed tombstones stamped too far ahead of the wall clock to raise the tombstone horizon (above); expected 0.
 - `pull_answered`: pages this node sent in answer to catch-up requests. `pull_refused`: catch-up requests it did not answer for their form or their sender, answers of another form, and records of a page it was not asked for or may not take (above); expected 0.
 - `pull_no_answer`: catch-up requests not answered within 10 s (an oracle that is away, runs the previous release, or has `CSTORE_HANDOFF` `off`).
-- `pull<n>_cut_s`: seconds by which the floor of a request of series n lay above the lowest mark it asked from, the largest of the period (above).
+- `pull<n>_cut_s`: seconds by which the floor of a request of series n lay above the newest mark it asked from, the largest of the period (above).
 - `<bucket>/pull<n>/missing`, `newer`, `over_legacy`, `same`, `held`, and the merge's own labels (`ver_<word>`, `refused_too_large`, `refused_too_deep`, `refused_unencodable`, `ver_copy_delete`, `tombstone_new`, `perm_readonly`, `delete_foreign`) under the origin `pull<n>`: what the pages of series n of a catch-up changed, or in `report` would change (above).
 - `handoff/send/<peer>`, `handoff/resend/<peer>`, `handoff/gave_up/<peer>`, `handoff/window_full/<peer>` (`CSTORE_HANDOFF` `report` or `on`): first re-sends of a pair, later re-sends, give-ups, and (in `on` only) due pairs held back by the window, at each sweep, per target peer (in `report`, each due pair is counted at its due time, as if every re-send went unanswered). `<bucket>/handoff/answered`: a confirmation of a pair already re-sent (in `report`, a re-send `on` would have wasted).
 - `<bucket>/resync/asked`, `<bucket>/resync/answered`, `<bucket>/resync/merged`: the store's own resync of a signed namespace (above): requests sent, answers taken, and records those answers inserted or replaced. `<bucket>/resync/unanswered`: asked peers whose answer was not taken when a request's wait ended (a request with none taken is asked again once). `<bucket>/resync/dropped_<word>` (`not_asked`, `other_namespace`, `not_member`, `malformed`): answers to these requests the answer handler dropped, by why.

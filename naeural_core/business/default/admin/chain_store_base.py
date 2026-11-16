@@ -4627,10 +4627,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     compared only with that writer's own mark, never with a wall clock or another writer's stamps. ``floor`` is
     computed for each request: the larger of the tombstone horizon and now less ``CSTORE_TOMBSTONE_DAYS`` plus
     the same margin; no record stamped below it is asked for, so a key whose delete this node no longer
-    remembers cannot come back. The seconds by which the floor lies above the lowest ``since`` are kept as the
-    period's largest ``pull<n>_cut_s`` (n: the series; present with 0 when nothing was cut): above 0, part of
-    what a mark asks for can no longer be asked for. The mark of a writer whose newest record is older than
-    the floor gives a cut too, although nothing may be missing from it.
+    remembers cannot come back. The seconds by which the floor lies above the highest ``since`` (the newest
+    mark, about when this node stopped receiving) are kept as the period's largest ``pull<n>_cut_s`` (n: the
+    series; present with 0 when nothing was cut): above 0, this node was away longer than what may still be
+    asked for, so part of what it missed can no longer be asked for. A writer whose mark lies below the floor
+    gives no cut: its records stamped below the floor were written while this node still received, so a loss of
+    them is not what a restart's catch-up repairs.
 
     Returns
     -------
@@ -4693,8 +4695,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
                "floor": floor, "after": pull["after"]}
     # The label of this series' cut.
     label = "pull%d_cut_s" % (pull["done"] + 1)
-    # The seconds by which the floor lies above the lowest mark asked for, kept as the period's largest.
-    self.__cs_count(label, n=max(0, (floor - min(request["since"].values(), default=floor)) // 1000
+    # The seconds by which the floor lies above the newest mark asked for (how far this node's time away went past
+    # what may still be asked), kept as the period's largest. Before, the lowest mark: a writer quiet for longer than
+    # the tombstone life gave a cut at every start (86,640 s for one 8 days quiet), although nothing was missing.
+    self.__cs_count(label, n=max(0, (floor - max(request["since"].values(), default=floor)) // 1000
                                  - self.__cs_stats.get(label, 0)))
     # The request's id, which the answer echoes.
     pull["request"] = self.uuid()

@@ -744,12 +744,14 @@ No write may name it: a local one raises, and a peer's store or delete is droppe
 counted `hs:cstore_pull/remote/refused_invalid_key`. A start repairs a record of another
 form, with one red line per field: a horizon that is not an int, or lies past the bound of
 a stamp that is not a future one, becomes that bound, and marks that are not a map of
-writer to int are dropped. The owner field is not read, so the record survives a change of
-the node's address. One red line also says when the newest mark of a start is older than
+writer to int are dropped. A record whose owner field is not the node's address is read the
+same way, with one red line naming that owner, so the record survives a change of the
+node's address. One red line also says when the newest mark of a start is older than
 `CSTORE_TOMBSTONE_DAYS`: keys deleted on the network meanwhile are still held on that node.
 
 A node of the previous release keeps the record in its file, reads it nowhere, and takes a
-peer's store to that key like any other; the repair above is for that case.
+peer's store to that key like any other; the repair and the owner's red line above are for
+that case. The owner field of such a store is the one the sender names.
 
 **The request and its answer.** A catch-up request is the namespace sync's request message
 with a `pull` field and no `hkey`: `SHSYNC_REQ {op, request_id, pull: {since, floor, after}}`.

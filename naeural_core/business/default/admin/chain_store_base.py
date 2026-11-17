@@ -333,7 +333,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
     The reserved record (``CS_PULL_KEY``, ``"hs:cstore_pull"``) is read once the store this instance uses is
     known: its ``floor`` becomes the tombstone horizon and its ``owed`` the marks a catch-up still owes. A
-    replica without the record starts with the horizon 0 and nothing owed. A field of another form is repaired,
+    replica without the record starts with the horizon 0 and nothing owed. A record whose owner is not this
+    node's address (a peer's store that a node of the previous release took, or a change of this node's address)
+    is read the same way, with one red line naming that owner. A field of another form is repaired,
     with one red line each: a horizon that is not an int, or lies more than ``CSTORE_VER_MAX_AHEAD`` ahead of
     the wall clock, becomes that bound (the safe end: no record stamped before this start may then come back
     by a catch-up); marks that are not a map of writer to int are dropped. With ``CSTORE_HANDOFF`` not 'off'
@@ -502,6 +504,13 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # Its two fields; a value that is not a dict has neither (a node of the previous release takes a peer's store to
     # this key).
     floor, owed = (saved.get("floor"), saved.get("owed")) if isinstance(saved, dict) else (None, None)
+    # The address that wrote the record, read only for the red line below (this node's own when the replica holds no
+    # record): before, a record another address wrote was read with no line.
+    writer = self.__chain_storage.get(self.CS_PULL_KEY, {self.CS_OWNER: self.ee_addr}).get(self.CS_OWNER)
+    if writer != self.ee_addr:
+      self.P(f" === Chain storage: the saved catch-up record was written by {writer}, not by this node (a peer's store "
+             "that an older release took, or a change of this node's address); it is read as this node's own",
+             color='r')
     if type(floor) is not int or floor > limit:
       self.P(" === Chain storage: the saved tombstone horizon is not a stamp time up to now; set to now, so no "
              "record stamped before this start may come back by a catch-up", color='r')

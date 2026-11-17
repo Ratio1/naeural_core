@@ -384,7 +384,7 @@ class TestReservedRecord(_StartCase):
   def test_a_malformed_reserved_record_is_repaired_at_start_and_one_of_another_owner_is_kept(self):
     """A saved horizon that is not an int or lies more than 60 s ahead becomes that bound, and saved marks that
     are not a map of writer to int are dropped, each with one red line; a value that is not a dict is repaired
-    as both; a well-formed record owned by another address is kept as it is, with no line."""
+    as both; a well-formed record owned by another address is kept as it is, with one red line."""
     # One stamped record, so a start has a mark of its own.
     held = {KEY: record(KEY, "v", "w1", [NOW_MS - 1000, "w1"])}
     # The marks of such a start.
@@ -403,8 +403,9 @@ class TestReservedRecord(_StartCase):
       (reserved(7, {"w1": 1.5}), 7, marks, 1), (reserved("x", 5), LIMIT, marks, 2),
       # A value that is not a dict has no horizon (repaired) and no marks.
       (record(RESERVED, "x", "node"), LIMIT, marks, 1), (record(RESERVED, [1], "node"), LIMIT, marks, 1),
-      # A well-formed record written under another address (the node's key was replaced since): kept, no line.
-      (record(RESERVED, {"floor": 7, "owed": {"w1": NOW_MS - 5000}}, "old-address"), 7, {"w1": NOW_MS - 5000}, 0),
+      # A well-formed record written under another address (the node's key was replaced since): kept, with the one red
+      # line of a record this node did not write.
+      (record(RESERVED, {"floor": 7, "owed": {"w1": NOW_MS - 5000}}, "old-address"), 7, {"w1": NOW_MS - 5000}, 1),
     )
     # Each case.
     for saved, horizon, owed, lines in cases:
@@ -415,6 +416,27 @@ class TestReservedRecord(_StartCase):
         # The horizon and the marks as repaired, written back, and one red line per repair.
         self.assertEqual((getattr(store, HORIZON), store.storage[RESERVED]["value"], len(red(store))),
                          (horizon, {"floor": horizon, "owed": owed}, lines))
+
+  def test_a_reserved_record_another_address_wrote_gives_one_red_line_and_is_read_as_before(self):
+    """In every mode, a start over a well-formed reserved record that another address wrote logs one red line
+    naming that address and reads the record as it reads its own (the same horizon and marks); the node's own
+    record gives no line, and neither does a replica without the record."""
+    # One stamped record, so a start in 'report' or 'on' has a mark of its own (w1, 1 s ago).
+    held = {KEY: record(KEY, "v", "w1", [NOW_MS - 1000, "w1"])}
+    # The same well-formed value, written by this node ("node") and by another address.
+    value = {"floor": 7, "owed": {"w1": NOW_MS - 5000}}
+    # Each mode: the record is read in all three.
+    for mode in ("off", "report", "on"):
+      # One sub-test each.
+      with self.subTest(mode=mode):
+        # The starts over the other address's record, over the node's own, and over a replica without one.
+        other, own, none = (started(self, mode, {**held, **saved}) for saved in (
+          {RESERVED: record(RESERVED, value, "old-address")}, {RESERVED: reserved(**value)}, {}))
+        # The other address's record: one red line that names it; the same horizon and marks as the node's own.
+        self.assertEqual(([("old-address" in text) for text in red(other)], getattr(other, HORIZON), getattr(other, OWED)),
+                         ([True], getattr(own, HORIZON), getattr(own, OWED)))
+        # The node's own record and no record: no red line.
+        self.assertEqual((red(own), red(none)), ([], []))
 
   def test_the_namespace_answers_the_census_and_the_hand_off_do_not_see_the_reserved_record(self):
     """The reserved record, as the store writes it, is in no namespace's sync answer and in no row of the census,

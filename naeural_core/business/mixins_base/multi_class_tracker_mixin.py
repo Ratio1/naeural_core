@@ -13,6 +13,7 @@ It is intended to be used as a mixin in classes that provide certain attributes 
 
 - self.cfg_tracking_enabled : bool
 - self.cfg_tracking_mode
+- self.cfg_tracking_history_max_entries (optional; absent config preserves unlimited history)
 - self.cfg_linear_max_age
 - self.cfg_linear_max_distance_ratio
 - self.cfg_linear_max_relative_dist
@@ -195,6 +196,14 @@ class _MultiClassTrackerMixin:
       dict
           Updated dictionary of inferences.
 
+      Notes
+      -----
+      Tracking settings are captured when each class tracker is created. The
+      retired-history cap is per tracker, not shared between classes, and does
+      not retroactively change existing trackers after a config update.
+      Non-CV consumers with older config schemas retain unlimited history when
+      the option is absent; explicit values still use the typed config accessor.
+
       """
       if not self.cfg_tracking_enabled:
           return dct_inference
@@ -224,6 +233,14 @@ class _MultiClassTrackerMixin:
                   img_shape = self.dataapi_image().shape
               self._object_trackers[valid_class] = CentroidObjectTracker(
                   object_tracking_mode=self.cfg_tracking_mode,
+                  # Config descriptors live on the class: a previous instance can
+                  # create the getter even when this old-schema instance omits the
+                  # option. Check key presence, not hasattr or truthiness; explicit
+                  # None/bool/invalid values must still fail in the constructor.
+                  tracking_history_max_entries=(
+                      self.cfg_tracking_history_max_entries
+                      if 'TRACKING_HISTORY_MAX_ENTRIES' in self.config_data else 0
+                  ),
                   linear_max_age=self.cfg_linear_max_age,
                   linear_max_distance=np.sqrt(img_shape[0] * img_shape[1]) / self.cfg_linear_max_distance_ratio,
                   linear_max_relative_distance=self.cfg_linear_max_relative_dist,

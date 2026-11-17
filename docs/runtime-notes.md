@@ -98,6 +98,19 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## Plugins and business manager
 
+- `TRACKING_HISTORY_MAX_ENTRIES=0` preserves unlimited retired linear-track
+  history. A positive non-boolean integer caps entries per class tracker in
+  retirement order, without changing active tracks or IDs. It is read at tracker
+  construction; config updates do not retune existing trackers. This is not a
+  byte cap, TTL or minimum history horizon, and external references can retain
+  evicted objects. Eviction is irreversible: audit late orientation/line-crossing
+  and drawing consumers before enabling, since some index missing history and
+  can raise `IndexError`. No fleet default or consumer behavior is changed.
+  Non-CV consumers with older schemas keep unlimited history when the option is
+  absent, including after another instance has created its class-level getter;
+  an explicitly supplied invalid value is not treated as omission.
+  Run `python -m unittest naeural_core.business.test_framework.test_tracker_history_retention`
+  in the controlled E2 image with the candidate wheel and real runtime imports.
 - Linear centroid tracking computes row priority and nearest-column indices
   once per assignment update. Its distance matrix does not change inside the
   greedy loop, so repeated full-matrix argmin reductions add no information.
@@ -192,6 +205,19 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## Serving and training
 
+- A heartbeat collects one GPU observation and reuses it for payload, device
+  selection and performance text; there is no cross-heartbeat cache. Empty or
+  failed observations select CPU without retrying within that transaction.
+  Standalone `ServingManager.default_cuda` remains fresh; device-index validation,
+  historical formatting fallbacks and telemetry units are unchanged. The focused
+  real-import test is `business/test_framework/test_status_gpu_snapshot.py`;
+  its synthetic hardware observations do not certify CUDA/NVML availability.
+- SHM admission uses `.size` only for exact NumPy ndarrays; subclasses and
+  nonarrays keep legacy shape-reduction/error behavior. This avoids a reduction,
+  not a frame copy. Slot ownership, metadata, transfer, ACK and cleanup are
+  unchanged. `python -m unittest naeural_core.utils.test_shared_memory_admission`
+  exercises tiny real OS allocations; pre-existing zero-dimension restoration
+  behavior is not repaired by this optimization.
 - GPU telemetry (`Logger.gpu_info`) does not force Python garbage collection or
   clear CUDA allocator caches. Reported GPU memory includes existing cached
   allocations; use explicit model/lifecycle cleanup when reclamation is intended.

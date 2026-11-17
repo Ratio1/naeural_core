@@ -31,6 +31,7 @@ _CONFIG = {
   # Tracker
   'TRACKING_ENABLED': True,
   'TRACKING_MODE': 0,  # 0 - linear, 1-sort,
+  'TRACKING_HISTORY_MAX_ENTRIES': 0,
   'LINEAR_RESET_MINUTES': 60,
   'LINEAR_MAX_DISTANCE_RATIO': 4,
   'LINEAR_MAX_DIST_SCALE': 1.4,
@@ -118,6 +119,16 @@ _CONFIG = {
     'TRACKING_MODE': {
       'TYPE': 'int',
       'DESCRIPTION': 'What tracking algorithm to be used. 1 - linear, 2 - sort. Default 1'
+    },
+
+    'TRACKING_HISTORY_MAX_ENTRIES': {
+      'TYPE': 'int',
+      'MIN_VAL': 0,
+      'DESCRIPTION': 'Non-boolean integer maximum retired linear-track records per class tracker; '
+                     '0 preserves unlimited history. '
+                     'Positive values irreversibly evict oldest retired entries, not active tracks. '
+                     'Not a byte/time bound. Requires late-history consumer approval before enabling; '
+                     'read when each class tracker is created, not reapplied to existing trackers.'
     },
 
     'LINEAR_RESET_MINUTES': {

@@ -28,6 +28,9 @@ MIN_PROCESS_INCREASE_GB = MIN_PROCESS_INCREASE_MB / 1000
 
 WARMUP_READINGS = 5
 
+# None is a possible configured device value; only omission requests a new read.
+_DEFAULT_CUDA_UNSET = object()
+
 class ApplicationMonitor(DecentrAIObject):
   def __init__(self, log, owner, **kwargs):
     self.owner = owner
@@ -322,7 +325,20 @@ class ApplicationMonitor(DecentrAIObject):
     self.dct_curr_nr[stage] += val
     return
   
-  def get_basic_perf_info(self):
+  def get_basic_perf_info(self, default_cuda=_DEFAULT_CUDA_UNSET):
+    """Format historical load using an optional transaction-resolved device.
+
+    Parameters
+    ----------
+    default_cuda : Any, optional
+      Device already resolved for this status transaction. Omission retains the
+      standalone fresh-query behavior, including the no-manager CUDA-0 fallback.
+
+    Returns
+    -------
+    str
+      Existing CPU/GPU history text with unchanged units and index fallback.
+    """
     str_info = ''
     str_info += '\n\n'+ 40 * '=' + ' Basic load Info ' + 40 * '='
     cpu_loads = np.array(self.cpu_log).astype('float16')
@@ -333,7 +349,9 @@ class ApplicationMonitor(DecentrAIObject):
       str_cpu_loads,
     )
     str_info += "\n    Proc mem over time: {} (GB))".format(self.slow_process_memory_log)
-    cuda = self.owner.serving_manager.default_cuda if self.owner.serving_manager is not None else 'cuda:0'
+    cuda = default_cuda
+    if cuda is _DEFAULT_CUDA_UNSET:
+      cuda = self.owner.serving_manager.default_cuda if self.owner.serving_manager is not None else 'cuda:0'
     if isinstance(cuda, str):
       cuda = cuda.lower().replace('cuda:','')
       try:
@@ -533,6 +551,27 @@ class ApplicationMonitor(DecentrAIObject):
   
 
   def get_status(self, status=None, full=True, send_log=False):
+    """Build one heartbeat with a fresh GPU observation shared by its consumers.
+
+    Parameters
+    ----------
+    status : str or None, optional
+      Explicit device status; ``None`` uses the existing online default.
+    full : bool, optional
+      Include detailed timers, system monitor and package information.
+    send_log : bool, optional
+      Include device and error logs instead of their summary placeholders.
+
+    Returns
+    -------
+    dict
+      Existing heartbeat schema, optionally compressed by the owner's policy.
+
+    Notes
+    -----
+    Device selection and performance text reuse this call's GPU observation.
+    No snapshot survives the call, and standalone device queries remain fresh.
+    """
     machine_ip = self.log.get_localhost_ip()
     machine_memory = round(self.log.total_memory,3)
     cpu_usage = self.log.get_cpu_usage()
@@ -620,7 +659,11 @@ class ApplicationMonitor(DecentrAIObject):
     default_cuda = ''
     if self.owner.serving_manager is not None:
       active_serving_processes = self.owner.serving_manager.get_active_servers(show=False)
-      default_cuda = self.owner.serving_manager.default_cuda
+      # get_gpu_info preserves its public error string; only an actual list is
+      # a device snapshot. Do not retry a failed/empty observation in this status.
+      default_cuda = self.owner.serving_manager.get_default_cuda(
+        lst_gpus if isinstance(lst_gpus, list) else None
+      )
       serving_pids = self.owner.serving_manager.serving_pids
     str_active_serving_processes = '\n\nActive serving processes (in-process: {}):'.format(self.owner.in_process_serving)  
     if len(active_serving_processes) == 0:
@@ -630,7 +673,9 @@ class ApplicationMonitor(DecentrAIObject):
       for k,v in svr.items():
         str_active_serving_processes += "\n    {:<15}{}".format(k + ':', v)
 
-    str_gpu_info = self.get_basic_perf_info()
+    str_gpu_info = self.get_basic_perf_info(
+      default_cuda=default_cuda if self.owner.serving_manager is not None else 'cuda:0'
+    )
     
     str_timers = None
     if full:

@@ -183,6 +183,15 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     -------
     None
 
+    Raises
+    ------
+    ValueError
+      When the connection type (``_conn_type``) is neither ``'mqtt'`` nor ``'amqp'`` and a wrapper built by an
+      earlier call is still set; its message names that wrapper.
+    AttributeError
+      In the same case when no wrapper is set (a first call, or one after ``_release``): the message of the
+      ``ValueError`` reads ``self.wrapper_server``, which fails first.
+
     Notes
     -----
     The listener reuses the shared communication parameters, injects both

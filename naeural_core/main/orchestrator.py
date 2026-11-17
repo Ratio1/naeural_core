@@ -1266,6 +1266,14 @@ class Orchestrator(DecentrAIObject,
     int
       Number of pipeline versions resolved during this pass (0 when the pass was skipped).
 
+    Raises
+    ------
+    ValueError
+      Not to the caller. It is raised inside the pass for a versioned pipeline (a ``secret_revision`` key, a
+      ``revision`` other than 0 in its deeploy specs, or an operation key) that names no secret revision, and
+      caught by the pass's own handler, which withholds that pipeline and retries it on the refusal's pace (up
+      to 300 s), as for a refusal by dAuth.
+
     Notes
     -----
     Object identity is a safe "nothing changed" test because ``choose_current_running_streams``, the only
@@ -2006,7 +2014,7 @@ class Orchestrator(DecentrAIObject,
         timer, elapsed = self.log.get_opened_timer()
         msg = "{} MLSTOP @ {} from start, stage stop '{}', now '{}', {} stops so far, {:.0f}s since stop, {:.0f}s since last, timer `{}={:.1f}s`,(E2 loop avg/last time {:.1f}s/{:.1f}s)".format(
           # The label follows the decision above, so a start-up stop reads "Normal (start/stop)".
-          "WARNING:" if mlstop_dangerous else "Normal (start/stop)", 
+          "WARNING:" if mlstop_dangerous else "Normal (start/stop)",
           self.log.elapsed_to_str(self.running_time), 
           self.__main_loop_stop_at_stage, self.__loop_stage,
           self.__main_loop_stopped_count, time() - self.__main_loop_stopped_time, 
@@ -2024,7 +2032,7 @@ class Orchestrator(DecentrAIObject,
         self.__main_loop_stopped = False
         msg = "{} main loop resumed after {:.0f}s from stage '{}', {} stop-resumes so far! (E2 loop avg/last {:.1f}s/{:.1f}s)".format(
           # The resume is labelled as its stop was.
-          "WARNING:" if mlstop_dangerous else "Normal (start/stop)", 
+          "WARNING:" if mlstop_dangerous else "Normal (start/stop)",
           time() - self.__main_loop_stopped_time, self.__main_loop_stop_at_stage,
           self.__main_loop_stopped_count, self.avg_loop_timings, self._get_last_timing()
         )

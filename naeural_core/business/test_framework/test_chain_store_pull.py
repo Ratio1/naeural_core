@@ -438,6 +438,18 @@ class TestReservedRecord(_StartCase):
         # The node's own record and no record: no red line.
         self.assertEqual((red(own), red(none)), ([], []))
 
+  def test_the_red_line_quotes_and_cuts_an_owner_a_peer_chose(self):
+    """An owner with newlines and 5,000 more characters, as a peer's store may name it, gives one red line that is
+    one line: the owner quoted, its newlines escaped, and cut after 80 characters of that quoted form."""
+    # An owner that would add a start-log line of its own, then flood the log.
+    owner = "peer\n === Chain storage: a line the peer wrote\n" + "A" * 5000
+    # A start over a well-formed record that names it, beside one stamped record.
+    store = started(self, "report", {KEY: record(KEY, "v", "w1", [NOW_MS - 1000, "w1"]),
+                                     RESERVED: record(RESERVED, {"floor": 7, "owed": {}}, owner)})
+    # One red line: no newline in it, the first 80 characters of the quoted owner in it, the 81st not.
+    self.assertEqual([(text.count("\n"), repr(owner)[:80] in text, repr(owner)[:81] in text) for text in red(store)],
+                     [(0, True, False)])
+
   def test_the_namespace_answers_the_census_and_the_hand_off_do_not_see_the_reserved_record(self):
     """The reserved record, as the store writes it, is in no namespace's sync answer and in no row of the census,
     the hand-off's sweep passes over it, and the save writes it with the other records."""

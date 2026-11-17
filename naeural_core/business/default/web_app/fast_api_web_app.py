@@ -510,6 +510,31 @@ class FastApiWebAppPlugin(BasePlugin):
     return
 
   def on_init(self):
+    """
+    Start the plugin: register its endpoints, start the local process manager, then start the web server.
+
+    The endpoints are registered first. A process manager is started on the loopback interface at a free
+    port; it holds the two queues through which the web server process and this plugin exchange requests and
+    answers. The request buffers, the monitor's state and the profiling counters are created, the base start
+    renders and launches the web server, and the request monitor thread starts last.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The manager's key is 32 random bytes written as hex text, new at every start. The web server gets it
+    through its rendered template (``manager_auth``), in a private temporary folder. Before, the key was the
+    same constant on every node, in the source and in the log, while the key is the only check the manager
+    makes before it unpickles what a local client sends.
+
+    Examples
+    --------
+    >>> plugin.on_init()
+    >>> len(plugin.manager_auth), plugin.manager_port == plugin._manager.address[1]
+    (64, True)
+    """
     self.__uvicorn_server_started = False
     # Register all endpoint methods.
     self._init_endpoints()
@@ -517,7 +542,9 @@ class FastApiWebAppPlugin(BasePlugin):
   
 
     # FIXME: move to setup_manager method
-    self.manager_auth = b'abc'
+    # A key of this start alone: 32 random bytes as hex text (bytes, as the manager and the template need).
+    # It was the constant b'abc' on every node.
+    self.manager_auth = os.urandom(32).hex().encode()
     self._manager = get_server_manager(self.manager_auth)
     self._server_queue = self._manager.get_server_queue()
     self._client_queue = self._manager.get_client_queue()
@@ -566,6 +593,34 @@ class FastApiWebAppPlugin(BasePlugin):
       - profile: dict or None - Profiling object
       - t_put_wall_ns: int or None - Wall-clock time when the request was enqueued
       - client_ip: str or None - Address of the HTTP client
+    """
+    return
+
+  def on_request_monitor_tick(self):
+    """
+    Hook called on the request monitor thread at each turn of its loop; it does nothing here.
+
+    The monitor calls it before each read of the server queue: about every 0.25 s while no request comes (the
+    read's timeout) and right after each request was queued or refused. A web app overrides it for short work
+    that must not wait for the plugin thread, which an endpoint that hangs can hold: for example a write to the
+    chain store with ``wait=False``.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    An exception raised here is logged in red and the monitor goes on admitting requests, as for ``on_request``.
+    The work must stay short: requests wait at the door while it runs. A chain-store write with ``wait=False``
+    waits neither for confirmations nor for the plugin thread, and at most 1 ms for the chain store's
+    persistence lock, which other threads hold for whole-store walks (a namespace sync's merge holds it for its
+    whole answer, about 5 s for 1,000 signed records a replica lacks at 0.35 core): held longer, the write
+    stores nothing and ends ``not_ready``, and the caller writes again later.
+
+    Examples
+    --------
+    >>> self.on_request_monitor_tick()   # the base web app: nothing happens
     """
     return
 
@@ -627,8 +682,9 @@ class FastApiWebAppPlugin(BasePlugin):
       """
       Request monitor loop: admit each server request to the incoming queue or refuse it at once.
 
-      For each request read from ``_server_queue`` (a blocking read with a 0.25 s timeout, so the stop
-      flag is re-checked while no request comes) it runs the ``on_request`` hook (not for timing
+      Before each read it runs the ``on_request_monitor_tick`` hook (an exception there is logged in red
+      and the loop goes on). For each request read from ``_server_queue`` (a blocking read with a 0.25 s
+      timeout, so the stop flag is re-checked while no request comes) it runs the ``on_request`` hook (not for timing
       reports) and warns when the hook outlasts ``REQUEST_TIMEOUT``. It then queues the request and wakes
       the plugin loop, or refuses it with a 503 when the queue already holds ``MAX_INCOMING_REQUESTS`` or
       its oldest entry (a request or a timing report) has already waited longer than the queue-wait limit
@@ -652,6 +708,12 @@ class FastApiWebAppPlugin(BasePlugin):
       """
       try:
         while not self._stop_request_monitor.is_set():
+          try:
+            # The web app's own work on this thread, before each read: about every 0.25 s while idle and after each
+            # request; before, nothing ran here between requests.
+            self.on_request_monitor_tick()
+          except Exception:
+            self.P(f"Exception in on_request_monitor_tick:\n{self.get_exception()}", color='r')
           try:
             request = self._server_queue.get(True, 0.25)
           except queue.Empty:
@@ -858,6 +920,30 @@ class FastApiWebAppPlugin(BasePlugin):
     return
 
   def _process_postponed_request(self, request):
+    """
+    Run the solver of one postponed request, on the plugin thread, and queue its answer or keep it postponed.
+
+    Parameters
+    ----------
+    request : dict
+      The postponed request's record (``get_postponed_dict``): ``id``, ``value`` (the ``PostponedRequest``),
+      ``endpoint_name``, ``profile`` and ``client_ip``.
+
+    Returns
+    -------
+    dict or None
+      The record of the request when the solver postponed it again; None when it was answered.
+
+    Notes
+    -----
+    A solver that raises is answered with an error (status 500), and one red line names the endpoint, the solver
+    and the names of its keyword arguments, with the traceback. It never shows their values: an endpoint can put
+    request data, such as a token or a credential, in them. Before, the line printed the values.
+
+    Examples
+    --------
+    >>> self._process_postponed_request(self.get_postponed_dict("r1", PostponedRequest(solve, {"x": 1}), "work"))
+    """
     id, value, endpoint_name, profile = self.parse_postponed_dict(request)
 
     method = value.get_solver_method()
@@ -872,9 +958,10 @@ class FastApiWebAppPlugin(BasePlugin):
       if isinstance(profile, dict):
         self._profile_slice_end(profile)
     except Exception as exc:
+      # The names of the solver's keyword arguments, never their values (one can be a token or a credential).
       self.P(
         f'Exception occurred while processing postponed request for {endpoint_name} with method {method.__name__} '
-        f'and args:\n{kwargs}\nException:\n{self.get_exception()}',
+        f'and args:\n{list(kwargs)}\nException:\n{self.get_exception()}',
         color='r'
       )
       value = {
@@ -906,6 +993,37 @@ class FastApiWebAppPlugin(BasePlugin):
     return None
 
   def _process_incoming_request(self, request):
+    """
+    Run the endpoint one incoming request names, on the plugin thread, and queue its answer.
+
+    A timing report from the server side is handled apart, and a request that waited past the queue-wait limit is
+    answered with a 503 without running. Otherwise the endpoint runs with the request's arguments (a trailing dict
+    as its keyword arguments when it takes ``**kwargs``): a ``PostponedRequest`` it returns is kept for later
+    laps, any other value is the answer.
+
+    Parameters
+    ----------
+    request : dict
+      The request the monitor queued: ``id``, ``value`` (the endpoint's name, then its arguments), ``profile``,
+      ``t_put_wall_ns`` and ``client_ip``.
+
+    Returns
+    -------
+    dict or None
+      The postponed request's record when the endpoint postponed it; None when it was answered or refused.
+
+    Notes
+    -----
+    An endpoint that raises, or one that is not registered, is answered with an error (status 500, 404 for an
+    unknown endpoint), and one red line names the endpoint, the names of the arguments the request passed (the
+    endpoint's parameter names for the positional ones, then the keys of the keyword ones) and the traceback.
+    It never shows the argument values: an argument can be a token or a credential, such as an API key in a
+    payload. Before, the line printed the values.
+
+    Examples
+    --------
+    >>> self._process_incoming_request({"id": "r1", "value": ("add_secrets", payload), "profile": None})
+    """
     id = request.get('id')
     value = request.get('value')
     profile = request.get('profile')
@@ -925,10 +1043,12 @@ class FastApiWebAppPlugin(BasePlugin):
     if self._reject_expired_request(request, method):
       return None
 
+    # The endpoint the request names (None when it is not registered), looked up before the try so the error line
+    # below can name its arguments; and the call's keyword arguments, none until a trailing dict is taken below.
+    endpoint, kwargs = self._endpoints.get(method), {}
     try:
       if self.cfg_log_requests:
         self.P(f"Received request {id} for {method}.[{self.get_deques_stats_str()}]")
-      endpoint = self._endpoints.get(method)
       if endpoint is None:
         raise ValueError(f"Endpoint '{method}' not found in registered endpoints.")
       has_kwargs = any(
@@ -947,9 +1067,12 @@ class FastApiWebAppPlugin(BasePlugin):
       if isinstance(profile, dict):
         self._profile_slice_end(profile)
     except Exception as exc:
+      # The names of the arguments the request passed, never their values (one can be a token or a credential): the
+      # endpoint's parameter names for the positional ones, then the keys of the keyword ones.
+      names = ([] if endpoint is None else list(inspect.signature(endpoint).parameters)[:len(args)]) + list(kwargs)
       self.P("Exception occured while processing\n"
              "Request: {}\nArgs: {}\nException:\n{}".format(
-                 method, args, self.get_exception()), color='r')
+                 method, names, self.get_exception()), color='r')
       status_code = 500
       if isinstance(exc, ValueError) and "not found" in str(exc):
         status_code = 404

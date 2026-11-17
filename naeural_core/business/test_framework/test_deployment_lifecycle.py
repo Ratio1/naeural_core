@@ -38,6 +38,43 @@ def plugin(ready=False, alive=True, external=False, stopped=False):
     _deployment_cleanup_complete=stopped)
 
 
+def report(runtime, status, code=None):
+  """
+  Drive a fake plugin the way `report_deployment_status` drives a real one.
+
+  The real method stores the status and the error code, and makes the plugin ready only for "ready".
+  Of a plugin's reported state, the lifecycle reads these three things. A container or worker runner
+  never reports "ready": it reports "starting" and later makes the plugin ready by itself, which a
+  test models by replacing `is_plugin_ready` after the report.
+
+  Parameters
+  ----------
+  runtime : types.SimpleNamespace
+    A fake plugin made by `plugin`.
+  status : str
+    The workload status the runner reports, for example "failed", "pulling_image" or "ready".
+  code : str or None
+    The error code reported with "failed", or None.
+
+  Returns
+  -------
+  types.SimpleNamespace
+    The same fake plugin, so a test can build it and report in one expression.
+
+  Examples
+  --------
+  >>> runtime = report(plugin(), "failed", "WORKLOAD_START_FAILED")
+  >>> runtime.is_plugin_ready(), runtime._deployment_error_code
+  (False, 'WORKLOAD_START_FAILED')
+  """
+  # The status and the error code, set together as the real method sets them.
+  runtime._deployment_status, runtime._deployment_error_code = status, code
+  # Ready only for "ready", as the real method sets the plugin's readiness.
+  runtime.is_plugin_ready = lambda: status == "ready"
+  # The same fake plugin, for use in one expression.
+  return runtime
+
+
 class DeploymentLifecycleTest(unittest.TestCase):
   def setUp(self):
     self.directory = tempfile.TemporaryDirectory()
@@ -47,10 +84,46 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.writes = []
 
   def publish(self, succeed=True):
+    """
+    Run one publication pass with a setter that confirms every write, or leaves every write unconfirmed.
+
+    Parameters
+    ----------
+    succeed : bool, optional
+      True (the default): the setter stores and confirms. False: the write is not confirmed by the peers.
+
+    Returns
+    -------
+    dict
+      The record of the last write the pass made.
+    """
     def setter(key, value, **kwargs):
+      """
+      Record a write and answer as the chain-store setter does: the bool, and the outcome word for the caller.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        Whether the write was stored and confirmed.
+      """
+      # Every write of the test, with its options.
       self.writes.append((key, deepcopy(value), kwargs))
+      # The word of the way out, which the real setter sets on every path: stored, or not confirmed by the peers.
+      kwargs["result_info"]["outcome"] = "changed" if succeed else "unconfirmed"
+      # The bool the real setter returns.
       return succeed
+    # One pass of the reporter, with a signer that stamps the record.
     self.lifecycle.publish(setter, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"))
+    # The last record written.
     return self.writes[-1][1]
 
   def test_rejects_spoofed_coordinator_and_unvalidated_commands(self):
@@ -338,6 +411,180 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.publish(succeed=False)
     self.assertEqual([record["operation_id"] for _, record, _ in self.writes],
                      ["stopped", "failed", "operation"])
+
+  def test_start_failure_moves_to_ready_once_the_workload_runs(self):
+    """
+    A start or image failure stays while the plugin holds its code or is not ready; it moves to ready, and is
+    published, once the runner reports "starting" and then makes the plugin ready, as a container runner does.
+    """
+    # The two codes a node leaves; the test names them so a change of that list is seen here.
+    for code in ("WORKLOAD_START_FAILED", "IMAGE_PULL_FAILED"):
+      # One subtest per code.
+      with self.subTest(code=code):
+        # A fresh journal per code, so each attempt starts unreported.
+        self.path = os.path.join(self.directory.name, code + ".json")
+        # The lifecycle that keeps that journal.
+        self.lifecycle = DeploymentLifecycle(self.path, "node")
+        # The coordinator's start of the attempt.
+        self.lifecycle.admit(config(), "oracle", True)
+        # The runner reports that the workload could not start.
+        runtime = report(plugin(), "failed", code)
+        # Its plugin joins the attempt.
+        self.lifecycle.attach(config(), "WORKER", "worker", runtime)
+        # The failure is published.
+        failed = self.publish()
+        # As "failed", with the runner's code.
+        self.assertEqual((failed["status"], failed["instances"][0]["error"]["code"]), ("failed", code))
+        # The writes so far.
+        written = len(self.writes)
+        # The plugin becomes ready with no new report, so it still holds the code (a build command that failed in
+        # a container whose health check passes looks like this).
+        runtime.is_plugin_ready = lambda: True
+        # Observed again.
+        self.publish()
+        # Still "failed", and nothing new was written.
+        self.assertEqual((len(self.writes), self.lifecycle.records["operation|deploy"]["status"]), (written, "failed"))
+        # While the runner retries, a new report clears the code, but the workload is not ready.
+        report(runtime, "pulling_image")
+        # Observed again.
+        self.publish()
+        # Still "failed", and nothing new was written.
+        self.assertEqual((len(self.writes), self.lifecycle.records["operation|deploy"]["status"]), (written, "failed"))
+        # The workload starts: the runner reports "starting", which clears the code ...
+        report(runtime, "starting")
+        # ... and its health check later makes the plugin ready, without another report.
+        runtime.is_plugin_ready = lambda: True
+        # Observed again.
+        ready = self.publish()
+        # The attempt and its instance left "failed", with no error.
+        self.assertEqual((ready["status"], ready["instances"][0]["status"], ready["instances"][0]["error"]),
+                         ("ready", "ready", None))
+        # Published as a newer snapshot.
+        self.assertGreater(ready["sequence"], failed["sequence"])
+
+  def test_restart_starts_a_persisted_start_failure_again(self):
+    """After a node restart a persisted start failure reports again from "starting", then ready."""
+    # The coordinator's start of the attempt.
+    self.lifecycle.admit(config(), "oracle", True)
+    # The workload could not start before the node restarted.
+    self.lifecycle.attach(config(), "WORKER", "worker", report(plugin(), "failed", "WORKLOAD_START_FAILED"))
+    # The failure is published.
+    failed = self.publish()
+    # As "failed".
+    self.assertEqual(failed["status"], "failed")
+    # The restarted node starts the attempt again, so the persisted failure is no longer its state.
+    self.restart_process()
+    # Published again after the restart.
+    starting = self.publish()
+    # As "starting", its instance "initializing" with no error.
+    self.assertEqual((starting["status"], starting["instances"][0]["status"], starting["instances"][0]["error"]),
+                     ("starting", "initializing", None))
+    # As a newer snapshot.
+    self.assertGreater(starting["sequence"], failed["sequence"])
+    # The new process's plugin brings the workload up: the usual ready report follows.
+    self.lifecycle.attach(config(), "WORKER", "worker", report(plugin(), "ready"))
+    # Published as ready.
+    self.assertEqual(self.publish()["status"], "ready")
+
+  def test_other_failures_stay_failed_beside_a_recovered_start(self):
+    """Only a start or image failure is left: any other failure keeps its instance and the attempt failed."""
+    # One attempt.
+    pipeline = config()
+    # Two instances of it.
+    pipeline["PLUGINS"][0]["INSTANCES"].append({"INSTANCE_ID": "other"})
+    # The coordinator's start of the attempt.
+    self.lifecycle.admit(pipeline, "oracle", True)
+    # One fails to start.
+    started = report(plugin(), "failed", "WORKLOAD_START_FAILED")
+    # The other fails its health check, a code that is kept.
+    unhealthy = report(plugin(), "failed", "WORKLOAD_UNHEALTHY")
+    # The first plugin joins the attempt.
+    self.lifecycle.attach(pipeline, "WORKER", "worker", started)
+    # The second one too.
+    self.lifecycle.attach(pipeline, "WORKER", "other", unhealthy)
+    # Both failures are published.
+    self.publish()
+    # The first workload runs again.
+    report(started, "ready")
+    # The second one too.
+    report(unhealthy, "ready")
+    # Observed again.
+    observed = self.publish()
+    # The start failure is left; the other failure stays.
+    self.assertEqual([(item["status"], (item["error"] or {}).get("code")) for item in observed["instances"]],
+                     [("ready", None), ("failed", "WORKLOAD_UNHEALTHY")])
+    # And keeps the attempt failed.
+    self.assertEqual(observed["status"], "failed")
+    # The node restarts.
+    self.restart_process()
+    # A restart does not reset an attempt that holds a kept failure.
+    self.assertEqual(self.lifecycle.records["operation|deploy"]["status"], "failed")
+
+  def test_restart_keeps_a_rejected_command_failed(self):
+    """A rejected command's record, failed with no failed instance, is published as failed again after a restart."""
+    # The live revision 3 of job 7.
+    previous = config(revision=3)
+    # Its job and revision, which a retirement must name.
+    previous["DEEPLOY_SPECS"] = {"job_id": 7, "revision": 3}
+    # The coordinator's start of it.
+    self.lifecycle.admit(previous, "oracle", True)
+    # A retirement of revision 1, not the live one.
+    operation = config(action="retire", attempt="retire", revision=1)["DEEPLOY_OPERATION"]
+    # Of the same job, after the live operation.
+    operation.update(job_id=7, expected_previous_operation_id="operation")
+    # Rejected: its record is failed with the error on the record, and none of its instances failed.
+    self.assertFalse(self.lifecycle.retire("app", previous, operation, "oracle", True))
+    # The rejection is published.
+    self.publish()
+    # The node restarts.
+    self.restart_process()
+    # Keep only what is published from now on.
+    self.writes = []
+    # The restarted node publishes its journal again.
+    self.publish()
+    # What it published for the retirement.
+    observed = [record for _, record, _ in self.writes if record["attempt"] == "retire"]
+    # Published again (each snapshot goes to two keys), always as failed with the rejection, never as "starting".
+    self.assertEqual({(record["status"], record["error"]["code"]) for record in observed},
+                     {("failed", "CONFIGURATION_REJECTED")})
+
+  def test_restart_keeps_a_stopped_attempt_stopping(self):
+    """A restart starts a start failure again only for a running attempt; a stopped one keeps its stop."""
+    # Two apps.
+    stopped, running = config(), config()
+    # With their own names and operations.
+    running["NAME"] = running["DEEPLOY_OPERATION"]["operation_id"] = "running"
+    # Each started, and each external workload failed to start.
+    for pipeline in (stopped, running):
+      # The coordinator's start of the app.
+      self.lifecycle.admit(pipeline, "oracle", True)
+      # Its plugin, which reports the failed start, joins the attempt.
+      self.lifecycle.attach(pipeline, "WORKER", "worker",
+                            report(plugin(external=True), "failed", "WORKLOAD_START_FAILED"))
+    # Both failures are published.
+    self.publish()
+    # The coordinator stops the first one.
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    # The node restarts before that stop is proven.
+    self.restart_process()
+    # The journal after the restart.
+    records = self.lifecycle.records
+    # The stopped attempt keeps its stop and its instance's failure.
+    self.assertEqual((records["operation|deploy"]["status"], records["operation|deploy"]["instances"][0]["status"]),
+                     ("stopping", "failed"))
+    # The running one starts again.
+    self.assertEqual(records["running|deploy"]["status"], "starting")
+    # Published after the restart.
+    self.publish()
+    # Nothing the stopped app reports says starting or ready.
+    self.assertEqual({record["status"] for _, record, _ in self.writes if record["app_id"] == "app"},
+                     {"failed", "stopping"})
+    # Its stop is proven now.
+    self.lifecycle._cleanup = lambda *args: True
+    # Observed again.
+    self.publish()
+    # It reports stopped.
+    self.assertEqual(records["operation|deploy"]["status"], "stopped")
 
   def test_recent_snapshot_storage_is_bounded(self):
     self.lifecycle.admit(config(), "oracle", True)
@@ -1105,6 +1352,340 @@ class StrictPersistenceTest(unittest.TestCase):
         written = stream.read()
     self.assertEqual(len(writes), 1)
     self.assertEqual(written, pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+
+
+class RefusedReportTest(unittest.TestCase):
+  """A report write the node's own chain store refuses: reported once, and retried only when a retry can help."""
+
+  def setUp(self):
+    """
+    Create a journal with one admitted attempt, written by a node whose address is "node".
+
+    Returns
+    -------
+    None
+    """
+    # A folder for the journal, removed after the test.
+    self.directory = tempfile.TemporaryDirectory()
+    # Removed even when the test fails.
+    self.addCleanup(self.directory.cleanup)
+    # The journal file.
+    self.path = os.path.join(self.directory.name, "journal.json")
+    # The node, at the address its records are written under.
+    self.lifecycle = DeploymentLifecycle(self.path, "node")
+    # One attempt admitted from its coordinator.
+    self.lifecycle.admit(config(), "oracle", True)
+    # The storage keys the setter was called with, and the lines the lifecycle reported with their color.
+    self.calls, self.lines = [], []
+
+  def use(self, node_addr="node"):
+    """
+    Load the journal as a node with the given address would after a restart, and catch its report lines.
+
+    Parameters
+    ----------
+    node_addr : str, optional
+      The node's current address. Default "node", the address the journal's records carry.
+
+    Returns
+    -------
+    None
+    """
+    # A new process: nothing is remembered about earlier refusals.
+    self.lifecycle = DeploymentLifecycle(self.path, node_addr)
+    # What start() sets from the business manager's log method.
+    self.lifecycle._report = lambda text, color=None: self.lines.append((text, color))
+
+  def passes(self, outcome, count=1):
+    """
+    Run publication passes whose every write ends with the given outcome word.
+
+    Parameters
+    ----------
+    outcome : str
+      The chain-store outcome word of each write; "changed" stores and confirms, any other word fails it.
+    count : int, optional
+      Number of passes. Default 1.
+
+    Returns
+    -------
+    None
+    """
+    def setter(key, value, **kwargs):
+      """
+      Count the write and answer with the outcome under test, as the chain-store setter does.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        True only for the outcome "changed".
+      """
+      # One more write attempt, with the sequence it carried.
+      self.calls.append(value["sequence"])
+      # The word of the way out.
+      kwargs["result_info"]["outcome"] = outcome
+      # Stored and confirmed only for "changed".
+      return outcome == "changed"
+    # The passes, one after another as the reporter thread makes them.
+    for _ in range(count):
+      # One pass of the reporter thread, with a signer that stamps the record.
+      self.lifecycle.publish(setter, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"))
+
+  def sequence(self):
+    """
+    The sequence of the attempt as the journal file holds it.
+
+    Returns
+    -------
+    int
+      The persisted sequence.
+    """
+    # The journal as it is on disk.
+    with open(self.path, encoding="utf-8") as stream:
+      # The journal is one JSON mapping of records.
+      return json.load(stream)["operation|deploy"]["sequence"]
+
+  def test_a_refusal_no_sequence_can_clear_is_reported_once_and_not_written_again(self):
+    """A record written under another node address is refused once: one red line, then no bump, save or write."""
+    # The node now runs with another address than the one its journal record carries.
+    self.use(node_addr="node-now")
+    # Five passes of the reporter; the store refuses the record by the signed-record rule.
+    self.passes("refused_versioned", count=5)
+    # One write attempt in five passes; before, one per pass.
+    self.assertEqual(len(self.calls), 1)
+    # The sequence was bumped for that one attempt only, and the journal was not saved again.
+    self.assertEqual(self.sequence(), self.calls[0])
+    # One red line.
+    self.assertEqual([color for _, color in self.lines], ['r'])
+    # It names the attempt, the sequence, the reason word, that the address differs and that it is not retried.
+    for part in ("operation|deploy", "sequence {}".format(self.calls[0]), "refused_versioned", "differs", "not retried"):
+      # Each part is in the one line.
+      self.assertIn(part, self.lines[0][0])
+    # The coordinator stops the attempt: the snapshot changes.
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    # Three more passes with the same refusal.
+    self.passes("refused_versioned", count=3)
+    # Exactly one new attempt for the changed snapshot, and one new line.
+    self.assertEqual((len(self.calls), len(self.lines)), (2, 2))
+
+  def test_a_token_or_readonly_refusal_is_not_written_again(self):
+    """A record refused for the stored token or for another owner's readonly mark is final at the node's own address."""
+    # The two words that say the stored record belongs to another writer.
+    for outcome in ("refused_token", "refused_readonly"):
+      # Each word is reported on its own.
+      with self.subTest(outcome=outcome):
+        # The node at the address of its record, in a new process.
+        self.use()
+        # No write counted yet for this word.
+        self.calls.clear()
+        # Four passes with this refusal.
+        self.passes(outcome, count=4)
+        # One write attempt.
+        self.assertEqual(len(self.calls), 1)
+        # Reported once, with the word, as final.
+        self.assertTrue(outcome in self.lines[-1][0] and "not retried" in self.lines[-1][0])
+
+  def test_a_refusal_a_higher_sequence_can_clear_keeps_its_retry_and_is_reported_once(self):
+    """At the node's own address a signed-record refusal is retried every pass with a higher sequence; one red line."""
+    # The node at the address of its record.
+    self.use()
+    # Four passes: the store holds this record at a higher sequence, which the bumps can catch up with.
+    self.passes("refused_versioned", count=4)
+    # One attempt per pass, each with the next sequence.
+    self.assertEqual(self.calls, [self.calls[0] + step for step in range(4)])
+    # One red line for the four refusals, which says the write is retried.
+    self.assertEqual(len(self.lines), 1)
+    # The address matches, and the retry goes on.
+    self.assertTrue("matches" in self.lines[0][0] and "retried each pass" in self.lines[0][0])
+    # The next pass catches up: the write is stored and confirmed.
+    self.passes("changed")
+    # Two more writes (the recent slot and the current snapshot), and nothing after that for this snapshot.
+    written = len(self.calls)
+    # A further pass.
+    self.passes("changed")
+    # Published: not written again.
+    self.assertEqual(len(self.calls), written)
+
+  def test_a_peer_refusal_keeps_its_retry_and_an_unconfirmed_write_is_not_reported(self):
+    """A refusal by the peers is retried and reported once; a write that only went unconfirmed is retried silently."""
+    # The node at the address of its record.
+    self.use()
+    # Three passes whose write the peers do not confirm.
+    self.passes("unconfirmed", count=3)
+    # Retried every pass, with no line: nothing was refused.
+    self.assertEqual((len(self.calls), self.lines), (3, []))
+    # Three passes whose write the peers refuse.
+    self.passes("refused_by_peers", count=3)
+    # Still retried every pass, and reported once.
+    self.assertEqual((len(self.calls), len(self.lines)), (6, 1))
+
+  def test_a_refusal_for_want_of_a_target_peer_keeps_its_retry_and_is_reported_once(self):
+    """A write refused because it has no peer to go to is not one of the final refusals: retried every pass, one red line."""
+    # The node at the address of its record.
+    self.use()
+    # Three passes whose write the store refuses for want of a target peer.
+    self.passes("refused_no_peers", count=3)
+    # One attempt per pass, and one line for the three refusals.
+    self.assertEqual((len(self.calls), len(self.lines)), (3, 1))
+    # The line names the word and says that the write is retried.
+    self.assertTrue("refused_no_peers" in self.lines[0][0] and "retried each pass" in self.lines[0][0])
+
+  def test_the_reporter_thread_writes_the_refusal_line_through_the_log_method_given_to_start(self):
+    """Started with start(), the reporter thread reports a refused report in one red line and does not fail its pass."""
+    # The stop event of the reporter, and the signal this test waits on.
+    from threading import Event
+
+    class QuickTick(Event):
+      """
+      The reporter's stop event with a tick of 10 ms in place of the reporter's one second.
+
+      Parameters
+      ----------
+      None
+
+      Returns
+      -------
+      None
+      """
+
+      def wait(self, timeout=None):
+        """
+        Wait 10 ms for the stop, whatever time the reporter asks for.
+
+        Parameters
+        ----------
+        timeout : float, optional
+          The time the caller asked for; not used. Default None.
+
+        Returns
+        -------
+        bool
+          Whether the stop was asked.
+        """
+        # The same wait, shortened.
+        return Event.wait(self, 0.01)
+
+    # The node now runs with another address than the one its journal record carries.
+    self.lifecycle = DeploymentLifecycle(self.path, "node-now")
+    # The reporter makes a pass every 10 ms.
+    self.lifecycle._stop = QuickTick()
+    # Set when the reporter begins its third pass; one entry per pass.
+    third_pass, passes = Event(), []
+
+    def setter(key, value, **kwargs):
+      """
+      Count the write and refuse it by the signed-record rule, as the chain store does for another node address.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        False: the write was refused.
+      """
+      # One more write attempt.
+      self.calls.append(value["sequence"])
+      # The word of the signed-record rule.
+      kwargs["result_info"]["outcome"] = "refused_versioned"
+      # Refused.
+      return False
+
+    def provider():
+      """
+      Count the reporter's pass and hand out the setter, as the shared memory does once the chain store is ready.
+
+      Returns
+      -------
+      callable
+        The refusing setter.
+      """
+      # One more pass.
+      passes.append(1)
+      if len(passes) == 3:
+        # Two passes are complete.
+        third_pass.set()
+      # The setter of this pass.
+      return setter
+
+    # Started as the business manager starts it: a setter provider, a signer and its log method.
+    self.lifecycle.start(provider, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"),
+                         lambda text, color=None: self.lines.append((text, color)))
+    # Stopped also when an assertion below fails.
+    self.addCleanup(self.lifecycle.close)
+    # The reporter reaches its third pass.
+    self.assertTrue(third_pass.wait(10))
+    # Stopped before its lines are read.
+    self.lifecycle.close()
+    # One write in all its passes: the refusal is final.
+    self.assertEqual(len(self.calls), 1)
+    # One red line and nothing else; without the log method the pass failed and wrote "publication failed".
+    self.assertEqual([color for _, color in self.lines], ['r'])
+    # It is the refusal line.
+    self.assertTrue("refused_versioned" in self.lines[0][0] and "not retried" in self.lines[0][0])
+
+  def test_a_refused_record_does_not_hold_back_another_record_s_end_of_reporting(self):
+    """In one pass, one attempt is refused for good and another is confirmed ready: the second one's end is saved."""
+    # A second attempt, of another app, on the same node.
+    second = config()
+    # Its own app name and operation.
+    second["NAME"], second["DEEPLOY_OPERATION"]["operation_id"] = "app-two", "second"
+    # Admitted from the same coordinator.
+    self.lifecycle.admit(second, "oracle", True)
+    # Its workload is ready.
+    self.lifecycle.attach(second, "WORKER", "worker", plugin(ready=True))
+    # The lifecycle's report lines.
+    self.lifecycle._report = lambda text, color=None: self.lines.append((text, color))
+
+    def setter(key, value, **kwargs):
+      """
+      Refuse the first attempt's record for its token and confirm the second attempt's.
+
+      Parameters
+      ----------
+      key : str
+        The storage key.
+      value : dict
+        The signed record.
+      **kwargs
+        The write's options; ``result_info`` receives the outcome word.
+
+      Returns
+      -------
+      bool
+        True for the second attempt's record.
+      """
+      # The second attempt is the one that is stored.
+      stored = value["operation_id"] == "second"
+      # The outcome word of each.
+      kwargs["result_info"]["outcome"] = "changed" if stored else "refused_token"
+      # The bool the real setter returns.
+      return stored
+    # One pass with both records pending.
+    self.lifecycle.publish(setter, lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="signature"))
+    # The journal as it is on disk.
+    with open(self.path, encoding="utf-8") as stream:
+      # The journal after the pass.
+      saved = json.load(stream)
+    # The confirmed ready attempt has its end of reporting persisted.
+    self.assertTrue(saved["second|deploy"]["ready_reported"])
+    # The refused one was reported.
+    self.assertEqual(len(self.lines), 1)
 
 
 if __name__ == "__main__":

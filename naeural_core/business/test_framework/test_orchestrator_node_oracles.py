@@ -1,6 +1,12 @@
 import unittest
 from threading import Lock
+# Stand-ins for the orchestrator and the managers a start creates, and the patch of the module's names.
+from unittest import mock
 
+# The prefix of the node's thread names.
+from naeural_core import constants as ct
+# The module whose Thread and manager classes a start creates.
+from naeural_core.main import orchestrator as orchestrator_module
 from naeural_core.main.orchestrator import Orchestrator
 
 
@@ -18,8 +24,22 @@ class _FakeBCWrapper:
 
 class _FakeBlockchainManager:
   def __init__(self, whitelist=None):
+    """
+    Stand for the node's blockchain engine: its allowed senders, the batches added to them, and its network.
+
+    Parameters
+    ----------
+    whitelist : list of str, optional
+      The allowed senders it starts with; none by default.
+
+    Returns
+    -------
+    None
+    """
     self.whitelist = list(whitelist or [])
     self.added_batches = []
+    # A network other than "VPN": the refresh and its apply skip a VPN fleet, and read this before anything else.
+    self.evm_network = "mainnet"
 
   def _add_prefix(self, addr):
     return addr if addr.startswith("0xai_") else "0xai_" + addr
@@ -46,7 +66,19 @@ class _FakeThread:
   def is_alive(self):
     return self._alive
 
-  def join(self):
+  def join(self, timeout=None):
+    """
+    Stand for ``Thread.join``: the thread is joined at once and is no longer alive.
+
+    Parameters
+    ----------
+    timeout : float, optional
+      The bound the stop passes; not waited for.
+
+    Returns
+    -------
+    None
+    """
     self.joined = True
     self._alive = False
     return
@@ -59,7 +91,24 @@ class TestOrchestratorNodeOracleRefresh(unittest.TestCase):
   LOCK_ATTR = "_Orchestrator__node_oracle_refresh_lock"
 
   def _make_orchestrator(self, whitelist=None, oracles=None):
+    """
+    Build an orchestrator with only what the oracle refresh, its apply and the stop read.
+
+    Parameters
+    ----------
+    whitelist : list of str, optional
+      The allowed senders of its blockchain engine; none by default.
+    oracles : list, optional
+      What its block engine wrapper's ``get_oracles`` finds: addresses, or (address, alias) pairs; none by default.
+
+    Returns
+    -------
+    Orchestrator
+      The orchestrator, its log lines recorded in ``_messages`` as (text, color, other keyword arguments).
+    """
     orchestrator = Orchestrator.__new__(Orchestrator)
+    # The stop reads the admin pipeline's poll seconds from the config: none set, so its default.
+    orchestrator.config_data = {}
     orchestrator._blockchain_manager = _FakeBlockchainManager(whitelist=whitelist)
     orchestrator._bc = _FakeBCWrapper(oracles or [])
     orchestrator._last_oracle_update = 0
@@ -148,6 +197,138 @@ class TestOrchestratorNodeOracleRefresh(unittest.TestCase):
     self.assertTrue(refresh_thread.joined)
     self.assertIn("asynchronous communication thread joined", orchestrator._messages[0][0].lower())
     self.assertIn("node oracle refresh thread joined", orchestrator._messages[1][0].lower())
+
+
+class _RecordedThread:
+  """Stands for ``threading.Thread`` during a start: records each thread made and started, and runs none."""
+
+  # Every thread made, in order, by its name.
+  made = []
+
+  def __init__(self, target=None, args=(), name=None, daemon=None):
+    """
+    Record a thread the start makes.
+
+    Parameters
+    ----------
+    target : callable, optional
+      What the thread would run; not run.
+    args : tuple, optional
+      Its arguments.
+    name : str, optional
+      The thread's name, which the test reads.
+    daemon : bool, optional
+      Whether it is a daemon thread.
+
+    Returns
+    -------
+    None
+    """
+    # The name, and whether start was called.
+    self.name, self.started = name, False
+    # Kept for the test.
+    _RecordedThread.made.append(self)
+
+  def start(self):
+    """
+    Record that the start started this thread.
+
+    Returns
+    -------
+    None
+    """
+    # Started, without running anything.
+    self.started = True
+
+
+def start_node(receives_heartbeats, whitelist):
+  """
+  Run the real ``_init_all_processes`` on a stand-in node and give the threads it started and the lines it logged.
+
+  Every collaborator of the start is a ``MagicMock`` (its managers, dAuth, the network monitor); only the comm
+  manager's answer to whether this node receives peer heartbeats, the allowed senders after dAuth and the admin
+  pipeline's dispatch switch (off) are set.
+
+  Parameters
+  ----------
+  receives_heartbeats : bool
+    False for a node whose heartbeat receive the comm manager removed (a non-supervisor in oracle-only heartbeat
+    mode).
+  whitelist : list of str
+    The allowed senders after start-up dAuth.
+
+  Returns
+  -------
+  tuple
+    ``(started, lines)``: the names of the threads made and started, without the node's thread prefix, and
+    each logged line as (text, color).
+
+  Examples
+  --------
+  >>> start_node(False, [])[0]
+  ['async_comm']
+  """
+  # The stand-in node: every attribute and method a MagicMock unless set below.
+  node = mock.MagicMock()
+  # Its lines.
+  lines = []
+  # Recorded instead of printed.
+  node.P = lambda msg, color=None, **kwargs: lines.append((msg, color))
+  # No extra comm environment for the network monitor, and no admin pipeline collection thread.
+  node.cfg_communication_environment, node.cfg_admin_pipeline_async_dispatch = {}, False
+  # The comm manager's flag: set when it removed the heartbeat receive.
+  node._comm_manager.should_register_local_self_heartbeat = not receives_heartbeats
+  # The allowed senders dAuth left.
+  node.whitelist = whitelist
+  # No thread recorded yet.
+  _RecordedThread.made = []
+  # The start's own classes: threads recorded, managers and monitors stand-ins.
+  with mock.patch.object(orchestrator_module, "Thread", _RecordedThread), \
+       mock.patch.object(orchestrator_module, "MainLoopDataHandler", mock.MagicMock()), \
+       mock.patch.object(orchestrator_module, "ApplicationMonitor", mock.MagicMock()), \
+       mock.patch.object(orchestrator_module, "NetworkMonitor", mock.MagicMock()):
+    # The real start, on the stand-in node.
+    Orchestrator._init_all_processes(node)
+  # The threads started, by name without the node's thread prefix, and the lines.
+  return [thread.name[len(ct.THREADS_PREFIX):] for thread in _RecordedThread.made if thread.started], lines
+
+
+class TestNodeOracleRefreshStart(unittest.TestCase):
+  """The oracle refresh starts only on a node that receives peer heartbeats; one that does not says why, and says
+  in red when its allowed senders are empty."""
+
+  def test_a_node_that_receives_no_peer_heartbeats_starts_no_refresh_and_says_why(self):
+    """A non-supervisor whose heartbeat receive was removed starts the comm thread and no oracle refresh, with one
+    yellow line saying why; with allowed senders from dAuth no red line (before, the refresh started and failed
+    at every pass with a red traceback, 0 of 14 oracles mapped)."""
+    # A worker in oracle-only heartbeat mode whose dAuth gave allowed senders.
+    started, lines = start_node(receives_heartbeats=False, whitelist=["0xai_oracle"])
+    # Only the comm thread.
+    self.assertEqual(started, ["async_comm"])
+    # One yellow line about the refresh, and no red line.
+    self.assertEqual([(color, "receives no peer heartbeats" in text) for text, color in lines if color in ("y", "r")],
+                     [("y", True)])
+
+  def test_such_a_node_with_no_allowed_senders_after_dauth_says_so_in_red(self):
+    """The same node with an empty allowed-senders list after dAuth (its dAuth failed) logs one red line, after
+    the yellow one: it refuses every oracle command until it restarts (before, nothing said so)."""
+    # A worker in oracle-only heartbeat mode whose dAuth gave nothing.
+    started, lines = start_node(receives_heartbeats=False, whitelist=[])
+    # No refresh either.
+    self.assertEqual(started, ["async_comm"])
+    # The yellow line, then the red one.
+    self.assertEqual([(color, "No allowed command senders" in text) for text, color in lines if color in ("y", "r")],
+                     [("y", False), ("r", True)])
+
+  def test_a_node_that_receives_peer_heartbeats_starts_the_refresh_as_before(self):
+    """An oracle, or any node whose heartbeat receive is kept, starts the comm thread and the oracle refresh and
+    logs neither line, also with no allowed senders (the refresh adds the oracles)."""
+    # A node that receives heartbeats, with an empty allowed list.
+    started, lines = start_node(receives_heartbeats=True, whitelist=[])
+    # Both threads.
+    self.assertEqual(started, ["async_comm", "node_oracle_refresh"])
+    # No yellow or red line.
+    self.assertEqual([color for _, color in lines if color in ("y", "r")], [])
 
 
 if __name__ == "__main__":

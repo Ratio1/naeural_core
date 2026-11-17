@@ -154,7 +154,10 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
   payload, so capture metadata growth increases wire size.
 - `ADMIN_PIPELINE_ASYNC_DISPATCH` is on by default: `admin_pipeline` capture and dispatch run on
   their own lanes, primed before serving warmup, controlled by `ADMIN_PIPELINE_DISPATCH_POLL_SECONDS`,
-  `ADMIN_PIPELINE_QUEUE_MAXLEN` and `ADMIN_PIPELINE_STALL_WARNING_SECONDS`.
+  `ADMIN_PIPELINE_QUEUE_MAXLEN` and `ADMIN_PIPELINE_STALL_WARNING_SECONDS`. The collection lane starts
+  before the admin bootstrap and takes no input from the capture while the business manager knows no
+  admin instance: what arrives while the admin plugins are created waits in the capture, where it was
+  taken and routed to no plugin before.
 - FastAPI web apps: `get_request_client_ip()` is uvicorn's `request.client.host`, which follows
   `X-Forwarded-For` only for connections from `FORWARDED_ALLOW_IPS` (default `127.0.0.1`). Tunnel
   agents must reach the app on 127.0.0.1, or the value is the agent's address. Never trust `*` on

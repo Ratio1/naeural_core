@@ -250,16 +250,84 @@ def build_runtime_pipeline_config(canonical_pipeline, secret_plugins=None, envir
   return runtime_pipeline
 
 
+def _is_inert_capture_tree(value):
+  """Identify inert configuration trees without invoking custom copy hooks.
+
+  Parameters
+  ----------
+  value : Any
+      Canonical configuration value to inspect.
+
+  Returns
+  -------
+  bool
+      Whether all containers, string keys and scalar leaves are exact builtin
+      JSON types with ASCII-only environment reference names. Subclasses,
+      arbitrary objects and non-ASCII references retain the legacy resolver.
+  """
+  value_type = type(value)
+  if value_type is dict:
+    return all(
+      type(key) is str and _is_inert_capture_tree(item)
+      for key, item in value.items()
+    )
+  if value_type is list:
+    return all(_is_inert_capture_tree(item) for item in value)
+  if value_type is str:
+    # JSON can contain unpaired surrogates; os.environ lookup may fail while
+    # encoding such a reference. Keep that observable error on the legacy path.
+    return not value.startswith(ENV_SECRET_PREFIX) or value.isascii()
+  return value_type in (int, float, bool, type(None))
+
+
 def build_capture_pipeline_config(canonical_pipeline, environment=None):
   """Build a capture-safe pipeline without exposing plugin secret values.
 
   Capture configuration may contain local ``$EE_*`` references outside
   ``PLUGINS`` (for example, a capture URL). Those values are resolved for the
-  capture subsystem, while the complete canonical plugin tree is restored so
+  capture subsystem, while the complete canonical plugin tree is copied so
   dAuth and local plugin secrets remain available only to BusinessManager.
+
+  Parameters
+  ----------
+  canonical_pipeline : dict
+      Canonical pipeline with unresolved plugin secret references.
+  environment : Mapping[str, str] or None, optional
+      Capture reference source; the current process environment is the default.
+
+  Returns
+  -------
+  dict
+      Detached capture fields with canonical, unresolved ``PLUGINS``. Plain
+      JSON trees skip the discarded plugin resolution; custom objects or
+      environment mappings retain the legacy traversal and exception behavior.
   """
   plugins_key = ct.CONFIG_STREAM.K_PLUGINS
   canonical_plugins = canonical_pipeline.get(plugins_key, _MISSING)
+  # The normal callers supply JSON-loaded configs and os.environ. Only inert
+  # trees may skip the first plugin traversal: a custom __deepcopy__ or mapping
+  # lookup can have observable effects even when its result is discarded.
+  plain_environment = environment is None or (
+    type(environment) is dict and all(
+      type(key) is str and type(value) is str
+      for key, value in environment.items()
+    )
+  )
+  try:
+    inert_config = plain_environment and _is_inert_capture_tree(canonical_pipeline)
+  except RecursionError:
+    # Generator-based probing can exhaust Python's stack before the resolver's
+    # inlined comprehensions do. Let the original traversal decide deep inputs.
+    inert_config = False
+  if inert_config:
+    return {
+      key: deepcopy(value) if key == plugins_key else resolve_environment_references(
+        value, environment=environment,
+      )
+      for key, value in canonical_pipeline.items()
+    }
+  # Preserve the existing path for non-JSON/effectful caller inputs, rather than
+  # silently changing their lookup order, copy hooks or failures.
   capture_pipeline = resolve_environment_references(
     canonical_pipeline,
     environment=environment,

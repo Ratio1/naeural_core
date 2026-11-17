@@ -168,6 +168,15 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
   are canonical and redacted. Only BusinessManager receives `_runtime_dct_config_streams`, where
   `$EE_*` references and dAuth placeholders are resolved in memory. CaptureManager gets only
   runtime-eligible pipelines with redacted `PLUGINS`.
+- The capture builder copies canonical `PLUGINS` directly for plain JSON trees,
+  avoiding environment resolution whose result would immediately be discarded.
+  Custom containers/leaves and explicit custom environment mappings retain the
+  legacy traversal, copy hooks and errors. Non-ASCII environment references and
+  inputs exceeding the shape probe's recursion capacity also use the legacy path.
+  Keep detached ownership, per-call
+  environment freshness and snapshot locks unchanged. Run
+  `test_capture_config_copy`, `test_admin_pipeline_capture_snapshot` and the
+  runtime-secret regressions in the controlled E2 image with its real dependencies.
 - The recurring admin capture snapshot selects and copies only the eligible canonical
   `admin_pipeline` under the runtime configuration lock, then applies the usual capture-safe
   builder outside the lock. Do not route this lane through the all-stream snapshot or cache

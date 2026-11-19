@@ -44,32 +44,36 @@ class ConfigCommandHandlers:
       
 
     operation = delta_config_stream.get(OPERATION_KEY)
-    if operation is None and "PLUGINS" in delta_config_stream and not self.shmem[SERVICE_KEY].allows_untracked_update(
-        delta_config_stream, self.dct_config_streams.get(stream_name, {})):
-      return  # Drop a delayed whole legacy payload before it can overwrite a repaired tracked worker.
+    lifecycle = self.shmem[SERVICE_KEY]
+    if operation is None and not lifecycle.allows_untracked_update(delta_config_stream, self.dct_config_streams.get(stream_name, {})):
+      # Dotted fields and updates without PLUGINS can still override a repaired stream.
+      self.P("Ignored a legacy UPDATE_CONFIG for a repaired Deeploy pipeline.", color="y")
+      return
     if operation is not None:
-      lifecycle = self.shmem[SERVICE_KEY]
       if operation.get("action") in ("retire", "inspect_worker_v1", "retire_worker_v1"):
-        with lifecycle.lock:
-          current = self.dct_config_streams.get(stream_name, {})
-          evidence = None
-          if operation["action"] != "retire":
-            # Unknown versioned actions are rejected by older workers before any stream write.
-            evidence = lifecycle.check_worker_repair(stream_name, current, operation, sender_addr, validated_command,
-                                                     self.owner.bc, self.owner._business_manager)
-            if evidence is None:
-              return  # Inspection, expired retries and mismatches never remove a pipeline.
-            operation = dict(operation, action="retire")  # Only a verified same-worker conditional retire reaches here.
-          if lifecycle.retire(stream_name, current, operation, sender_addr, validated_command, repair_evidence=evidence):
+        def get_current():
+          return self.dct_config_streams.get(stream_name, {})
+
+        def retire_current(current, retire_operation, evidence=None):
+          # Adopt the runtime and remove its config under the same lock as the final retirement check.
+          if lifecycle.retire(stream_name, current, retire_operation, sender_addr, validated_command, repair_evidence=evidence):
             manager = self.owner._business_manager
             if manager is not None:
               for plugin in list(manager.current_instances.values()):
                 if plugin is not None and plugin.get_stream_id() == stream_name:
-                  tracked_config = {OPERATION_KEY: operation}
+                  tracked_config = {OPERATION_KEY: retire_operation}
                   lifecycle.attach(tracked_config, plugin.get_signature(), plugin.get_instance_id(), plugin)
-                  plugin._deployment_operation_key = lifecycle.key(operation)
+                  plugin._deployment_operation_key = lifecycle.key(retire_operation)
             if current:
               self.delete_config_stream(stream_name, initiator_id, session_id, verbose=verbose)
+
+        if operation["action"] == "retire":
+          with lifecycle.lock:
+            retire_current(get_current(), operation)
+        else:
+          # Inspection and a rejected conditional retirement never remove a pipeline.
+          lifecycle.check_worker_repair(stream_name, get_current, operation, sender_addr, validated_command,
+                                        self.owner.bc, self.owner._business_manager, retire_current)
         return
       if operation.get("action") == "start_repaired_worker_v1":
         occupant = self.dct_config_streams.get(stream_name, {})

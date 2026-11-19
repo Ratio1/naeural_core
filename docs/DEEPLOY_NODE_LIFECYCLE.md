@@ -35,8 +35,11 @@ An authenticated current protocol oracle can inspect a named untracked job with
 one `WORKER_APP_RUNNER` instance. The transport addresses the worker by its
 current identity. The versioned actions below require a coordinator-prefixed
 operation ID, integer job ID, revision zero, exact `instance_id`, `node_addr`,
-a 32-character lowercase hex `challenge` and integer Unix `expires_at` within
-120 seconds. The coordinator encrypts the full canonical configuration fingerprint
+a 32-character lowercase hex `challenge` and an integer Unix `expires_at`.
+The coordinator issues a 110-second challenge. A worker accepts it while the
+deadline is in its future, up to 180 seconds from its local clock. The worker
+throttles repeated running-worker inspections for the same job for five seconds.
+The coordinator encrypts the full canonical configuration fingerprint
 to this worker as `config_seal`. The worker decrypts it with the authenticated
 sender identity and compares it locally on both commands. Only the ciphertext's
 SHA-256 tag, `config_seal_hash`, appears in the journal and signed receipts.
@@ -53,7 +56,9 @@ and response metadata. Older command handlers reject these action names.
   preserving order and emitting Unicode literally. Only the coordinator receives
   the observation. An absent worker or expired challenge yields no new report.
   Reading the commit establishes what is checked out locally. The coordinator
-  separately checks restoration source availability.
+  separately checks restoration source availability. The worker runs the Docker
+  probe outside its shared lifecycle lock, then confirms that the runtime,
+  config and recorded challenge still match under the lock.
   For a previously stopped worker the same request can use
   `confirm_prior_stop=true`. It verifies the matching local journal STOP
   and Git pin, absence of the stream and live instance, and no pending start.
@@ -64,6 +69,8 @@ and response metadata. Older command handlers reject these action names.
   digest, ciphertext and `git_commit`. The worker rechecks its observation and live checkout
   before entering the existing durable retire path. The signed stop carries
   the parent ID, challenge, order digest and per-instance runtime binding.
+  The inspected live Git commit remains authoritative when the runner
+  attaches or reports cached artifact identifiers.
   A durable conditional abort also prevents the old untracked job from starting
   if its stream file survives a crash between journal and configuration writes.
   Its tombstone survives admission of a later tracked revision. A tracked start
@@ -73,8 +80,9 @@ and response metadata. Older command handlers reject these action names.
   attempt on either target. It requires this worker's matching local stop
   record, the parent operation, job ID and the child's immutable repair secret
   revision. The node persists that the legacy revision was retired, including on
-  the target that had already stopped. Subsequent whole-pipeline legacy
-  messages for the repaired job are discarded before config merge. Accepted
+  the target that had already stopped. Subsequent untracked `UPDATE_CONFIG`
+  messages for the repaired job, including partial updates and dotted keys,
+  are discarded before config merge with a diagnostic that omits the payload. Accepted
   starts use the normal tracked runtime format and can be updated normally.
   Retries against an absent pipeline leave the existing retirement receipt intact.
   A changed job, instance, command order, Git commit or expired authorization

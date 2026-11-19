@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import threading
 import unittest
 import weakref
 from copy import deepcopy
@@ -969,7 +970,7 @@ class DeploymentCommandTest(unittest.TestCase):
         verbosity=0, config={"PEM_FILE": os.path.join(directory, label + ".pem")}), owner=None)
         for label in ("oracle", "node")]  # Exercise the SDK encryption/decryption used by production peers.
       service = DeploymentLifecycle(journal, node.address)
-      worker = plugin(ready=True)
+      worker = plugin(ready=False)  # Repair must also work before the runner's readiness check caches Git metadata.
       worker.get_stream_id = lambda: "app"
       worker.get_signature = lambda: "WORKER_APP_RUNNER"
       worker.get_instance_id = lambda: "worker"
@@ -977,6 +978,9 @@ class DeploymentCommandTest(unittest.TestCase):
       worker.cfg_chainstore_peers = ["two", "one"]
       observed_commit = ["e" * 40]
       worker.read_deployment_git_commit = lambda: observed_commit[0]
+      image_id = "sha256:" + "a" * 64
+      cached_bindings = {"image_id": image_id}  # Readiness can lag while Docker already exposes the image.
+      worker.get_deployment_runtime_artifacts = lambda: cached_bindings.copy()
       current = {"NAME": "app", "DEEPLOY_SPECS": {"job_id": 31, "current_target_nodes": ["old2", "old1"]},
                  "PLUGINS": [{"SIGNATURE": "WORKER_APP_RUNNER", "INSTANCES": [{"INSTANCE_ID": "worker",
                    "BUILD_AND_RUN_COMMANDS": ["prepare", "serve"], "CHAINSTORE_PEERS": ["two", "one"],
@@ -990,9 +994,9 @@ class DeploymentCommandTest(unittest.TestCase):
       seal = oracle.encrypt_str(fingerprint, node.address)
       request = {"operation_id": prefix + "a" * 32, "attempt": "inspect", "action": "inspect_worker_v1",
                  "instance_id": "worker", "job_id": 31, "revision": 0, "coordinator": oracle.address, "node_addr": node.address,
-                 "peers": [oracle.address], "expires_at": 1060, "challenge": "c" * 32, "config_seal": seal}
-      def send(op, **transport):
-        envelope = self.command({"NAME": "app", "DEEPLOY_OPERATION": op})
+                 "peers": [oracle.address], "expires_at": 1110, "challenge": "c" * 32, "config_seal": seal}
+      def send(op, name="app", **transport):
+        envelope = self.command({"NAME": name, "DEEPLOY_OPERATION": op})
         envelope["EE_SENDER"] = oracle.address
         harness.update_config_stream(dict(envelope, **transport), "oracle-id", "session")
       def publish():
@@ -1006,7 +1010,7 @@ class DeploymentCommandTest(unittest.TestCase):
           service.admit({"NAME": "app", "DEEPLOY_OPERATION": dict(request, attempt=attempt, action=action)}, oracle.address, True)
       # Every bad scope must be refused before reading Docker or writing the journal.
       for override in ({"node_addr": "other"}, {"job_id": 99}, {"instance_id": "other"}, {"revision": False},
-                       {"expires_at": 999}, {"expires_at": 1121}, {"challenge": "bad"}, {"coordinator": "other"},
+                       {"expires_at": 999}, {"expires_at": 1181}, {"challenge": "bad"}, {"coordinator": "other"},
                        {"config_seal": None}, {"config_seal": oracle.encrypt_str("0"*64, node.address)},
                        {"config_seal": fingerprint}):
         send(dict(request, **override))
@@ -1015,8 +1019,25 @@ class DeploymentCommandTest(unittest.TestCase):
       send(request)
       self.assertEqual(service.records, {})
       harness.owner.bc.get_eth_oracles = lambda: [member]
-      send(request)
-      report = publish()[-1]
+      with patch.object(module.time, "time", return_value=970), patch.object(module.time, "monotonic", return_value=50):
+        send(request)  # A node 30s behind the coordinator still accepts a normal 110s challenge.
+        send(dict(request, challenge="d"*32, expires_at=1111))
+        self.assertEqual(service.records[request["operation_id"] + "|inspect"]["challenge"], request["challenge"])
+        other = deepcopy(current)
+        other["NAME"] = "other"
+        other["DEEPLOY_SPECS"]["job_id"] = 32
+        harness.dct_config_streams["other"] = other
+        other_worker = deepcopy(worker)
+        other_worker.get_stream_id = lambda: "other"
+        worker_registry = harness.owner._business_manager.current_instances
+        worker_registry["other"] = other_worker
+        other_request = dict(request, job_id=32, operation_id=prefix + "d"*32,
+                             config_seal=oracle.encrypt_str(module.repair_config_fingerprint(other), node.address))
+        send(other_request, name="other")  # A different job on the same worker is not throttled.
+        self.assertIn(other_request["operation_id"] + "|inspect", service.records)
+        worker_registry.pop("other")
+        harness.dct_config_streams.pop("other")
+      report = next(r for r in publish() if r["operation_id"] == request["operation_id"])
       self.assertEqual((report["status"], report["challenge"]), ("observed", request["challenge"]))
       self.assertNotIn("private", str(report))
       self.assertNotIn("prepare", str(report))
@@ -1053,8 +1074,30 @@ class DeploymentCommandTest(unittest.TestCase):
       send(retire)
       self.assertIn("app", harness.dct_config_streams)
       current["DEEPLOY_SPECS"]["current_target_nodes"].reverse()
+
+      lock_released = threading.Event()
+      probe_threads = []
+      def probe_during_config_change():
+        def concurrently_change():
+          with service.lock:
+            instance["ENV"] = {"SECRET": "changed while Docker was running"}
+            lock_released.set()
+        thread = threading.Thread(target=concurrently_change)
+        probe_threads.append(thread)
+        thread.start()
+        return observed_commit[0] if lock_released.wait(2) else None
+      worker.read_deployment_git_commit = probe_during_config_change
+      send(retire)
+      for thread in probe_threads:
+        thread.join(timeout=2)
+      self.assertTrue(lock_released.is_set(), "workload probing must not hold the lifecycle lock")
+      self.assertIn("app", harness.dct_config_streams, "a raced configuration change must block retirement")
+      instance["ENV"] = {"SECRET": "private"}
+      worker.read_deployment_git_commit = lambda: observed_commit[0]
       send(retire)
       self.assertNotIn("app", harness.dct_config_streams)
+      bindings = {"image_id": image_id, "git_commit": "e" * 40}
+      self.assertEqual(service.records[retire["operation_id"] + "|retire"]["instances"][0]["runtime_artifacts"], bindings)
       # The old stream file may survive a process exit between durable admission and deletion.
       restarted = DeploymentLifecycle(journal, node.address)
       self.assertFalse(restarted.allowed(current))
@@ -1062,10 +1105,11 @@ class DeploymentCommandTest(unittest.TestCase):
       self.assertTrue(restarted.allowed(other_job))
       worker.thread.is_alive = lambda: False
       worker._deployment_cleanup_complete = True
+      cached_bindings["git_commit"] = "f" * 40  # A stale cache must not replace the checked-out commit when publishing.
       stop = next(r for r in publish() if r["attempt"] == "retire")
       self.assertEqual((stop["status"], stop["parent_operation_id"], stop["order_digest"]),
                        ("stopped", request["operation_id"], report["order_digest"]))
-      self.assertEqual(stop["instances"][0]["runtime_artifacts"], {"git_commit": "e" * 40})
+      self.assertEqual(stop["instances"][0]["runtime_artifacts"], bindings)
       self.assertEqual(stop["config_seal_hash"], report["config_seal_hash"])
       service = DeploymentLifecycle(journal, node.address)
       harness.shmem["deeploy_lifecycle"] = service
@@ -1170,9 +1214,16 @@ class DeploymentCommandTest(unittest.TestCase):
         service = DeploymentLifecycle(journal, "node")
         self.assertTrue(service.allowed(start))  # Tracking remains usable after loading the worker journal again.
         harness = self.harness(service, start)
+        messages = []
+        harness.P = lambda msg, **kw: messages.append(msg)
         harness.update_config_stream(self.command(legacy), "oracle-id", "session")
         harness.update_config_stream(self.command({"NAME": "app", "PLUGINS": []}), "oracle-id", "session")
+        harness.update_config_stream(self.command({"NAME": "app", "PLUGINS.0.INSTANCES.0.ENV": "do-not-log"}),
+                                     "oracle-id", "session")
+        harness.update_config_stream(self.command({"NAME": "app", "DEEPLOY_SPECS.revision": 99}), "oracle-id", "session")
         self.assertEqual(harness.dct_config_streams["app"], start)
+        self.assertEqual(len(messages), 4)
+        self.assertTrue(all("UPDATE_CONFIG" in msg and "do-not-log" not in msg for msg in messages))
         self.assertFalse(service.allowed(legacy))
         self.assertTrue(service.allows_untracked_update(dict(legacy, NAME="unrelated"), {}))
       later = config(revision=2)

@@ -20,6 +20,9 @@ from copy import deepcopy
 OPERATION_KEY = "DEEPLOY_OPERATION"
 SERVICE_KEY = "deeploy_lifecycle"
 OBSERVATION_HKEY = "DEEPLOY_NODE_OPERATIONS"
+# The coordinator issues 110-second challenges. Allow a worker's clock to lag by up to 70 seconds.
+REPAIR_MAX_FUTURE_SECONDS = 180
+REPAIR_INSPECTION_INTERVAL = 5
 # Seconds a report write waits for peer confirmation before the next pass retries it.
 PUBLISH_TIMEOUT = 15
 # Shared by lifecycle objects in this interpreter; recreating a journal reader
@@ -74,6 +77,32 @@ def repair_config_fingerprint(config):
   return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _matches_repair_fingerprint(config, expected):
+  """Check a local pipeline against the decrypted repair fingerprint.
+
+  Parameters
+  ----------
+  config : dict
+      Current local pipeline.
+  expected : str
+      Validated configuration digest from the scoped coordinator command.
+
+  Returns
+  -------
+  bool
+      Whether the local pipeline can be encoded and matches the digest.
+
+  Examples
+  --------
+  >>> _matches_repair_fingerprint({}, "a" * 64)
+  False
+  """
+  try:
+    return hmac.compare_digest(expected, repair_config_fingerprint(config))
+  except (TypeError, ValueError, KeyError, AttributeError):
+    return False  # A stream can become incomplete during configuration replacement.
+
+
 class DeploymentLifecycle:
   """Track operation attempts independently of plugin execution threads.
 
@@ -94,7 +123,7 @@ class DeploymentLifecycle:
     self._legacy_repair_aborts = {}  # Index only versioned conditional retirements for fast legacy startup checks.
     self.plugins = {}
     self._published = {}
-    self._last_repair_inspection = None  # One in-process throttle also covers failed Docker inspections.
+    self._last_repair_inspection_by_job = {}  # A slow inspection only throttles another probe of the same job.
     self._stop = threading.Event()
     self._thread = None
     self._cleanup = None
@@ -301,19 +330,21 @@ class DeploymentLifecycle:
                       runtime_artifacts={"git_commit": commit})], **binding)
     self._save()  # Signing and CStore publication run outside the command handler.
 
-  def check_worker_repair(self, name, current, operation, sender, validated, blockchain, business):
+  def check_worker_repair(self, name, get_current, operation, sender, validated, blockchain, business, retire_current):
     """Inspect a legacy worker, or check the same live evidence before retirement.
 
-    Called under the lifecycle lock before any configuration mutation. The
-    signed observation binds identity, ordered lists, the ciphertext authorizing
-    the full config, and Git HEAD. Older workers reject both action names.
+    Verify the runtime without holding the lifecycle lock during Docker or
+    registry requests. Recheck the journal and configuration after the probe
+    and retire only while the final checks and config change are under the lock.
 
     Parameters
     ----------
     name, sender : str
       Pipeline name and authenticated transport identity.
-    current, operation : dict
-      Local canonical configuration and coordinator's command.
+    get_current, retire_current : callable
+      Read the canonical pipeline and apply a verified retirement respectively.
+    operation : dict
+      Authenticated coordinator command with the repair scope.
     validated : bool
       Transport signature verification result.
     blockchain, business : object
@@ -321,14 +352,12 @@ class DeploymentLifecycle:
 
     Returns
     -------
-    dict or None
-      Verified evidence for conditional retirement. Inspection produces a
-      signed reporting record asynchronously and returns None.
+    None
+      Queues signed observations and invokes retirement only on exact evidence.
 
     Examples
     --------
-    >>> with service.lock:
-    ...   evidence = service.check_worker_repair(name, config, command, sender, True, bc, manager)
+    >>> service.check_worker_repair(name, get_current, command, sender, True, bc, manager, retire_current)  # doctest: +SKIP
     """
     inspect = operation.get("action") == "inspect_worker_v1"
     if validated is not True or not isinstance(sender, str) or sender != operation.get("coordinator"):
@@ -346,98 +375,122 @@ class DeploymentLifecycle:
     challenge, expires = operation.get("challenge"), operation.get("expires_at")
     if not isinstance(challenge, str) or not re.fullmatch(r"[0-9a-f]{32}", challenge):
       return None
-    if type(expires) is not int or not 0 < expires - time.time() <= 120:
-      return None  # Outstanding aborts remain durable and publish normally after this window.
-    if type(operation.get("revision")) is not int or operation["revision"] != 0 or current.get(OPERATION_KEY):
+    if type(expires) is not int or not 0 < expires - time.time() <= REPAIR_MAX_FUTURE_SECONDS:
+      return None  # The future bound accommodates clock skew and an expired request never acts locally.
+    if type(operation.get("revision")) is not int or operation["revision"] != 0:
       return None  # This bounded repair handles untracked workers only.
     instance_id = operation.get("instance_id")
     if (not isinstance(instance_id, str) or not instance_id or type(operation.get("job_id")) is not int
         or business is None or operation.get("expected_previous_operation_id") is not None):
       return None
-    observed = self.records.get(parent + "|inspect", {})
-    if inspect and observed and expires <= observed["expires_at"]:
-      return None  # Ignore retries and older challenges once an observation exists.
+    # These registry and crypto calls are read-only and do not need the journal lock.
     try:
       member = blockchain.node_address_to_eth_address(sender).lower()
       if member not in {addr.lower() for addr in blockchain.get_eth_oracles() or []}:
         return None  # A regular whitelisted node cannot inspect or retire another workload.
-      workers = [p for p in list(business.current_instances.values()) if p is not None and p.get_stream_id() == name]
-      if operation.get("confirm_prior_stop") is True:
+      confirm_stop = operation.get("confirm_prior_stop") is True
+      if not confirm_stop:
+        seal = operation.get("config_seal")
+        if not isinstance(seal, str) or not 1 <= len(seal) <= 2048 or not seal.isascii():
+          return None  # Accept only bounded SDK ciphertexts.
+        seal_hash = hashlib.sha256(seal.encode("ascii")).hexdigest()
+        expected = blockchain.decrypt_str(seal, sender)
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+          return None
+    except Exception:
+      return None  # Missing live registry or invalid ciphertext cannot authorize a repair.
+
+    def workers_for_pipeline():
+      # Snapshot the manager's instance map before matching this pipeline.
+      return [p for p in list(business.current_instances.values()) if p is not None and p.get_stream_id() == name]
+
+    inspection_key = parent + "|inspect"
+    retire_key = operation_id + "|retire"
+    job_id = operation["job_id"]
+    with self.lock:
+      current = get_current()
+      observed = self.records.get(inspection_key)
+      if current.get(OPERATION_KEY) or time.time() >= expires or (inspect and observed and expires <= observed["expires_at"]):
+        return None  # Discard superseded challenges and keep tracked workers out of repair preflight.
+      workers = workers_for_pipeline()
+      if confirm_stop:
         if not inspect or current or any(p.thread.is_alive() for p in workers) or any(
             r["app_id"] == name and r.get("active") and not r["aborted"] for r in self.records.values()):
           return None  # A past stop cannot attest that this worker is still vacant.
         proof = self.records.get(parent + "|retire", {})
-        commit = self._repair_stop_commit(proof, name, operation["job_id"], instance_id, parent, sender)
-        if commit and time.time() < expires:
+        commit = self._repair_stop_commit(proof, name, job_id, instance_id, parent, sender)
+        if commit:
           self._save_worker_inspection(name, operation, commit, confirm_prior_stop=True)
-        return None  # The previously stopped worker needs no Docker inspection, secrets or config change.
-    except Exception:
-      return None  # Missing live registry or incomplete local evidence cannot authorize any repair.
-    specs = current.get("DEEPLOY_SPECS", {})
-    if (not isinstance(specs, dict) or current.get("NAME") != name
-        or str(specs.get("job_id")) != str(operation["job_id"]) or type(specs.get("revision", 0)) is not int
-        or specs.get("revision", 0) != operation["revision"]):
-      return None  # The exact prior job and revision must still occupy the named pipeline.
-    plugins = current.get("PLUGINS", [])
-    if (not isinstance(plugins, list) or len(plugins) != 1
-        or not isinstance(plugins[0], dict) or plugins[0].get("SIGNATURE") != "WORKER_APP_RUNNER"
-        or not isinstance(plugins[0].get("INSTANCES"), list) or len(plugins[0]["INSTANCES"]) != 1):
-      return None  # Multiple plugins or instances require a different proof.
-    instance = plugins[0]["INSTANCES"][0]
-    if not isinstance(instance, dict) or instance.get("INSTANCE_ID") != instance_id:
-      return None
-    prior_retire = self.records.get(operation_id + "|retire")
-    if not inspect and prior_retire is not None and (
-        prior_retire.get("status") == "stopped" or prior_retire.get("parent_operation_id") != parent
-        or prior_retire.get("challenge") != challenge):
-      return None  # A late retry cannot re-adopt a workload after the original receipt.
-    if not inspect and (observed.get("challenge") != challenge or observed.get("expires_at") != expires
-                        or observed.get("order_digest") != operation.get("order_digest")):
-      return None  # The authorizing inspection must already exist in this node's journal.
-    try:
-      seal = operation.get("config_seal")
-      if not isinstance(seal, str) or not 1 <= len(seal) <= 2048 or not seal.isascii():
-        return None  # Accept only bounded SDK ciphertexts.
-      seal_hash = hashlib.sha256(seal.encode("ascii")).hexdigest()
-      if not inspect and observed.get("config_seal_hash") != seal_hash:
-        return None  # A different ciphertext cannot authorize the recorded observation.
-      expected = blockchain.decrypt_str(seal, sender)
-      if (not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
-          or not hmac.compare_digest(expected, repair_config_fingerprint(current))):
-        return None  # Check all private workload settings locally, again immediately before retirement.
-      if inspect:
-        now = time.monotonic()
-        if self._last_repair_inspection is not None and now - self._last_repair_inspection < 5:
-          return None  # A broken or slow runtime must not receive repeated probes on each refresh.
-        self._last_repair_inspection = now
-      if len(workers) != 1:
-        return None  # Extra live instances invalidate the single-worker evidence.
+        return None  # The previously stopped worker needs no Docker inspection or config change.
+      specs = current.get("DEEPLOY_SPECS", {})
+      if (not isinstance(specs, dict) or current.get("NAME") != name
+          or str(specs.get("job_id")) != str(job_id) or type(specs.get("revision", 0)) is not int
+          or specs.get("revision", 0) != operation["revision"]):
+        return None  # The exact prior job and revision must still occupy the named pipeline.
+      plugins = current.get("PLUGINS", [])
+      if (not isinstance(plugins, list) or len(plugins) != 1
+          or not isinstance(plugins[0], dict) or plugins[0].get("SIGNATURE") != "WORKER_APP_RUNNER"
+          or not isinstance(plugins[0].get("INSTANCES"), list) or len(plugins[0]["INSTANCES"]) != 1):
+        return None  # Multiple plugins or instances require a different proof.
+      instance = plugins[0]["INSTANCES"][0]
+      if not isinstance(instance, dict) or instance.get("INSTANCE_ID") != instance_id or len(workers) != 1:
+        return None
       worker = workers[0]
-      if (worker.get_signature() != "WORKER_APP_RUNNER" or worker.get_instance_id() != instance_id
-          or not worker.thread.is_alive()):
+      if worker.get_signature() != "WORKER_APP_RUNNER" or worker.get_instance_id() != instance_id or not worker.thread.is_alive():
         return None  # A stale BusinessManager entry cannot attest to a live worker.
       lists = [specs.get("current_target_nodes"), instance.get("BUILD_AND_RUN_COMMANDS"), instance.get("CHAINSTORE_PEERS")]
       if any(not isinstance(items, list) or not items or not all(isinstance(v, str) and v for v in items) for items in lists):
         return None  # Strictly limit the digest to the three documented ordered string lists.
       if worker.cfg_build_and_run_commands != lists[1] or worker.cfg_chainstore_peers != lists[2]:
         return None  # The persisted pipeline and actual runner must agree.
+      if not _matches_repair_fingerprint(current, expected):
+        return None  # Compare all private workload settings locally.
       encoded = json.dumps(lists, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
       digest = hashlib.sha256(encoded).hexdigest()
-      commit = worker.read_deployment_git_commit()  # Direct, bounded read from the live container.
-      if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit) or time.time() >= expires:
-        return None
+      prior_retire = self.records.get(retire_key)
+      if inspect:
+        now = time.monotonic()
+        self._last_repair_inspection_by_job = {
+          job: last for job, last in self._last_repair_inspection_by_job.items() if now - last < REPAIR_INSPECTION_INTERVAL
+        }
+        if job_id in self._last_repair_inspection_by_job:
+          return None  # A broken or slow runtime must not receive repeated probes of the same job.
+        self._last_repair_inspection_by_job[job_id] = now
+      else:
+        if prior_retire is not None and (prior_retire.get("status") == "stopped"
+            or prior_retire.get("parent_operation_id") != parent or prior_retire.get("challenge") != challenge):
+          return None  # A late retry cannot re-adopt a workload after the original receipt.
+        if not observed or (observed.get("challenge"), observed.get("expires_at"), observed.get("order_digest"),
+                             observed.get("config_seal_hash"), observed.get("app_id"), observed.get("job_id"),
+                             observed["instances"][0]["instance_id"]) != (challenge, expires, digest, seal_hash, name, job_id, instance_id):
+          return None  # Conditional retirement needs the same observation in the journal.
+        if digest != operation.get("order_digest"):
+          return None
+      container = getattr(worker, "container", None)  # Snapshot local runtime identity before releasing the lock.
+
+    try:
+      commit = worker.read_deployment_git_commit()  # The bounded Docker read does not hold the journal lock.
     except Exception:
-      return None  # A missing dependency, unavailable registry or incomplete checkout leaves the worker running.
-    if inspect:
-      self._save_worker_inspection(name, operation, commit, order_digest=digest, config_seal_hash=seal_hash)
       return None
-    if (digest != operation.get("order_digest") or commit != operation.get("git_commit")
-        or commit != observed["instances"][0]["runtime_artifacts"]["git_commit"]
-        or observed.get("app_id") != name or observed.get("job_id") != operation["job_id"]
-        or observed["instances"][0]["instance_id"] != instance_id):
-      return None  # Drift after preview keeps the canonical stream and the current process intact.
-    return {"parent_operation_id": parent, "challenge": challenge, "order_digest": digest, "config_seal_hash": seal_hash,
-            "git_commit": commit, "job_id": operation["job_id"]}
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+      return None
+    with self.lock:
+      workers = workers_for_pipeline()
+      if (time.time() >= expires or get_current() is not current or len(workers) != 1 or workers[0] is not worker
+          or getattr(worker, "container", None) is not container or not worker.thread.is_alive()
+          or worker.cfg_build_and_run_commands != lists[1] or worker.cfg_chainstore_peers != lists[2]
+          or not _matches_repair_fingerprint(current, expected)
+          or self.records.get(inspection_key) is not observed):
+        return None  # A probe racing reconfiguration, replacement or a fresh challenge must not act.
+      if inspect:
+        self._save_worker_inspection(name, operation, commit, order_digest=digest, config_seal_hash=seal_hash)
+        return None
+      if (self.records.get(retire_key) is not prior_retire or (prior_retire and prior_retire["status"] == "stopped")
+          or commit != operation.get("git_commit") or commit != observed["instances"][0]["runtime_artifacts"]["git_commit"]):
+        return None  # Preserve any newer stop evidence and leave a changed Git workload running.
+      evidence = {"parent_operation_id": parent, "challenge": challenge, "order_digest": digest, "config_seal_hash": seal_hash,
+                  "git_commit": commit, "job_id": job_id}
+      retire_current(current, dict(operation, action="retire"), evidence)
 
   def retire(self, name, current_config, operation, sender, validated, repair_evidence=None):
     """Bind a retirement to the exact prior revision before stopping anything.
@@ -638,17 +691,45 @@ class DeploymentLifecycle:
     with self.lock:
       key = self.key(operation)
       self.plugins[(key, signature, instance_id)] = plugin
-      for instance in self.records[key]["instances"]:
+      record = self.records[key]
+      for instance in record["instances"]:
         if (instance["signature"], instance["instance_id"]) == (signature, instance_id):
           instance["possibly_started"] = True
           workload_owner = plugin if plugin is not None else plugin_class
           if workload_owner is not None:
             instance["process_id"] = self.process_id
             instance["process_bound"] = getattr(workload_owner, "_deployment_external_workload", False) is False
-          artifacts = self._runtime_artifacts(plugin)
-          if artifacts:
-            instance["runtime_artifacts"] = artifacts
+          self._capture_runtime_artifacts(record, instance, plugin)
       self._save()
+
+  def _capture_runtime_artifacts(self, record, instance, plugin):
+    """Capture cached runtime artifacts without replacing an inspected repair pin.
+
+    Parameters
+    ----------
+    record, instance : dict
+        Local operation and its instance within the durable journal.
+    plugin : object or None
+        Runtime exposing the cached artifact getter.
+
+    Returns
+    -------
+    None
+        Updates the instance bindings when the runtime has safe identifiers.
+
+    Examples
+    --------
+    >>> service._capture_runtime_artifacts(record, instance, plugin)  # doctest: +SKIP
+    """
+    artifacts = self._runtime_artifacts(plugin)  # The cache can be incomplete before readiness.
+    if not artifacts:
+      return
+    if record["attempt"] == "retire" and record.get("parent_operation_id"):
+      # The live Git check at conditional retirement has precedence over cached bindings.
+      artifacts.pop("git_commit", None)
+      instance.setdefault("runtime_artifacts", {}).update(artifacts)
+    else:
+      instance["runtime_artifacts"] = artifacts
 
   def fail(self, config, signature=None, instance_id=None, code="PLUGIN_INIT_FAILED"):
     """Record a safe lifecycle failure without copying exception/secret text."""
@@ -675,9 +756,7 @@ class DeploymentLifecycle:
         # Stop evidence remains valid after releasing the runtime object.
         continue
       plugin = self.plugins.get((key, instance["signature"], instance["instance_id"]))
-      artifacts = self._runtime_artifacts(plugin)
-      if artifacts:
-        instance["runtime_artifacts"] = artifacts
+      self._capture_runtime_artifacts(record, instance, plugin)
       if plugin is None:
         if record["aborted"]:
           # Native threads from an earlier process cannot survive its exit.

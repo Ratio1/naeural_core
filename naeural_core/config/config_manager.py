@@ -63,6 +63,7 @@ class ConfigManager(
     self.shmem[SERVICE_KEY] = DeploymentLifecycle(
       os.path.join(self.log.get_data_folder(), "deeploy_node_operations.json"),
       self.owner.blockchain_manager.address,
+      source_modes=getattr(ct, "DEPLOYMENT_SOURCE_MODES", False),  # Older edge images keep their reporting contract.
     )
 
     if self._subfolder_path is not None:

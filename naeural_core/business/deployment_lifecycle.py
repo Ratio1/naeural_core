@@ -32,9 +32,45 @@ ERRORS = {
   "CONFIGURATION_REJECTED": "Pipeline configuration was rejected.",
   "WORKLOAD_START_FAILED": "Workload startup failed.",
   "WORKLOAD_UNHEALTHY": "Workload readiness check failed.",
+  "SOURCE_UNREACHABLE": "The configured source could not be reached.",
   "IMAGE_PULL_FAILED": "Container image could not be downloaded.",
   "SECRET_RESOLUTION_FAILED": "Protected configuration could not be resolved.",
 }
+
+
+# Only these runner errors can be superseded by evidence of a later source start.
+SOURCE_FAILURES = {"WORKLOAD_START_FAILED", "WORKLOAD_UNHEALTHY", "IMAGE_PULL_FAILED", "SOURCE_UNREACHABLE"}
+
+
+def deployment_source_mode(signature, pipeline, instance):
+  """Determine how a runner selects the version to start.
+
+  A persisted pipeline carries the same job type and instance fields as a new deployment.
+
+  Parameters
+  ----------
+  signature : str
+      Plugin signature from the canonical pipeline.
+  pipeline : dict
+      Pipeline containing the deployment specifications.
+  instance : dict
+      Configuration of this particular instance.
+
+  Returns
+  -------
+  str or None
+      The source mode, or None for a plugin outside the source policy.
+
+  Examples
+  --------
+  >>> deployment_source_mode("WORKER_APP_RUNNER", {}, {})
+  'following'
+  """
+  if signature.upper() not in ("WORKER_APP_RUNNER", "CONTAINER_APP_RUNNER"):
+    return None
+  if pipeline.get("DEEPLOY_SPECS", {}).get("job_app_type") == "service":
+    return "service"
+  return "pinned" if instance.get("PINNED_VERSION") is True else "following"
 
 
 class DeploymentLifecycle:
@@ -46,16 +82,24 @@ class DeploymentLifecycle:
       Private local journal path. Unreadable/corrupt journals fail closed.
   node_addr : str
       Blockchain address used for signed observations.
+  source_modes : bool
+      Whether the installed edge runtime supports following and pinned runners.
   """
 
-  def __init__(self, path, node_addr):
+  def __init__(self, path, node_addr, source_modes=False):
     self.path = path
     self.node_addr = node_addr
+    self.source_modes = source_modes
     self.process_id = PROCESS_ID
     self.lock = threading.RLock()
     self.records = {}
     self.plugins = {}
     self._published = {}
+    # Keep just the latest confirmed signed report and outstanding recipients for each active following attempt.
+    self._source_delivery = {}
+    self._peer_sessions = {}
+    self._peer_session = None
+    self._confirmed_peers = None
     self._stop = threading.Event()
     self._thread = None
     self._cleanup = None
@@ -69,7 +113,9 @@ class DeploymentLifecycle:
         if record["status"] not in ("stopping", "stopped", "failed"):
           record["status"] = "starting"
           for instance in record["instances"]:
-            instance["status"] = "initializing"
+            # A confirmed bound instance retains its final observation in a mixed pipeline.
+            if not record.get("ready_reported") or instance.get("source_mode") == "following":
+              instance["status"] = "initializing"
 
   def _save(self):
     """Atomically persist the journal, propagating every durability failure."""
@@ -143,10 +189,16 @@ class DeploymentLifecycle:
           for record in self.records.values():
             if record["app_id"] == config["NAME"]:
               record["active"] = False
-        instances = [
-          {"signature": plugin["SIGNATURE"], "instance_id": instance["INSTANCE_ID"], "status": "initializing", "error": None, "possibly_started": operation["action"] == "retire"}
-          for plugin in config.get("PLUGINS", []) for instance in plugin.get("INSTANCES", [])
-        ]
+        instances = []
+        for group in config.get("PLUGINS", []):
+          for item in group.get("INSTANCES", []):
+            observation = dict(signature=group["SIGNATURE"], instance_id=item["INSTANCE_ID"], status="initializing",
+                               error=None, possibly_started=operation["action"] == "retire")
+            if self.source_modes:
+              mode = deployment_source_mode(group["SIGNATURE"], config, item)
+              if mode:
+                observation["source_mode"] = mode  # A readiness deadline can expire before construction.
+            instances.append(observation)
         current = {
           "operation_id": operation["operation_id"], "attempt": operation["attempt"],
           "revision": operation["revision"], "coordinator": sender,
@@ -224,7 +276,7 @@ class DeploymentLifecycle:
                            for item in self.records.get(previous_key, {}).get("instances", [])}
         for instance in self.records[self.key(operation)]["instances"]:
           prior = prior_instances.get((instance["signature"], instance["instance_id"]), {})
-          for field in ("process_id", "process_bound"):
+          for field in ("process_id", "process_bound", "source_mode"):
             if field in prior:
               instance[field] = prior[field]
           if prior.get("runtime_artifacts"):
@@ -339,6 +391,16 @@ class DeploymentLifecycle:
           instance["possibly_started"] = True
           workload_owner = plugin if plugin is not None else plugin_class
           if workload_owner is not None:
+            # Old journals have no mode. BusinessManager reads it from the persisted pipeline at startup.
+            if self.source_modes and plugin is not None and getattr(plugin, "_deployment_source_mode", None):
+              instance["source_mode"] = plugin._deployment_source_mode
+              # Older nodes could journal a dead thread during shutdown after confirming readiness.
+              # A freshly constructed runner now owns that workload and will report its own health.
+              if (plugin._deployment_source_mode == "following" and self.records[key].get("ready_reported")
+                  and (instance.get("error") or {}).get("code") == "PLUGIN_EXECUTION_FAILED"):
+                instance.update(status="initializing", error=None)
+            elif not self.source_modes:
+              instance.pop("source_mode", None)  # A runtime downgrade withdraws the capability.
             instance["process_id"] = self.process_id
             instance["process_bound"] = getattr(workload_owner, "_deployment_external_workload", False) is False
           artifacts = self._runtime_artifacts(plugin)
@@ -370,6 +432,8 @@ class DeploymentLifecycle:
       if record["aborted"] and instance["status"] == "stopped":
         # Stop evidence remains valid after releasing the runtime object.
         continue
+      if not record["aborted"] and record.get("ready_reported") and instance.get("source_mode") != "following":
+        continue  # Only the source-following members of a confirmed mixed rollout keep reporting.
       plugin = self.plugins.get((key, instance["signature"], instance["instance_id"]))
       artifacts = self._runtime_artifacts(plugin)
       if artifacts:
@@ -391,7 +455,8 @@ class DeploymentLifecycle:
               instance["status"] = "stopped"
         continue
       thread = getattr(plugin, "thread", None)
-      thread_dead = thread is not None and not thread.is_alive()
+      # A newly allocated Thread has no ident until start() and supplies no exit evidence.
+      thread_dead = thread is not None and not thread.is_alive() and getattr(thread, "ident", True) is not None
       if record["aborted"]:
         stopped = getattr(plugin, "_deployment_stopped", False)
         if not getattr(plugin, "_deployment_external_workload", False):
@@ -403,11 +468,26 @@ class DeploymentLifecycle:
             plugin._deployment_stopped = True
         instance["status"] = "stopped" if thread_dead and stopped else "stopping"
         continue
-      if instance["status"] == "failed":
-        continue
+      follows_source = instance.get("source_mode") == "following"
+      if instance["status"] == "failed" and not (
+        follows_source and (instance.get("error") or {}).get("code") in SOURCE_FAILURES
+      ):
+        continue  # Infrastructure and bound workload failures remain terminal.
+      instance["error"] = None  # A recovered workload must not carry the previous failure.
+      if follows_source:
+        if not artifacts:
+          instance.pop("runtime_artifacts", None)  # Do not display the previous process as running.
+        branch = getattr(plugin, "branch", None) if instance["signature"].upper() == "WORKER_APP_RUNNER" else None
+        if isinstance(branch, str) and branch:
+          instance["source_branch"] = branch
+        if getattr(plugin, "_deployment_source_error", None) == "SOURCE_UNREACHABLE":
+          instance["source_error"] = "SOURCE_UNREACHABLE"  # Polling trouble can coexist with readiness.
+        else:
+          instance.pop("source_error", None)
       failure = getattr(plugin, "_deployment_error_code", None)
       if failure or thread_dead:
-        failure = failure if failure in ERRORS else "PLUGIN_EXECUTION_FAILED"
+        if failure not in ERRORS or (thread_dead and follows_source and failure in SOURCE_FAILURES):
+          failure = "PLUGIN_EXECUTION_FAILED"  # A dead runner cannot observe a new source.
         instance["status"] = "failed"
         instance["error"] = {"code": failure, "message": ERRORS[failure]}
       elif getattr(plugin, "_deployment_status", None) == "failed":
@@ -420,7 +500,9 @@ class DeploymentLifecycle:
     statuses = [instance["status"] for instance in record["instances"]]
     if record["aborted"]:
       record["status"] = "stopped" if all(status == "stopped" for status in statuses) else "stopping"
-    elif record["status"] != "failed":
+    elif record["status"] != "failed" or (not record.get("error") and any(
+      item.get("source_mode") == "following" for item in record["instances"]
+    )):
       record["status"] = "failed" if "failed" in statuses else "ready" if statuses and all(status == "ready" for status in statuses) else "starting"
 
   def publish(self, setter, signer):
@@ -428,8 +510,8 @@ class DeploymentLifecycle:
 
     A snapshot is published only when its observable state changes, and is
     retried until a write is confirmed. Once a ready snapshot of an attempt is
-    confirmed, nothing more is published for it unless the coordinator stops or
-    retires it: deployment reporting is over and NetMon owns workload liveness.
+    confirmed for a bound workload, only retirement and stop remain reportable.
+    Source-following attempts continue to publish changes in status and version.
 
     Parameters
     ----------
@@ -460,9 +542,11 @@ class DeploymentLifecycle:
               plugin = self.plugins.get((key, instance["signature"], instance["instance_id"]))
               if plugin is not None:
                 stopped_plugins.add(id(plugin))
-        elif record.get("ready_reported", False):
+        elif record.get("ready_reported", False) and not any(
+          item.get("source_mode") == "following" for item in record["instances"]
+        ):
           continue
-        fingerprint = {name: value for name, value in record.items() if name not in ("sequence", "updated_at")}
+        fingerprint = {name: value for name, value in record.items() if name not in ("sequence", "updated_at", "ready_reported")}
         if self._published.get(key) == fingerprint:
           continue
         record["sequence"] += 1
@@ -475,11 +559,17 @@ class DeploymentLifecycle:
         # identities. Release all aliases only after stop evidence is persisted.
         self.plugins = {key: plugin for key, plugin in self.plugins.items()
                         if id(plugin) not in stopped_plugins}
+      # Retiring an attempt also retires its replay cache, even if its next write cannot be confirmed.
+      for key in list(self._source_delivery):
+        if self.records[key]["aborted"] or not self.records[key].get("active"):
+          del self._source_delivery[key]
     # Stop and failure reports drive coordinator decisions; do not queue them
     # behind writes that may each wait PUBLISH_TIMEOUT for unreachable peers.
     pending.sort(key=lambda item: not (item[1]["aborted"] or item[1]["status"] == "failed"))
     ready_reported = []
     for key, record, fingerprint in pending:
+      # A superseded snapshot must never be replayed while its replacement awaits confirmation.
+      self._source_delivery.pop(key, None)
       ready = record["status"] == "ready" and not record["aborted"]
       peers = record.pop("peers")
       record.pop("aborted")
@@ -501,6 +591,14 @@ class DeploymentLifecycle:
                                      timeout=PUBLISH_TIMEOUT, max_retries=0)
       if success:
         self._published[key] = fingerprint
+        if (self._peer_session is not None and fingerprint.get("active") and not fingerprint["aborted"]
+            and any(i.get("source_mode") == "following" for i in record["instances"])):
+          # A bulk write can succeed with only one acknowledgement. Keep the exact signed current field
+          # for the other recipients; never refresh its sequence, timestamp or eight history slots.
+          confirmed = self._confirmed_peers(storage_key)
+          due = {peer: None if peer in confirmed else (time.monotonic() + PUBLISH_TIMEOUT, False)
+                 for peer in peers if peer != self.node_addr}
+          self._source_delivery[key] = (storage_key, record, due)
         if ready:
           ready_reported.append(key)
     if ready_reported:
@@ -509,16 +607,70 @@ class DeploymentLifecycle:
         for key in ready_reported:
           self.records[key]["ready_reported"] = True
         self._save()
+    self._repair_source_delivery(setter)  # New reports always take precedence over a bounded repair.
     if observation_failed:
       # Preserve the worker's existing throttled error notification after all
       # independently observed jobs have had their publication opportunity.
       raise RuntimeError("Deployment workload observation failed; retrying.")
 
-  def start(self, setter_provider, signer, report_error, cleanup=None):
+  def _repair_source_delivery(self, setter):
+    """Replay one current field to an oracle that missed it or restarted.
+
+    Parameters
+    ----------
+    setter : callable
+      CStore writer supporting a single destination and bounded confirmation wait.
+
+    Returns
+    -------
+    None
+      A failed transfer remains queued. Superseding observations replace the pending value.
+
+    Examples
+    --------
+    >>> journal._repair_source_delivery(setter)
+    """
+    now = time.monotonic()
+    peers = {peer for _, _, recipients in self._source_delivery.values() for peer in recipients}
+    sessions = {peer: self._peer_session(peer) for peer in peers}  # Sample each destination only once.
+    returning = set()
+    for peer, (online, uptime) in sessions.items():
+      previous = self._peer_sessions.get(peer)
+      if previous is not None and online and (
+        not previous[0] or (uptime is not None and previous[1] is not None and uptime < previous[1])
+      ):
+        returning.add(peer)  # A peer can restart between heartbeats without appearing offline.
+    self._peer_sessions = sessions
+    transfer = None
+    for storage_key, report, recipients in self._source_delivery.values():
+      for peer, pending in recipients.items():
+        if peer in returning:
+          pending = recipients[peer] = (now, True)  # Ignore confirmations predating a peer restart.
+        if pending is None or pending[0] > now or not sessions[peer][0]:
+          continue
+        due, force = pending
+        if not force and peer in self._confirmed_peers(storage_key):
+          recipients[peer] = None  # The broadcast acknowledgement arrived after quorum; no replay needed.
+        elif transfer is None or due < transfer[0]:
+          transfer = (due, peer, storage_key, report, recipients)
+    if transfer is not None:
+      _, peer, storage_key, report, recipients = transfer
+      recipients[peer] = (now + 30, True)  # Back off on timeout/exception; other peers get their turn.
+      previous_acks = self._confirmed_peers(storage_key)  # CStore resets this list on each accepted local write.
+      delivered = setter(storage_key, report, owner=self.node_addr, readonly=True, peers=[peer],
+                         include_default_peers=False, timeout=2, max_retries=0)
+      current_acks = self._confirmed_peers(storage_key)
+      if delivered or (current_acks is not previous_acks and peer in current_acks):
+        # Accept the fresh target ack even when global MIN_CONFIRMATIONS exceeds one.
+        recipients[peer] = None
+
+  def start(self, setter_provider, signer, report_error, cleanup=None, peer_session=None, confirmed_peers=None):
     """Start an independent bounded publication worker once CStore is ready."""
     if self._thread is not None:
       return
     self._cleanup = cleanup
+    self._peer_session = peer_session
+    self._confirmed_peers = confirmed_peers
     def run():
       last_error_report = 0
       while not self._stop.wait(1):

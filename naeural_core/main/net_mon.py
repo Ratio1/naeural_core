@@ -5,6 +5,7 @@ TODO: change from ee_id-based to ee_addr-based
 import json
 import os
 import math
+import re
 import numpy as np
 
 from time import time, sleep
@@ -1940,7 +1941,38 @@ class NetworkMonitor(DecentrAIObject):
       return uptime >= min_uptime
 
 
-    def network_node_uptime(self, addr, as_str=True):
+    def network_node_uptime(self, addr, as_str=True, allow_summary=False):
+      """Read a node's last observed process uptime.
+
+      Parameters
+      ----------
+      addr : str
+        Reporting node address.
+      as_str : bool
+        Format uptime as hours, minutes and seconds.
+      allow_summary : bool
+        Also accept uptime from the fresh authorized summary selected for this node.
+
+      Returns
+      -------
+      str or float or None
+        Observed uptime, or None if the selected summary omits a valid uptime.
+
+      Examples
+      --------
+      >>> monitor.network_node_uptime(node, as_str=False, allow_summary=True)
+      120
+      """
+      if allow_summary:
+        # NET_MON_01 sends elapsed_to_str() output. Only a fresh, authorized summary
+        # selected ahead of direct observations can replace direct heartbeat evidence.
+        value = self.__network_node_summary_value_for_display(addr, ct.PAYLOAD_DATA.NETMON_UPTIME)
+        if value is not SUMMARY_NOT_SELECTED:
+          match = re.fullmatch(r"([0-9]{1,9}):([0-5][0-9]):([0-5][0-9])", value) if isinstance(value, str) else None
+          if match is None:
+            return None
+          hours, minutes, seconds = map(int, match.groups())
+          return value if as_str else hours * 3600 + minutes * 60 + seconds
       uptime_sec = self.__network_node_uptime(addr=addr, as_minutes=False)
       if as_str:
         result = self.log.elapsed_to_str(uptime_sec)

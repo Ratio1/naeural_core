@@ -75,12 +75,24 @@ sequence, and Unix `updated_at`. They are signed with
 when its observable state changes, with a `PUBLISH_TIMEOUT` (15 s) confirmation
 wait, and is retried on the next pass until a write is confirmed. Stop and failure
 snapshots are written first in each pass, and a snapshot's second field is
-skipped once its first write is unconfirmed. There is no periodic refresh. Once a ready snapshot of an attempt is confirmed, the journal
-marks it reported and nothing more is published for that attempt, including
-after a node restart, unless the coordinator stops or retires it; workload
-liveness after deployment comes from NetMon. Sequence is persisted before
-publication. Consumers must verify signatures and expected node/operation
-identity; `updated_at` is not a liveness signal.
+skipped once its first write is unconfirmed. Each updated app runner reports its
+`source_mode` (`following`, `pinned` or `service`) from admission. A
+following runner continues to report changes to its status and actual commit or
+image after readiness. A branch lookup failure can coexist with readiness and
+appears as `source_error: SOURCE_UNREACHABLE`. A new start can clear a workload
+start, health, image pull or source access failure. Infrastructure failures
+remain terminal for the affected runner. A new runner on node restart observes
+its own health after a previously confirmed deployment. Bound instances retain
+their confirmed ready snapshot until retirement or stop.
+
+The node replays the latest signed current field to an intended oracle that
+missed publication, came back online, or whose reported process uptime fell.
+The replay preserves the original sequence, timestamp and history slots.
+The node accepts process uptime from direct heartbeats and fresh authorized
+network summaries. If an older summary omits uptime and the oracle restarts
+after acknowledging but before its disk flush, a restart that never appears
+offline can leave its replica behind until the next observation. Consumers must verify signatures and
+expected node/operation identity and use node liveness to detect stale reports.
 
 These are bounded recent snapshots, not a permanent event log. Tombstones and
 operation journal records are retained; operator retention must not discard aborts
@@ -113,6 +125,7 @@ Tracked plugin construction is serialized with lifecycle admission and reporting
 the lock is acquired after prior-instance shutdown and is never held across that
 thread join. Stop acknowledgment cannot race a constructor creating an external
 workload. Runner `get_deployment_runtime_artifacts()` must return cached values
-without I/O. The node journals and reports only `image_id` (full sha256 Docker
-identity) and optional `git_commit` (40 hexadecimal characters), including after
-retirement/restart. Missing bindings remain absent so restoration can fail closed.
+without I/O. The node journals the actual `image_id` (local Docker identity),
+the immutable registry `image_ref` when available, and the worker's checked-out
+`git_commit`. Retirement keeps this evidence. Restoring a bound instance
+requires its recorded artifact. A following instance resolves its source again.

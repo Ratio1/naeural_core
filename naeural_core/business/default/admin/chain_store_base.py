@@ -701,7 +701,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       return False
     expected = operation_id
     if namespace == "DEEPLOY_NODE_OPERATIONS":
-      if value.get("attempt") not in ("deploy", "restore", "retire"):
+      if value.get("attempt") not in ("deploy", "restore", "retire", "inspect"):
         return False
       expected += "|" + value["attempt"] + "|" + principal
     if field not in (expected, expected + "|" + str(value["sequence"] % 8)):

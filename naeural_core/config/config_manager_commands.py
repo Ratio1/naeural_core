@@ -44,12 +44,23 @@ class ConfigCommandHandlers:
       
 
     operation = delta_config_stream.get(OPERATION_KEY)
+    if operation is None and "PLUGINS" in delta_config_stream and not self.shmem[SERVICE_KEY].allows_untracked_update(
+        delta_config_stream, self.dct_config_streams.get(stream_name, {})):
+      return  # Drop a delayed whole legacy payload before it can overwrite a repaired tracked worker.
     if operation is not None:
       lifecycle = self.shmem[SERVICE_KEY]
-      if operation.get("action") == "retire":
+      if operation.get("action") in ("retire", "inspect_worker_v1", "retire_worker_v1"):
         with lifecycle.lock:
           current = self.dct_config_streams.get(stream_name, {})
-          if lifecycle.retire(stream_name, current, operation, sender_addr, validated_command):
+          evidence = None
+          if operation["action"] != "retire":
+            # Unknown versioned actions are rejected by older workers before any stream write.
+            evidence = lifecycle.check_worker_repair(stream_name, current, operation, sender_addr, validated_command,
+                                                     self.owner.bc, self.owner._business_manager)
+            if evidence is None:
+              return  # Inspection, expired retries and mismatches never remove a pipeline.
+            operation = dict(operation, action="retire")  # Only a verified same-worker conditional retire reaches here.
+          if lifecycle.retire(stream_name, current, operation, sender_addr, validated_command, repair_evidence=evidence):
             manager = self.owner._business_manager
             if manager is not None:
               for plugin in list(manager.current_instances.values()):
@@ -60,8 +71,17 @@ class ConfigCommandHandlers:
             if current:
               self.delete_config_stream(stream_name, initiator_id, session_id, verbose=verbose)
         return
+      if operation.get("action") == "start_repaired_worker_v1":
+        occupant = self.dct_config_streams.get(stream_name, {})
+        tracked = occupant.get(OPERATION_KEY)
+        if occupant and ((not tracked and lifecycle.allowed(occupant))
+                         or (tracked and tracked.get("operation_id") != operation.get("operation_id"))):
+          return  # A worker reoccupied after the stopped-worker preflight cannot be silently overwritten.
       if not lifecycle.admit(delta_config_stream, sender_addr, validated_command):
         return
+      if operation["action"] == "start_repaired_worker_v1":
+        operation = dict(operation, action="start")  # Runtime, restart and later tracked updates use the usual contract.
+        delta_config_stream[OPERATION_KEY] = operation
       if operation["action"] == "stop":
         # A delayed stop cannot remove another deployment or its restoration.
         current = self.dct_config_streams.get(stream_name, {})
@@ -94,6 +114,11 @@ class ConfigCommandHandlers:
     #endif
 
     config_stream = self.dct_config_streams.get(stream_name, {})
+    if (operation is not None and operation["action"] == "start" and config_stream and
+        config_stream.get(OPERATION_KEY) is None and not lifecycle.allowed(config_stream)):
+      # A crash after conditional retirement may leave this obsolete file. Build the accepted tracked
+      # replacement from its complete input so removed fields and old secret references cannot survive.
+      config_stream = {}
     is_new = False
     if len(config_stream) > 0:
       msg = "Received {} command to update for existing pipeline '{}' ({}) from {}:{}".format(

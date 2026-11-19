@@ -29,6 +29,57 @@ canonical configuration is already absent, any active matching journal record
 still supplies workload identities for cleanup; absence of a configuration alone
 cannot acknowledge a journaled workload as stopped.
 
+### Same-host legacy worker inspection
+
+An authenticated current protocol oracle can inspect a named untracked job with
+one `WORKER_APP_RUNNER` instance. The transport addresses the worker by its
+current identity. The versioned actions below require a coordinator-prefixed
+operation ID, integer job ID, revision zero, exact `instance_id`, `node_addr`,
+a 32-character lowercase hex `challenge` and integer Unix `expires_at` within
+120 seconds. The coordinator encrypts the full canonical configuration fingerprint
+to this worker as `config_seal`. The worker decrypts it with the authenticated
+sender identity and compares it locally on both commands. Only the ciphertext's
+SHA-256 tag, `config_seal_hash`, appears in the journal and signed receipts.
+The fingerprint preserves scalar values and all list order, excluding transport
+and response metadata. Older command handlers reject these action names.
+
+- `action=inspect_worker_v1`, `attempt=inspect` uses the existing parent
+  operation ID. The worker compares its local stream and live runner and reads
+  Git HEAD from the live container. It returns a node-signed observation at
+  `<parent operation ID>|inspect|<node>` in `DEEPLOY_NODE_OPERATIONS` with
+  `status=observed`, the challenge, deadline, job, app, revision, exact worker
+  identity, Git commit and `order_digest`. The digest is SHA-256 of compact
+  UTF-8 JSON for `[current_target_nodes, BUILD_AND_RUN_COMMANDS, CHAINSTORE_PEERS]`,
+  preserving order and emitting Unicode literally. Only the coordinator receives
+  the observation. An absent worker or expired challenge yields no new report.
+  Reading the commit establishes what is checked out locally. The coordinator
+  separately checks restoration source availability.
+  For a previously stopped worker the same request can use
+  `confirm_prior_stop=true`. It verifies the matching local journal STOP
+  and Git pin, absence of the stream and live instance, and no pending start.
+  The signed receipt carries that flag and the pin without a config seal or
+  order digest. This verifies both target workers' compatibility before retirement.
+- `action=retire_worker_v1`, `attempt=retire` uses a new child operation ID and
+  supplies `parent_operation_id`, the same challenge and deadline, accepted
+  digest, ciphertext and `git_commit`. The worker rechecks its observation and live checkout
+  before entering the existing durable retire path. The signed stop carries
+  the parent ID, challenge, order digest and per-instance runtime binding.
+  A durable conditional abort also prevents the old untracked job from starting
+  if its stream file survives a crash between journal and configuration writes.
+  Its tombstone survives admission of a later tracked revision. A tracked start
+  encountering that obsolete file builds its replacement from the supplied
+  pipeline so removed settings and credential references cannot carry forward.
+- `action=start_repaired_worker_v1` starts the tracked `deploy` or `restore`
+  attempt on either target. It requires this worker's matching local stop
+  record, the parent operation, job ID and the child's immutable repair secret
+  revision. The node persists that the legacy revision was retired, including on
+  the target that had already stopped. Subsequent whole-pipeline legacy
+  messages for the repaired job are discarded before config merge. Accepted
+  starts use the normal tracked runtime format and can be updated normally.
+  Retries against an absent pipeline leave the existing retirement receipt intact.
+  A changed job, instance, command order, Git commit or expired authorization
+  leaves the current pipeline running.
+
 ## Durable observations and cleanup
 
 `DeploymentLifecycle` is owned by ConfigManager and publishes on an independent

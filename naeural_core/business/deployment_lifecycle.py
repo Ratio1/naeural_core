@@ -21,6 +21,9 @@ SERVICE_KEY = "deeploy_lifecycle"
 OBSERVATION_HKEY = "DEEPLOY_NODE_OPERATIONS"
 # Seconds a report write waits for peer confirmation before the next pass retries it.
 PUBLISH_TIMEOUT = 15
+# Repair the current field at most three times per recipient until its session or the snapshot changes.
+SOURCE_REPLAY_LIMIT = 3
+SOURCE_REPLAY_INTERVAL = 30
 # Shared by lifecycle objects in this interpreter; recreating a journal reader
 # is not evidence that the process owning native plugin threads has exited.
 PROCESS_ID = uuid.uuid4().hex
@@ -68,7 +71,8 @@ def deployment_source_mode(signature, pipeline, instance):
   """
   if signature.upper() not in ("WORKER_APP_RUNNER", "CONTAINER_APP_RUNNER"):
     return None
-  if pipeline.get("DEEPLOY_SPECS", {}).get("job_app_type") == "service":
+  specs = pipeline.get("DEEPLOY_SPECS")
+  if isinstance(specs, dict) and specs.get("job_app_type") == "service":
     return "service"
   return "pinned" if instance.get("PINNED_VERSION") is True else "following"
 
@@ -240,7 +244,7 @@ class DeploymentLifecycle:
     bool
         Whether removal of the current canonical configuration is authorized.
     """
-    specs = current_config.get("DEEPLOY_SPECS", {})
+    specs = current_config.get("DEEPLOY_SPECS") or {}
     previous = current_config.get(OPERATION_KEY)
     mismatch = current_config and (
       str(specs.get("job_id")) != str(operation.get("job_id"))
@@ -519,12 +523,24 @@ class DeploymentLifecycle:
         CStore runtime setter; bounded waits and explicit peers are supplied.
     signer : callable
         Blockchain signing function accepting add_data and use_digest.
+
+    Returns
+    -------
+    None
+        Stops taking observations when shutdown begins.
+
+    Examples
+    --------
+    >>> journal.publish(setter, signer)
     """
     with self.lock:
       pending = []
       stopped_plugins = set()
       observation_failed = False
       for key, record in self.records.items():
+        # The same lock lets close wait for an observation already in progress.
+        if self._stop.is_set():
+          break
         # Do not refresh timestamps for historical readiness without observing
         # that workload. Only a rejected command needs an inactive failure report.
         if not record.get("active", False) and "error" not in record:
@@ -568,6 +584,8 @@ class DeploymentLifecycle:
     pending.sort(key=lambda item: not (item[1]["aborted"] or item[1]["status"] == "failed"))
     ready_reported = []
     for key, record, fingerprint in pending:
+      if self._stop.is_set():
+        break  # Shutdown should wait only for the current write.
       # A superseded snapshot must never be replayed while its replacement awaits confirmation.
       self._source_delivery.pop(key, None)
       ready = record["status"] == "ready" and not record["aborted"]
@@ -584,6 +602,9 @@ class DeploymentLifecycle:
       prefix = "hs:" + hashlib.sha256(OBSERVATION_HKEY.encode()).hexdigest()[:10] + ":"
       success = True
       for field_name in (field + "|" + str(record["sequence"] % 8), field):
+        if self._stop.is_set():
+          success = False  # A partial publication is retried on the next node start.
+          break
         storage_key = prefix + base64.urlsafe_b64encode(field_name.encode()).decode()
         # One unconfirmed write already fails the snapshot; skip the second wait.
         success = success and setter(storage_key, record, owner=self.node_addr, readonly=True,
@@ -596,7 +617,7 @@ class DeploymentLifecycle:
           # A bulk write can succeed with only one acknowledgement. Keep the exact signed current field
           # for the other recipients; never refresh its sequence, timestamp or eight history slots.
           confirmed = self._confirmed_peers(storage_key)
-          due = {peer: None if peer in confirmed else (time.monotonic() + PUBLISH_TIMEOUT, False)
+          due = {peer: None if peer in confirmed else (time.monotonic() + PUBLISH_TIMEOUT, 0, False)
                  for peer in peers if peer != self.node_addr}
           self._source_delivery[key] = (storage_key, record, due)
         if ready:
@@ -607,7 +628,8 @@ class DeploymentLifecycle:
         for key in ready_reported:
           self.records[key]["ready_reported"] = True
         self._save()
-    self._repair_source_delivery(setter)  # New reports always take precedence over a bounded repair.
+    if not self._stop.is_set():
+      self._repair_source_delivery(setter)  # New reports always take precedence over a bounded repair.
     if observation_failed:
       # Preserve the worker's existing throttled error notification after all
       # independently observed jobs have had their publication opportunity.
@@ -624,7 +646,7 @@ class DeploymentLifecycle:
     Returns
     -------
     None
-      A failed transfer remains queued. Superseding observations replace the pending value.
+      A failed transfer remains queued up to the repair limit per snapshot and peer session.
 
     Examples
     --------
@@ -632,36 +654,41 @@ class DeploymentLifecycle:
     """
     now = time.monotonic()
     peers = {peer for _, _, recipients in self._source_delivery.values() for peer in recipients}
-    sessions = {peer: self._peer_session(peer) for peer in peers}  # Sample each destination only once.
+    sessions = {}
+    self._peer_sessions = {peer: session for peer, session in self._peer_sessions.items() if peer in peers}
     returning = set()
-    for peer, (online, uptime) in sessions.items():
+    for peer in peers:
+      try:
+        online, uptime = self._peer_session(peer)
+      except Exception:
+        # A monitor error says nothing about this peer's session and cannot block other destinations.
+        continue
+      sessions[peer] = (online, uptime)
       previous = self._peer_sessions.get(peer)
       if previous is not None and online and (
         not previous[0] or (uptime is not None and previous[1] is not None and uptime < previous[1])
       ):
         returning.add(peer)  # A peer can restart between heartbeats without appearing offline.
-    self._peer_sessions = sessions
+    self._peer_sessions.update(sessions)
     transfer = None
     for storage_key, report, recipients in self._source_delivery.values():
       for peer, pending in recipients.items():
         if peer in returning:
-          pending = recipients[peer] = (now, True)  # Ignore confirmations predating a peer restart.
-        if pending is None or pending[0] > now or not sessions[peer][0]:
+          pending = recipients[peer] = (now, 0, True)  # Ignore confirmations predating a peer restart.
+        if pending is None or pending[0] > now or not sessions.get(peer, (False, None))[0]:
           continue
-        due, force = pending
+        due, tries, force = pending
         if not force and peer in self._confirmed_peers(storage_key):
           recipients[peer] = None  # The broadcast acknowledgement arrived after quorum; no replay needed.
         elif transfer is None or due < transfer[0]:
-          transfer = (due, peer, storage_key, report, recipients)
-    if transfer is not None:
-      _, peer, storage_key, report, recipients = transfer
-      recipients[peer] = (now + 30, True)  # Back off on timeout/exception; other peers get their turn.
-      previous_acks = self._confirmed_peers(storage_key)  # CStore resets this list on each accepted local write.
-      delivered = setter(storage_key, report, owner=self.node_addr, readonly=True, peers=[peer],
-                         include_default_peers=False, timeout=2, max_retries=0)
-      current_acks = self._confirmed_peers(storage_key)
-      if delivered or (current_acks is not previous_acks and peer in current_acks):
-        # Accept the fresh target ack even when global MIN_CONFIRMATIONS exceeds one.
+          transfer = (due, peer, storage_key, report, recipients, tries)
+    if transfer is not None and not self._stop.is_set():
+      _, peer, storage_key, report, recipients, tries = transfer
+      # Debiting the budget before calling the setter also bounds failures that raise.
+      tries += 1
+      recipients[peer] = (now + SOURCE_REPLAY_INTERVAL, tries, True) if tries < SOURCE_REPLAY_LIMIT else None
+      if setter(storage_key, report, owner=self.node_addr, readonly=True, peers=[peer],
+                include_default_peers=False, timeout=2, max_retries=0, require_target_ack=True):
         recipients[peer] = None
 
   def start(self, setter_provider, signer, report_error, cleanup=None, peer_session=None, confirmed_peers=None):
@@ -686,7 +713,25 @@ class DeploymentLifecycle:
     self._thread.start()
 
   def close(self):
-    """Stop publication without discarding pending observations or tombstones."""
+    """Stop observing plugins before their shutdown begins.
+
+    A write already in progress can use its remaining timeout. Pending observations and
+    tombstones are kept in the journal.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> journal.close()
+    """
     self._stop.set()
     if self._thread is not None:
-      self._thread.join(timeout=3)
+      with self.lock:
+        pass  # Wait for the last plugin observation before BusinessManager stops plugin threads.
+      self._thread.join(timeout=3)  # An in-flight CStore wait cannot take new observations.

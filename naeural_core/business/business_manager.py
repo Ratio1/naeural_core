@@ -971,9 +971,12 @@ class BusinessManager(Manager):
             )
           #end try-except
 
-          if plugin is not None:
-            # Persisted pipelines also pick up source policy on their first start after upgrade.
-            plugin._deployment_source_mode = deployment_source_mode(signature, pipeline, upstream_config)
+          if plugin is not None and lifecycle is not None and lifecycle.source_modes:
+            # Include saved Deeploy jobs that predate lifecycle operations. SDK pipelines retain runner defaults.
+            specs = pipeline.get(ct.CONFIG_STREAM.DEEPLOY_SPECS)
+            job_id = specs.get("job_id", specs.get("JOB_ID")) if isinstance(specs, dict) else None
+            if operation or (type(job_id) in (int, str) and job_id != ""):
+              plugin._deployment_source_mode = deployment_source_mode(signature, pipeline, upstream_config)
           if operation and plugin is not None:
             plugin._deployment_operation_key = lifecycle.key(operation)
             lifecycle.attach(pipeline, signature, instance_id, plugin)

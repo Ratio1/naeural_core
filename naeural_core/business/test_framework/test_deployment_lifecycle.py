@@ -406,6 +406,34 @@ class DeploymentLifecycleTest(unittest.TestCase):
       self.publish()
       self.assertEqual(len(self.writes), writes)
 
+  def test_replay_budget_is_per_peer_and_resets_when_peer_returns(self):
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.lifecycle.attach(pipeline, "CONTAINER_APP_RUNNER", "worker", plugin(ready=True))
+    sessions = {"oracle": (True, 100), "other": (True, 200)}
+    self.lifecycle._peer_session = sessions.__getitem__
+    self.lifecycle._confirmed_peers = lambda key: ["other"]
+    with patch.object(module.time, "monotonic", return_value=10) as clock:
+      self.publish()
+      current_field, signed_record, _ = self.writes[-1]
+      def peer_session(peer):
+        if peer == "other":
+          raise RuntimeError("NetMon lookup failed")
+        return sessions[peer]
+      self.lifecycle._peer_session = peer_session
+      # A failing lookup for "other" leaves "oracle" eligible for its bounded retries.
+      for _ in range(module.SOURCE_REPLAY_LIMIT + 2):
+        clock.return_value += module.SOURCE_REPLAY_INTERVAL
+        self.publish(succeed=False)
+      attempts = self.writes[2:]
+      self.assertEqual(len(attempts), module.SOURCE_REPLAY_LIMIT)
+      self.assertTrue(all((key, value) == (current_field, signed_record) for key, value, _ in attempts))
+      self.assertTrue(all(call["peers"] == ["oracle"] and call["require_target_ack"] for _, _, call in attempts))
+      sessions["oracle"] = (True, 1)  # Restart without an intervening offline observation.
+      self.publish()
+      self.assertEqual(len(self.writes[2:]), module.SOURCE_REPLAY_LIMIT + 1)
+
   def test_repair_backoff_preserves_live_report_priority_and_replaces_a_superseded_version(self):
     pipeline = config()
     pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
@@ -417,7 +445,11 @@ class DeploymentLifecycleTest(unittest.TestCase):
     with patch.object(module.time, "monotonic", return_value=10) as clock:
       self.publish()
       clock.return_value += module.PUBLISH_TIMEOUT
-      self.publish(succeed=False)
+      def failing_setter(key, value, **kwargs):
+        self.writes.append((key, value, kwargs))
+        raise RuntimeError("CStore repair failed")
+      with self.assertRaisesRegex(RuntimeError, "CStore repair failed"):
+        self.lifecycle.publish(failing_setter, lambda *args, **kwargs: None)
       first_peer = self.writes[-1][2]["peers"]
       count = len(self.writes)
       self.publish()
@@ -481,6 +513,34 @@ class DeploymentLifecycleTest(unittest.TestCase):
       self.lifecycle.admit(pipeline, "oracle", True)
       self.assertEqual(self.publish()["instances"][0]["source_mode"], expected)
     self.assertIsNone(module.deployment_source_mode("NATIVE_APP", {}, {}))
+
+  def test_close_halts_observation_even_when_write_outlasts_join(self):
+    from threading import Event, Thread
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    runtime = plugin(ready=True)
+    self.lifecycle.attach(pipeline, "CONTAINER_APP_RUNNER", "worker", runtime)
+    write_started, release_write = Event(), Event()
+    self.addCleanup(release_write.set)
+    def setter(key, record, **kwargs):
+      self.writes.append((key, record, kwargs))
+      write_started.set()
+      return release_write.wait(2)
+    reporter = Thread(target=self.lifecycle.publish, args=(setter, lambda *args, **kwargs: None), daemon=True)
+    self.lifecycle._thread = reporter
+    reporter.start()
+    self.assertTrue(write_started.wait(1))
+    with patch.object(reporter, "join") as timeout:
+      self.lifecycle.close()  # Simulate the join returning while CStore is still waiting.
+      timeout.assert_called_once_with(timeout=3)
+    runtime.thread.is_alive = lambda: False
+    release_write.set()
+    reporter.join(1)
+    self.assertFalse(reporter.is_alive())
+    self.lifecycle.publish(setter, lambda *args, **kwargs: None)
+    self.assertEqual(len(self.writes), 1)
+    self.assertEqual(self.lifecycle.records["operation|deploy"]["status"], "ready")
 
   def test_unconfirmed_ready_is_retried_until_confirmed(self):
     self.lifecycle.admit(config(), "oracle", True)
@@ -647,6 +707,26 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     self.assertEqual(store.storage["key"][store.CS_CONFIRMATIONS], 1)
     store._ChainStoreBasePlugin__exec_received_confirm(data, sender="peer2")
     self.assertEqual(store.storage["key"][store.CS_CONFIRMATIONS], 2)
+
+  def test_target_replay_requires_the_new_targets_acknowledgement(self):
+    store = self.make_store()
+    confirm = store._ChainStoreBasePlugin__exec_received_confirm
+    data = {store.CS_KEY: "key", store.CS_VALUE: "value", store.CS_OWNER: "node"}
+    store._set_value("key", "value", owner="node", timeout=.2, max_retries=0)
+    confirm(data, sender="peer2")
+    # An old ack for the same value, or an ack from another peer, cannot satisfy this replay.
+    def other_peer(seconds):
+      store._now += seconds
+      confirm(data, sender="peer1")
+    store.sleep = other_peer
+    kwargs = dict(owner="node", peers=["peer2"], include_default_peers=False, timeout=.2, max_retries=0)
+    self.assertFalse(store._set_value("key", "value", require_target_ack=True, **kwargs))
+    def target_peer(seconds):
+      other_peer(seconds)
+      confirm(data, sender="peer2")
+    store.sleep = target_peer
+    self.assertFalse(store._set_value("key", "value", **kwargs))  # Normal write still uses its configured quorum.
+    self.assertTrue(store._set_value("key", "value", require_target_ack=True, **kwargs))
 
   def test_writes_are_saved_by_the_flush_outside_persistence_lock_and_never_by_process(self):
     # The SerializationManager calls the flush on its own thread every CS_SAVE_INTERVAL seconds.
@@ -1181,6 +1261,40 @@ class ConstructionBarrierTest(unittest.TestCase):
       lifecycle._observe("operation|deploy", lifecycle.records["operation|deploy"])
       self.assertEqual(lifecycle.records["operation|deploy"]["status"], "stopping")
       self.assertIs(lifecycle.plugins[("operation|deploy", "WORKER", "worker")], runtime)
+
+  def test_startup_limits_source_modes_to_deeploy_pipelines(self):
+    for operation, specs, pinned, expected in (
+      (None, None, False, None),
+      (None, {}, True, None),
+      (None, {"job_id": "1"}, False, "following"),
+      (None, {"job_id": "1", "job_app_type": "service"}, False, "service"),
+      ("restore", None, False, "following"),
+      ("deploy", None, True, "pinned"),
+    ):
+      with self.subTest(operation=operation, specs=specs, pinned=pinned), tempfile.TemporaryDirectory() as folder:
+        lifecycle = DeploymentLifecycle(os.path.join(folder, "journal.json"), "node", source_modes=True)
+        pipeline = config(attempt=operation or "deploy")
+        if operation is None:
+          pipeline.pop("DEEPLOY_OPERATION")
+        pipeline["DEEPLOY_SPECS"] = specs
+        group = pipeline["PLUGINS"][0]
+        group["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+        upstream_config = group["INSTANCES"][0]
+        upstream_config["PINNED_VERSION"] = pinned
+        if operation:
+          lifecycle.admit(pipeline, "oracle", True)
+        runtime = plugin(ready=True)
+        runtime.cfg_runs_only_on_supervisor_node = False
+        runtime.start_thread = lambda: None
+        manager = self.manager(lifecycle, lambda **kwargs: runtime)
+        manager._dct_config_streams = {"app": pipeline}
+        manager.get_current_jobs = lambda **kwargs: [
+          (None, None, None, None, None, "app", group["SIGNATURE"], "worker", upstream_config)]
+        self.assertEqual(manager._check_instances(), ["instance"])
+        self.assertIs(manager._dct_current_instances["instance"], runtime)
+        self.assertEqual(getattr(runtime, "_deployment_source_mode", None), expected)
+        if operation:
+          self.assertEqual(lifecycle.records["operation|" + operation]["instances"][0]["source_mode"], expected)
 
   def test_blocked_code_execution_plugins_are_never_constructed(self):
     from naeural_core import constants as ct

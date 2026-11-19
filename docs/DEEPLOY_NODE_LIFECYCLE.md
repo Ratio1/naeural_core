@@ -75,8 +75,10 @@ sequence, and Unix `updated_at`. They are signed with
 when its observable state changes, with a `PUBLISH_TIMEOUT` (15 s) confirmation
 wait, and is retried on the next pass until a write is confirmed. Stop and failure
 snapshots are written first in each pass, and a snapshot's second field is
-skipped once its first write is unconfirmed. Each updated app runner reports its
-`source_mode` (`following`, `pinned` or `service`) from admission. A
+skipped once its first write is unconfirmed. Each updated Deeploy app runner reports its
+`source_mode` (`following`, `pinned` or `service`) from admission. Saved
+Deeploy pipelines use the same source policy after node restart. Direct SDK
+pipelines keep the runner's regular source and pull settings. A
 following runner continues to report changes to its status and actual commit or
 image after readiness. A branch lookup failure can coexist with readiness and
 appears as `source_error: SOURCE_UNREACHABLE`. A new start can clear a workload
@@ -88,6 +90,9 @@ their confirmed ready snapshot until retirement or stop.
 The node replays the latest signed current field to an intended oracle that
 missed publication, came back online, or whose reported process uptime fell.
 The replay preserves the original sequence, timestamp and history slots.
+It waits for an acknowledgement from that specific oracle and makes up to
+three attempts per snapshot and oracle session. A new observation or a
+returning oracle starts a fresh retry budget.
 The node accepts process uptime from direct heartbeats and fresh authorized
 network summaries. If an older summary omits uptime and the oracle restarts
 after acknowledging but before its disk flush, a restart that never appears

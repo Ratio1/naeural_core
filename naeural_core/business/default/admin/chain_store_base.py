@@ -924,7 +924,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return self.__chain_storage.get(key, {}).get(self.CS_MIN_CONFIRMATIONS, 0)
 
 
-  def __reset_confirmations(self, key, peers=None, include_default_peers=True):
+  def __reset_confirmations(self, key, peers=None, include_default_peers=True, require_target_ack=False):
     """
     Reset confirmation counters for a stored key.
 
@@ -937,6 +937,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     include_default_peers : bool, optional
       If True, include the default chain peer set when deriving the minimum
       confirmation count. Default is True.
+    require_target_ack : bool, optional
+      Use one confirmation for replay to a single explicit recipient.
 
     Returns
     -------
@@ -947,7 +949,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     self.__chain_storage[key]["target_peers"] = self.__get_target_peers(
       peers=peers, include_default_peers=include_default_peers,
     )
-    self.__chain_storage[key][self.CS_MIN_CONFIRMATIONS] = self.__get_min_peer_confirmations(
+    self.__chain_storage[key][self.CS_MIN_CONFIRMATIONS] = 1 if require_target_ack else self.__get_min_peer_confirmations(
       peers=peers,
       include_default_peers=include_default_peers,
     )
@@ -973,6 +975,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     local_sync_storage_op=False,
     peers=None,
     include_default_peers=True,
+    require_target_ack=False,
   ):
     """
     Set a key-value pair in the local chain-store replica.
@@ -1004,6 +1007,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     include_default_peers : bool, optional
       If True, include the default chain peer set when deriving confirmation
       thresholds. Default is True.
+    require_target_ack : bool, optional
+      Wait for one confirmation when replaying to a single explicit recipient.
 
     Returns
     -------
@@ -1044,6 +1049,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       key,
       peers=peers,
       include_default_peers=include_default_peers,
+      require_target_ack=require_target_ack,
     )
     if local_sync_storage_op:
       # set the confirmations to -1 to indicate that the key is remote synced on this node
@@ -1064,6 +1070,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     timeout=None,
     max_retries=None,
     debug=False, 
+    require_target_ack=False,
   ):
     """
     Set a value in chain storage and optionally wait for confirmations.
@@ -1102,6 +1109,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       the built-in default.
     debug : bool, optional
       If True, print debug messages. Default is False.
+    require_target_ack : bool, optional
+      Confirm a replay to one explicit peer using that peer's acknowledgement.
+      Intended for the node reporter's delivery repair, after normal quorum.
 
     Returns
     -------
@@ -1185,6 +1195,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         peers=peers,
         include_default_peers=include_default_peers,
       )
+      if require_target_ack and (
+        include_default_peers or local_sync_storage_op or len(target_peers) != 1 or value is None
+      ):
+        raise ValueError("A targeted acknowledgement requires a local value write to one explicit peer.")
       # A local write of a Tunnels Manager namespace goes only to oracle registry members, the senders a write or a
       # sync request of it is taken from: the default peers (the allowed list) and the configured or extra peers may
       # name other nodes, which are left out of this write's targets.
@@ -1291,6 +1305,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             readonly=readonly, token=token,
             peers=peers,
             include_default_peers=include_default_peers,
+            require_target_ack=require_target_ack,
           )
           # The outcome counted for this call: a delete of a key not held, a write of what was already stored,
           # or a change of the replica. Before, nothing was counted.

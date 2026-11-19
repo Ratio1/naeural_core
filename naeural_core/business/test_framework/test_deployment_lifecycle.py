@@ -542,6 +542,47 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.assertEqual(len(self.writes), 1)
     self.assertEqual(self.lifecycle.records["operation|deploy"]["status"], "ready")
 
+  def test_close_does_not_wait_on_admission_lock_held_by_orphan_cleanup(self):
+    from threading import Event, Thread
+    pipeline = config()
+    pipeline["PLUGINS"][0]["INSTANCES"].append({"INSTANCE_ID": "second"})
+    self.lifecycle.admit(pipeline, "oracle", True)
+    for instance in ("worker", "second"):
+      self.lifecycle.attach(pipeline, "WORKER", instance, plugin(ready=True))
+    stopped = deepcopy(pipeline)
+    stopped["DEEPLOY_OPERATION"]["action"] = "stop"
+    self.lifecycle.admit(stopped, "oracle", True)
+    self.lifecycle = DeploymentLifecycle(self.path, "node")  # The old plugin objects are unavailable.
+    cleanup_started, release_cleanup, closed = Event(), Event(), Event()
+    self.addCleanup(release_cleanup.set)
+    calls = []
+    def cleanup(app, signature, instance):
+      calls.append(instance)
+      cleanup_started.set()
+      return release_cleanup.wait(5)
+    self.lifecycle._cleanup = cleanup
+    def setter(*args, **kwargs):
+      self.writes.append(args)
+      return True
+    reporter = Thread(target=self.lifecycle.publish, args=(setter, lambda *args, **kwargs: None), daemon=True)
+    self.lifecycle._thread = reporter
+    reporter.start()
+    self.assertTrue(cleanup_started.wait(2))
+    def close():
+      self.lifecycle.close()
+      closed.set()
+    with patch.object(reporter, "join") as timeout:
+      closer = Thread(target=close, daemon=True)
+      closer.start()
+      # Simulate the join expiring with Docker cleanup still holding admission.
+      self.assertTrue(closed.wait(2))
+      timeout.assert_called_once_with(timeout=3)
+    release_cleanup.set()
+    reporter.join(2)
+    self.assertFalse(reporter.is_alive())
+    self.assertEqual(calls, ["worker"])
+    self.assertFalse(self.writes)
+
   def test_unconfirmed_ready_is_retried_until_confirmed(self):
     self.lifecycle.admit(config(), "oracle", True)
     self.lifecycle.attach(config(), "WORKER", "worker", plugin(ready=True))

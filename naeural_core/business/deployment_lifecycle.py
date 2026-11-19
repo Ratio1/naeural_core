@@ -96,6 +96,8 @@ class DeploymentLifecycle:
     self.source_modes = source_modes
     self.process_id = PROCESS_ID
     self.lock = threading.RLock()
+    # Shutdown waits for live plugin observation, independently of journal I/O and orphan cleanup.
+    self._observation_lock = threading.Lock()
     self.records = {}
     self.plugins = {}
     self._published = {}
@@ -433,6 +435,8 @@ class DeploymentLifecycle:
   def _observe(self, key, record):
     """Aggregate plugin evidence without executing plugin workload methods."""
     for instance in record["instances"]:
+      if self._stop.is_set():
+        return  # An in-progress Docker cleanup may finish, but shutdown must not start another.
       if record["aborted"] and instance["status"] == "stopped":
         # Stop evidence remains valid after releasing the runtime object.
         continue
@@ -538,7 +542,6 @@ class DeploymentLifecycle:
       stopped_plugins = set()
       observation_failed = False
       for key, record in self.records.items():
-        # The same lock lets close wait for an observation already in progress.
         if self._stop.is_set():
           break
         # Do not refresh timestamps for historical readiness without observing
@@ -547,11 +550,19 @@ class DeploymentLifecycle:
           continue
         if record.get("active", False):
           try:
-            self._observe(key, record)
+            if record["aborted"]:
+              self._observe(key, record)  # Orphan cleanup holds admission, but cannot report execution failure.
+            else:
+              with self._observation_lock:
+                if self._stop.is_set():
+                  break
+                self._observe(key, record)
           except Exception:
             # One workload's observer/reaper cannot withhold other jobs' reports.
             observation_failed = True
             continue
+          if self._stop.is_set():
+            break  # Do not publish a snapshot interrupted partway through observation.
         if record["aborted"]:
           for instance in record["instances"]:
             if instance["status"] == "stopped":
@@ -732,6 +743,6 @@ class DeploymentLifecycle:
     """
     self._stop.set()
     if self._thread is not None:
-      with self.lock:
+      with self._observation_lock:
         pass  # Wait for the last plugin observation before BusinessManager stops plugin threads.
-      self._thread.join(timeout=3)  # An in-flight CStore wait cannot take new observations.
+      self._thread.join(timeout=3)  # An in-flight CStore wait or cleanup cannot take new observations.

@@ -294,7 +294,7 @@ class DeploymentLifecycle:
     """
     items = proof.get("instances") or []
     # Older direct parent STOPs have no job ID. New conditional STOPs must name it explicitly.
-    scope_matches = proof["job_id"] == job_id if "job_id" in proof else (
+    scope_matches = (type(proof["job_id"]) is int and proof["job_id"] == job_id) if "job_id" in proof else (
       proof.get("operation_id") == parent and "parent_operation_id" not in proof
     )
     if (proof.get("status") != "stopped" or proof.get("app_id") != name or proof.get("revision") != 0
@@ -326,13 +326,22 @@ class DeploymentLifecycle:
     >>> service._save_worker_inspection(name, operation, commit, confirm_prior_stop=True)  # doctest: +SKIP
     """
     key = operation["operation_id"] + "|inspect"
+    previous = self.records.get(key)
     self.records[key] = dict(operation_id=operation["operation_id"], attempt="inspect", app_id=name,
       job_id=operation["job_id"], revision=operation["revision"], coordinator=operation["coordinator"], node_addr=self.node_addr,
-      challenge=operation["challenge"], expires_at=operation["expires_at"], sequence=self.records.get(key, {}).get("sequence", 0),
+      challenge=operation["challenge"], expires_at=operation["expires_at"], sequence=(previous or {}).get("sequence", 0),
       updated_at=time.time(), peers=[operation["coordinator"]], aborted=False, active=False, status="observed",
       instances=[dict(signature="WORKER_APP_RUNNER", instance_id=operation["instance_id"], status="observed",
                       runtime_artifacts={"git_commit": commit})], **binding)
-    self._save()  # Signing and CStore publication run outside the command handler.
+    try:
+      self._save()  # Signing and CStore publication run outside the command handler.
+    except OSError:
+      # A failed journal write must not leave an observation available for publication.
+      if previous is None:
+        self.records.pop(key, None)
+      else:
+        self.records[key] = previous
+      raise
     if binding.get("confirm_prior_stop") is True:
       # The exact stopped legacy instance must remain fenced while the coordinator prepares its start.
       self._legacy_repair_aborts.setdefault(name, set()).add((str(operation["job_id"]), 0))

@@ -1202,6 +1202,11 @@ class DeploymentCommandTest(unittest.TestCase):
       confirm()
       self.assertNotIn(key, service.records)
       inspection.owner._business_manager.current_instances.clear()
+      with patch.object(service, "_save", side_effect=OSError("journal unavailable")):
+        with self.assertRaises(OSError):
+          confirm()
+      self.assertNotIn(key, service.records)  # The publisher cannot advertise an undurable inspection.
+      self.assertTrue(service.allows_untracked_update(legacy, {}))
       confirm()
       receipt = service.records[key]
       self.assertTrue(receipt["confirm_prior_stop"])

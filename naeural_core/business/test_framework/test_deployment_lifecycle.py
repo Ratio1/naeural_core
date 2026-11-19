@@ -1198,6 +1198,9 @@ class DeploymentCommandTest(unittest.TestCase):
       inspection.owner._business_manager.current_instances["worker"] = active
       confirm()
       self.assertNotIn(key, service.records)
+      active.thread = None  # A half-created worker makes prior-stop confirmation inconclusive.
+      confirm()
+      self.assertNotIn(key, service.records)
       inspection.owner._business_manager.current_instances.clear()
       confirm()
       receipt = service.records[key]
@@ -1206,6 +1209,13 @@ class DeploymentCommandTest(unittest.TestCase):
       self.assertNotIn("config_seal_hash", receipt)
       self.assertNotIn("order_digest", receipt)
       self.assertEqual(inspection.dct_config_streams, {})
+      messages = []
+      inspection.P = lambda msg, **kw: messages.append(msg)
+      rebooted = DeploymentLifecycle(journal, "node")
+      inspection.shmem[module.SERVICE_KEY] = rebooted
+      inspection.update_config_stream(self.command(legacy), "oracle-id", "session")
+      self.assertEqual(inspection.dct_config_streams, {})  # The STOP confirmation fences replay before start.
+      self.assertIn("'app'", messages[0])
       for attempt, revision in (("deploy", 1), ("restore", 0)):
         start["DEEPLOY_SPECS"].update(revision=revision, secret_revision="operation:repair_v1:" + attempt)
         start["DEEPLOY_OPERATION"].update(attempt=attempt, revision=revision)
@@ -1224,6 +1234,16 @@ class DeploymentCommandTest(unittest.TestCase):
         self.assertEqual(harness.dct_config_streams["app"], start)
         self.assertEqual(len(messages), 4)
         self.assertTrue(all("UPDATE_CONFIG" in msg and "do-not-log" not in msg for msg in messages))
+        notifications = []
+        harness._create_notification = lambda **kwargs: notifications.append(kwargs)
+        update = dict(NAME="app", SIGNATURE="WORKER_APP_RUNNER", INSTANCE_ID="worker",
+                      INSTANCE_CONFIG={"ENV": {"SECRET": "do-not-log"}})
+        self.assertIsNone(harness.update_pipeline_instance(update, "oracle-id", "session"))
+        harness.batch_update_pipeline_instance([update], "oracle-id", "session")
+        self.assertEqual(notifications[-1]["BATCH_UPDATE_PIPELINE_INSTANCE"], [])
+        self.assertTrue(any("UPDATE_PIPELINE_INSTANCE" in msg and "'app'" in msg for msg in messages))
+        self.assertTrue(all("do-not-log" not in msg for msg in messages))
+        self.assertEqual(harness.dct_config_streams["app"], start)
         self.assertFalse(service.allowed(legacy))
         self.assertTrue(service.allows_untracked_update(dict(legacy, NAME="unrelated"), {}))
       later = config(revision=2)
@@ -1243,6 +1263,9 @@ class DeploymentCommandTest(unittest.TestCase):
     constants = SimpleNamespace(
       CONFIG_STREAM=SimpleNamespace(NAME="NAME", INITIATOR_ID="INITIATOR_ID"),
       COMMS=SimpleNamespace(COMM_RECV_MESSAGE=SimpleNamespace(K_VALIDATED="VALIDATED", K_SENDER_ADDR="EE_SENDER")),
+      PAYLOAD_DATA=SimpleNamespace(NAME="NAME", INSTANCE_CONFIG="INSTANCE_CONFIG"),
+      PLUGIN_INFO=SimpleNamespace(SIGNATURE="SIGNATURE", INSTANCE_ID="INSTANCE_ID"),
+      STATUS_TYPE=SimpleNamespace(STATUS_EXCEPTION="error", STATUS_NORMAL="normal"),
     )
     commands = _load_class_from_source(source, "ConfigCommandHandlers", extra_globals={
       "ct": constants, "OPERATION_KEY": "DEEPLOY_OPERATION", "SERVICE_KEY": "deeploy_lifecycle",

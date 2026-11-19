@@ -47,7 +47,7 @@ class ConfigCommandHandlers:
     lifecycle = self.shmem[SERVICE_KEY]
     if operation is None and not lifecycle.allows_untracked_update(delta_config_stream, self.dct_config_streams.get(stream_name, {})):
       # Dotted fields and updates without PLUGINS can still override a repaired stream.
-      self.P("Ignored a legacy UPDATE_CONFIG for a repaired Deeploy pipeline.", color="y")
+      self.P(f"Ignored a legacy UPDATE_CONFIG for repaired Deeploy pipeline {stream_name!r}.", color="y")
       return
     if operation is not None:
       if operation.get("action") in ("retire", "inspect_worker_v1", "retire_worker_v1"):
@@ -233,7 +233,14 @@ class ConfigCommandHandlers:
       notif_code=ct.NOTIFICATION_CODES.PIPELINE_FAILED
       info = "Command should contain NAME, SIGNATURE, INSTANCE_ID as well as INSTANCE_CONFIG 'delta' object and MUST address a existing pipeline. Full received command: {}".format(dct_config_data)
     else:
-      
+      lifecycle = self.shmem.get(SERVICE_KEY)
+      if lifecycle is not None and not lifecycle.allows_untracked_update(
+        {"NAME": pipeline_name}, self.dct_config_streams[pipeline_name],
+      ):
+        # Batch updates also reach this gate through the single-instance handler.
+        self.P(f"Ignored a legacy UPDATE_PIPELINE_INSTANCE for repaired Deeploy pipeline {pipeline_name!r}.", color="y")
+        return None
+
       if session_id is None:
         session_id = self.dct_config_streams[pipeline_name].get(ct.PAYLOAD_DATA.SESSION_ID)
       else:
@@ -354,7 +361,7 @@ class ConfigCommandHandlers:
         if res is not None:
           results.append(res)
       #endfor
-      msg = "Successfully updated {} pipelines with `batch_update_pipeline_instance`".format(len(lst_configs))
+      msg = "Successfully updated {} pipelines with `batch_update_pipeline_instance`".format(len(results))
       info = " Pipelines:\n  - " +"\n  - ".join([
         str(res)
         for res in results

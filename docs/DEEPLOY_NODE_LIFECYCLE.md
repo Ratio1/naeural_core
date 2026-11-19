@@ -63,7 +63,10 @@ and response metadata. Older command handlers reject these action names.
   `confirm_prior_stop=true`. It verifies the matching local journal STOP
   and Git pin, absence of the stream and live instance, and no pending start.
   The signed receipt carries that flag and the pin without a config seal or
-  order digest. This verifies both target workers' compatibility before retirement.
+  order digest. The worker persists the legacy replay fence with this receipt
+  before responding. An older direct parent STOP may lack a job ID. That
+  compatibility path still binds the exact parent, coordinator, pipeline and
+  instance. New conditional STOP records must include the job ID.
 - `action=retire_worker_v1`, `attempt=retire` uses a new child operation ID and
   supplies `parent_operation_id`, the same challenge and deadline, accepted
   digest, ciphertext and `git_commit`. The worker rechecks its observation and live checkout
@@ -81,8 +84,9 @@ and response metadata. Older command handlers reject these action names.
   record, the parent operation, job ID and the child's immutable repair secret
   revision. The node persists that the legacy revision was retired, including on
   the target that had already stopped. Subsequent untracked `UPDATE_CONFIG`
-  messages for the repaired job, including partial updates and dotted keys,
-  are discarded before config merge with a diagnostic that omits the payload. Accepted
+  messages for the repaired job, including partial and dotted updates, and
+  single or batched legacy instance updates are discarded before config
+  merge. The diagnostic names the pipeline and omits the payload. Accepted
   starts use the normal tracked runtime format and can be updated normally.
   Retries against an absent pipeline leave the existing retirement receipt intact.
   A changed job, instance, command order, Git commit or expired authorization

@@ -134,7 +134,7 @@ class DeploymentLifecycle:
         raise ValueError("Invalid deployment lifecycle journal")
       # A persisted readiness observation is not evidence after node restart.
       for record in self.records.values():
-        if record.get("parent_operation_id") and "job_id" in record:
+        if (record.get("parent_operation_id") or record.get("confirm_prior_stop") is True) and "job_id" in record:
           self._legacy_repair_aborts.setdefault(record["app_id"], set()).add((str(record["job_id"]), 0))
         if record["attempt"] != "inspect" and record["status"] not in ("stopping", "stopped", "failed"):
           record["status"] = "starting"
@@ -293,9 +293,13 @@ class DeploymentLifecycle:
     True
     """
     items = proof.get("instances") or []
+    # Older direct parent STOPs have no job ID. New conditional STOPs must name it explicitly.
+    scope_matches = proof["job_id"] == job_id if "job_id" in proof else (
+      proof.get("operation_id") == parent and "parent_operation_id" not in proof
+    )
     if (proof.get("status") != "stopped" or proof.get("app_id") != name or proof.get("revision") != 0
         or proof.get("node_addr") != self.node_addr or proof.get("coordinator") != sender
-        or proof.get("parent_operation_id", proof.get("operation_id")) != parent or proof.get("job_id", job_id) != job_id
+        or proof.get("parent_operation_id", proof.get("operation_id")) != parent or not scope_matches
         or len(items) != 1 or items[0].get("signature") != "WORKER_APP_RUNNER"
         or items[0].get("instance_id") != instance_id or items[0].get("status") != "stopped"):
       return None  # Only this worker's own confirmed prior Git instance can authorize a start.
@@ -329,6 +333,9 @@ class DeploymentLifecycle:
       instances=[dict(signature="WORKER_APP_RUNNER", instance_id=operation["instance_id"], status="observed",
                       runtime_artifacts={"git_commit": commit})], **binding)
     self._save()  # Signing and CStore publication run outside the command handler.
+    if binding.get("confirm_prior_stop") is True:
+      # The exact stopped legacy instance must remain fenced while the coordinator prepares its start.
+      self._legacy_repair_aborts.setdefault(name, set()).add((str(operation["job_id"]), 0))
 
   def check_worker_repair(self, name, get_current, operation, sender, validated, blockchain, business, retire_current):
     """Inspect a legacy worker, or check the same live evidence before retirement.
@@ -404,6 +411,10 @@ class DeploymentLifecycle:
       # Snapshot the manager's instance map before matching this pipeline.
       return [p for p in list(business.current_instances.values()) if p is not None and p.get_stream_id() == name]
 
+    def worker_is_running(worker):
+      thread = getattr(worker, "thread", None)
+      return thread is not None and thread.is_alive()
+
     inspection_key = parent + "|inspect"
     retire_key = operation_id + "|retire"
     job_id = operation["job_id"]
@@ -414,7 +425,7 @@ class DeploymentLifecycle:
         return None  # Discard superseded challenges and keep tracked workers out of repair preflight.
       workers = workers_for_pipeline()
       if confirm_stop:
-        if not inspect or current or any(p.thread.is_alive() for p in workers) or any(
+        if not inspect or current or any(getattr(p, "thread", None) is None or worker_is_running(p) for p in workers) or any(
             r["app_id"] == name and r.get("active") and not r["aborted"] for r in self.records.values()):
           return None  # A past stop cannot attest that this worker is still vacant.
         proof = self.records.get(parent + "|retire", {})
@@ -436,7 +447,7 @@ class DeploymentLifecycle:
       if not isinstance(instance, dict) or instance.get("INSTANCE_ID") != instance_id or len(workers) != 1:
         return None
       worker = workers[0]
-      if worker.get_signature() != "WORKER_APP_RUNNER" or worker.get_instance_id() != instance_id or not worker.thread.is_alive():
+      if worker.get_signature() != "WORKER_APP_RUNNER" or worker.get_instance_id() != instance_id or not worker_is_running(worker):
         return None  # A stale BusinessManager entry cannot attest to a live worker.
       lists = [specs.get("current_target_nodes"), instance.get("BUILD_AND_RUN_COMMANDS"), instance.get("CHAINSTORE_PEERS")]
       if any(not isinstance(items, list) or not items or not all(isinstance(v, str) and v for v in items) for items in lists):
@@ -477,7 +488,7 @@ class DeploymentLifecycle:
     with self.lock:
       workers = workers_for_pipeline()
       if (time.time() >= expires or get_current() is not current or len(workers) != 1 or workers[0] is not worker
-          or getattr(worker, "container", None) is not container or not worker.thread.is_alive()
+          or getattr(worker, "container", None) is not container or not worker_is_running(worker)
           or worker.cfg_build_and_run_commands != lists[1] or worker.cfg_chainstore_peers != lists[2]
           or not _matches_repair_fingerprint(current, expected)
           or self.records.get(inspection_key) is not observed):

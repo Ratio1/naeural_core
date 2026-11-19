@@ -45,6 +45,7 @@ class ConfigCommandHandlers:
 
     operation = delta_config_stream.get(OPERATION_KEY)
     lifecycle = self.shmem[SERVICE_KEY]
+    replace_stopped_attempt = False  # Repair rollback may find the failed attempt's file after a restart.
     if operation is None and not lifecycle.allows_untracked_update(delta_config_stream, self.dct_config_streams.get(stream_name, {})):
       # Dotted fields and updates without PLUGINS can still override a repaired stream.
       self.P(f"Ignored a legacy UPDATE_CONFIG for repaired Deeploy pipeline {stream_name!r}.", color="y")
@@ -81,6 +82,12 @@ class ConfigCommandHandlers:
         if occupant and ((not tracked and lifecycle.allowed(occupant))
                          or (tracked and tracked.get("operation_id") != operation.get("operation_id"))):
           return  # A worker reoccupied after the stopped-worker preflight cannot be silently overwritten.
+        if tracked and lifecycle.key(tracked) != lifecycle.key(operation):
+          # Verify the stopped predecessor before admitting a start that changes the active journal record.
+          if (operation["attempt"] != "restore" or tracked["attempt"] != "deploy"
+              or not lifecycle.stopped(occupant)):
+            return
+          replace_stopped_attempt = True
       if not lifecycle.admit(delta_config_stream, sender_addr, validated_command):
         return
       if operation["action"] == "start_repaired_worker_v1":
@@ -118,8 +125,8 @@ class ConfigCommandHandlers:
     #endif
 
     config_stream = self.dct_config_streams.get(stream_name, {})
-    if (operation is not None and operation["action"] == "start" and config_stream and
-        config_stream.get(OPERATION_KEY) is None and not lifecycle.allowed(config_stream)):
+    if replace_stopped_attempt or (operation is not None and operation["action"] == "start" and config_stream and
+                                   config_stream.get(OPERATION_KEY) is None and not lifecycle.allowed(config_stream)):
       # A crash after conditional retirement may leave this obsolete file. Build the accepted tracked
       # replacement from its complete input so removed fields and old secret references cannot survive.
       config_stream = {}

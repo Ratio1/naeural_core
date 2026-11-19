@@ -76,6 +76,9 @@ and response metadata. Older command handlers reject these action names.
   attaches or reports cached artifact identifiers.
   A durable conditional abort also prevents the old untracked job from starting
   if its stream file survives a crash between journal and configuration writes.
+  The reporter sees retirement only after the journal file and its directory
+  entry are synced. A restart syncs the directory before using the recovered
+  journal.
   Its tombstone survives admission of a later tracked revision. A tracked start
   encountering that obsolete file builds its replacement from the supplied
   pipeline so removed settings and credential references cannot carry forward.
@@ -90,6 +93,9 @@ and response metadata. Older command handlers reject these action names.
   or restoration and are rejected for a retired local configuration. The
   instance command format carries no deployment revision. The diagnostic
   names the pipeline and omits the payload.
+  A restore that finds the failed deployment's config file after a restart
+  replaces it with the complete restore config after verifying the stopped
+  attempt in the journal.
   Retries against an absent pipeline leave the existing retirement receipt intact.
   A changed job, instance, command order, Git commit or expired authorization
   leaves the current pipeline running.

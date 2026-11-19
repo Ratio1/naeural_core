@@ -119,6 +119,53 @@ class DeploymentLifecycleTest(unittest.TestCase):
     instance._deployment_stopped = True
     self.assertEqual(self.publish()["status"], "stopped")
 
+  def test_repair_retirement_is_hidden_until_durable(self):
+    legacy = config(revision=0)
+    legacy.pop("DEEPLOY_OPERATION")
+    legacy["DEEPLOY_SPECS"] = {"job_id": 31}
+    retirement = config("retire", "retire", 0)["DEEPLOY_OPERATION"]
+    retirement.update(job_id=31)
+    evidence = dict(parent_operation_id="parent", challenge="a"*32, order_digest="b"*64,
+                    config_seal_hash="c"*64, git_commit="d"*40, job_id=31)
+    cleanup = []
+    self.lifecycle._cleanup = lambda *args: cleanup.append(args) or True
+    for target, method in ((module.os, "replace"), (self.lifecycle, "_sync_journal_directory")):
+      with self.subTest(failing=method):
+        with patch.object(target, method, side_effect=OSError("fixture journal failure")):
+          with self.assertRaises(OSError):
+            self.lifecycle.retire("app", legacy, retirement, "oracle", True, repair_evidence=evidence)
+        self.assertTrue(self.lifecycle.allowed(legacy))
+        self.assertEqual(self.lifecycle.records, {})
+        self.lifecycle.publish(lambda *args, **kwargs: self.fail("Undurable STOP"), lambda *a, **kw: None)
+        self.assertEqual(cleanup, [])
+        self.assertEqual(Path(self.path).exists(), method == "_sync_journal_directory")
+
+    # A restart seeing the replaced file must sync its directory before that snapshot can act.
+    with patch.object(DeploymentLifecycle, "_sync_journal_directory", side_effect=OSError("still unavailable")):
+      with self.assertRaises(OSError):
+        DeploymentLifecycle(self.path, "node")
+    self.lifecycle = DeploymentLifecycle(self.path, "node")
+    self.assertFalse(self.lifecycle.allowed(legacy))
+    self.lifecycle._cleanup = lambda *args: cleanup.append(args) or True
+    self.assertEqual(self.publish()["status"], "stopped")
+    self.assertEqual(len(cleanup), 1)
+
+  def test_repair_retirement_can_retry_after_a_failed_replace(self):
+    legacy = config(revision=0)
+    legacy.pop("DEEPLOY_OPERATION")
+    legacy["DEEPLOY_SPECS"] = {"job_id": 31}
+    retire = config("retire", "retire", 0)["DEEPLOY_OPERATION"]
+    retire.update(job_id=31)
+    evidence = dict(parent_operation_id="parent", challenge="a"*32, order_digest="b"*64,
+                    config_seal_hash="c"*64, git_commit="d"*40, job_id=31)
+    with patch.object(module.os, "replace", side_effect=OSError("fixture rename failure")):
+      with self.assertRaises(OSError):
+        self.lifecycle.retire("app", legacy, retire, "oracle", True, repair_evidence=evidence)
+    self.assertTrue(self.lifecycle.retire("app", legacy, retire, "oracle", True, repair_evidence=evidence))
+    self.assertFalse(self.lifecycle.allowed(legacy))
+    self.lifecycle._cleanup = lambda *args: True
+    self.assertEqual(self.publish()["status"], "stopped")
+
   def test_stopped_retirements_release_all_plugin_aliases_but_keep_evidence(self):
     class Runtime:
       pass

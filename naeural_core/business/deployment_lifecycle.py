@@ -189,6 +189,8 @@ class DeploymentLifecycle:
         self.records = json.load(stream)
       if not isinstance(self.records, dict):
         raise ValueError("Invalid deployment lifecycle journal")
+      # A process can restart after rename but before the directory sync was acknowledged.
+      self._sync_journal_directory()
       # A persisted readiness observation is not evidence after node restart.
       for record in self.records.values():
         if (record.get("parent_operation_id") or record.get("confirm_prior_stop") is True) and "job_id" in record:
@@ -200,25 +202,58 @@ class DeploymentLifecycle:
             if not record.get("ready_reported") or instance.get("source_mode") == "following":
               instance["status"] = "initializing"
 
-  def _save(self):
-    """Atomically persist the journal, propagating every durability failure."""
+  def _save(self, records=None):
+    """Persist a journal snapshot atomically and acknowledge its durability.
+
+    Parameters
+    ----------
+    records : dict or None
+      Staged snapshot, or the current journal when omitted.
+
+    Returns
+    -------
+    None
+      Raises on any failed write or sync.
+
+    Examples
+    --------
+    >>> service._save(staged_records)  # doctest: +SKIP
+    """
     folder = os.path.dirname(self.path)
     os.makedirs(folder, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".deeploy-", dir=folder)
     try:
       with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(self.records, stream, sort_keys=True)
+        json.dump(self.records if records is None else records, stream, sort_keys=True)
         stream.flush()
         os.fsync(stream.fileno())
       os.replace(temporary, self.path)
-      directory = os.open(folder, os.O_RDONLY)
-      try:
-        os.fsync(directory)
-      finally:
-        os.close(directory)
+      self._sync_journal_directory()
     finally:
       if os.path.exists(temporary):
         os.unlink(temporary)
+
+  def _sync_journal_directory(self):
+    """Confirm durability of the directory entry for the journal.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+      Raises if the directory cannot be synced.
+
+    Examples
+    --------
+    >>> service._sync_journal_directory()  # doctest: +SKIP
+    """
+    directory = os.open(os.path.dirname(self.path), os.O_RDONLY)
+    try:
+      os.fsync(directory)
+    finally:
+      os.close(directory)
 
   @staticmethod
   def key(operation):
@@ -288,12 +323,14 @@ class DeploymentLifecycle:
         raise ValueError("Deployment attempt identity conflict")
       if current and operation["action"] == "start" and (current["aborted"] or not current.get("active", False)):
         return False
+      # Stage this attempt and affected active flags. Other journal entries keep their object identity.
+      staged = self.records.copy()
       if current is None:
         other_active = any(record.get("active", False) and record["app_id"] == config["NAME"] for record in self.records.values())
         if operation["action"] in ("start", "retire") and not rejected:
-          for record in self.records.values():
-            if record["app_id"] == config["NAME"]:
-              record["active"] = False
+          for record_key, record in self.records.items():
+            if record["app_id"] == config["NAME"] and record.get("active"):
+              staged[record_key] = dict(record, active=False)
         instances = []
         for group in config.get("PLUGINS", []):
           for item in group.get("INSTANCES", []):
@@ -321,7 +358,9 @@ class DeploymentLifecycle:
           current["instances"][0]["runtime_artifacts"] = {"git_commit": repair_evidence["git_commit"]}
         if repair_start:
           current.update(parent_operation_id=parent, job_id=job_id)  # The already-stopped worker also fences legacy replay.
-        self.records[key] = current
+      else:
+        current = current.copy()  # The transition below only changes top-level fields.
+      staged[key] = current
       if operation["action"] in ("stop", "retire") and not rejected:
         current["aborted"] = True
         if current["status"] != "stopped":
@@ -329,7 +368,8 @@ class DeploymentLifecycle:
       if rejected:
         current["status"] = "failed"
         current["error"] = {"code": "CONFIGURATION_REJECTED", "message": ERRORS["CONFIGURATION_REJECTED"]}
-      self._save()
+      self._save(staged)  # A failed write must leave cleanup and publication on the old snapshot.
+      self.records = staged
       if repair_evidence is not None or repair_start:
         # Preserve the tombstone when a tracked deployment takes over, including before its config-file write.
         self._legacy_repair_aborts.setdefault(current["app_id"], set()).add((str(current["job_id"]), 0))
@@ -662,6 +702,31 @@ class DeploymentLifecycle:
     with self.lock:
       record = self.records.get(self.key(operation))
       return record is not None and record.get("active", False) and not record["aborted"]
+
+  def stopped(self, config):
+    """Check whether the journal recorded a stop for this exact local attempt.
+
+    Parameters
+    ----------
+    config : dict
+      Local tracked pipeline whose file may have survived a restart.
+
+    Returns
+    -------
+    bool
+      Whether the attempt was aborted and fully stopped.
+
+    Examples
+    --------
+    >>> service.stopped(occupied_pipeline)  # doctest: +SKIP
+    """
+    operation = config[OPERATION_KEY]
+    with self.lock:
+      record = self.records.get(self.key(operation), {})
+      return (record.get("aborted") is True and record.get("status") == "stopped"
+              and record.get("app_id") == config.get("NAME")
+              and record.get("revision") == operation.get("revision")
+              and record.get("coordinator") == operation.get("coordinator"))
 
   def allows_untracked_update(self, delta, current):
     """Check a whole legacy pipeline before it can merge into a repaired worker.

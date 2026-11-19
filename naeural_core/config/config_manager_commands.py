@@ -234,11 +234,9 @@ class ConfigCommandHandlers:
       info = "Command should contain NAME, SIGNATURE, INSTANCE_ID as well as INSTANCE_CONFIG 'delta' object and MUST address a existing pipeline. Full received command: {}".format(dct_config_data)
     else:
       lifecycle = self.shmem.get(SERVICE_KEY)
-      if lifecycle is not None and not lifecycle.allows_untracked_update(
-        {"NAME": pipeline_name}, self.dct_config_streams[pipeline_name],
-      ):
-        # Batch updates also reach this gate through the single-instance handler.
-        self.P(f"Ignored a legacy UPDATE_PIPELINE_INSTANCE for repaired Deeploy pipeline {pipeline_name!r}.", color="y")
+      # Single and batched deltas address the current instance without a deployment revision.
+      if lifecycle is not None and not lifecycle.allows_instance_update(self.dct_config_streams[pipeline_name]):
+        self.P(f"Ignored UPDATE_PIPELINE_INSTANCE for inactive Deeploy pipeline {pipeline_name!r}.", color="y")
         return None
 
       if session_id is None:

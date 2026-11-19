@@ -84,10 +84,12 @@ and response metadata. Older command handlers reject these action names.
   record, the parent operation, job ID and the child's immutable repair secret
   revision. The node persists that the legacy revision was retired, including on
   the target that had already stopped. Subsequent untracked `UPDATE_CONFIG`
-  messages for the repaired job, including partial and dotted updates, and
-  single or batched legacy instance updates are discarded before config
-  merge. The diagnostic names the pipeline and omits the payload. Accepted
-  starts use the normal tracked runtime format and can be updated normally.
+  messages for the repaired job, including partial and dotted updates, are
+  discarded before config merge. Single and batched instance updates address
+  the current local instance. They can target the active tracked deployment
+  or restoration and are rejected for a retired local configuration. The
+  instance command format carries no deployment revision. The diagnostic
+  names the pipeline and omits the payload.
   Retries against an absent pipeline leave the existing retirement receipt intact.
   A changed job, instance, command order, Git commit or expired authorization
   leaves the current pipeline running.

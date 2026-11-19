@@ -625,6 +625,32 @@ class DeploymentLifecycle:
       # An old payload can omit its specs or inherit the tracked operation via a delta merge.
       return incoming is not None and (str(incoming), 0) not in retired and (str(existing), 0) not in retired
 
+  def allows_instance_update(self, current):
+    """Check the current target of an instance update after a repair.
+
+    Instance deltas use the pipeline and instance names to address the local target.
+
+    Parameters
+    ----------
+    current : dict
+        The existing local pipeline configuration.
+
+    Returns
+    -------
+    bool
+        Whether the target accepts ordinary instance updates.
+
+    Examples
+    --------
+    >>> service.allows_instance_update({"NAME": "unrelated"})
+    True
+    """
+    # Ordinary targets retain their existing handling.
+    if current.get("NAME") not in self._legacy_repair_aborts:
+      return True
+    # A stream with a repair fence only accepts instance deltas on an active tracked attempt.
+    return current.get(OPERATION_KEY) is not None and self.allowed(current)
+
   @staticmethod
   def _runtime_artifacts(plugin):
     """

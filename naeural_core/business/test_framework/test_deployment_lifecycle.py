@@ -2,10 +2,12 @@
 import base64
 import collections
 import gc
+import hashlib
 import importlib.util
 import json
 import os
 import tempfile
+import threading
 import unittest
 import weakref
 from copy import deepcopy
@@ -45,6 +47,23 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.path = os.path.join(self.directory.name, "journal.json")
     self.lifecycle = DeploymentLifecycle(self.path, "node", source_modes=True)
     self.writes = []
+
+  def test_private_repair_fingerprint_normalizes_only_delivery_metadata(self):
+    instance = {"INSTANCE_ID": "i", "ENV": {"COUNT": 1}, "BUILD_AND_RUN_COMMANDS": ["a", "b"]}
+    config = {"PLUGINS": [{"INSTANCES": [instance]}], "NAME": "app", "OWNER": "owner"}
+    expected = module.repair_config_fingerprint(config)
+    decorated = deepcopy(config)
+    decorated.update(TIME=1, SESSION_ID="s", LAST_UPDATE_TIME=2, plugins=[], INITIATOR_ID="first",
+                     INITIATOR_ADDR="before", MODIFIED_BY_ID="next", MODIFIED_BY_ADDR="after", VALIDATED=True,
+                     DEEPLOY_OPERATION=None)
+    decorated["PLUGINS"][0]["INSTANCES"][0].update(CHAINSTORE_RESPONSE_KEY="callback", DEEPLOY_RUNTIME_ARTIFACTS=None)
+    self.assertEqual(module.repair_config_fingerprint(decorated), expected)
+    self.assertIn("CHAINSTORE_RESPONSE_KEY", decorated["PLUGINS"][0]["INSTANCES"][0])
+    for changed in ({"BUILD_AND_RUN_COMMANDS": ["b", "a"]}, {"ENV": {"COUNT": "1"}},
+                    {"ENV": {"COUNT": True}}, {"DEEPLOY_RUNTIME_ARTIFACTS": {}}):
+      with patch.dict(instance, changed):
+        self.assertNotEqual(module.repair_config_fingerprint(config), expected)
+    self.assertNotEqual(module.repair_config_fingerprint(dict(config, DEEPLOY_OPERATION={})), expected)
 
   def publish(self, succeed=True):
     def setter(key, value, **kwargs):
@@ -98,6 +117,53 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.assertEqual(self.publish()["status"], "stopping")
     self.assertIs(self.lifecycle.plugins[("operation|deploy", "WORKER", "worker")], instance)
     instance._deployment_stopped = True
+    self.assertEqual(self.publish()["status"], "stopped")
+
+  def test_repair_retirement_is_hidden_until_durable(self):
+    legacy = config(revision=0)
+    legacy.pop("DEEPLOY_OPERATION")
+    legacy["DEEPLOY_SPECS"] = {"job_id": 31}
+    retirement = config("retire", "retire", 0)["DEEPLOY_OPERATION"]
+    retirement.update(job_id=31)
+    evidence = dict(parent_operation_id="parent", challenge="a"*32, order_digest="b"*64,
+                    config_seal_hash="c"*64, git_commit="d"*40, job_id=31)
+    cleanup = []
+    self.lifecycle._cleanup = lambda *args: cleanup.append(args) or True
+    for target, method in ((module.os, "replace"), (self.lifecycle, "_sync_journal_directory")):
+      with self.subTest(failing=method):
+        with patch.object(target, method, side_effect=OSError("fixture journal failure")):
+          with self.assertRaises(OSError):
+            self.lifecycle.retire("app", legacy, retirement, "oracle", True, repair_evidence=evidence)
+        self.assertTrue(self.lifecycle.allowed(legacy))
+        self.assertEqual(self.lifecycle.records, {})
+        self.lifecycle.publish(lambda *args, **kwargs: self.fail("Undurable STOP"), lambda *a, **kw: None)
+        self.assertEqual(cleanup, [])
+        self.assertEqual(Path(self.path).exists(), method == "_sync_journal_directory")
+
+    # A restart seeing the replaced file must sync its directory before that snapshot can act.
+    with patch.object(DeploymentLifecycle, "_sync_journal_directory", side_effect=OSError("still unavailable")):
+      with self.assertRaises(OSError):
+        DeploymentLifecycle(self.path, "node")
+    self.lifecycle = DeploymentLifecycle(self.path, "node")
+    self.assertFalse(self.lifecycle.allowed(legacy))
+    self.lifecycle._cleanup = lambda *args: cleanup.append(args) or True
+    self.assertEqual(self.publish()["status"], "stopped")
+    self.assertEqual(len(cleanup), 1)
+
+  def test_repair_retirement_can_retry_after_a_failed_replace(self):
+    legacy = config(revision=0)
+    legacy.pop("DEEPLOY_OPERATION")
+    legacy["DEEPLOY_SPECS"] = {"job_id": 31}
+    retire = config("retire", "retire", 0)["DEEPLOY_OPERATION"]
+    retire.update(job_id=31)
+    evidence = dict(parent_operation_id="parent", challenge="a"*32, order_digest="b"*64,
+                    config_seal_hash="c"*64, git_commit="d"*40, job_id=31)
+    with patch.object(module.os, "replace", side_effect=OSError("fixture rename failure")):
+      with self.assertRaises(OSError):
+        self.lifecycle.retire("app", legacy, retire, "oracle", True, repair_evidence=evidence)
+    self.assertTrue(self.lifecycle.retire("app", legacy, retire, "oracle", True, repair_evidence=evidence))
+    self.assertFalse(self.lifecycle.allowed(legacy))
+    self.lifecycle._cleanup = lambda *args: True
     self.assertEqual(self.publish()["status"], "stopped")
 
   def test_stopped_retirements_release_all_plugin_aliases_but_keep_evidence(self):
@@ -1145,6 +1211,26 @@ class ProtectedChainStoreTest(unittest.TestCase):
       store._ChainStoreBasePlugin__merge_hset_snapshot(hkey, {key: candidate})
     self.assertEqual(store.storage[key][store.CS_VALUE]["sequence"], 16)
 
+  def test_inspect_report_uses_the_signed_worker_namespace_and_separate_attempt(self):
+    from naeural_core import Logger
+    from ratio1.bc import DefaultBlockEngine
+    with tempfile.TemporaryDirectory() as directory:
+      log = Logger("WORKER", base_folder=directory, app_folder="_local_cache", no_folders_no_save=True, DEBUG=False)
+      engine = DefaultBlockEngine(name="repair-" + os.path.basename(directory), log=log, eth_enabled=False, verbosity=0,
+                                  config={"PEM_FILE": os.path.join(directory, "fixture.pem")})
+      store = self.store()
+      store.bc.verify = engine.verify
+      value = {"operation_id": "op", "attempt": "inspect", "sequence": 1, "node_addr": engine.address,
+               "status": "observed", "order_digest": "a" * 64, "challenge": "b" * 32}
+      engine.sign(value, add_data=True, use_digest=True)
+      key = _hset_key("DEEPLOY_NODE_OPERATIONS", "op|inspect|" + engine.address)
+      self.assertTrue(store._set_value(key, value, owner=engine.address, local_sync_storage_op=True))
+      for field in ("op|retire|" + engine.address, "op|inspect|other"):
+        self.assertFalse(store._set_value(_hset_key("DEEPLOY_NODE_OPERATIONS", field), value, owner=engine.address,
+                                          local_sync_storage_op=True))
+      self.assertFalse(store._set_value(key, dict(value, challenge="c" * 32, sequence=2), owner=engine.address,
+                                        local_sync_storage_op=True))  # A forged newer observation cannot replace the receipt.
+
   def test_signed_node_cannot_preempt_another_nodes_field(self):
     store = self.store()
     key = _hset_key("DEEPLOY_NODE_OPERATIONS", "op|deploy|victim|0")
@@ -1210,6 +1296,322 @@ class DeploymentCommandTest(unittest.TestCase):
       self.assertIs(service.plugins[("operation|retire", "WORKER", "worker")], runtime)
       self.assertEqual(runtime._deployment_operation_key, "operation|retire")
 
+  def test_legacy_worker_inspection_and_conditional_retirement(self):
+    from naeural_core import Logger
+    from naeural_core.utils.plugins_base.bc_wrapper import BCWrapper
+    from ratio1.bc import DefaultBlockEngine
+    with tempfile.TemporaryDirectory() as directory, patch.object(module.time, "time", return_value=1000):
+      journal = os.path.join(directory, "journal")
+      log = Logger("WORKER", base_folder=directory, app_folder="_local_cache", no_folders_no_save=True, DEBUG=False)
+      oracle, node = [BCWrapper(DefaultBlockEngine(name=label + os.path.basename(directory), log=log, eth_enabled=False,
+        verbosity=0, config={"PEM_FILE": os.path.join(directory, label + ".pem")}), owner=None)
+        for label in ("oracle", "node")]  # Exercise the SDK encryption/decryption used by production peers.
+      service = DeploymentLifecycle(journal, node.address)
+      worker = plugin(ready=False)  # Repair must also work before the runner's readiness check caches Git metadata.
+      worker.get_stream_id = lambda: "app"
+      worker.get_signature = lambda: "WORKER_APP_RUNNER"
+      worker.get_instance_id = lambda: "worker"
+      worker.cfg_build_and_run_commands = ["prepare", "serve"]
+      worker.cfg_chainstore_peers = ["two", "one"]
+      observed_commit = ["e" * 40]
+      worker.read_deployment_git_commit = lambda: observed_commit[0]
+      image_id = "sha256:" + "a" * 64
+      cached_bindings = {"image_id": image_id}  # Readiness can lag while Docker already exposes the image.
+      worker.get_deployment_runtime_artifacts = lambda: cached_bindings.copy()
+      current = {"NAME": "app", "DEEPLOY_SPECS": {"job_id": 31, "current_target_nodes": ["old2", "old1"]},
+                 "PLUGINS": [{"SIGNATURE": "WORKER_APP_RUNNER", "INSTANCES": [{"INSTANCE_ID": "worker",
+                   "BUILD_AND_RUN_COMMANDS": ["prepare", "serve"], "CHAINSTORE_PEERS": ["two", "one"],
+                   "ENV": {"SECRET": "private"}}]}]}
+      harness = self.harness(service, current, worker)
+      harness.owner.bc = node
+      member = node.node_address_to_eth_address(oracle.address)
+      harness.owner.bc.get_eth_oracles = lambda: [member]
+      prefix = hashlib.sha256(oracle.address.encode()).hexdigest()[:16] + "-"
+      fingerprint = module.repair_config_fingerprint(current)
+      seal = oracle.encrypt_str(fingerprint, node.address)
+      request = {"operation_id": prefix + "a" * 32, "attempt": "inspect", "action": "inspect_worker_v1",
+                 "instance_id": "worker", "job_id": 31, "revision": 0, "coordinator": oracle.address, "node_addr": node.address,
+                 "peers": [oracle.address], "expires_at": 1110, "challenge": "c" * 32, "config_seal": seal}
+      def send(op, name="app", **transport):
+        envelope = self.command({"NAME": name, "DEEPLOY_OPERATION": op})
+        envelope["EE_SENDER"] = oracle.address
+        harness.update_config_stream(dict(envelope, **transport), "oracle-id", "session")
+      def publish():
+        writes = []
+        service.publish(lambda key, value, **kwargs: writes.append(deepcopy(value)) or True,
+                        lambda record, **kwargs: record.update(EE_SENDER="node", EE_SIGN="fixture"))
+        return writes
+      # A handler using the pre-repair lifecycle admission rejects both commands before modifying streams.
+      for attempt, action in (("inspect", "inspect_worker_v1"), ("retire", "retire_worker_v1")):
+        with self.assertRaises(ValueError):
+          service.admit({"NAME": "app", "DEEPLOY_OPERATION": dict(request, attempt=attempt, action=action)}, oracle.address, True)
+      # Every bad scope must be refused before reading Docker or writing the journal.
+      for override in ({"node_addr": "other"}, {"job_id": 99}, {"instance_id": "other"}, {"revision": False},
+                       {"expires_at": 999}, {"expires_at": 1181}, {"challenge": "bad"}, {"coordinator": "other"},
+                       {"config_seal": None}, {"config_seal": oracle.encrypt_str("0"*64, node.address)},
+                       {"config_seal": fingerprint}):
+        send(dict(request, **override))
+      send(request, VALIDATED=False)
+      harness.owner.bc.get_eth_oracles = lambda: []
+      send(request)
+      self.assertEqual(service.records, {})
+      harness.owner.bc.get_eth_oracles = lambda: [member]
+      with patch.object(module.time, "time", return_value=970), patch.object(module.time, "monotonic", return_value=50):
+        send(request)  # A node 30s behind the coordinator still accepts a normal 110s challenge.
+        send(dict(request, challenge="d"*32, expires_at=1111))
+        self.assertEqual(service.records[request["operation_id"] + "|inspect"]["challenge"], request["challenge"])
+        other = deepcopy(current)
+        other["NAME"] = "other"
+        other["DEEPLOY_SPECS"]["job_id"] = 32
+        harness.dct_config_streams["other"] = other
+        other_worker = deepcopy(worker)
+        other_worker.get_stream_id = lambda: "other"
+        worker_registry = harness.owner._business_manager.current_instances
+        worker_registry["other"] = other_worker
+        other_request = dict(request, job_id=32, operation_id=prefix + "d"*32,
+                             config_seal=oracle.encrypt_str(module.repair_config_fingerprint(other), node.address))
+        send(other_request, name="other")  # A different job on the same worker is not throttled.
+        self.assertIn(other_request["operation_id"] + "|inspect", service.records)
+        worker_registry.pop("other")
+        harness.dct_config_streams.pop("other")
+      report = next(r for r in publish() if r["operation_id"] == request["operation_id"])
+      self.assertEqual((report["status"], report["challenge"]), ("observed", request["challenge"]))
+      self.assertNotIn("private", str(report))
+      self.assertNotIn("prepare", str(report))
+      self.assertEqual(report["config_seal_hash"], hashlib.sha256(seal.encode()).hexdigest())
+      self.assertNotIn(fingerprint, str(report))
+      self.assertNotIn(seal, str(report))
+      self.assertNotIn(fingerprint, Path(journal).read_text())
+      self.assertNotIn(seal, Path(journal).read_text())
+      self.assertEqual(report["order_digest"], hashlib.sha256(
+        b'[["old2","old1"],["prepare","serve"],["two","one"]]').hexdigest())
+      self.assertEqual(harness.dct_config_streams["app"], current)
+      send(request)  # Same challenge cannot cause repeated Docker or journal writes.
+      self.assertEqual(publish(), [])
+      service = DeploymentLifecycle(journal, node.address)
+      harness.shmem["deeploy_lifecycle"] = service
+      retire = dict(request, action="retire_worker_v1", attempt="retire", operation_id=prefix + "b" * 32,
+                    parent_operation_id=request["operation_id"], order_digest=report["order_digest"], git_commit="e" * 40)
+      for override in ({"parent_operation_id": prefix + "f"*32}, {"order_digest": "x"}, {"challenge": "d"*32},
+                       {"git_commit": "d"*40}, {"instance_id": "wrong"},
+                       {"config_seal": oracle.encrypt_str(fingerprint, node.address)}):
+        send(dict(retire, **override))
+        self.assertIn("app", harness.dct_config_streams)
+      observed_commit[0] = "f" * 40
+      send(retire)
+      self.assertIn("app", harness.dct_config_streams)
+      observed_commit[0] = "e" * 40
+      instance = current["PLUGINS"][0]["INSTANCES"][0]
+      for field, change in (("ENV", {"SECRET": "changed"}), ("VOLUMES", {"data": "/var/data"}),
+                            ("BUILD_AND_RUN_COMMANDS", ["serve", "prepare"])):
+        with patch.dict(instance, {field: change}):
+          send(retire)  # Every post-inspection config change, even a single private scalar, must cancel the stop.
+          self.assertIn("app", harness.dct_config_streams)
+      current["DEEPLOY_SPECS"]["current_target_nodes"].reverse()  # A later config invalidates the observed order.
+      send(retire)
+      self.assertIn("app", harness.dct_config_streams)
+      current["DEEPLOY_SPECS"]["current_target_nodes"].reverse()
+
+      lock_released = threading.Event()
+      probe_threads = []
+      def probe_during_config_change():
+        def concurrently_change():
+          with service.lock:
+            instance["ENV"] = {"SECRET": "changed while Docker was running"}
+            lock_released.set()
+        thread = threading.Thread(target=concurrently_change)
+        probe_threads.append(thread)
+        thread.start()
+        return observed_commit[0] if lock_released.wait(2) else None
+      worker.read_deployment_git_commit = probe_during_config_change
+      send(retire)
+      for thread in probe_threads:
+        thread.join(timeout=2)
+      self.assertTrue(lock_released.is_set(), "workload probing must not hold the lifecycle lock")
+      self.assertIn("app", harness.dct_config_streams, "a raced configuration change must block retirement")
+      instance["ENV"] = {"SECRET": "private"}
+      worker.read_deployment_git_commit = lambda: observed_commit[0]
+      send(retire)
+      self.assertNotIn("app", harness.dct_config_streams)
+      bindings = {"image_id": image_id, "git_commit": "e" * 40}
+      self.assertEqual(service.records[retire["operation_id"] + "|retire"]["instances"][0]["runtime_artifacts"], bindings)
+      # The old stream file may survive a process exit between durable admission and deletion.
+      restarted = DeploymentLifecycle(journal, node.address)
+      self.assertFalse(restarted.allowed(current))
+      other_job = dict(current, DEEPLOY_SPECS=dict(current["DEEPLOY_SPECS"], job_id=32))
+      self.assertTrue(restarted.allowed(other_job))
+      worker.thread.is_alive = lambda: False
+      worker._deployment_cleanup_complete = True
+      cached_bindings["git_commit"] = "f" * 40  # A stale cache must not replace the checked-out commit when publishing.
+      stop = next(r for r in publish() if r["attempt"] == "retire")
+      self.assertEqual((stop["status"], stop["parent_operation_id"], stop["order_digest"]),
+                       ("stopped", request["operation_id"], report["order_digest"]))
+      self.assertEqual(stop["instances"][0]["runtime_artifacts"], bindings)
+      self.assertEqual(stop["config_seal_hash"], report["config_seal_hash"])
+      service = DeploymentLifecycle(journal, node.address)
+      harness.shmem["deeploy_lifecycle"] = service
+      with patch.object(module.time, "time", return_value=1200):
+        send(retire)  # Expired retry against an absent pipeline must keep its complete receipt.
+        again = next(r for r in publish() if r["attempt"] == "retire")
+        self.assertEqual(again["instances"], stop["instances"])
+        self.assertEqual(again["status"], "stopped")
+
+  def test_conditional_tombstone_prevents_merging_a_surviving_file_after_two_restarts(self):
+    from naeural_core import constants as ct
+    from test_chain_store_hsync import _load_class_from_source
+    source = Path(__file__).resolve().parents[2] / "config" / "config_manager_commands.py"
+    handlers = _load_class_from_source(source, "ConfigCommandHandlers", extra_globals={
+      "OPERATION_KEY": module.OPERATION_KEY, "SERVICE_KEY": module.SERVICE_KEY,
+    }, strip_text=("from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY\n",))
+    with tempfile.TemporaryDirectory() as directory:
+      journal = os.path.join(directory, "journal")
+      retired = config("retire", "retire", 0)
+      retired.update(DEEPLOY_SPECS={"job_id": 31}, OBSOLETE_SETTING="old")
+      surviving = deepcopy(retired)
+      del surviving["DEEPLOY_OPERATION"]  # The old file was never removed before process exit.
+      proof = dict(parent_operation_id="parent", challenge="c"*32, order_digest="a"*64,
+                   config_seal_hash="b"*64, git_commit="e"*40, job_id=31)
+      service = DeploymentLifecycle(journal, "node")
+      self.assertTrue(service.admit(retired, "oracle", True, repair_evidence=proof))
+      persisted = config(revision=1)
+      persisted["DEEPLOY_SPECS"] = {"job_id": 31, "revision": 1}
+      first_restart = DeploymentLifecycle(journal, "node")
+      self.assertFalse(first_restart.allowed(surviving))
+      self.assertTrue(first_restart.admit(persisted, "oracle", True))  # Crash before writing the new config.
+      service = DeploymentLifecycle(journal, "node")
+      self.assertFalse(service.allowed(surviving))
+      self.assertTrue(service.allowed(persisted))
+      harness = SimpleNamespace(shmem={module.SERVICE_KEY: service}, admin_pipeline_name="admin",
+        dct_config_streams={"app": surviving}, _check_duplicate_last=lambda **kw: False,
+        P=lambda *args, **kw: None, _create_notification=lambda **kw: None, keep_good_stream=lambda value: value,
+        _save_stream_config=lambda value: None)
+      def apply_delta(old, new):
+        self.assertEqual(old, {})  # The real handler must discard the obsolete file before entering delta merge.
+        return dict(old, **new)
+      harness._apply_delta_to_config = apply_delta
+      envelope = dict(persisted)
+      envelope[ct.CONFIG_STREAM.INITIATOR_ID] = "oracle-id"
+      envelope[ct.COMMS.COMM_RECV_MESSAGE.K_VALIDATED] = True
+      envelope[ct.COMMS.COMM_RECV_MESSAGE.K_SENDER_ADDR] = "oracle"
+      handlers.update_config_stream(harness, envelope, "oracle-id", "session")
+      self.assertNotIn("OBSOLETE_SETTING", harness.dct_config_streams["app"])
+      self.assertEqual(harness.dct_config_streams["app"]["DEEPLOY_OPERATION"], persisted["DEEPLOY_OPERATION"])
+
+  def test_repaired_start_requires_local_stop_and_fences_historical_legacy_writes(self):
+    with tempfile.TemporaryDirectory() as directory:
+      journal = os.path.join(directory, "journal")
+      service = DeploymentLifecycle(journal, "node")
+      parent_id = hashlib.sha256(b"oracle").hexdigest()[:16] + "-" + "a"*32
+      start = config(revision=1)
+      start["PLUGINS"][0]["SIGNATURE"] = "WORKER_APP_RUNNER"
+      start["DEEPLOY_OPERATION"].update(action="start_repaired_worker_v1", parent_operation_id=parent_id, job_id=31)
+      start["DEEPLOY_SPECS"] = {"job_id": 31, "revision": 1, "secret_revision": "operation:repair_v1:deploy"}
+      self.assertFalse(service.admit(start, "oracle", True))  # Historical STOP must exist locally even after restart.
+      legacy = deepcopy(start)
+      del legacy["DEEPLOY_OPERATION"]
+      legacy["DEEPLOY_SPECS"] = {"job_id": 31}
+      parent = config("retire", "retire", 0)["DEEPLOY_OPERATION"]
+      parent.update(operation_id=parent_id, job_id=31)
+      self.assertTrue(service.retire("app", legacy, parent, "oracle", True))
+      proof = service.records[parent_id + "|retire"]
+      proof["instances"][0]["runtime_artifacts"] = {"git_commit": "a"*40}
+      service._cleanup = lambda *args: True  # Simulate the original node's verified external cleanup.
+      service.publish(lambda *a, **kw: True, lambda *a, **kw: None)
+      request = dict(parent, attempt="inspect", action="inspect_worker_v1", challenge="d"*32,
+                     expires_at=int(module.time.time()) + 100, confirm_prior_stop=True, instance_id="worker", node_addr="node")
+      inspection = self.harness(service, {})
+      inspection.owner.bc = SimpleNamespace(node_address_to_eth_address=lambda _: "eth", get_eth_oracles=lambda: ["eth"])
+      def confirm(**overrides):
+        inspection.update_config_stream(self.command(dict(NAME="app", DEEPLOY_OPERATION=dict(request, **overrides))),
+                                        "oracle-id", "session")
+      key = parent_id + "|inspect"
+      inspection.dct_config_streams["app"] = legacy
+      confirm()
+      self.assertNotIn(key, service.records)
+      inspection.dct_config_streams.clear()
+      confirm(instance_id="wrong")
+      self.assertNotIn(key, service.records)
+      active = SimpleNamespace(get_stream_id=lambda: "app", thread=SimpleNamespace(is_alive=lambda: True))
+      inspection.owner._business_manager.current_instances["worker"] = active
+      confirm()
+      self.assertNotIn(key, service.records)
+      active.thread = None  # A half-created worker makes prior-stop confirmation inconclusive.
+      confirm()
+      self.assertNotIn(key, service.records)
+      inspection.owner._business_manager.current_instances.clear()
+      with patch.object(service, "_save", side_effect=OSError("journal unavailable")):
+        with self.assertRaises(OSError):
+          confirm()
+      self.assertNotIn(key, service.records)  # The publisher cannot advertise an undurable inspection.
+      self.assertTrue(service.allows_untracked_update(legacy, {}))
+      confirm()
+      receipt = service.records[key]
+      self.assertTrue(receipt["confirm_prior_stop"])
+      self.assertEqual(receipt["instances"][0]["runtime_artifacts"], {"git_commit": "a"*40})
+      self.assertNotIn("config_seal_hash", receipt)
+      self.assertNotIn("order_digest", receipt)
+      self.assertEqual(inspection.dct_config_streams, {})
+      messages = []
+      inspection.P = lambda msg, **kw: messages.append(msg)
+      rebooted = DeploymentLifecycle(journal, "node")
+      inspection.shmem[module.SERVICE_KEY] = rebooted
+      inspection.update_config_stream(self.command(legacy), "oracle-id", "session")
+      self.assertEqual(inspection.dct_config_streams, {})  # The STOP confirmation fences replay before start.
+      self.assertIn("'app'", messages[0])
+      target = dict(NAME="app", SIGNATURE="WORKER_APP_RUNNER", INSTANCE_ID="worker")
+      command = dict(target, INSTANCE_CONFIG={"INSTANCE_COMMAND": {"action": "status"}})
+      inspection.dct_config_streams["app"] = deepcopy(legacy)  # A crash can leave a retired file in place.
+      notifications = []
+      inspection._create_notification = lambda **kwargs: notifications.append(kwargs)
+      self.assertIsNone(inspection.update_pipeline_instance(command, "oracle-id", "session"))
+      inspection.batch_update_pipeline_instance([command], "oracle-id", "session")
+      self.assertEqual(notifications[-1]["BATCH_UPDATE_PIPELINE_INSTANCE"], [])
+      self.assertEqual(inspection.dct_config_streams["app"], legacy)
+      inspection.dct_config_streams["app"].pop("DEEPLOY_SPECS")  # A legacy file without job metadata is still fenced.
+      self.assertIsNone(inspection.update_pipeline_instance(command, "oracle-id", "session"))
+      for attempt, revision in (("deploy", 1), ("restore", 0)):
+        start["DEEPLOY_SPECS"].update(revision=revision, secret_revision="operation:repair_v1:" + attempt)
+        start["DEEPLOY_OPERATION"].update(attempt=attempt, revision=revision)
+        service = DeploymentLifecycle(journal, "node")
+        self.assertTrue(service.admit(start, "oracle", True))
+        service = DeploymentLifecycle(journal, "node")
+        self.assertTrue(service.allowed(start))  # Tracking remains usable after loading the worker journal again.
+        harness = self.harness(service, deepcopy(start))  # Preserve the deployment envelope for the next start.
+        messages = []
+        harness.P = lambda msg, **kw: messages.append(msg)
+        harness.update_config_stream(self.command(legacy), "oracle-id", "session")
+        harness.update_config_stream(self.command({"NAME": "app", "PLUGINS": []}), "oracle-id", "session")
+        harness.update_config_stream(self.command({"NAME": "app", "PLUGINS.0.INSTANCES.0.ENV": "do-not-log"}),
+                                     "oracle-id", "session")
+        harness.update_config_stream(self.command({"NAME": "app", "DEEPLOY_SPECS.revision": 99}), "oracle-id", "session")
+        self.assertEqual(harness.dct_config_streams["app"], start)
+        self.assertEqual(len(messages), 4)
+        self.assertTrue(all("UPDATE_CONFIG" in msg and "do-not-log" not in msg for msg in messages))
+        notifications = []
+        harness._create_notification = lambda **kwargs: notifications.append(kwargs)
+        instance = harness.dct_config_streams["app"]["PLUGINS"][0]["INSTANCES"][0]
+        harness._get_plugin_instance = lambda **kwargs: instance
+        harness._apply_delta_to_config = lambda original, delta, **kwargs: original.update(delta)
+        harness._save_stream_config = lambda value: None
+        self.assertEqual(harness.update_pipeline_instance(command, "oracle-id", "session"),
+                         ("app", "WORKER_APP_RUNNER", "worker"))
+        self.assertEqual(instance["INSTANCE_COMMAND"], {"action": "status"})
+        update = dict(target, INSTANCE_CONFIG={"PROCESS_DELAY": 1})
+        harness.batch_update_pipeline_instance([update], "oracle-id", "session")
+        self.assertEqual(notifications[-1]["BATCH_UPDATE_PIPELINE_INSTANCE"], [("app", "WORKER_APP_RUNNER", "worker")])
+        self.assertEqual(instance["PROCESS_DELAY"], 1)
+        self.assertEqual(harness.dct_config_streams["app"]["DEEPLOY_OPERATION"], start["DEEPLOY_OPERATION"])
+        stop = dict(start, DEEPLOY_OPERATION=dict(start["DEEPLOY_OPERATION"], action="stop"))
+        self.assertTrue(service.admit(stop, "oracle", True))  # A stop can be journaled before the pipeline file is removed.
+        self.assertIsNone(harness.update_pipeline_instance(update, "oracle-id", "session"))
+        harness.batch_update_pipeline_instance([update], "oracle-id", "session")
+        self.assertEqual(notifications[-1]["BATCH_UPDATE_PIPELINE_INSTANCE"], [])
+        self.assertFalse(service.allowed(legacy))
+        self.assertTrue(service.allows_untracked_update(dict(legacy, NAME="unrelated"), {}))
+      later = config(revision=2)
+      later["DEEPLOY_OPERATION"]["operation_id"] = "later"
+      self.assertTrue(service.admit(later, "oracle", True))  # Subsequent ordinary tracked updates still work.
+
   @staticmethod
   def command(config):
     config = deepcopy(config)
@@ -1221,8 +1623,13 @@ class DeploymentCommandTest(unittest.TestCase):
     from test_chain_store_hsync import _load_class_from_source
     source = Path(__file__).resolve().parents[2] / "config" / "config_manager_commands.py"
     constants = SimpleNamespace(
-      CONFIG_STREAM=SimpleNamespace(NAME="NAME", INITIATOR_ID="INITIATOR_ID"),
+      CONFIG_STREAM=SimpleNamespace(NAME="NAME", INITIATOR_ID="INITIATOR_ID",
+                                    K_MODIFIED_BY_ID="MODIFIED_BY_ID", K_MODIFIED_BY_ADDR="MODIFIED_BY_ADDR"),
       COMMS=SimpleNamespace(COMM_RECV_MESSAGE=SimpleNamespace(K_VALIDATED="VALIDATED", K_SENDER_ADDR="EE_SENDER")),
+      PAYLOAD_DATA=SimpleNamespace(NAME="NAME", INSTANCE_CONFIG="INSTANCE_CONFIG", SESSION_ID="SESSION_ID"),
+      PLUGIN_INFO=SimpleNamespace(SIGNATURE="SIGNATURE", INSTANCE_ID="INSTANCE_ID"),
+      STATUS_TYPE=SimpleNamespace(STATUS_EXCEPTION="error", STATUS_NORMAL="normal"),
+      NOTIFICATION_CODES=SimpleNamespace(PIPELINE_FAILED="failed", PIPELINE_OK="ok"),
     )
     commands = _load_class_from_source(source, "ConfigCommandHandlers", extra_globals={
       "ct": constants, "OPERATION_KEY": "DEEPLOY_OPERATION", "SERVICE_KEY": "deeploy_lifecycle",

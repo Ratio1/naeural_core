@@ -43,7 +43,7 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.directory = tempfile.TemporaryDirectory()
     self.addCleanup(self.directory.cleanup)
     self.path = os.path.join(self.directory.name, "journal.json")
-    self.lifecycle = DeploymentLifecycle(self.path, "node")
+    self.lifecycle = DeploymentLifecycle(self.path, "node", source_modes=True)
     self.writes = []
 
   def publish(self, succeed=True):
@@ -301,17 +301,287 @@ class DeploymentLifecycleTest(unittest.TestCase):
                              lambda *args, **kwargs: None)
     self.assertEqual(len(self.writes), written)
 
-  def test_confirmed_ready_ends_reporting_across_restart(self):
-    self.lifecycle.admit(config(), "oracle", True)
-    self.lifecycle.attach(config(), "WORKER", "worker", plugin(ready=True))
-    self.assertEqual(self.publish()["status"], "ready")
+  def test_confirmed_pinned_ready_ends_reporting_across_restart(self):
+    pipeline = config()
+    group = pipeline["PLUGINS"][0]
+    group.update(SIGNATURE="WORKER_APP_RUNNER")
+    group["INSTANCES"][0].update(PINNED_VERSION=True, VCS_DATA={"COMMIT": "a" * 40})
+    runtime = plugin(ready=True)
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.lifecycle.attach(pipeline, group["SIGNATURE"], "worker", runtime)
+    ready = self.publish()
+    self.assertEqual((ready["status"], ready["instances"][0]["source_mode"]), ("ready", "pinned"))
     self.assertTrue(all(kwargs["timeout"] == module.PUBLISH_TIMEOUT for _, _, kwargs in self.writes))
     self.assertNotIn("ready_reported", self.writes[-1][1])
     silent = lambda *args, **kwargs: self.fail("ready attempt reported again")
-    self.lifecycle.plugins[("operation|deploy", "WORKER", "worker")] = plugin(alive=False)
+    runtime.thread.is_alive = lambda: False
     self.lifecycle.publish(silent, lambda *args, **kwargs: None)
     self.lifecycle = DeploymentLifecycle(self.path, "node")
     self.lifecycle.publish(silent, lambda *args, **kwargs: None)
+
+  def test_existing_following_worker_reports_recovery_and_each_new_commit(self):
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "WORKER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    runtime = plugin()
+    # On an upgrade the old journal can already have a confirmed ready observation.
+    self.lifecycle.records["operation|deploy"]["ready_reported"] = True
+    del self.lifecycle.records["operation|deploy"]["instances"][0]["source_mode"]
+    runtime._deployment_source_mode = "following"
+    runtime._deployment_error_code = "WORKLOAD_START_FAILED"
+    artifacts = {"git_commit": "a" * 40}
+    runtime.get_deployment_runtime_artifacts = lambda: artifacts.copy()
+    self.lifecycle.attach(pipeline, "WORKER_APP_RUNNER", "worker", runtime)
+    failed = self.publish()
+    self.assertEqual((failed["status"], failed["instances"][0]["source_mode"]), ("failed", "following"))
+    self.assertEqual(failed["instances"][0]["runtime_artifacts"], artifacts)
+    runtime._deployment_error_code = None
+    self.assertEqual(self.publish()["status"], "starting")
+    runtime.is_plugin_ready = lambda: True
+    runtime._deployment_source_error = "SOURCE_UNREACHABLE"
+    ready = self.publish()
+    self.assertEqual((ready["status"], ready["instances"][0]["error"]), ("ready", None))
+    self.assertEqual(ready["instances"][0]["source_error"], "SOURCE_UNREACHABLE")
+    runtime._deployment_source_error = None
+    artifacts["git_commit"] = "b" * 40
+    changed = self.publish()
+    self.assertGreater(changed["sequence"], ready["sequence"])
+    self.assertEqual(changed["instances"][0]["runtime_artifacts"], artifacts)
+    self.assertNotIn("source_error", changed["instances"][0])
+    self.lifecycle.publish(lambda *args, **kwargs: self.fail("unchanged report"), lambda *args, **kwargs: None)
+    self.lifecycle.fail(pipeline, code="PLUGIN_EXECUTION_FAILED")
+    self.assertEqual(self.publish()["status"], "failed")
+
+  def test_following_report_replays_exact_current_field_to_missing_or_restarted_peer(self):
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "WORKER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    runtime = plugin(ready=True)
+    self.lifecycle.attach(pipeline, "WORKER_APP_RUNNER", "worker", runtime)
+    sessions = {"oracle": (True, 100), "other": (True, 200)}
+    self.lifecycle._peer_session = sessions.__getitem__
+    self.lifecycle._confirmed_peers = lambda key: ["other"]  # The bulk write succeeded without the coordinator.
+    with patch.object(module.time, "monotonic", return_value=10) as clock:
+      self.publish()
+      current_field, signed_record, _ = self.writes[-1]
+      initial_count = len(self.writes)
+      self.publish()
+      self.assertEqual(len(self.writes), initial_count)
+      clock.return_value += module.PUBLISH_TIMEOUT
+      self.publish()
+      self.assertEqual(self.writes[-1][:2], (current_field, signed_record))
+      self.assertEqual(self.writes[-1][2]["peers"], ["oracle"])
+      self.assertEqual(len(self.writes), initial_count + 1)
+      # Reconnects and fast process restarts each repair the confirmed copy exactly once.
+      for interrupted, returned in (((False, None), (True, 210)), ((True, 250), (True, 1))):
+        count = len(self.writes)
+        sessions["other"] = interrupted
+        self.publish()
+        self.assertEqual(len(self.writes), count)
+        sessions["other"] = returned
+        self.publish()
+        self.assertEqual(len(self.writes), count + 1)
+        self.assertEqual(self.writes[-1][:2], (current_field, signed_record))
+        self.assertEqual(self.writes[-1][2]["peers"], ["other"])
+        self.publish()
+        self.assertEqual(len(self.writes), count + 1)
+      # Retiring an attempt discards its pending deliveries and never replays an obsolete ready snapshot.
+      self.lifecycle.admit(config("stop"), "oracle", True)
+      self.publish()
+      self.assertFalse(self.lifecycle._source_delivery)
+
+  def test_ack_after_quorum_suppresses_redundant_source_replay(self):
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.lifecycle.attach(pipeline, "CONTAINER_APP_RUNNER", "worker", plugin(ready=True))
+    confirmations = ["other"]
+    self.lifecycle._confirmed_peers = lambda key: confirmations
+    self.lifecycle._peer_session = lambda peer: (True, 10)
+    with patch.object(module.time, "monotonic", return_value=10) as clock:
+      self.publish()
+      writes = len(self.writes)
+      confirmations.append("oracle")
+      clock.return_value += module.PUBLISH_TIMEOUT
+      self.publish()
+      self.assertEqual(len(self.writes), writes)
+
+  def test_replay_budget_is_per_peer_and_resets_when_peer_returns(self):
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.lifecycle.attach(pipeline, "CONTAINER_APP_RUNNER", "worker", plugin(ready=True))
+    sessions = {"oracle": (True, 100), "other": (True, 200)}
+    self.lifecycle._peer_session = sessions.__getitem__
+    self.lifecycle._confirmed_peers = lambda key: ["other"]
+    with patch.object(module.time, "monotonic", return_value=10) as clock:
+      self.publish()
+      current_field, signed_record, _ = self.writes[-1]
+      def peer_session(peer):
+        if peer == "other":
+          raise RuntimeError("NetMon lookup failed")
+        return sessions[peer]
+      self.lifecycle._peer_session = peer_session
+      # A failing lookup for "other" leaves "oracle" eligible for its bounded retries.
+      for _ in range(module.SOURCE_REPLAY_LIMIT + 2):
+        clock.return_value += module.SOURCE_REPLAY_INTERVAL
+        self.publish(succeed=False)
+      attempts = self.writes[2:]
+      self.assertEqual(len(attempts), module.SOURCE_REPLAY_LIMIT)
+      self.assertTrue(all((key, value) == (current_field, signed_record) for key, value, _ in attempts))
+      self.assertTrue(all(call["peers"] == ["oracle"] and call["require_target_ack"] for _, _, call in attempts))
+      sessions["oracle"] = (True, 1)  # Restart without an intervening offline observation.
+      self.publish()
+      self.assertEqual(len(self.writes[2:]), module.SOURCE_REPLAY_LIMIT + 1)
+
+  def test_repair_backoff_preserves_live_report_priority_and_replaces_a_superseded_version(self):
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    runtime = plugin(ready=True)
+    self.lifecycle.attach(pipeline, "CONTAINER_APP_RUNNER", "worker", runtime)
+    self.lifecycle._peer_session = lambda peer: (True, 5)
+    self.lifecycle._confirmed_peers = lambda key: []
+    with patch.object(module.time, "monotonic", return_value=10) as clock:
+      self.publish()
+      clock.return_value += module.PUBLISH_TIMEOUT
+      def failing_setter(key, value, **kwargs):
+        self.writes.append((key, value, kwargs))
+        raise RuntimeError("CStore repair failed")
+      with self.assertRaisesRegex(RuntimeError, "CStore repair failed"):
+        self.lifecycle.publish(failing_setter, lambda *args, **kwargs: None)
+      first_peer = self.writes[-1][2]["peers"]
+      count = len(self.writes)
+      self.publish()
+      self.assertEqual(len(self.writes), count + 1)
+      self.assertNotEqual(self.writes[-1][2]["peers"], first_peer)
+      runtime._deployment_error_code = "WORKLOAD_START_FAILED"
+      updated = self.publish()
+      self.assertEqual(updated["status"], "failed")
+      clock.return_value += 35
+      self.publish()
+      self.assertEqual(self.writes[-1][1], updated)  # The old ready record is never resent.
+
+  def test_mixed_pipeline_preserves_bound_report_while_following_worker_changes(self):
+    pipeline = config()
+    group = pipeline["PLUGINS"][0]
+    group.update(SIGNATURE="WORKER_APP_RUNNER")
+    group["INSTANCES"].append({"INSTANCE_ID": "fixed", "PINNED_VERSION": True, "VCS_DATA": {"COMMIT": "a" * 40}})
+    self.lifecycle.admit(pipeline, "oracle", True)
+    following, fixed = plugin(ready=True), plugin(ready=True)
+    for name, runtime in (("worker", following), ("fixed", fixed)):
+      self.lifecycle.attach(pipeline, group["SIGNATURE"], name, runtime)
+    first = self.publish()
+    fixed.thread.is_alive = lambda: False
+    following._deployment_error_code = "IMAGE_PULL_FAILED"
+    failed = self.publish()
+    self.assertEqual(first["status"], "ready")
+    self.assertEqual([item["status"] for item in failed["instances"]], ["failed", "ready"])
+    following._deployment_error_code = None
+    self.assertEqual(self.publish()["status"], "ready")
+
+  def test_new_runner_supersedes_a_previous_confirmed_threads_exit(self):
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    old = plugin(ready=True)
+    self.lifecycle.attach(pipeline, "CONTAINER_APP_RUNNER", "worker", old)
+    self.assertEqual(self.publish()["status"], "ready")
+    old.thread.is_alive = lambda: False
+    self.assertEqual(self.publish()["instances"][0]["error"]["code"], "PLUGIN_EXECUTION_FAILED")
+    self.lifecycle = DeploymentLifecycle(self.path, "node", source_modes=True)
+    new = plugin()
+    new._deployment_source_mode = "following"
+    new.thread = SimpleNamespace(is_alive=lambda: False, ident=None)  # start_thread has not started it yet.
+    self.lifecycle.attach(pipeline, "CONTAINER_APP_RUNNER", "worker", new)
+    self.assertEqual(self.publish()["status"], "starting")
+    new.thread = SimpleNamespace(is_alive=lambda: True, ident=123)
+    new.is_plugin_ready = lambda: True
+    self.assertEqual(self.publish()["status"], "ready")
+
+  def test_only_capable_generic_runners_advertise_following(self):
+    pipeline = config()
+    group = pipeline["PLUGINS"][0]
+    group["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+    self.lifecycle.source_modes = False  # A new Core can be installed under an older edge runtime.
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.assertNotIn("source_mode", self.publish()["instances"][0])
+    for job_type, expected in (("generic", "following"), ("service", "service")):
+      pipeline["DEEPLOY_OPERATION"]["operation_id"] = job_type
+      pipeline["DEEPLOY_SPECS"] = {"job_app_type": job_type}
+      self.lifecycle.source_modes = True
+      self.lifecycle.admit(pipeline, "oracle", True)
+      self.assertEqual(self.publish()["instances"][0]["source_mode"], expected)
+    self.assertIsNone(module.deployment_source_mode("NATIVE_APP", {}, {}))
+
+  def test_close_halts_observation_even_when_write_outlasts_join(self):
+    from threading import Event, Thread
+    pipeline = config()
+    pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+    self.lifecycle.admit(pipeline, "oracle", True)
+    runtime = plugin(ready=True)
+    self.lifecycle.attach(pipeline, "CONTAINER_APP_RUNNER", "worker", runtime)
+    write_started, release_write = Event(), Event()
+    self.addCleanup(release_write.set)
+    def setter(key, record, **kwargs):
+      self.writes.append((key, record, kwargs))
+      write_started.set()
+      return release_write.wait(2)
+    reporter = Thread(target=self.lifecycle.publish, args=(setter, lambda *args, **kwargs: None), daemon=True)
+    self.lifecycle._thread = reporter
+    reporter.start()
+    self.assertTrue(write_started.wait(1))
+    with patch.object(reporter, "join") as timeout:
+      self.lifecycle.close()  # Simulate the join returning while CStore is still waiting.
+      timeout.assert_called_once_with(timeout=3)
+    runtime.thread.is_alive = lambda: False
+    release_write.set()
+    reporter.join(1)
+    self.assertFalse(reporter.is_alive())
+    self.lifecycle.publish(setter, lambda *args, **kwargs: None)
+    self.assertEqual(len(self.writes), 1)
+    self.assertEqual(self.lifecycle.records["operation|deploy"]["status"], "ready")
+
+  def test_close_does_not_wait_on_admission_lock_held_by_orphan_cleanup(self):
+    from threading import Event, Thread
+    pipeline = config()
+    pipeline["PLUGINS"][0]["INSTANCES"].append({"INSTANCE_ID": "second"})
+    self.lifecycle.admit(pipeline, "oracle", True)
+    for instance in ("worker", "second"):
+      self.lifecycle.attach(pipeline, "WORKER", instance, plugin(ready=True))
+    stopped = deepcopy(pipeline)
+    stopped["DEEPLOY_OPERATION"]["action"] = "stop"
+    self.lifecycle.admit(stopped, "oracle", True)
+    self.lifecycle = DeploymentLifecycle(self.path, "node")  # The old plugin objects are unavailable.
+    cleanup_started, release_cleanup, closed = Event(), Event(), Event()
+    self.addCleanup(release_cleanup.set)
+    calls = []
+    def cleanup(app, signature, instance):
+      calls.append(instance)
+      cleanup_started.set()
+      return release_cleanup.wait(5)
+    self.lifecycle._cleanup = cleanup
+    def setter(*args, **kwargs):
+      self.writes.append(args)
+      return True
+    reporter = Thread(target=self.lifecycle.publish, args=(setter, lambda *args, **kwargs: None), daemon=True)
+    self.lifecycle._thread = reporter
+    reporter.start()
+    self.assertTrue(cleanup_started.wait(2))
+    def close():
+      self.lifecycle.close()
+      closed.set()
+    with patch.object(reporter, "join") as timeout:
+      closer = Thread(target=close, daemon=True)
+      closer.start()
+      # Simulate the join expiring with Docker cleanup still holding admission.
+      self.assertTrue(closed.wait(2))
+      timeout.assert_called_once_with(timeout=3)
+    release_cleanup.set()
+    reporter.join(2)
+    self.assertFalse(reporter.is_alive())
+    self.assertEqual(calls, ["worker"])
+    self.assertFalse(self.writes)
 
   def test_unconfirmed_ready_is_retried_until_confirmed(self):
     self.lifecycle.admit(config(), "oracle", True)
@@ -478,6 +748,26 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     self.assertEqual(store.storage["key"][store.CS_CONFIRMATIONS], 1)
     store._ChainStoreBasePlugin__exec_received_confirm(data, sender="peer2")
     self.assertEqual(store.storage["key"][store.CS_CONFIRMATIONS], 2)
+
+  def test_target_replay_requires_the_new_targets_acknowledgement(self):
+    store = self.make_store()
+    confirm = store._ChainStoreBasePlugin__exec_received_confirm
+    data = {store.CS_KEY: "key", store.CS_VALUE: "value", store.CS_OWNER: "node"}
+    store._set_value("key", "value", owner="node", timeout=.2, max_retries=0)
+    confirm(data, sender="peer2")
+    # An old ack for the same value, or an ack from another peer, cannot satisfy this replay.
+    def other_peer(seconds):
+      store._now += seconds
+      confirm(data, sender="peer1")
+    store.sleep = other_peer
+    kwargs = dict(owner="node", peers=["peer2"], include_default_peers=False, timeout=.2, max_retries=0)
+    self.assertFalse(store._set_value("key", "value", require_target_ack=True, **kwargs))
+    def target_peer(seconds):
+      other_peer(seconds)
+      confirm(data, sender="peer2")
+    store.sleep = target_peer
+    self.assertFalse(store._set_value("key", "value", **kwargs))  # Normal write still uses its configured quorum.
+    self.assertTrue(store._set_value("key", "value", require_target_ack=True, **kwargs))
 
   def test_writes_are_saved_by_the_flush_outside_persistence_lock_and_never_by_process(self):
     # The SerializationManager calls the flush on its own thread every CS_SAVE_INTERVAL seconds.
@@ -958,6 +1248,7 @@ class ConstructionBarrierTest(unittest.TestCase):
     owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "BusinessManager")
     method = next(node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name == "_check_instances")
     namespace = {"ct": ct, "SERVICE_KEY": "deeploy_lifecycle", "OPERATION_KEY": "DEEPLOY_OPERATION",
+                 "deployment_source_mode": module.deployment_source_mode,
                  "perf_counter": perf_counter, "deque": deque, "traceback": traceback}
     wrapper = ast.ClassDef(name="BusinessManager", bases=[], keywords=[], body=[method], decorator_list=[])
     exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])), str(source), "exec"), namespace)
@@ -1011,6 +1302,40 @@ class ConstructionBarrierTest(unittest.TestCase):
       lifecycle._observe("operation|deploy", lifecycle.records["operation|deploy"])
       self.assertEqual(lifecycle.records["operation|deploy"]["status"], "stopping")
       self.assertIs(lifecycle.plugins[("operation|deploy", "WORKER", "worker")], runtime)
+
+  def test_startup_limits_source_modes_to_deeploy_pipelines(self):
+    for operation, specs, pinned, expected in (
+      (None, None, False, None),
+      (None, {}, True, None),
+      (None, {"job_id": "1"}, False, "following"),
+      (None, {"job_id": "1", "job_app_type": "service"}, False, "service"),
+      ("restore", None, False, "following"),
+      ("deploy", None, True, "pinned"),
+    ):
+      with self.subTest(operation=operation, specs=specs, pinned=pinned), tempfile.TemporaryDirectory() as folder:
+        lifecycle = DeploymentLifecycle(os.path.join(folder, "journal.json"), "node", source_modes=True)
+        pipeline = config(attempt=operation or "deploy")
+        if operation is None:
+          pipeline.pop("DEEPLOY_OPERATION")
+        pipeline["DEEPLOY_SPECS"] = specs
+        group = pipeline["PLUGINS"][0]
+        group["SIGNATURE"] = "CONTAINER_APP_RUNNER"
+        upstream_config = group["INSTANCES"][0]
+        upstream_config["PINNED_VERSION"] = pinned
+        if operation:
+          lifecycle.admit(pipeline, "oracle", True)
+        runtime = plugin(ready=True)
+        runtime.cfg_runs_only_on_supervisor_node = False
+        runtime.start_thread = lambda: None
+        manager = self.manager(lifecycle, lambda **kwargs: runtime)
+        manager._dct_config_streams = {"app": pipeline}
+        manager.get_current_jobs = lambda **kwargs: [
+          (None, None, None, None, None, "app", group["SIGNATURE"], "worker", upstream_config)]
+        self.assertEqual(manager._check_instances(), ["instance"])
+        self.assertIs(manager._dct_current_instances["instance"], runtime)
+        self.assertEqual(getattr(runtime, "_deployment_source_mode", None), expected)
+        if operation:
+          self.assertEqual(lifecycle.records["operation|" + operation]["instances"][0]["source_mode"], expected)
 
   def test_blocked_code_execution_plugins_are_never_constructed(self):
     from naeural_core import constants as ct

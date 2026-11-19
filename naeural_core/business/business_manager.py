@@ -14,7 +14,7 @@ from copy import deepcopy
 from naeural_core import constants as ct
 from naeural_core import Logger
 from naeural_core.manager import Manager
-from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY
+from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY, deployment_source_mode
 
 from collections import deque, defaultdict
 
@@ -120,6 +120,9 @@ class BusinessManager(Manager):
         self.owner.blockchain_manager.sign,
         self.P,
         cleanup=self._cleanup_deployment_instance,
+        peer_session=self._deployment_peer_session,
+        # CStore records confirmations only from authenticated recipients of this exact value.
+        confirmed_peers=lambda key: self.plugins_shmem.get("__chain_storage", {}).get(key, {}).get("confirmed_peers", ()),
       )
     if self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True):
       self.P(
@@ -131,6 +134,32 @@ class BusinessManager(Manager):
         color='b',
       )
     return
+
+  def _deployment_peer_session(self, peer):
+    """Read reachability and process uptime for a deployment report recipient.
+
+    Parameters
+    ----------
+    peer : str
+      Oracle in the accepted deployment plan.
+
+    Returns
+    -------
+    tuple
+      Online-for-control status and uptime in seconds from a heartbeat or fresh authorized summary.
+
+    Examples
+    --------
+    >>> manager._deployment_peer_session(oracle)
+    (True, 120)
+    """
+    monitor = self.shmem.get("network_monitor")
+    if monitor is None or not monitor.network_node_is_online_for_control(peer):
+      return False, None
+    try:
+      return True, monitor.network_node_uptime(peer, as_str=False, allow_summary=True)
+    except (ValueError, KeyError):
+      return True, None  # Summary-only peers have liveness evidence but no direct heartbeat history.
 
   def _cleanup_deployment_instance(self, app_id, signature, instance_id):
     """Verify external workload cleanup after restart without starting a plugin.
@@ -942,6 +971,12 @@ class BusinessManager(Manager):
             )
           #end try-except
 
+          if plugin is not None and lifecycle is not None and lifecycle.source_modes:
+            # Include saved Deeploy jobs that predate lifecycle operations. SDK pipelines retain runner defaults.
+            specs = pipeline.get(ct.CONFIG_STREAM.DEEPLOY_SPECS)
+            job_id = specs.get("job_id", specs.get("JOB_ID")) if isinstance(specs, dict) else None
+            if operation or (type(job_id) in (int, str) and job_id != ""):
+              plugin._deployment_source_mode = deployment_source_mode(signature, pipeline, upstream_config)
           if operation and plugin is not None:
             plugin._deployment_operation_key = lifecycle.key(operation)
             lifecycle.attach(pipeline, signature, instance_id, plugin)
@@ -1111,6 +1146,10 @@ class BusinessManager(Manager):
 
   def close(self):
     self.P("Stopping all business plugins...", color='y')
+    # End observation before healthy plugin threads are stopped for node shutdown.
+    lifecycle = self.shmem.get(SERVICE_KEY)
+    if lifecycle is not None:
+      lifecycle.close()
     self._stop_admin_dispatch_thread()
     # First, shutdown special instances
     self.__maybe_shutdown_special_instances()
@@ -1119,9 +1158,6 @@ class BusinessManager(Manager):
     for _hash in keys:
       self._send_stop_signal_to_plugin(instance_hash=_hash, forced=True)
     self.P("Done stopping all business plugins.", color='y')
-    lifecycle = self.shmem.get(SERVICE_KEY)
-    if lifecycle is not None:
-      lifecycle.close()
     return
 
   def _deallocate_unused_instances(self, current_instances):

@@ -1462,7 +1462,8 @@ class DeploymentCommandTest(unittest.TestCase):
     source = Path(__file__).resolve().parents[2] / "config" / "config_manager_commands.py"
     handlers = _load_class_from_source(source, "ConfigCommandHandlers", extra_globals={
       "OPERATION_KEY": module.OPERATION_KEY, "SERVICE_KEY": module.SERVICE_KEY,
-    }, strip_text=("from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY\n",))
+      "STATELESS_REPLACEMENT_START": module.STATELESS_REPLACEMENT_START,
+    }, strip_text=("from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY, STATELESS_REPLACEMENT_START\n",))
     with tempfile.TemporaryDirectory() as directory:
       journal = os.path.join(directory, "journal")
       retired = config("retire", "retire", 0)
@@ -1612,6 +1613,91 @@ class DeploymentCommandTest(unittest.TestCase):
       later["DEEPLOY_OPERATION"]["operation_id"] = "later"
       self.assertTrue(service.admit(later, "oracle", True))  # Subsequent ordinary tracked updates still work.
 
+  def test_stateless_replacement_applies_complete_config_without_a_stop_and_fences_replay(self):
+    with tempfile.TemporaryDirectory() as directory:
+      journal = os.path.join(directory, "journal")
+      service = DeploymentLifecycle(journal, "node")
+      replacement = config(revision=3)
+      replacement.update(OWNER="owner", DEEPLOY_SPECS={"job_id": 31, "revision": 3, "secret_revision": "new:deploy"})
+      replacement["PLUGINS"][0]["SIGNATURE"] = "WORKER_APP_RUNNER"
+      replacement["PLUGINS"].append({"SIGNATURE": "NATIVE_FIXTURE", "INSTANCES": [{"INSTANCE_ID": "native"}]})
+      replacement["DEEPLOY_OPERATION"].update(
+        action=module.STATELESS_REPLACEMENT_START, operation_id="new", job_id=31,
+      )
+      previous = deepcopy(replacement)
+      previous["DEEPLOY_SPECS"] = {"job_id": 31, "revision": 2}
+      del previous["DEEPLOY_OPERATION"]
+      previous["REMOVED_SETTING"] = "must not survive delta merge"
+      harness = self.harness(service, previous)
+      harness.owner.bc = SimpleNamespace(node_address_to_eth_address=lambda _: "eth", get_eth_oracles=lambda: ["eth"])
+      harness.P = harness._create_notification = lambda *args, **kwargs: None
+      harness._check_duplicate_last = lambda **kwargs: False
+      harness._apply_delta_to_config = lambda base, delta: dict(base, **delta)
+      harness.keep_good_stream = lambda pipeline: pipeline
+      harness._save_stream_config = lambda pipeline: None
+      harness.update_config_stream(self.command(replacement), "oracle-id", "session")
+      applied = harness.dct_config_streams["app"]
+      self.assertNotIn("REMOVED_SETTING", applied)
+      self.assertEqual(service.records["new|deploy"]["instances"][1]["signature"], "NATIVE_FIXTURE")
+      self.assertEqual(applied["DEEPLOY_OPERATION"]["action"], "start")
+      self.assertTrue(service.allowed(applied))
+      self.assertNotIn("new|retire", service.records)
+      rebooted = DeploymentLifecycle(journal, "node")
+      self.assertFalse(rebooted.allowed(previous))
+      self.assertTrue(rebooted.allowed(applied))
+      self.assertTrue(rebooted.allows_instance_update(applied))
+      delayed = config(revision=2)
+      delayed["DEEPLOY_SPECS"] = {"job_id": 31, "revision": 2}
+      self.assertFalse(rebooted.admit(delayed, "oracle", True))
+
+      # Only a strictly newer rollout can restore older canonical content, after its own stop.
+      restore = config(revision=2, attempt="restore")
+      restore["DEEPLOY_SPECS"] = {"job_id": 31, "revision": 2}
+      restore["DEEPLOY_OPERATION"].update(operation_id="later", job_id=31)
+      self.assertFalse(rebooted.admit(restore, "oracle", True))
+      stop = config(action="stop", revision=4)
+      stop["DEEPLOY_OPERATION"].update(operation_id="later", job_id=31)
+      self.assertTrue(rebooted.admit(stop, "oracle", True))
+      self.assertFalse(rebooted.admit(restore, "oracle", True))
+      rebooted.records["later|deploy"]["status"] = "stopped"
+      self.assertTrue(rebooted.admit(restore, "oracle", True))
+
+  def test_stateless_replacement_refuses_different_local_occupant(self):
+    with tempfile.TemporaryDirectory() as directory:
+      service = DeploymentLifecycle(os.path.join(directory, "journal"), "node")
+      ready = config(revision=3)
+      ready["PLUGINS"][0]["SIGNATURE"] = "NATIVE_FIXTURE"
+      ready["DEEPLOY_OPERATION"].update(job_id=31, action=module.STATELESS_REPLACEMENT_START)
+      ready.update(OWNER="owner", DEEPLOY_SPECS={"job_id": 31, "revision": 3, "secret_revision": "operation:deploy"})
+      previous = deepcopy(ready)
+      previous["DEEPLOY_SPECS"]["revision"] = 2
+      del previous["DEEPLOY_OPERATION"]
+      self.assertTrue(service.can_replace_stateless_worker(ready, previous))
+      self.assertFalse(service.can_replace_stateless_worker(ready, dict(previous, OWNER="other")))
+      wrong_signature = deepcopy(previous)
+      wrong_signature["PLUGINS"][0]["SIGNATURE"] = "DIFFERENT_NATIVE_FIXTURE"
+      self.assertFalse(service.can_replace_stateless_worker(ready, wrong_signature))
+      previous["PLUGINS"][0]["INSTANCES"][0]["FIXED_SIZE_VOLUMES"] = {"db": {"SIZE": "100M"}}
+      self.assertFalse(service.can_replace_stateless_worker(ready, previous))
+      instance = previous["PLUGINS"][0]["INSTANCES"][0]
+      instance.pop("FIXED_SIZE_VOLUMES")
+      instance["PER_NODE_CONFIG"] = {"byNode": {"node": {"volumes": {"/mnt/data": "/data"}}}}
+      self.assertFalse(service.can_replace_stateless_worker(ready, previous))
+      instance["PER_NODE_CONFIG"] = {"default": {"ENV": {"ROLE": "web"}}}
+      self.assertTrue(service.can_replace_stateless_worker(ready, previous))
+      self.assertFalse(service.records)
+
+  def test_stateless_replacement_accepts_an_empty_name_after_a_historical_retire(self):
+    with tempfile.TemporaryDirectory() as directory:
+      service = DeploymentLifecycle(os.path.join(directory, "journal"), "node")
+      retired = config("retire", "retire", 0)  # Old journals kept the app name without a job ID.
+      self.assertTrue(service.admit(retired, "oracle", True))
+      incoming = config(revision=2)
+      incoming["DEEPLOY_OPERATION"].update(job_id=31, action=module.STATELESS_REPLACEMENT_START)
+      self.assertFalse(service.can_replace_stateless_worker(incoming, {}))
+      service.records["operation|retire"]["status"] = "stopped"  # The historical occupant no longer owns the name.
+      self.assertTrue(service.can_replace_stateless_worker(incoming, {}))
+
   @staticmethod
   def command(config):
     config = deepcopy(config)
@@ -1624,16 +1710,19 @@ class DeploymentCommandTest(unittest.TestCase):
     source = Path(__file__).resolve().parents[2] / "config" / "config_manager_commands.py"
     constants = SimpleNamespace(
       CONFIG_STREAM=SimpleNamespace(NAME="NAME", INITIATOR_ID="INITIATOR_ID",
-                                    K_MODIFIED_BY_ID="MODIFIED_BY_ID", K_MODIFIED_BY_ADDR="MODIFIED_BY_ADDR"),
+                                    K_MODIFIED_BY_ID="MODIFIED_BY_ID", K_MODIFIED_BY_ADDR="MODIFIED_BY_ADDR",
+                                    K_INITIATOR_ADDR="INITIATOR_ADDR", K_INITIATOR_ID="INITIATOR_ID"),
       COMMS=SimpleNamespace(COMM_RECV_MESSAGE=SimpleNamespace(K_VALIDATED="VALIDATED", K_SENDER_ADDR="EE_SENDER")),
       PAYLOAD_DATA=SimpleNamespace(NAME="NAME", INSTANCE_CONFIG="INSTANCE_CONFIG", SESSION_ID="SESSION_ID"),
+      PAYLOAD_CT=SimpleNamespace(COMMANDS=SimpleNamespace(UPDATE_CONFIG="UPDATE_CONFIG")),
       PLUGIN_INFO=SimpleNamespace(SIGNATURE="SIGNATURE", INSTANCE_ID="INSTANCE_ID"),
       STATUS_TYPE=SimpleNamespace(STATUS_EXCEPTION="error", STATUS_NORMAL="normal"),
       NOTIFICATION_CODES=SimpleNamespace(PIPELINE_FAILED="failed", PIPELINE_OK="ok"),
     )
     commands = _load_class_from_source(source, "ConfigCommandHandlers", extra_globals={
       "ct": constants, "OPERATION_KEY": "DEEPLOY_OPERATION", "SERVICE_KEY": "deeploy_lifecycle",
-    }, strip_text=("from naeural_core import constants as ct\n", "from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY\n"))
+      "STATELESS_REPLACEMENT_START": module.STATELESS_REPLACEMENT_START,
+    }, strip_text=("from naeural_core import constants as ct\n", "from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY, STATELESS_REPLACEMENT_START\n"))
     harness = commands()
     harness.shmem = {"deeploy_lifecycle": service}
     harness.dct_config_streams = {"app": current}

@@ -52,14 +52,31 @@ class ConfigCommandHandlers:
       return
     replacement_start = operation is not None and operation.get("action") == STATELESS_REPLACEMENT_START
     if replacement_start:
-      if (not validated_command or operation.get("coordinator") != sender_addr
-          or self.owner.bc.node_address_to_eth_address(sender_addr) not in self.owner.bc.get_eth_oracles()):
-        return  # A replacement carries more authority than a regular pipeline command.
-      with lifecycle.lock:
-        if not lifecycle.can_replace_stateless_worker(delta_config_stream, self.dct_config_streams.get(stream_name, {})):
-          return  # Preserve the unrelated or incompatible local occupant.
-        if not lifecycle.admit(delta_config_stream, sender_addr, validated_command):
-          return
+      if not validated_command or operation.get("coordinator") != sender_addr:
+        self.P("Refused a stateless replacement from an unauthenticated coordinator.", color="y")
+        return
+      try:
+        sender_eth = self.owner.bc.node_address_to_eth_address(sender_addr).lower()
+        registered = {address.lower() for address in self.owner.bc.get_eth_oracles()}
+      except Exception:
+        # A registry read failure leaves the previous config intact and can be retried by the coordinator.
+        self.P("Stateless replacement coordinator authorization is unavailable.", color="y")
+        return
+      if sender_eth not in registered:
+        self.P("Refused a stateless replacement from an unregistered coordinator.", color="y")
+        return
+      try:
+        with lifecycle.lock:
+          if not lifecycle.can_replace_stateless_worker(delta_config_stream, self.dct_config_streams.get(stream_name, {})):
+            self.P(f"Refused stateless replacement for {stream_name!r} because of its local deployment state.", color="y")
+            return
+          if not lifecycle.admit(delta_config_stream, sender_addr, validated_command):
+            self.P(f"Refused stateless replacement for {stream_name!r} at lifecycle admission.", color="y")
+            return
+      except (ValueError, TypeError, KeyError, AttributeError):
+        # Refuse a malformed config without logging configuration values or changing the local workload.
+        self.P(f"Refused invalid stateless replacement configuration for {stream_name!r}.", color="y")
+        return
       operation = dict(operation, action="start")  # Reuse the existing supervised plugin restart and reports.
       delta_config_stream[OPERATION_KEY] = operation
     elif operation is not None:

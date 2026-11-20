@@ -216,5 +216,7 @@ validation and the replacement configuration checks. The new
 attempt is journaled before the config changes. The business manager uses the
 ordinary tracked restart path, including local shutdown before reconstructing a
 component with the same identity. The journal fences older starts and
-unversioned pipeline writes for the job across a worker restart. Instance
+unversioned pipeline writes for the job across a worker restart. The journal
+orders new starts against same-job retirements even after the config file is
+removed. Historical per-node overlays are checked for local mounts. Instance
 commands still address the active tracked attempt.

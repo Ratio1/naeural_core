@@ -1683,6 +1683,8 @@ class DeploymentCommandTest(unittest.TestCase):
       instance.pop("FIXED_SIZE_VOLUMES")
       instance["PER_NODE_CONFIG"] = {"byNode": {"node": {"volumes": {"/mnt/data": "/data"}}}}
       self.assertFalse(service.can_replace_stateless_worker(ready, previous))
+      instance["PER_NODE_CONFIG"] = {"node": {"file_volumes": {"local.conf": "/app/local.conf"}}}
+      self.assertFalse(service.can_replace_stateless_worker(ready, previous))
       instance["PER_NODE_CONFIG"] = {"default": {"ENV": {"ROLE": "web"}}}
       self.assertTrue(service.can_replace_stateless_worker(ready, previous))
       self.assertFalse(service.records)
@@ -1696,6 +1698,20 @@ class DeploymentCommandTest(unittest.TestCase):
       incoming["DEEPLOY_OPERATION"].update(job_id=31, action=module.STATELESS_REPLACEMENT_START)
       self.assertFalse(service.can_replace_stateless_worker(incoming, {}))
       service.records["operation|retire"]["status"] = "stopped"  # The historical occupant no longer owns the name.
+      self.assertTrue(service.can_replace_stateless_worker(incoming, {}))
+
+  def test_stateless_replacement_cannot_displace_newer_retirement_without_config(self):
+    with tempfile.TemporaryDirectory() as directory:
+      service = DeploymentLifecycle(os.path.join(directory, "journal"), "node")
+      retired = config("retire", "retire", 3)
+      retired["DEEPLOY_OPERATION"].update(job_id=31, operation_id="newer")
+      self.assertTrue(service.admit(retired, "oracle", True))
+      incoming = config(revision=2)
+      incoming["DEEPLOY_OPERATION"].update(job_id=31, action=module.STATELESS_REPLACEMENT_START)
+      # A stopped receipt still fences older first deliveries when the config file vanished.
+      service.records["newer|retire"]["status"] = "stopped"
+      self.assertFalse(service.can_replace_stateless_worker(incoming, {}))
+      incoming["DEEPLOY_OPERATION"]["revision"] = 4
       self.assertTrue(service.can_replace_stateless_worker(incoming, {}))
 
   @staticmethod

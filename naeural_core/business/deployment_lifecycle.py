@@ -89,12 +89,13 @@ def stateless_worker_identities(config):
         # Historical configs let the runner apply default and per-target settings after admission.
         if not isinstance(overrides, dict):
           raise ValueError("Replacement requires a valid per-worker configuration.")
-        candidates = [overrides]
+        candidates = [overrides]  # Keep rejecting mount keys written directly on a malformed overlay.
         for selector, values in overrides.items():
-          if isinstance(values, dict) and selector.upper() == "DEFAULT":
-            candidates.append(values)
-          elif isinstance(values, dict) and selector.upper() in ("BYINDEX", "BY_INDEX", "BYNODE", "BY_NODE"):
+          # Bare selectors are the historical by-node form. Structured selector maps add one level.
+          if isinstance(values, dict) and selector in ("byIndex", "BY_INDEX", "byNode", "BY_NODE"):
             candidates.extend(values.values())
+          else:
+            candidates.append(values)
         if any(isinstance(overlay, dict) and any(key.upper() in local_mounts and val for key, val in overlay.items())
                for overlay in candidates):
           raise ValueError("Replacement cannot use per-worker local mounts.")
@@ -510,10 +511,16 @@ class DeploymentLifecycle:
     specs = previous.get("DEEPLOY_SPECS") or {}
     tracked = previous.get(OPERATION_KEY)
     if not previous:
-      # A tracked job can be awaiting local cleanup even after its config has disappeared.
-      return not any(record.get("active") and record["app_id"] == incoming["NAME"]
-                     and record.get("status") != "stopped" and str(record.get("job_id")) != job_id
-                     for record in self.records.values())
+      # Journal state still owns the name and orders starts after the config file is gone.
+      for record in self.records.values():
+        if not record.get("active") or record["app_id"] != incoming["NAME"]:
+          continue
+        if str(record.get("job_id")) != job_id:
+          if record.get("status") != "stopped":
+            return False
+        elif record["revision"] >= operation["revision"] and self.key(record) != self.key(operation):
+          return False
+      return True
     if (str(specs.get("job_id")) != job_id
         or str(previous.get("OWNER", "")).lower() != str(incoming.get("OWNER", "")).lower()):
       return False  # An occupied pipeline name must still identify this job and its owner.

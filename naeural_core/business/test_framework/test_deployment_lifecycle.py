@@ -1296,6 +1296,22 @@ class DeploymentCommandTest(unittest.TestCase):
       self.assertIs(service.plugins[("operation|retire", "WORKER", "worker")], runtime)
       self.assertEqual(runtime._deployment_operation_key, "operation|retire")
 
+  def test_plugin_wrapper_signs_eip191_text_with_the_node_key(self):
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+    from naeural_core import Logger
+    from naeural_core.utils.plugins_base.bc_wrapper import BCWrapper
+    from ratio1.bc import DefaultBlockEngine
+
+    with tempfile.TemporaryDirectory() as directory:
+      log = Logger("WORKER", base_folder=directory, no_folders_no_save=True, DEBUG=False)
+      engine = DefaultBlockEngine("signer-" + os.path.basename(directory), log=log, eth_enabled=False,
+                                  verbosity=0, config={"PEM_FILE": os.path.join(directory, "oracle.pem")})
+      wrapper = BCWrapper(engine, owner=None)
+      message = "Ratio1 Deeploy replacement refusal v1\n[\"devnet\",\"31\"]"
+      signature = wrapper.eth_sign_text(message, no_hash=True)
+      self.assertEqual(Account.recover_message(encode_defunct(text=message), signature=signature), wrapper.eth_address)
+
   def test_legacy_worker_inspection_and_conditional_retirement(self):
     from naeural_core import Logger
     from naeural_core.utils.plugins_base.bc_wrapper import BCWrapper

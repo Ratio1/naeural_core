@@ -19,6 +19,7 @@ from copy import deepcopy
 
 OPERATION_KEY = "DEEPLOY_OPERATION"
 SERVICE_KEY = "deeploy_lifecycle"
+STATELESS_REPLACEMENT_START = "start_stateless_replacement_v1"
 OBSERVATION_HKEY = "DEEPLOY_NODE_OPERATIONS"
 # The coordinator issues 110-second challenges. Allow a worker's clock to lag by up to 70 seconds.
 REPAIR_MAX_FUTURE_SECONDS = 180
@@ -43,6 +44,69 @@ ERRORS = {
   "IMAGE_PULL_FAILED": "Container image could not be downloaded.",
   "SECRET_RESOLUTION_FAILED": "Protected configuration could not be resolved.",
 }
+
+
+def stateless_worker_identities(config):
+  """Read the stable component IDs accepted for stateless replacement.
+
+  Application state is attested separately by the signed wallet request. The
+  runtime excludes managed services, local mounts, synchronization and one-time commands.
+
+  Parameters
+  ----------
+  config : dict
+    The complete deployed or requested pipeline.
+
+  Returns
+  -------
+  frozenset
+    Nonempty set of distinct plugin signature and instance ID pairs.
+
+  Examples
+  --------
+  >>> stateless_worker_identities({"PLUGINS": []})
+  Traceback (most recent call last):
+  ...
+  ValueError: Replacement requires plugins with stable signatures and instance IDs.
+  """
+  instances = []
+  local_mounts = ("VOLUMES", "FILE_VOLUMES", "FIXED_SIZE_VOLUMES")
+  if config.get("PIPELINE_COMMAND"):
+    raise ValueError("Replacement cannot replay a pipeline command.")
+  for group in config.get("PLUGINS") or []:
+    signature = group.get("SIGNATURE")
+    # Preserve the plugin's runtime identity while leaving plugin selection to normal deployment validation.
+    if not isinstance(signature, str) or not signature.strip() or not group.get("INSTANCES"):
+      raise ValueError("Replacement requires plugins with stable signatures and instance IDs.")
+    for instance in group["INSTANCES"]:
+      if (any(instance.get(key) for key in (*local_mounts, "INSTANCE_COMMAND"))
+          or not isinstance(instance.get("SYNC") or {}, dict)
+          or (instance.get("SYNC") or {}).get("ENABLED", False) is not False):
+        raise ValueError("Replacement cannot use local mounts, synchronization or one-time commands.")
+      for field, overrides in instance.items():
+        if field.upper() not in ("PER_NODE_CONFIG", "PERNODECONFIG") or not overrides:
+          continue
+        # Historical configs let the runner apply default and per-target settings after admission.
+        if not isinstance(overrides, dict):
+          raise ValueError("Replacement requires a valid per-worker configuration.")
+        candidates = [overrides]  # Keep rejecting mount keys written directly on a malformed overlay.
+        for selector, values in overrides.items():
+          # Bare selectors are the historical by-node form. Structured selector maps add one level.
+          if isinstance(values, dict) and selector in ("byIndex", "BY_INDEX", "byNode", "BY_NODE"):
+            candidates.extend(values.values())
+          else:
+            candidates.append(values)
+        if any(isinstance(overlay, dict) and any(key.upper() in local_mounts and val for key, val in overlay.items())
+               for overlay in candidates):
+          raise ValueError("Replacement cannot use per-worker local mounts.")
+      instance_id = instance.get("INSTANCE_ID")
+      if not isinstance(instance_id, str) or not instance_id:
+        raise ValueError("Replacement requires plugins with stable signatures and instance IDs.")
+      instances.append((signature, instance_id))  # Preserve the runtime identity even across config edits.
+  if not instances or len(set(instances)) != len(instances):
+    raise ValueError("Replacement requires plugins with stable signatures and instance IDs.")
+  return frozenset(instances)
+
 
 
 def repair_config_fingerprint(config):
@@ -172,6 +236,7 @@ class DeploymentLifecycle:
     # Shutdown waits for live plugin observation, independently of journal I/O and orphan cleanup.
     self._observation_lock = threading.Lock()
     self.records = {}
+    self._replacement_revisions = {}  # Durable minimum revision after replacement, indexed by job and pipeline.
     self._legacy_repair_aborts = {}  # Index only versioned conditional retirements for fast legacy startup checks.
     self.plugins = {}
     self._published = {}
@@ -193,6 +258,8 @@ class DeploymentLifecycle:
       self._sync_journal_directory()
       # A persisted readiness observation is not evidence after node restart.
       for record in self.records.values():
+        if record.get("stateless_replacement") is True:
+          self._index_stateless_replacement(record)  # Reestablish the fence before loading recovered configs.
         if (record.get("parent_operation_id") or record.get("confirm_prior_stop") is True) and "job_id" in record:
           self._legacy_repair_aborts.setdefault(record["app_id"], set()).add((str(record["job_id"]), 0))
         if record["attempt"] != "inspect" and record["status"] not in ("stopping", "stopped", "failed"):
@@ -289,7 +356,8 @@ class DeploymentLifecycle:
     if operation.get("attempt") not in ("deploy", "restore", "retire"):
       raise ValueError("Invalid deployment attempt")
     repair_start = operation.get("action") == "start_repaired_worker_v1"
-    if repair_start:
+    replacement_start = operation.get("action") == STATELESS_REPLACEMENT_START
+    if repair_start or replacement_start:
       operation = dict(operation, action="start")  # Give a verified repair the regular tracked runtime lifecycle.
     if operation.get("action") not in ("start", "stop", "retire"):
       raise ValueError("Invalid deployment action")
@@ -304,6 +372,23 @@ class DeploymentLifecycle:
     key = self.key(operation)
     with self.lock:
       current = self.records.get(key)
+      specs = config.get("DEEPLOY_SPECS") or {}
+      identity = (config["NAME"], str(specs.get("job_id")))
+      replacement_floor = self._replacement_revisions.get(identity, 0)
+      if operation["action"] == "start" and operation["revision"] < replacement_floor:
+        # A newer update may restore older saved content after its own rollout stops.
+        deploy = self.records.get(operation["operation_id"] + "|deploy") or {}
+        if not (operation["attempt"] == "restore" and deploy.get("revision", 0) > replacement_floor
+                and deploy.get("coordinator") == sender and deploy.get("app_id") == config["NAME"]
+                and str(deploy.get("job_id")) == identity[1] and deploy.get("aborted") and deploy.get("status") == "stopped"):
+          return False  # A delayed start or restore from before replacement cannot revive a displaced revision.
+      if replacement_start:
+        if (operation["attempt"] != "deploy" or type(operation.get("job_id")) is not int
+            or str(operation["job_id"]) != identity[1] or specs.get("revision") != operation["revision"]
+            or not isinstance(config.get("OWNER"), str) or not config["OWNER"]
+            or specs.get("secret_revision") != operation["operation_id"] + ":deploy"):
+          return False
+        stateless_worker_identities(config)  # A refused payload must leave the previous attempt active.
       if repair_start:
         parent = operation.get("parent_operation_id")
         job_id = operation.get("job_id")
@@ -356,6 +441,10 @@ class DeploymentLifecycle:
             "parent_operation_id", "challenge", "order_digest", "config_seal_hash", "job_id",
           )})
           current["instances"][0]["runtime_artifacts"] = {"git_commit": repair_evidence["git_commit"]}
+        if operation.get("job_id") is not None:
+          current["job_id"] = operation["job_id"]  # Bind tracked local occupancy even after its config is removed.
+        if replacement_start:
+          current["stateless_replacement"] = True
         if repair_start:
           current.update(parent_operation_id=parent, job_id=job_id)  # The already-stopped worker also fences legacy replay.
       else:
@@ -373,7 +462,77 @@ class DeploymentLifecycle:
       if repair_evidence is not None or repair_start:
         # Preserve the tombstone when a tracked deployment takes over, including before its config-file write.
         self._legacy_repair_aborts.setdefault(current["app_id"], set()).add((str(current["job_id"]), 0))
+      if replacement_start:
+        self._index_stateless_replacement(current)  # Do not fence anything until the journal write is confirmed.
     return True
+
+  def _index_stateless_replacement(self, record):
+    """Index the minimum tracked revision and the legacy fence for a durable replacement.
+
+    Parameters
+    ----------
+    record : dict
+      Persisted journal entry for the signed replacement.
+
+    Returns
+    -------
+    None
+      Updates the in-memory indexes.
+
+    Examples
+    --------
+    >>> service._index_stateless_replacement(entry)  # doctest: +SKIP
+    """
+    app_id, job_id = record["app_id"], str(record["job_id"])
+    identity = (app_id, job_id)
+    self._replacement_revisions[identity] = max(record["revision"], self._replacement_revisions.get(identity, 0))
+    self._legacy_repair_aborts.setdefault(app_id, set()).add((job_id, 0))
+
+  def can_replace_stateless_worker(self, incoming, previous):
+    """Check local ownership and identity before applying a complete replacement.
+
+    Parameters
+    ----------
+    incoming, previous : dict
+      Requested pipeline and its local occupant, if one exists.
+
+    Returns
+    -------
+    bool
+      Whether the replacement may use this local pipeline name.
+
+    Examples
+    --------
+    >>> service.can_replace_stateless_worker(replacement, occupant)  # doctest: +SKIP
+    True
+    """
+    operation = incoming[OPERATION_KEY]
+    job_id = str(operation.get("job_id"))
+    specs = previous.get("DEEPLOY_SPECS") or {}
+    tracked = previous.get(OPERATION_KEY)
+    if not previous:
+      # Journal state still owns the name and orders starts after the config file is gone.
+      for record in self.records.values():
+        if not record.get("active") or record["app_id"] != incoming["NAME"]:
+          continue
+        if str(record.get("job_id")) != job_id:
+          if record.get("status") != "stopped":
+            return False
+        elif record["revision"] >= operation["revision"] and self.key(record) != self.key(operation):
+          return False
+      return True
+    if (str(specs.get("job_id")) != job_id
+        or str(previous.get("OWNER", "")).lower() != str(incoming.get("OWNER", "")).lower()):
+      return False  # An occupied pipeline name must still identify this job and its owner.
+    if tracked and self.key(tracked) == self.key(operation):
+      return True  # Retry after the journal was committed.
+    if type(specs.get("revision", 0)) is not int or specs.get("revision", 0) >= operation["revision"]:
+      return False  # A delayed replacement must not overwrite a newer tracked deployment.
+    try:
+      # BusinessManager restarts a matching plugin under the new attempt only after its old instance stops locally.
+      return stateless_worker_identities(incoming) == stateless_worker_identities(previous)
+    except ValueError:
+      return False
 
   def _repair_stop_commit(self, proof, name, job_id, instance_id, parent, sender):
     """Read the exact local STOP shared by repair preflight and tracked start.
@@ -698,7 +857,9 @@ class DeploymentLifecycle:
         return True  # The common path for untracked jobs avoids the lifecycle lock entirely.
       with self.lock:
         specs = config.get("DEEPLOY_SPECS") or {}
-        return (str(specs.get("job_id")), specs.get("revision", 0)) not in retired
+        job_id = str(specs.get("job_id"))
+        return ((config.get("NAME"), job_id) not in self._replacement_revisions
+                and (job_id, specs.get("revision", 0)) not in retired)
     with self.lock:
       record = self.records.get(self.key(operation))
       return record is not None and record.get("active", False) and not record["aborted"]

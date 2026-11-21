@@ -343,6 +343,28 @@ class BCWrapper:
     """
     return self.__bc.eth_sign_message(types=types, values=values)  
 
+  def eth_sign_text(self, message: str, *, no_hash: bool = False) -> str:
+    """Sign text with the node's EVM account.
+
+    Parameters
+    ----------
+    message : str
+      Text to sign.
+    no_hash : bool, optional
+      Use EIP-191 directly over UTF-8 text when true, or over the SDK's
+      Solidity hash of the text otherwise.
+
+    Returns
+    -------
+    str
+      The hex-encoded signature.
+
+    Examples
+    --------
+    >>> wrapper.eth_sign_text("Example message", no_hash=True)  # doctest: +SKIP
+    """
+    return self.__bc.eth_sign_text(message, no_hash=no_hash)
+
   def eth_hash_message(self, types: list, values: list, as_hex: bool = False):
     """
     Hash a typed EVM payload using solidity keccak.

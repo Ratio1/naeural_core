@@ -205,3 +205,18 @@ without I/O. The node journals the actual `image_id` (local Docker identity),
 the immutable registry `image_ref` when available, and the worker's checked-out
 `git_commit`. Retirement keeps this evidence. Restoring a bound instance
 requires its recorded artifact. A following instance resolves its source again.
+
+## Stateless replacement
+
+A validated command from an enrolled oracle can use
+`start_stateless_replacement_v1` to send a complete configuration without a
+prior retirement receipt. The job, owner and runtime component identities must
+match any local occupant. Native and runner plugins go through normal plugin
+validation and the replacement configuration checks. The new
+attempt is journaled before the config changes. The business manager uses the
+ordinary tracked restart path, including local shutdown before reconstructing a
+component with the same identity. The journal fences older starts and
+unversioned pipeline writes for the job across a worker restart. The journal
+orders new starts against same-job retirements even after the config file is
+removed. Historical per-node overlays are checked for local mounts. Instance
+commands still address the active tracked attempt.

@@ -242,10 +242,78 @@ def keep_boxes_inside_irregular_target_area(lst_box, target_area, prc_intersect)
 
   Notes
   -----
-  Plain numeric TLBR batches reuse target construction within this call only.
+  Bounded integer TLBRs against a closed axis-aligned integer rectangle use
+  continuous rectangle areas. Other plain numeric batches reuse the target
+  geometry within this call only.
   Polygon boxes, array/custom inputs and effectful numeric subclasses use the
   scalar path, preserving alias mutations and conversion/exception ordering.
   """
+
+  l = _irregular_target_fractions(lst_box, target_area, prc_intersect)
+  arr_intersect = np.array(l)
+  sel = arr_intersect >= prc_intersect
+  intersect_values = arr_intersect[sel]
+  lst_box = np.array(lst_box)[sel].tolist()
+  return lst_box, intersect_values
+
+
+def _irregular_target_fractions(lst_box, target_area, prc_intersect):
+  """Compute overlap fractions without changing the public selection path.
+
+  Parameters
+  ----------
+  lst_box, target_area : list
+      Detections and target points passed unchanged to the scalar fallback.
+  prc_intersect : float
+      Only exact builtin thresholds opt into arithmetic; custom comparisons
+      keep the original execution path.
+
+  Returns
+  -------
+  list
+      One fraction per row, in order, with legacy scalar types on fallback.
+  """
+  # Recognize only ordinary JSON-shaped data. At +/-2**20 even the largest
+  # rectangle area (2**42) is an exact binary64 integer before division.
+  limit = 1 << 20
+  if (
+    type(lst_box) is list and lst_box
+    and (type(prc_intersect) is float or type(prc_intersect) is int)
+    and type(target_area) is list and len(target_area) == 5
+    and all(type(p) is list and len(p) == 2
+            and all(type(v) is int and -limit <= v <= limit for v in p)
+            for p in target_area)
+    and target_area[0] == target_area[-1]
+  ):
+    a, b, c, d, _ = target_area
+    x0, y0 = a
+    x1, y1 = c
+    # A and C must be opposite corners, with the two remaining corners in
+    # perimeter order. Four corners alone would also admit a bow-tie.
+    if x0 != x1 and y0 != y1 and (
+      (b == [x0, y1] and d == [x1, y0]) or (b == [x1, y0] and d == [x0, y1])
+    ):
+      left, right = min(x0, x1), max(x0, x1)
+      top, bottom = min(y0, y1), max(y0, y1)
+      fractions = []
+      for row in lst_box:
+        # A colliding custom key may execute code even on an exact dict.
+        if type(row) is not dict or not all(type(k) is str for k in row):
+          break
+        box = row.get('TLBR_POS')
+        if (type(box) is not list or len(box) != 4
+            or not all(type(v) is int and -limit <= v <= limit for v in box)):
+          break
+        t, l, btm, r = box
+        if t >= btm or l >= r:
+          break
+        h = max(0, min(btm, bottom) - max(t, top))
+        w = max(0, min(r, right) - max(l, left))
+        fractions.append((h * w) / ((btm - t) * (r - l)))
+      else:
+        return fractions
+      # Any rejected row replays the *entire* batch in original order. The
+      # discarded prefix used only side-effect-free builtin reads/arithmetic.
 
   # Only inspect exact builtin containers/scalars here. Pre-validating or
   # converting arbitrary inputs could run user code before the first box, or
@@ -270,17 +338,12 @@ def keep_boxes_inside_irregular_target_area(lst_box, target_area, prc_intersect)
     )
   )
   target_cache = [None] if reuse_target else None
-  l = [
+  return [
     intersect_box_irregular_target(
       x['TLBR_POS'], target_area, _target_geometry_cache=target_cache,
     )
     for x in lst_box
   ]
-  arr_intersect = np.array(l)
-  sel = arr_intersect >= prc_intersect
-  intersect_values = arr_intersect[sel]
-  lst_box = np.array(lst_box)[sel].tolist()
-  return lst_box, intersect_values
 
 
 # def filter_boxes_regular_target(lst_box, target_area, prc_intersect):

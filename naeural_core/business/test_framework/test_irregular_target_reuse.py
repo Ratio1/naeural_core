@@ -1,6 +1,8 @@
 """Differential geometry tests using real NumPy/Shapely in the E2 image."""
 
 from copy import deepcopy
+from itertools import permutations
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -105,7 +107,8 @@ class IrregularTargetReuseTests(unittest.TestCase):
 
   def test_target_is_constructed_once_per_plain_batch(self):
     """Count actual target builds independently of per-box polygon builds."""
-    target = [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]]
+    # A genuinely irregular polygon must still use the construction cache.
+    target = [[0, 0], [4, 0], [3, 4], [0, 4], [0, 0]]
     rows = [{'TLBR_POS': [0, 0, 2, 2]} for _ in range(8)]
     with patch.object(utils, 'Polygon', wraps=Polygon) as polygons:
       utils.keep_boxes_inside_irregular_target_area(rows, target, .5)
@@ -113,6 +116,103 @@ class IrregularTargetReuseTests(unittest.TestCase):
     with patch.object(utils, 'LineString', wraps=LineString) as lines:
       utils.keep_boxes_inside_irregular_target_area(rows, target[:-1], 0)
       self.assertEqual(lines.call_count, 1)
+
+  def test_only_perimeter_order_rectangles_skip_geometry(self):
+    """Compare all corner orders; only the eight simple rings bypass GEOS."""
+    corners = [[-7, -3], [5, -3], [5, 9], [-7, 9]]
+    rows = [{'TLBR_POS': [-8, -8, 8, 8]}]
+    fast = 0
+    for order in permutations(corners):
+      area = [*order, order[0]]
+      with patch.object(utils, 'Polygon', wraps=Polygon) as polygons:
+        # The frozen oracle may raise on self-crossing rings; require the
+        # same exception and count only the candidate's actual polygon builds.
+        self.assert_equivalent(rows, area, 0)
+      # Neighbors must share exactly one axis, including the closing edge.
+      simple = all((a[0] == b[0]) != (a[1] == b[1]) for a, b in zip(area, area[1:]))
+      self.assertEqual(polygons.call_count, 0 if simple else 2)
+      fast += simple
+    self.assertEqual(fast, 8)
+
+  def test_bounded_fraction_bytes_and_threshold_neighbors(self):
+    """Include exact extremes, randomized coordinates and both cutoff neighbors."""
+    rng = np.random.default_rng(192)
+    limit = 1 << 20
+    for i in range(65):
+      xs, ys = (sorted(rng.choice(2 * limit, 2, replace=False).tolist()) for _ in range(2))
+      x, r = (v - limit for v in xs)
+      y, b = (v - limit for v in ys)
+      if i == 0:
+        x, r, y, b = -limit, limit, -limit, 0
+      area = [[x, y], [r, y], [r, b], [x, b], [x, y]]
+      row = {'TLBR_POS': [-limit, -limit, limit, limit]}
+      other = deepcopy(row)
+      rows = [row, other, row, {'TLBR_POS': [b, x, b + 1, r]}]
+      for _ in range(8):
+        t, btm = sorted(rng.choice(2 * limit + 1, 2, replace=False).tolist())
+        l, right = sorted(rng.choice(2 * limit + 1, 2, replace=False).tolist())
+        rows.append({'TLBR_POS': [t - limit, l - limit, btm - limit, right - limit]})
+      score = legacy_intersection(row['TLBR_POS'], area)
+      for cutoff in (0, float(np.nextafter(score, 0)), score,
+                     float(np.nextafter(score, 1)), 1, float('nan')):
+        old, expected = legacy_filter(rows, area, cutoff)
+        new, actual = utils.keep_boxes_inside_irregular_target_area(
+          lst_box=rows, target_area=area, prc_intersect=cutoff,
+        )
+        self.assertEqual([id(v) for v in new], [id(v) for v in old])
+        self.assertEqual((actual.dtype, actual.tobytes()), (expected.dtype, expected.tobytes()))
+
+  def test_opaque_or_nonpositive_row_replays_the_whole_batch(self):
+    """Never combine arithmetic results with stock polygon/exception side effects."""
+    area = [[0, 0], [6, 0], [6, 3], [0, 3], [0, 0]]
+    plain = {'TLBR_POS': [0, 0, 4, 4]}
+    for box in ([0., 0, 4, 4], [False, 0, 4, 4], [0, 0, 4, 2**20+1],
+                [0, 0, 0, 4], [4, 4, 0, 0], (0, 0, 4, 4), np.array([0, 0, 4, 4])):
+      for rows in ([{'TLBR_POS': box}, plain], [plain, {'TLBR_POS': box}]):
+        with patch.object(utils, 'intersect_box_irregular_target',
+                          wraps=utils.intersect_box_irregular_target) as scalar:
+          utils.keep_boxes_inside_irregular_target_area(rows, area, 0)
+        self.assertEqual(scalar.call_count, len(rows))
+        self.assert_equivalent(rows, area, 0)
+
+  def test_custom_selector_keeps_stock_indexing_order(self):
+    """An opaque threshold can observe which numpy result is indexed first."""
+    class Selector:
+      calls = 0
+
+      def __array__(self, dtype=None, copy=None):
+        self.calls += 1
+        return np.asarray([self.calls == 1, self.calls != 1], dtype=dtype)
+
+    class Threshold:
+      def __array_ufunc__(self, *args, **kwargs):
+        return Selector()
+
+    rows = [{'TLBR_POS': [0, 0, 4, 8]}, {'TLBR_POS': [0, 0, 4, 4]}]
+    area = [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]]
+    with patch.object(utils, 'intersect_box_irregular_target',
+                      wraps=utils.intersect_box_irregular_target) as scalar:
+      selected, scores = utils.keep_boxes_inside_irregular_target_area(rows, area, Threshold())
+    self.assertEqual(scalar.call_count, 2)
+    self.assertIs(selected[0], rows[1])
+    np.testing.assert_array_equal(scores, [.5])
+
+  def test_real_executor_annotates_only_selected_objects(self):
+    """Exercise the installed caller's keyword dispatch, identity and annotation."""
+    from naeural_core import constants as ct
+    from naeural_core.business.base.cv_plugin_executor import CVPluginExecutor
+
+    cfg = SimpleNamespace(_coords_type=ct.COORDS_POINTS, cfg_prc_intersect=.5,
+                          cfg_points=[[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]])
+    a = {'TLBR_POS': [0, 0, 4, 8]}
+    b = deepcopy(a)
+    miss = {'TLBR_POS': [4, 4, 8, 8]}
+    result = CVPluginExecutor._keep_only_intersected_objects(cfg, {'det': [[a, miss, b, a], []]})
+    self.assertEqual([id(x) for x in result['det'][0]], [id(a), id(b), id(a)])
+    self.assertEqual(result['det'][1], [])
+    self.assertEqual(a[ct.PRC_INTERSECT], .5)
+    self.assertEqual(b[ct.PRC_INTERSECT], .5)
+    self.assertNotIn(ct.PRC_INTERSECT, miss)
 
   def test_alias_closure_between_rows(self):
     """An aliased four-point box can change a target from line to polygon."""

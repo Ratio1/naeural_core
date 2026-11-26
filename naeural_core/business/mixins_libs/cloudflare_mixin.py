@@ -36,6 +36,11 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
       Examples
       --------
       >>> plugin._get_cloudflare_start_command()  # doctest: +SKIP
+
+      Notes
+      -----
+      Both forms use the configured local origin protocol. The tokenless form
+      omits the managed run subcommand and token-file option.
       """
       # The presence of a configured token still selects a managed tunnel.
       token = self.get_cloudflare_token()

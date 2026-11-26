@@ -237,8 +237,10 @@ class FastApiWebAppPlugin(BasePlugin):
       chunk_size=1024 * 1024,
       forward_accepted_status=False,
   ):
-    """
-    Decorator that marks a method as an HTTP endpoint with optional streaming support.
+    """Mark a plugin method as an HTTP endpoint.
+
+    Record the method, authentication, streaming and HTTP status options
+    for the template that generates its route.
 
     Parameters
     ----------
@@ -250,8 +252,9 @@ class FastApiWebAppPlugin(BasePlugin):
         Whether this endpoint should require a Bearer token.
     streaming_type : str or None
         Type of streaming: "upload", "download", or None for regular endpoints.
-    chunk_size : int
-        Size of chunks for streaming operations (default 1MB).
+    chunk_size : int or float
+        Streaming chunk size in bytes. The default is 1 MiB. Numeric
+        sizes are clamped to 128 KiB through 8 MiB.
     forward_accepted_status : bool
         Set HTTP 202 when a regular POST returns an explicit accepted status.
         The response body is kept intact. Default False.
@@ -261,14 +264,48 @@ class FastApiWebAppPlugin(BasePlugin):
     callable
         The registered endpoint or the decorator that registers it.
 
+    Raises
+    ------
+    ValueError or OverflowError
+        A numeric chunk size is not finite and cannot be converted to int.
+
     Examples
     --------
     >>> @FastApiWebAppPlugin.endpoint(method="post", forward_accepted_status=True)
     ... def submit(self):
     ...   return {"status_code": 202}
+
+    Notes
+    -----
+    The method remains a normal callable. The generated route only uses
+    the 202 opt-in for a regular POST with an explicit accepted status.
     """
     if func is None:
       def wrapper(func):
+        """Apply captured endpoint options to the decorated plugin method.
+
+        Forward the selected settings to the same registration helper.
+
+        Parameters
+        ----------
+        func : callable
+          Function decorated with the captured options.
+
+        Returns
+        -------
+        callable
+          The method after endpoint metadata has been attached.
+
+        Examples
+        --------
+        >>> wrapper(submit)  # doctest: +SKIP
+
+        Notes
+        -----
+        The wrapper runs at decoration time. It does not wrap the request
+        handler at call time.
+        """
+        # Preserve all selected options when the decorator was called with keywords.
         return FastApiWebAppPlugin.endpoint(
           func, method=method, require_token=require_token,
           streaming_type=streaming_type, chunk_size=chunk_size,
@@ -448,7 +485,39 @@ class FastApiWebAppPlugin(BasePlugin):
 
 
   def _init_endpoints(self) -> None:
-    """Enhanced to support streaming endpoints"""
+    """Build route metadata from configured and decorated endpoints.
+
+    Register custom-code endpoints, discover marked bound methods and pass
+    their signatures and options to the web server template.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+      Endpoint methods and route metadata are stored on the plugin.
+
+    Raises
+    ------
+    ValueError
+      A token-protected method's first named argument is not token.
+    IndexError
+      A token-protected method has no named argument.
+    AttributeError
+      An endpoint marker was supplied without its required route metadata.
+
+    Examples
+    --------
+    >>> plugin._init_endpoints()  # doctest: +SKIP
+
+    Notes
+    -----
+    The template receives the streaming mode and the opt-in for forwarding
+    an explicit accepted status. An endpoint without the opt-in keeps its
+    normal HTTP status.
+    """
     import inspect
     self._endpoints = {}
     jinja_args = []

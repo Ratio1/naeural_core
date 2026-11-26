@@ -104,17 +104,40 @@ class BusinessManager(Manager):
   def startup(self):
     """Start the business manager and admin async dispatch lane.
 
+    Share the plugin instance registry with the base manager and start
+    the deployment reporter when its journal has been installed.
+
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     None
       Initializes manager state, maps current instances to subalterns, and logs
       plugin timing diagnostics when enabled.
+
+    Raises
+    ------
+    RuntimeError
+      Starting a background worker failed.
+
+    Examples
+    --------
+    >>> manager.startup()  # doctest: +SKIP
+
+    Notes
+    -----
+    The reporter reads positive CStore acknowledgements for target repair.
+    A refusal or expired hand-off settles a peer without proving delivery.
     """
     super().startup()
     self._dct_current_instances = self._dct_subalterns # this allows usage of `self.get_subaltern(instance_hash)`
     self._initialize_admin_async_dispatch()
+    # The config manager installs the deployment journal before business startup.
     lifecycle = self.shmem.get(SERVICE_KEY)
     if lifecycle is not None:
+      # Bind the reporter to the live chain store and local signing identity.
       lifecycle.start(
         lambda: self.plugins_shmem.get("__chain_storage_set"),
         self.owner.blockchain_manager.sign,

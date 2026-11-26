@@ -669,6 +669,13 @@ class ConfigManager(
     Examples
     --------
     >>> manager.load()  # doctest: +SKIP
+
+    Notes
+    -----
+    An exact legacy stock MinIO mapping counts as optional unless explicitly
+    overridden. If an optional uploader references a missing or empty value,
+    its mapping is disabled and cleared before resolving required settings,
+    including MQTT.
     """
     # loads `config_app.txt` json available in `_data/box...`
     self.P("Loading '{}' from local cache...".format(self._fn_app_config), color='b')

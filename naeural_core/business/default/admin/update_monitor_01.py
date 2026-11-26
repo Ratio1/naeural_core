@@ -478,6 +478,12 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     Examples
     --------
     >>> monitor.get_git_server_version()  # doctest: +SKIP
+
+    Notes
+    -----
+    An absent token or a recognized placeholder leaves the Authorization
+    header unset. The configured URL and error text are masked for diagnostics.
+    Response excerpts are masked before applying the 100-character limit.
     """
     ver = None
     branch = self.docker_branch if self.runs_in_docker else self.log.git_branch

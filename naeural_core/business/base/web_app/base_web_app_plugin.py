@@ -252,9 +252,22 @@ class BaseWebAppPlugin(
     dict
       Start environment, including scoped application values.
 
+    Raises
+    ------
+    OSError
+      Reading the assets dotenv file failed.
+    ValueError
+      A nonblank, noncomment dotenv line has no equals sign.
+
     Examples
     --------
     >>> plugin._BaseWebAppPlugin__prepare_env(None)["PORT"]  # doctest: +SKIP
+
+    Notes
+    -----
+    Capture the setup environment before merging start defaults, asset dotenv
+    values, configured variables and plugin overrides. Later sources take
+    precedence in the start environment.
     """
     # Keep the existing EE_ exclusion and also remove other credentials from inherited settings.
     prepared_env = {key: value for key, value in child_environment(self.os_environ).items() if not key.startswith("EE_")}
@@ -321,9 +334,23 @@ class BaseWebAppPlugin(
     tuple
       Subprocess, optional stdout reader, and optional stderr reader.
 
+    Raises
+    ------
+    ValueError
+      The command is neither a string nor a list, or the tunnel token was
+      only partly staged.
+    OSError
+      Process launch or token pipe creation, writing or closure failed.
+
     Examples
     --------
     >>> plugin._BaseWebAppPlugin__run_command(["python", "app.py"], {})  # doctest: +SKIP
+
+    Notes
+    -----
+    A string command is split at spaces and launched directly. A cloudflared
+    subprocess also receives a filtered environment even when the command
+    does not use a managed token.
     """
     if isinstance(command, list):
       command_args = command
@@ -355,6 +382,8 @@ class BaseWebAppPlugin(
   def _redact_tunnel_command_for_log(self, command):
     """Mask parent and app-scoped credentials in command diagnostics.
 
+    Keep the command structure while hiding recognized secret values.
+
     Parameters
     ----------
     command : str or list
@@ -369,6 +398,11 @@ class BaseWebAppPlugin(
     --------
     >>> plugin._redact_tunnel_command_for_log("tool --password hidden")
     'tool --password [REDACTED]'
+
+    Notes
+    -----
+    Prepared app values take precedence over inherited values of the same
+    name when looking up known credentials for redaction.
     """
     # App-only values can be referenced by commands without a named secret option.
     return redact_command(command, {**os.environ, **(self.prepared_env or {})})
@@ -573,6 +607,39 @@ class BaseWebAppPlugin(
 
 
   def __maybe_run_nth_setup_command(self, idx, timeout=None):
+    """Start or poll an eligible setup command.
+
+    Wait for the previous command and publish the selected command's terminal
+    outcome after it exits or exceeds its configured deadline.
+
+    Parameters
+    ----------
+    idx : int
+      Setup command index.
+    timeout : float or None, optional
+      Positive maximum elapsed seconds. None or a nonpositive value disables
+      this deadline.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    IndexError
+      The command index does not exist in initialized setup state.
+    ValueError or OSError
+      The command is invalid or could not be launched.
+
+    Examples
+    --------
+    >>> plugin._BaseWebAppPlugin__maybe_run_nth_setup_command(0)  # doctest: +SKIP
+
+    Notes
+    -----
+    Setup runs with the base setup environment. The original command
+    reaches the launcher and a masked copy reaches diagnostics.
+    """
     if self.failed:
       return
 
@@ -691,6 +758,38 @@ class BaseWebAppPlugin(
     # endfor all start commands
 
   def __maybe_run_nth_start_command(self, idx, timeout=5):
+    """Start or poll an eligible long-running app command.
+
+    Wait for the previous command to pass its running check. An early
+    process exit marks the app failed.
+
+    Parameters
+    ----------
+    idx : int
+      Start command index.
+    timeout : float, optional
+      Seconds the process must remain running to be reported as successful.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    IndexError
+      The command index does not exist in initialized start state.
+    ValueError or OSError
+      The command is invalid or could not be launched.
+
+    Examples
+    --------
+    >>> plugin._BaseWebAppPlugin__maybe_run_nth_start_command(0)  # doctest: +SKIP
+
+    Notes
+    -----
+    Start commands receive the prepared app-specific environment. The
+    launch arguments and redacted diagnostic copy are kept separate.
+    """
     if self.failed:
       return
 
@@ -699,7 +798,9 @@ class BaseWebAppPlugin(
       return
 
     if not self.start_commands_started[idx]:
+      # Retain the configured command for launch with the app's prepared environment.
       cmd = self.get_start_commands()[idx]
+      # Build a masked copy for immediate logging.
       safe_cmd = self._redact_tunnel_command_for_log(cmd)
       self.P(f"Running start command nr {idx}: {safe_cmd}")
       proc, logs_reader, err_logs_reader = self.__run_command(cmd, self.prepared_env)
@@ -1202,6 +1303,28 @@ class BaseWebAppPlugin(
   # other plugin default methods
   
   def __setup_commands(self):
+    """Initialize setup and start command tracking.
+
+    Reset process handles, lifecycle flags, timestamps and output readers
+    for both command lists.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> plugin._BaseWebAppPlugin__setup_commands()  # doctest: +SKIP
+
+    Notes
+    -----
+    The configured commands remain available for launch. Only masked command
+    copies are logged while initializing tracking.
+    """
     setup_commands = self.get_setup_commands()
     self.setup_commands_started = [False] * len(setup_commands)
     self.setup_commands_finished = [False] * len(setup_commands)
@@ -1224,6 +1347,7 @@ class BaseWebAppPlugin(
     # Initial setup diagnostics use the same safe rendering as subsequent command logs.
     safe_setup_commands = [self._redact_tunnel_command_for_log(command) for command in setup_commands]
     self.P(f"Setup commands: {safe_setup_commands}")
+    # Use the same masking for start arguments as for setup arguments.
     safe_start_commands = [
       self._redact_tunnel_command_for_log(command)
       for command in start_commands
@@ -1335,38 +1459,43 @@ class BaseWebAppPlugin(
     return start_commands
 
   def initialize_assets(self, src_dir, dst_dir, jinja_args):
-    """
-    Initialize and copy assets, expanding any jinja templates.
-    All files from the source directory are copied to the
-    destination directory with the following exceptions:
-      - are symbolic links are ignored
-      - the root dotenv file is consumed in memory and replaced by a sanitized snapshot
-      - files named ending with .jinja are expanded as jinja templates,
-        .jinja is removed from the filename and the result copied to
-        the destination folder.
-    This maintains the directory structure of the source folder.
-    In case src_dir is None, only the .env files are written in the destination folder.
+    """Copy app assets and render templates.
+
+    Preserve the source directory layout, skip symlink files and the root
+    dotenv file, and render files ending in ``.jinja`` or ``.j2`` without
+    those suffixes.
 
     Parameters
     ----------
-    src_dir: str or None, path to the source directory
-    dst_dir: str, path to the destination directory
-    jinja_args: dict, jinja keys to use while expanding the templates
+    src_dir : str or None
+      Source directory. None skips asset copying.
+    dst_dir : str
+      Destination for copied or rendered files.
+    jinja_args : dict
+      Context values supplied to templates.
 
     Returns
     -------
     None
 
+    Raises
+    ------
+    OSError
+      Creating, reading, copying, writing or cleaning up assets failed.
+    jinja2.TemplateError
+      A selected template could not be loaded or rendered.
+
     Notes
     -----
-    The first log line names the template keys and prints none of their values. The values include the key of
-    the plugin's local process manager and whatever a deployment put in its template arguments, and printing
-    the whole dict also cost about 20 KB of log at every web app start. The manager's address is logged where
-    the manager starts and each endpoint where it is registered.
+    The first log line lists template keys only. Printing their values cost
+    about 20 KB per web app start and could include manager credentials.
+    Environment snapshots are always written under the plugin's temporary
+    directory. Named credentials are omitted and credential values in
+    otherwise ordinary settings are masked.
 
     Examples
     --------
-    >>> self.initialize_assets(src_dir=None, dst_dir=self.script_temp_dir, jinja_args=self.jinja_args)
+    >>> self.initialize_assets(src_dir=None, dst_dir=self.script_temp_dir, jinja_args=self.jinja_args)  # doctest: +SKIP
     """
 
     # now copy the assets to the destination

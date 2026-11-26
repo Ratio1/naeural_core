@@ -2959,8 +2959,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
 
 
   def __reset_confirmations(self, key, peers=None, include_default_peers=True, require_target_ack=False):
-    """
-    Give the confirmation fields of a new own record: no confirmation yet, its targets and how many must confirm.
+    """Build the confirmation fields for a new locally owned record.
+
+    Return initial counts, the eligible peers and the required number of
+    positive confirmations before the record is installed.
 
     Parameters
     ----------
@@ -4446,6 +4448,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     --------
     >>> self.__exec_received_confirm({"op": "SCONFIRM", "key": "k", "value": "v", "owner": owner}, sender="peer1")
     >>> self.__exec_received_confirm({"op": "SCONFIRM", "key": "k", "value": None, "owner": owner}, sender="peer1")
+
+    Notes
+    -----
+    A positive acknowledgement can populate acknowledged_peers on a tracked
+    deployment report. A refusal or exhausted hand-off can settle a peer
+    without proving delivery and cannot populate that positive list.
     """
     key = data.get(self.CS_KEY, None)
     value = data.get(self.CS_VALUE, None)

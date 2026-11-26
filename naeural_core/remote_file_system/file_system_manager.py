@@ -45,8 +45,42 @@ class FileSystemManager(Manager, _ConfigHandlerMixin):
 
 
   def create_file_system(self):
+    """Instantiate the configured remote filesystem backend.
+
+    Resolve the backend from its configured type, give it the uploader
+    settings and retain the instance for later upload and download calls.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+      The manager holds the initialized backend.
+
+    Raises
+    ------
+    KeyError
+      The configuration lacks its type or uploader settings.
+    Exception
+      Looking up or constructing the configured plugin failed. Initialization
+      errors inside the creation block are reported and re-raised.
+
+    Examples
+    --------
+    >>> manager.create_file_system()  # doctest: +SKIP
+
+    Notes
+    -----
+    The creation log identifies configuration field names. The backend
+    receives the full value mapping.
+    """
+    # Select the filesystem plugin by the validated configuration type.
     plugin_name = self.config[ct.TYPE]
+    # Resolve its implementation before supplying the uploader settings.
     _cls = self._get_plugin_class(plugin_name)
+    # Keep the mapping available for later operations on this manager.
     config = self.config['CONFIG_UPLOADER']
     self.uploader_config = config
 
@@ -56,6 +90,7 @@ class FileSystemManager(Manager, _ConfigHandlerMixin):
         _cls.__name__, sorted(config)), color='b'
       )
 
+      # Only the plugin needs the original values to configure its backend.
       file_system = _cls(
         log=self.log,
         signature=plugin_name,

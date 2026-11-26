@@ -54,6 +54,11 @@ class BaseTunnelEnginePlugin(
     --------
     >>> plugin._redact_tunnel_command_for_log("cloudflared tunnel run --token hidden")
     'cloudflared tunnel run --token [REDACTED]'
+
+    Notes
+    -----
+    Redaction combines command syntax and known environment values.
+    The original command remains available to the caller.
     """
     # Include names such as EE_MQTT which do not identify themselves by keyword.
     return redact_command(command, os.environ)
@@ -78,6 +83,11 @@ class BaseTunnelEnginePlugin(
     --------
     >>> plugin._configured_token_for_launch(["python", "app.py"]) is None
     True
+
+    Notes
+    -----
+    Only a string matching the generated command exactly is eligible.
+    A manually supplied command or argument vector does not select this token.
     """
     if (isinstance(command, str)
         and command.startswith("cloudflared tunnel --no-autoupdate run --token-file /dev/stdin --url ")
@@ -173,6 +183,12 @@ class BaseTunnelEnginePlugin(
     Examples
     --------
     >>> plugin.run_tunnel_command(plugin._get_cloudflare_start_command())  # doctest: +SKIP
+
+    Notes
+    -----
+    A managed launch bypasses the shell and carries its token on stdin.
+    The child environment is filtered and diagnostics use a masked command.
+    An empty command returns None.
     """
     if not command:
       return None

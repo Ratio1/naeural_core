@@ -185,9 +185,19 @@ class _ManagersInitMixin(object):
     -------
     None
 
+    Raises
+    ------
+    Exception
+      Validating an enabled configuration or constructing its uploader failed.
+
     Examples
     --------
     >>> node._initialize_file_system_manager()  # doctest: +SKIP
+
+    Notes
+    -----
+    The app configuration controls whether backend creation is attempted.
+    A disabled uploader still leaves the manager in shared memory.
     """
     header = "Initializing File System manager..."
     self.P(header, color='b', boxed=True)

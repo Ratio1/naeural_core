@@ -88,6 +88,11 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       Examples
       --------
       >>> plugin._NgrokMixinPlugin__get_ng_token()  # doctest: +SKIP
+
+      Notes
+      -----
+      Prefer a configured non-None value, including an empty string. The
+      environment is a fallback only. Diagnostics report presence flags.
       """
       # TODO: At the moment multiple user auth tokens will not work on the same node
       #  if `NGROK_USE_API` is set to False.

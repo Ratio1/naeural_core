@@ -68,7 +68,8 @@ def credential_env_names(environment):
 def child_environment(environment, extra_values=()):
   """Copy only environment settings safe for an unrelated child process.
 
-  An alias containing the same full value as a named credential is private too.
+  A setting containing the complete value of a named credential is private
+  even when it embeds that value in a larger string.
 
   Parameters
   ----------
@@ -87,14 +88,15 @@ def child_environment(environment, extra_values=()):
   >>> child_environment({"PATH": "/bin", "EE_MQTT": "example"})
   {'PATH': '/bin'}
   """
-  # Identify all named credentials once and check their complete values for aliases.
+  # Identify all named credentials once so ordinary keys need only a literal value check.
   names = credential_env_names(environment)
   # An empty credential is harmless and does not suppress unrelated empty settings.
   values = {environment[name] for name in names if environment[name]}
   # The explicitly scoped tunnel secret may occur under an otherwise ordinary name.
   values.update(value for value in extra_values if isinstance(value, str) and value)
-  # Keep the parent's mapping unchanged.
-  return {name: value for name, value in environment.items() if name not in names and value not in values}
+  # Use exact, case-sensitive substrings. Patterns or partial credential matches could drop unrelated settings.
+  return {name: value for name, value in environment.items()
+          if name not in names and not any(secret in value for secret in values)}
 
 
 def redact_command(command, environment, extra_values=()):

@@ -486,6 +486,11 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     self.assertEqual(child_environment(environment), {"PATH": "/bin"})
     # The original namespace must remain available to node-side providers.
     self.assertEqual(environment["APP_SECRET"], "synthetic-key")
+    # A short credential can be embedded in a larger setting. Preserve empty settings and case variants.
+    composite = {"APP_TOKEN": "q+", "ENDPOINT": "origin/q+/path", "SCOPED_ALIAS": "origin/Z7/path",
+                 "NORMAL_PATH": "origin/qq/Q+/path", "EMPTY_TOKEN": "", "OPTIONAL_VALUE": ""}
+    self.assertEqual(child_environment(composite, extra_values=("Z7",)),
+                     {"NORMAL_PATH": "origin/qq/Q+/path", "OPTIONAL_VALUE": ""})
     self.assertEqual(
       redact_command("tool --token 'first part'last --database-password=other --node target mnemonic-fixture", environment),
       "tool --token [REDACTED] --database-password=[REDACTED] --node target [REDACTED]",

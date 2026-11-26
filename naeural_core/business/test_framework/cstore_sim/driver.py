@@ -6,8 +6,8 @@ injects faults on a timeline and collects each node's measurements.
 Run by path so the heavy node package is not imported:
 
   python driver.py --list
-  python driver.py --scenario starved_node --variant new --new-src /path/to/repo
-  python driver.py --scenario starved_node --variant base --base-src /path/to/old/repo
+  python driver.py --scenario incident --variant new --new-src /path/to/repo
+  python driver.py --scenario incident --variant base --base-src /path/to/old/repo
 
 ``--variant mixed`` runs half of the fleet on each source tree. Set
 ``CSTORE_SIM_MANAGER=thread`` (or ``off``) to run the new code without the

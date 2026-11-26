@@ -341,6 +341,8 @@ class BaseWebAppPlugin(
       only partly staged.
     OSError
       Process launch or token pipe creation, writing or closure failed.
+    FileNotFoundError
+      A managed launch requires cloudflared installed on the node PATH.
 
     Examples
     --------
@@ -348,9 +350,10 @@ class BaseWebAppPlugin(
 
     Notes
     -----
-    A string command is split at spaces and launched directly. A cloudflared
-    subprocess also receives a filtered environment even when the command
-    does not use a managed token.
+    A string command is split at spaces and launched directly. Managed
+    launches resolve cloudflared and its PATH from the node before opening
+    the token pipe. A tokenless cloudflared launch keeps the caller's search
+    path and still receives a filtered environment.
     """
     if isinstance(command, list):
       command_args = command
@@ -361,7 +364,19 @@ class BaseWebAppPlugin(
 
     # App-scoped credentials are unrelated to its connector.
     token = self._configured_token_for_launch(command)
-    if command_args and self.os_path.basename(command_args[0]) == "cloudflared":
+    if token is not None:
+      # Interpret node PATH entries relative to the node before switching to the app directory.
+      node_path = os.pathsep.join(os.path.abspath(folder) for folder in os.get_exec_path())
+      # Resolve the installed connector from the node's search path instead of the app environment.
+      connector = shutil.which("cloudflared", path=node_path)
+      if connector is None:
+        # Fail before creating the credential pipe and explain how to provision the connector.
+        raise FileNotFoundError("Managed cloudflared was not found on the node PATH. Install cloudflared for the node.")
+      # Launch by absolute path and use the node PATH for any connector helpers.
+      command_args[0] = connector
+      # Preserve the remaining caller environment without mutating the app's own settings.
+      env = dict(os.environ if env is None else env, PATH=node_path)
+    if token is not None or (command_args and self.os_path.basename(command_args[0]) == "cloudflared"):
       # The process retains routing settings while the managed token travels on stdin.
       env = child_environment(os.environ if env is None else env, extra_values=(token,))
     # A generated managed tunnel gets its configured token on a one-use pipe.

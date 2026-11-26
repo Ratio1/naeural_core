@@ -423,7 +423,8 @@ class TestTunnelShutdownHardening(unittest.TestCase):
   def test_managed_web_app_tunnel_relaunch_uses_a_new_stdin_pipe(self):
     """Verify token delivery and argument isolation on initial launch and relaunch.
 
-    The subprocess substitute reads the actual pipe supplied by Popen.
+    The subprocess fixture reads the real pipe supplied by Popen and checks
+    that both managed launches use the node's configured installation.
 
     Parameters
     ----------
@@ -450,18 +451,64 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     process = mock.Mock()
     pipe_reads = []
     with tempfile.TemporaryDirectory() as folder:
+      # Place the node installation and app working directory in separate locations.
+      root = pathlib.Path(folder)
+      node_bin = root / "node-bin"
+      node_bin.mkdir()
+      app_dir = root / "app"
+      app_dir.mkdir()
+      # Make an executable marker for resolution only. Popen is mocked and never executes it.
+      connector = node_bin / "cloudflared"
+      connector.touch()
+      connector.chmod(0o700)
       # Real web-app commands use the script directory for their current directory.
-      plugin.script_temp_dir = folder
+      plugin.script_temp_dir = str(app_dir)
       # Capture Popen's stdin during launch, before the parent releases its copy.
       popen = mock.Mock(side_effect=lambda **kwargs: (pipe_reads.append(os.read(kwargs["stdin"], 4096)) or process))
-      with mock.patch.object(_BASE_WEB_APP_MODULE.subprocess, "Popen", popen):
+      # Simulate the operator making its connector available to the node process.
+      with mock.patch.dict(os.environ, {"PATH": str(node_bin)}), mock.patch.object(_BASE_WEB_APP_MODULE.subprocess, "Popen", popen):
         for _ in range(2):
           # The app's scoped tokens and the tunnel credential cannot become connector environment variables.
-          plugin._BaseWebAppPlugin__run_command(command, {"PATH": "/bin", "APP_TOKEN": "app-secret", "ALIAS": token})
+          plugin._BaseWebAppPlugin__run_command(command, {
+            "PATH": str(app_dir), "APP_TOKEN": "app-secret", "ALIAS": token, "FLAG": "normal",
+          })
     # Both pipes contained the full token, and their process arguments were identical and token-free.
     self.assertEqual(pipe_reads, [token.encode(), token.encode()])
-    self.assertEqual([call.kwargs["args"] for call in popen.call_args_list], [command.split(), command.split()])
-    self.assertEqual([call.kwargs["env"] for call in popen.call_args_list], [{"PATH": "/bin"}, {"PATH": "/bin"}])
+    # The connector runs from the node installation with only safe inherited settings.
+    args = [str(connector), *command.split()[1:]]
+    self.assertEqual([call.kwargs["args"] for call in popen.call_args_list], [args, args])
+    self.assertEqual([call.kwargs["env"] for call in popen.call_args_list], [{"PATH": str(node_bin), "FLAG": "normal"}] * 2)
+
+  def test_managed_connector_requires_node_installation_only_with_token(self):
+    """Require a managed connector before staging a token.
+
+    Tokenless and ordinary app launches keep the search path of the caller.
+    """
+    # Construct the launch boundary without starting a web app or connection.
+    plugin = BaseWebAppPlugin.__new__(BaseWebAppPlugin)
+    managed = "cloudflared tunnel --no-autoupdate run --token-file /dev/stdin --url http://127.0.0.1:8080"
+    plugin._get_cloudflare_start_command = lambda: managed
+    plugin.get_cloudflare_token = lambda: "synthetic-token"
+    plugin.os_path = os.path
+    with tempfile.TemporaryDirectory() as folder:
+      # Set the node search path to a directory with no installed connector.
+      plugin.script_temp_dir = folder
+      parent_path = {"PATH": folder}
+      app_env = {"PATH": os.path.join(folder, "app-bin"), "FLAG": "normal"}
+      with mock.patch.dict(os.environ, parent_path):
+        # Observe the credential helper to prove no managed pipe is opened without an installation.
+        with mock.patch.object(_BASE_WEB_APP_MODULE, "launch_with_tunnel_token") as launch:
+          with self.assertRaisesRegex(FileNotFoundError, "Install cloudflared for the node"):
+            plugin._BaseWebAppPlugin__run_command(managed, app_env, False, False)
+          launch.assert_not_called()
+        # Capture normal launch options without executing either fixture command.
+        with mock.patch.object(_BASE_WEB_APP_MODULE.subprocess, "Popen") as popen:
+          for command in ("cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080", "python app.py"):
+            with self.subTest(command=command):
+              plugin._BaseWebAppPlugin__run_command(command, app_env, False, False)
+              self.assertEqual(popen.call_args.kwargs["args"], command.split())
+              self.assertEqual(popen.call_args.kwargs["env"], app_env)
+              self.assertNotIn("stdin", popen.call_args.kwargs)
 
   def test_command_redaction_displays_safe_arguments_and_discoverable_names(self):
     """Cover explicit credential names, keyword discovery, and whole command arguments.

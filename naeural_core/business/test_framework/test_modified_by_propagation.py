@@ -155,6 +155,8 @@ def _make_common_stubs():
     "naeural_core.business.deployment_lifecycle": _module(
       "naeural_core.business.deployment_lifecycle",
       OPERATION_KEY="DEEPLOY_OPERATION", SERVICE_KEY="deeploy_lifecycle",
+      # Source classification is irrelevant to the configuration propagation fixture.
+      deployment_source_mode=lambda *_args: None,
     ),
     "naeural_core.business.base": business_base,
     "naeural_core.business.mixins_base": mixins_base,

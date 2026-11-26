@@ -282,6 +282,9 @@ class DeploymentLifecycle:
     # Shutdown waits for live plugin observation, independently of journal I/O and orphan cleanup.
     self._observation_lock = threading.Lock()
     self.records = {}
+    # Keep delivery receipts outside the record mapping that previous runtimes sign.
+    self._delivery_path = os.fspath(path) + ".deliveries"
+    self._delivery_receipts = {}
     self._replacement_revisions = {}  # Durable minimum revision after replacement, indexed by job and pipeline.
     self._legacy_repair_aborts = {}  # Index only versioned conditional retirements for fast legacy startup checks.
     self.plugins = {}
@@ -308,9 +311,13 @@ class DeploymentLifecycle:
         raise ValueError("Invalid deployment lifecycle journal")
       # A process can restart after rename but before the directory sync was acknowledged.
       self._sync_journal_directory()
+      # Checkpoints are optional proof. Missing or unreadable proof leaves delivery pending.
+      self._load_delivery_receipts()
+      self._migrate_embedded_receipts()
       # A persisted readiness observation is not evidence after node restart.
       for key, record in self.records.items():
-        if record.get("active") and not record["aborted"] and not record.get("ready_coordinator_confirmed"):
+        if (record.get("active") and not record["aborted"] and record.get("ready_reported")
+            and not self._has_ready_delivery(key, record)):
           # An older journal's quorum flag does not say whether its coordinator received readiness.
           record.pop("ready_reported", None)
         if record.get("stateless_replacement") is True:
@@ -332,11 +339,12 @@ class DeploymentLifecycle:
             # A confirmed bound instance retains its final observation in a mixed pipeline.
             if not record.get("ready_reported") or instance.get("source_mode") == "following":
               instance.update(status="initializing", error=None)
-        if record["status"] in TERMINAL_REPORT_STATES and record.get("terminal_report_digest"):
+        # Compute a terminal digest only for entries that have a receipt to validate.
+        terminal = self._delivery_receipts.get(key, {}).get("terminal")
+        if (terminal and record["status"] in TERMINAL_REPORT_STATES
+            and terminal == self._delivery_checkpoint(record, "terminal")):
           # Only an unchanged, coordinator-confirmed terminal receipt survives as already published.
-          fingerprint = self._report_fingerprint(record)
-          if record["terminal_report_digest"] == self._terminal_report_digest(fingerprint):
-            self._published[key] = deepcopy(fingerprint)
+          self._published[key] = deepcopy(self._report_fingerprint(record))
 
   def _save(self, records=None):
     """Persist a journal snapshot atomically and acknowledge its durability.
@@ -355,19 +363,122 @@ class DeploymentLifecycle:
     --------
     >>> service._save(staged_records)  # doctest: +SKIP
     """
+    # The primary journal keeps its existing record layout for older writers.
+    self._save_json(self.path, self.records if records is None else records)
+
+  def _save_json(self, path, snapshot):
+    """Atomically write a protected file alongside the worker journal.
+
+    The journal and its receipt file share a directory and a durability barrier.
+
+    Parameters
+    ----------
+    path : str
+      Journal or receipt path in the private journal directory.
+    snapshot : dict
+      Complete replacement contents.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    OSError
+      Writing, replacing or syncing the file failed.
+
+    Examples
+    --------
+    >>> journal._save_json(journal.path, journal.records)  # doctest: +SKIP
+    """
+    # Write the complete snapshot to a private temporary file before replacing anything.
     folder = os.path.dirname(self.path)
     os.makedirs(folder, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".deeploy-", dir=folder)
     try:
       with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(self.records if records is None else records, stream, sort_keys=True)
+        json.dump(snapshot, stream, sort_keys=True)
         stream.flush()
         os.fsync(stream.fileno())
-      os.replace(temporary, self.path)
+      # Replace the target only after the entire new file is durable.
+      os.replace(temporary, path)
       self._sync_journal_directory()
     finally:
       if os.path.exists(temporary):
         os.unlink(temporary)
+
+  def _load_delivery_receipts(self):
+    """Load optional coordinator delivery proofs from the separate file.
+
+    An unusable receipt file leaves the authoritative journal readable and
+    allows a potentially unconfirmed report to be delivered again.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> journal._load_delivery_receipts()  # doctest: +SKIP
+    """
+    try:
+      with open(self._delivery_path, encoding="utf-8") as stream:
+        # Parse only local state, leaving the primary journal independent of this read.
+        receipts = json.load(stream)
+    except (OSError, ValueError):
+      return
+    if isinstance(receipts, dict):
+      # Ignore malformed entries rather than using them as evidence of delivery.
+      self._delivery_receipts = {key: item for key, item in receipts.items() if isinstance(item, dict)}
+
+  def _migrate_embedded_receipts(self):
+    """Remove private receipt fields written by earlier candidate builds.
+
+    Rewrite the legacy-visible journal before saving valid receipts separately.
+    Interruption may require one new delivery of a report.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> journal._migrate_embedded_receipts()  # doctest: +SKIP
+    """
+    # Preserve all existing receipts and authoritative journal fields.
+    receipts = self._delivery_receipts.copy()
+    rewritten = False
+    for key, record in self.records.items():
+      if "ready_coordinator_confirmed" not in record and "terminal_report_digest" not in record:
+        continue
+      # Remove these fields from every legacy-visible record before another runtime can sign it.
+      ready = record.pop("ready_coordinator_confirmed", None)
+      terminal = record.pop("terminal_report_digest", None)
+      rewritten = True
+      # The earlier candidate stored this proof only after marking the ready record delivered.
+      entry = receipts.get(key, {}).copy()
+      if ready is True and record.get("ready_reported") is True:
+        entry["ready"] = self._delivery_checkpoint(record, "ready")
+      if record["status"] in TERMINAL_REPORT_STATES and terminal == self._delivery_digest(self._report_fingerprint(record)):
+        # Import only a terminal digest that describes the record still held by the journal.
+        entry["terminal"] = self._delivery_checkpoint(record, "terminal")
+      if entry:
+        receipts[key] = entry
+    if rewritten:
+      # Preserve the exact record contents other than the two implementation-private fields.
+      self._save()
+      if receipts != self._delivery_receipts:
+        # A lost sidecar update leaves an unproven record eligible for delivery.
+        self._save_json(self._delivery_path, receipts)
+        self._delivery_receipts = receipts
 
   def _sync_journal_directory(self):
     """Confirm durability of the directory entry for the journal.
@@ -1522,28 +1633,95 @@ class DeploymentLifecycle:
                             "terminal_report_digest")}
 
   @staticmethod
-  def _terminal_report_digest(fingerprint):
-    """Fingerprint the content of a coordinator-confirmed terminal report.
+  def _delivery_digest(content):
+    """Fingerprint the identity or content of a coordinator-confirmed report.
 
     Use a deterministic encoding so reloading the journal preserves identity.
 
     Parameters
     ----------
-    fingerprint : dict
-      Attempt and routing content, excluding local delivery state.
+    content : dict
+      Attempt identity or report and routing content without delivery metadata.
 
     Returns
     -------
     str
-      Hex digest persisted with the journal entry.
+      Hex digest for the separate delivery checkpoint.
 
     Examples
     --------
-    >>> len(DeploymentLifecycle._terminal_report_digest({"status": "stopped"}))
+    >>> len(DeploymentLifecycle._delivery_digest({"status": "stopped"}))
     64
     """
     # The journal already uses JSON for these fields.
-    return hashlib.sha256(json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+  def _delivery_checkpoint(self, record, kind):
+    """Bind a delivery receipt to the journal attempt and report generation.
+
+    Readiness uses the fixed attempt identity and generation because startup
+    normalizes its runtime observations. Terminal delivery also binds all
+    report content and routing so a changed stop or failure is replayed.
+
+    Parameters
+    ----------
+    record : dict
+      Persisted attempt record.
+    kind : str
+      Ready or terminal delivery receipt.
+
+    Returns
+    -------
+    list
+      JSON-compatible sequence, report timestamp for readiness and identity digest.
+
+    Examples
+    --------
+    >>> journal._delivery_checkpoint(journal.records["operation|deploy"], "ready")  # doctest: +SKIP
+    """
+    if kind == "ready":
+      # The attempt identity also remains stable while a following workload publishes newer observations.
+      content = {field: record[field] for field in (
+        "operation_id", "attempt", "revision", "app_id", "node_addr", "coordinator",
+      )}
+      return [record["sequence"], record["updated_at"], self._delivery_digest(content)]
+    # The timestamp and sequence distinguish a newly signed terminal report from a restored old one.
+    content = dict(self._report_fingerprint(record), updated_at=record["updated_at"])
+    return [record["sequence"], self._delivery_digest(content)]
+
+  def _has_ready_delivery(self, key, record):
+    """Check for readiness acknowledged by the coordinator of this attempt.
+
+    A following workload can publish newer observations after it first becomes
+    ready. Its historical receipt still belongs to the same running attempt.
+
+    Parameters
+    ----------
+    key : str
+      Local journal key.
+    record : dict
+      Attempt record before startup resets runtime observations.
+
+    Returns
+    -------
+    bool
+      Whether the saved readiness flag has matching coordinator delivery proof.
+
+    Examples
+    --------
+    >>> journal._has_ready_delivery("operation|deploy", journal.records["operation|deploy"])  # doctest: +SKIP
+    """
+    receipt = self._delivery_receipts.get(key, {}).get("ready")
+    # A malformed or future receipt cannot establish a prior coordinator acknowledgement.
+    if (not isinstance(receipt, list) or len(receipt) != 3
+        or type(receipt[0]) is not int or receipt[0] <= 0):
+      return False
+    current = self._delivery_checkpoint(record, "ready")
+    if receipt == current:
+      return True
+    # Only following instances publish newer reports while retaining the readiness flag.
+    return (receipt[0] < current[0] and receipt[2] == current[2]
+            and any(instance.get("source_mode") == "following" for instance in record["instances"]))
 
   def _save_report_deliveries(self, acknowledgements):
     """Persist ready or terminal observations acknowledged by their coordinators.
@@ -1569,8 +1747,8 @@ class DeploymentLifecycle:
     >>> journal._save_report_deliveries([("operation|deploy", 1, "stopped")])
     """
     with self.lock:
-      # A retransmission to a restarted coordinator can confirm an already checkpointed report.
-      updates = {}
+      # Only readiness needs to update the old journal's ready flag. All proof goes to the receipt file.
+      ready_updates, receipt_updates = {}, {}
       for key, sequence, status in acknowledgements:
         # The latest journal state may have changed while network writes were in flight.
         record = self.records.get(key)
@@ -1580,25 +1758,38 @@ class DeploymentLifecycle:
         fingerprint = self._report_fingerprint(record)
         if self._published.get(key) != fingerprint:
           continue
-        if status == "ready" and not record["aborted"] and not record.get("ready_coordinator_confirmed"):
-          # Only the local journal records the stronger acknowledgement requirement.
-          updates[key] = dict(record, ready_reported=True, ready_coordinator_confirmed=True)
+        if status == "ready" and not record["aborted"]:
+          # The legacy flag is understood by older writers and already excluded from their signed wire format.
+          kind = "ready"
+          if not record.get("ready_reported"):
+            ready_updates[key] = dict(record, ready_reported=True)
         elif status in TERMINAL_REPORT_STATES:
-          # Persist a compact checkpoint while retaining the terminal record itself.
-          digest = self._terminal_report_digest(fingerprint)
-          if record.get("terminal_report_digest") != digest:
-            updates[key] = dict(record, terminal_report_digest=digest)
-      if updates:
+          kind = "terminal"
+        else:
+          continue
+        # Keep both proof types when a following attempt moves between ready and failed.
+        entry = receipt_updates.get(key, self._delivery_receipts.get(key, {}))
+        checkpoint = self._delivery_checkpoint(record, kind)
+        if entry.get(kind) != checkpoint:
+          receipt_updates[key] = {**entry, kind: checkpoint}
+      if ready_updates or receipt_updates:
         try:
-          # Publish the delivery checkpoint in memory only after its atomic save succeeds.
-          self._save({**self.records, **updates})
+          # Commit the journal first. New readers still require matching proof for any new ready flag.
+          if ready_updates:
+            self._save({**self.records, **ready_updates})
+          # The report itself is already durable before signing, so a terminal receipt needs only this write.
+          if receipt_updates:
+            self._save_json(self._delivery_path, {**self._delivery_receipts, **receipt_updates})
         except OSError:
           # A later publication can reacquire delivery proof if saving this checkpoint failed.
-          for key in updates:
+          for key in ready_updates.keys() | receipt_updates.keys():
             self._published.pop(key, None)
           raise
-        self.records.update(updates)
-        for key, record in updates.items():
+        # The worker can suppress delivery in memory only after both required writes complete.
+        self.records.update(ready_updates)
+        self._delivery_receipts.update(receipt_updates)
+        for key in receipt_updates:
+          record = self.records[key]
           if record["status"] in TERMINAL_REPORT_STATES and (
             record["aborted"] or not any(instance.get("source_mode") == "following" for instance in record["instances"])
           ):

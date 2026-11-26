@@ -600,8 +600,7 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(ready=True))
     initial = self.publish()
     # Recreate the old journal shape before restarting with the new code.
-    self.lifecycle.records["operation|deploy"].pop("ready_coordinator_confirmed")
-    self.lifecycle._save()
+    Path(self.lifecycle._delivery_path).unlink()
     self.restart_process()
     self.assertFalse(self.lifecycle.records["operation|deploy"].get("ready_reported"))
     # The reattached workload supplies a fresh ready observation for the same attempt.
@@ -997,6 +996,152 @@ class DeploymentLifecycleTest(unittest.TestCase):
     writer.assert_not_called()
     signer.assert_not_called()
     self.assertEqual(self.lifecycle.records["operation|deploy"]["sequence"], delivered["sequence"])
+
+  def test_ready_flag_without_completed_receipt_write_replays_after_restart(self):
+    """Restart after the legacy ready flag writes and the receipt write fails.
+
+    The primary journal remains readable and its new flag is insufficient
+    to suppress readiness without the coordinator proof file.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> DeploymentLifecycleTest().test_ready_flag_without_completed_receipt_write_replays_after_restart()
+    """
+    # Produce readiness for an admitted bound workload.
+    pipeline = config()
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(ready=True))
+    # Let the report and legacy flag write succeed, then fail the second file write.
+    save_json = self.lifecycle._save_json
+
+    def interrupted_save(path, snapshot):
+      """Fail only the receipt file write.
+
+      Parameters
+      ----------
+      path : str
+        Destination path.
+      snapshot : dict
+        Complete atomic write payload.
+
+      Returns
+      -------
+      None
+
+      Raises
+      ------
+      OSError
+        When the receipt file is written.
+
+      Examples
+      --------
+      >>> interrupted_save(lifecycle.path, {})  # doctest: +SKIP
+      """
+      if path == self.lifecycle._delivery_path:
+        raise OSError("receipt write interrupted")
+      # Use the actual atomic journal writer for the two primary writes.
+      save_json(path, snapshot)
+
+    with patch.object(self.lifecycle, "_save_json", side_effect=interrupted_save):
+      with self.assertRaisesRegex(OSError, "receipt write interrupted"):
+        self.publish()
+    # Verify the interruption happened between the two writes.
+    saved = json.loads(Path(self.path).read_text())
+    self.assertTrue(saved["operation|deploy"]["ready_reported"])
+    self.assertFalse(Path(self.lifecycle._delivery_path).exists())
+    # A fresh worker must establish current readiness again.
+    self.restart_process()
+    self.assertFalse(self.lifecycle.records["operation|deploy"].get("ready_reported"))
+    self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(ready=True))
+    self.assertEqual(self.publish()["status"], "ready")
+    saved = self.lifecycle.records["operation|deploy"].copy()
+    # The same key and sequence do not prove delivery to a different coordinator or of another report.
+    for field, value in (("coordinator", "other"), ("updated_at", saved["updated_at"] + 1)):
+      with self.subTest(field=field):
+        self.lifecycle.records["operation|deploy"] = dict(saved, **{field: value})
+        self.lifecycle._save()
+        self.restart_process()
+        self.assertFalse(self.lifecycle.records["operation|deploy"].get("ready_reported"))
+
+  def test_stale_terminal_checkpoint_cannot_suppress_new_report(self):
+    """Replay a durable terminal record after its report generation changed.
+
+    A sidecar for the older report survives the simulated rollback write.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> DeploymentLifecycleTest().test_stale_terminal_checkpoint_cannot_suppress_new_report()
+    """
+    # A delivered stop leaves a checkpoint for exactly that generation.
+    self.lifecycle.admit(config(), "oracle", True)
+    self.lifecycle.attach(config(), "WORKER", "worker", plugin(alive=False, stopped=True))
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    self.assertEqual(self.publish()["status"], "stopped")
+    # Model an old writer persisting a new sequence before its network call completed.
+    key = "operation|deploy"
+    self.lifecycle.records[key]["sequence"] += 1
+    self.lifecycle._save()
+    self.restart_process()
+    self.assertNotIn(key, self.lifecycle._published)
+    # Delivery is retried for the new report, then checkpointed again.
+    self.assertEqual(self.publish()["status"], "stopped")
+    self.restart_process()
+    self.assertIn(key, self.lifecycle._published)
+
+  def test_embedded_receipt_migration_preserves_legacy_record_contents(self):
+    """Move older candidate proof out of the record before any rollback.
+
+    The terminal report stays confirmed on the candidate and the journal
+    keeps its existing observation and routing data.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> DeploymentLifecycleTest().test_embedded_receipt_migration_preserves_legacy_record_contents()
+    """
+    # Create the durable ready then stopped record used by the previous candidate.
+    pipeline = config()
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(ready=True))
+    self.publish()
+    self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(alive=False, stopped=True))
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    self.assertEqual(self.publish()["status"], "stopped")
+    # Reconstruct the original embedded format and keep a copy of the rollback-safe record.
+    expected = json.loads(Path(self.path).read_text())
+    key = "operation|deploy"
+    old = self.lifecycle.records[key]
+    old["ready_coordinator_confirmed"] = True
+    old["terminal_report_digest"] = self.lifecycle._delivery_digest(self.lifecycle._report_fingerprint(old))
+    self.lifecycle._save()
+    Path(self.lifecycle._delivery_path).unlink()
+    self.restart_process()
+    # The previous writer now reads the same record data without the two private fields.
+    self.assertEqual(json.loads(Path(self.path).read_text()), expected)
+    self.assertIn(key, self.lifecycle._published)
 
   def test_terminal_quorum_without_coordinator_keeps_the_stop_pending(self):
     """Deliver the stopped report to the coordinator after it returns.

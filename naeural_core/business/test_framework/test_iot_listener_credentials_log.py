@@ -318,6 +318,34 @@ class TestIoTListenerCredentialsLog(unittest.TestCase):
     self.assertIn('"PASS": null', logged)
     return
 
+  def test_unsupported_protocol_reports_the_configured_value(self):
+    """Report an unsupported protocol before creating a wrapper.
+
+    A new listener initialized with an unknown stream protocol raises a
+    ValueError that identifies the protocol and lists the supported values.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestIoTListenerCredentialsLog().test_unsupported_protocol_reports_the_configured_value()
+    """
+    # Build a newly configured listener without a wrapper or an active connection.
+    listener = self._make_listener(user=None, password=None)
+    # The stream's explicit protocol takes precedence over the shared MQTT default.
+    listener.cfg_stream_config_metadata["PROTOCOL"] = "http"
+    with self.assertRaisesRegex(ValueError, r"Unsupported IoT listener protocol 'http'.*mqtt.*amqp"):
+      # The exception must be constructible before any wrapper has been assigned.
+      listener._init()
+    # A bad configuration never attempts a broker connection.
+    listener._maybe_reconnect_to_controller_server.assert_not_called()
+
 
 if __name__ == "__main__":
   unittest.main()

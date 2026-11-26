@@ -179,6 +179,10 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     Builds the connection config from the shared communication parameters and the stream's own settings,
     logs it without the credentials, creates the MQTT or AMQP wrapper and connects.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     None
@@ -186,11 +190,8 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     Raises
     ------
     ValueError
-      When the connection type (``_conn_type``) is neither ``'mqtt'`` nor ``'amqp'`` and a wrapper built by an
-      earlier call is still set; its message names that wrapper.
-    AttributeError
-      In the same case when no wrapper is set (a first call, or one after ``_release``): the message of the
-      ``ValueError`` reads ``self.wrapper_server``, which fails first.
+      When the configured connection type is unsupported. The message names
+      that type and the supported protocols, ``'mqtt'`` and ``'amqp'``.
 
     Notes
     -----
@@ -282,7 +283,8 @@ class BaseIoTQueueListenerDataCapture(DataCaptureThread):
     elif self._conn_type == 'amqp':
       self.wrapper_server = AMQPWrapper(**wrapper_kwargs)
     else:
-      raise ValueError("Cannot understand reduce controller type: {}".format(self.wrapper_server))
+      # The configured protocol is available even if no wrapper has been constructed.
+      raise ValueError(f"Unsupported IoT listener protocol {self._conn_type!r}. Supported protocols are mqtt and amqp.")
 
     self._maybe_reconnect_to_controller_server()
     return

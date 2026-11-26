@@ -1103,14 +1103,24 @@ def main():
   -------
   None
 
+  Raises
+  ------
+  SystemExit
+    Command-line argument parsing failed.
+  KeyError
+    The requested scenario name is not registered.
+  OSError
+    The report file could not be written.
+
   Examples
   --------
   >>> main()  # doctest: +SKIP
 
-    Notes
-    -----
-    Replica equality requires a digest from every oracle. A JSON report can
-    show nonconvergence even when the command exits normally.
+  Notes
+  -----
+  Scenario descriptions are printed verbatim apart from whitespace
+  normalization. Replica equality requires a digest from every oracle.
+  A JSON report can show nonconvergence even when the command exits normally.
   """
   parser = argparse.ArgumentParser()
   parser.add_argument("--scenario", default="healthy")

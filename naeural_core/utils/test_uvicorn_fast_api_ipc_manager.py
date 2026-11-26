@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -71,7 +72,7 @@ class FastApiServerIntegrationTest(unittest.TestCase):
       s.bind(("127.0.0.1", 0))
       return s.getsockname()[1]
 
-  def _render_basic_server(self, dst_dir, manager_port, manager_auth, endpoint_name="ping"):
+  def _render_basic_server(self, dst_dir, manager_port, manager_auth, endpoint_registry):
     template_dir = Path(__file__).resolve().parents[1] / "business" / "base" / "uvicorn_templates"
     env = Environment(loader=FileSystemLoader(str(template_dir)))
     template = env.get_template("basic_server.j2")
@@ -91,8 +92,9 @@ class FastApiServerIntegrationTest(unittest.TestCase):
       "default_route": None,
       "profile_rate": 0,
       "profile_log_per_request": False,
-      "node_comm_params": [{
-        "name": endpoint_name,
+      # Use the plugin's real decorator metadata for the opted-in route fixture.
+      "node_comm_params": endpoint_registry._node_comms_jinja_args if endpoint_registry else [{
+        "name": "ping",
         "method": "get",
         "args": [],
         "params": [],
@@ -123,21 +125,27 @@ class FastApiServerIntegrationTest(unittest.TestCase):
         "  return DummyFile()\n"
       )
 
-  def _serve(self, requests, extra_uvicorn_args=()):
+  def _serve(self, requests, extra_uvicorn_args=(), endpoint_registry=None):
     """
     Run the generated server against a fake plugin loop and send `requests`.
 
     Parameters
     ----------
-    requests : list of dict
-      HTTP headers of each GET /ping request.
+    requests : list of tuple
+      Endpoint name, HTTP headers, and an optional JSON body for each request.
     extra_uvicorn_args : tuple of str
       Extra uvicorn command line arguments.
+    endpoint_registry : object or None
+      A plugin fixture with the registered endpoint methods, or None for the default ping route.
 
     Returns
     -------
     list of tuple
-      (response body, client_ip received by the plugin) per request.
+      HTTP status, response body, and client address received by the plugin per request.
+
+    Examples
+    --------
+    >>> test._serve([("ping", {}, None)])  # doctest: +SKIP
     """
     auth = b"int-test"
     manager = get_server_manager(auth)
@@ -145,9 +153,12 @@ class FastApiServerIntegrationTest(unittest.TestCase):
     server_queue = manager.get_server_queue()
     client_queue = manager.get_client_queue()
 
-    tmp_dir = tempfile.mkdtemp(prefix="uvicorn_int_test_")
+    # Keep rendered server files private, and remove them after the test.
+    rendered_server = tempfile.TemporaryDirectory(prefix="uvicorn_int_test_")
+    self.addCleanup(rendered_server.cleanup)
+    tmp_dir = rendered_server.name
     port = self._find_free_port()
-    self._render_basic_server(tmp_dir, manager_port, auth)
+    self._render_basic_server(tmp_dir, manager_port, auth, endpoint_registry)
 
     stop_plugin = threading.Event()
     client_ips = queue.Queue()
@@ -168,13 +179,18 @@ class FastApiServerIntegrationTest(unittest.TestCase):
         if method == "ping":
           client_ips.put(msg.get("client_ip"))
           client_queue.put({"id": req_id, "value": {"result": "pong"}})
+        elif endpoint_registry:
+          # Invoke the fixture's registered method so application opt-in controls the generated route.
+          client_ips.put(msg.get("client_ip"))
+          reply = endpoint_registry._endpoints[method](*value[1:])
+          client_queue.put({"id": req_id, "value": reply})
 
     plugin_thread = threading.Thread(target=_plugin_loop, daemon=True)
     plugin_thread.start()
 
     proc = subprocess.Popen(
       [
-        "python3", "-m", "uvicorn", "--app-dir", tmp_dir, "main:app",
+        sys.executable, "-m", "uvicorn", "--app-dir", tmp_dir, "main:app",
         "--host", "127.0.0.1", "--port", str(port), *extra_uvicorn_args,
       ],
       stdout=subprocess.PIPE,
@@ -199,11 +215,16 @@ class FastApiServerIntegrationTest(unittest.TestCase):
         stderr = (proc.stderr.read() or b"").decode(errors="ignore")
         self.fail(f"Uvicorn server did not start in time. stderr:\n{stderr}")
 
-      for headers in requests:
-        http_request = urllib.request.Request(f"http://127.0.0.1:{port}/ping", headers=headers)
-        with urllib.request.urlopen(http_request, timeout=5) as resp:
-          data = json.loads(resp.read().decode())
-        results.append((data, client_ips.get(timeout=5)))
+      for endpoint, headers, payload in requests:
+        # A supplied body makes a JSON POST; the original ping cases still use GET.
+        body = json.dumps(payload).encode() if payload is not None else None
+        http_request = urllib.request.Request(f"http://127.0.0.1:{port}/{endpoint}", data=body, headers=headers)
+        try:
+          response = urllib.request.urlopen(http_request, timeout=5)
+        except urllib.error.HTTPError as exc:
+          response = exc  # Error replies remain available for body and status assertions.
+        with response:
+          results.append((response.status, json.loads(response.read()), client_ips.get(timeout=5)))
     finally:
       stop_plugin.set()
       server_queue.put(None)
@@ -224,22 +245,78 @@ class FastApiServerIntegrationTest(unittest.TestCase):
     return results
 
   def test_generated_server_end_to_end(self):
-    (data, client_ip), = self._serve([{}])
+    # An ordinary generated endpoint retains its default wire status.
+    (status, data, client_ip), = self._serve([("ping", {}, None)])
+    self.assertEqual(status, 200)
     self.assertEqual(data.get("result"), "pong")
     self.assertEqual(client_ip, "127.0.0.1")
 
   def test_client_ip_comes_from_forwarded_for_of_local_proxy(self):
     # A tunnel agent on 127.0.0.1 forwards the caller address; a value the caller
     # sent itself stays to the left and is ignored.
-    (_, client_ip), = self._serve([{"X-Forwarded-For": "198.51.100.1, 203.0.113.7"}])
+    (_, _, client_ip), = self._serve([("ping", {"X-Forwarded-For": "198.51.100.1, 203.0.113.7"}, None)])
     self.assertEqual(client_ip, "203.0.113.7")
 
   def test_client_ip_ignores_forwarded_for_of_untrusted_peer(self):
-    (_, client_ip), = self._serve(
-      [{"X-Forwarded-For": "203.0.113.7"}],
+    (_, _, client_ip), = self._serve(
+      [("ping", {"X-Forwarded-For": "203.0.113.7"}, None)],
       extra_uvicorn_args=("--forwarded-allow-ips", "192.0.2.1"),
     )
     self.assertEqual(client_ip, "127.0.0.1")
+
+  def test_only_opted_in_post_endpoints_forward_http_acceptance(self):
+    """Verify status and body through a generated server and the local IPC transport.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> FastApiServerIntegrationTest('test_only_opted_in_post_endpoints_forward_http_acceptance').run()
+    """
+    from naeural_core.business.default.web_app.fast_api_web_app import FastApiWebAppPlugin
+
+    class EndpointRegistry:
+      # Both routes use only synthetic replies on the loopback test server.
+      cfg_endpoints = []
+
+      @staticmethod
+      def P(*args, **kwargs):
+        pass
+
+      @FastApiWebAppPlugin.endpoint(method="post", forward_accepted_status=True)
+      def submit(self, reply: dict):
+        return reply  # Stand in for the plugin's already signed result.
+
+      @FastApiWebAppPlugin.endpoint(method="post")
+      def ordinary(self, reply: dict):
+        return reply  # An app payload can include a status field without opting in.
+
+    # Register exactly as the runtime does, then let the template render both routes.
+    registry = EndpointRegistry()
+    FastApiWebAppPlugin._init_endpoints(registry)
+    accepted = {"status_code": 202, "status": "accepted", "operation_id": "fixture", "EE_SIGN": "fixture-signature"}
+    conflict = {"status_code": 409, "status": "error", "error": "Active operation", "EE_SIGN": "fixture-signature"}
+    headers = {"Content-Type": "application/json"}
+    requests = [
+      ("submit", headers, {"reply": {"status_code": 202, "result": accepted}}),
+      ("submit", headers, {"reply": {"status_code": 409, "result": conflict, "logged": True}}),
+      ("ordinary", headers, {"reply": {"status_code": 202, "result": accepted}}),
+      ("submit", headers, {"reply": {"result": "ordinary success"}}),
+    ]
+    # Both status routes preserve their existing body shapes and only explicit opted-in acceptance changes at the wire.
+    outcomes = [(status, body) for status, body, _ in self._serve(requests, endpoint_registry=registry)]
+    self.assertEqual(outcomes, [
+      (202, {"status_code": 202, "result": accepted}),
+      (409, {"detail": conflict}),
+      (200, {"status_code": 202, "result": accepted}),
+      (200, {"result": "ordinary success"}),
+    ])
 
 
 class IpcModuleFootprintTest(unittest.TestCase):

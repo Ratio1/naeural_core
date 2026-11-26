@@ -234,13 +234,16 @@ class FastApiWebAppPlugin(BasePlugin):
       method="get",
       require_token=False,
       streaming_type=None,
-      chunk_size=1024 * 1024
+      chunk_size=1024 * 1024,
+      forward_accepted_status=False,
   ):
     """
     Decorator that marks a method as an HTTP endpoint with optional streaming support.
 
     Parameters
     ----------
+    func : callable or None
+        The plugin method, or None while the decorator awaits a method.
     method : str
         HTTP method (e.g. "get", "post").
     require_token : bool
@@ -249,12 +252,27 @@ class FastApiWebAppPlugin(BasePlugin):
         Type of streaming: "upload", "download", or None for regular endpoints.
     chunk_size : int
         Size of chunks for streaming operations (default 1MB).
+    forward_accepted_status : bool
+        Set HTTP 202 when a regular POST returns an explicit accepted status.
+        The response body is kept intact. Default False.
+
+    Returns
+    -------
+    callable
+        The registered endpoint or the decorator that registers it.
+
+    Examples
+    --------
+    >>> @FastApiWebAppPlugin.endpoint(method="post", forward_accepted_status=True)
+    ... def submit(self):
+    ...   return {"status_code": 202}
     """
     if func is None:
       def wrapper(func):
         return FastApiWebAppPlugin.endpoint(
           func, method=method, require_token=require_token,
-          streaming_type=streaming_type, chunk_size=chunk_size
+          streaming_type=streaming_type, chunk_size=chunk_size,
+          forward_accepted_status=forward_accepted_status,
         )
 
       return wrapper
@@ -266,6 +284,8 @@ class FastApiWebAppPlugin(BasePlugin):
     func.__require_token__ = require_token
     func.__streaming_type__ = streaming_type
     func.__chunk_size__ = FastApiWebAppPlugin.cap_chunk_size(chunk_size)
+    # Carry the endpoint's explicit opt-in through to the generated HTTP route.
+    func.__forward_accepted_status__ = forward_accepted_status
     return func
 
 
@@ -498,7 +518,9 @@ class FastApiWebAppPlugin(BasePlugin):
         'require_token': require_token,
         'has_kwargs': has_kwargs,
         'streaming_type': streaming_type,
-        'chunk_size': chunk_size
+        'chunk_size': chunk_size,
+        # An unmarked endpoint keeps its default HTTP status even if its payload has a status_code field.
+        'forward_accepted_status': method.__forward_accepted_status__,
       })
 
       streaming_info = f" (streaming: {streaming_type})" if streaming_type else ""

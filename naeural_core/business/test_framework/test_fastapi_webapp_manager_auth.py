@@ -26,6 +26,8 @@ from jinja2 import Template
 
 # The real manager helpers: start one, connect to one.
 from naeural_core.utils.uvicorn_fast_api_ipc_manager import get_client_manager, get_server_manager
+# The real environment selector used when the extracted asset method writes its snapshots.
+from naeural_core.utils.process_credentials import credential_env_names
 
 # The package folder.
 _PACKAGE = Path(__file__).resolve().parents[2]
@@ -179,7 +181,7 @@ class TestAssetLogLine(unittest.TestCase):
     # The real method on a harness class.
     class_source = "class Harness:\n" + _method_source(_BASE, "BaseWebAppPlugin", "initialize_assets")
     # The module-level names the method uses.
-    namespace = {"os": os, "shutil": shutil}
+    namespace = {"os": os, "shutil": shutil, "credential_env_names": credential_env_names}
     # Compile the harness.
     exec(class_source, namespace)  # noqa: S102
     # An instance without the plugin stack.

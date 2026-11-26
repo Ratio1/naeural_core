@@ -575,6 +575,24 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     return
 
   def test_web_app_tunnel_start_logs_are_redacted_but_execution_is_unchanged(self):
+    """Check how the web-app start sequence presents a tunnel command.
+
+    Capture the command at the execution boundary and compare it with the
+    original. The setup and start logs and the status payload must omit the
+    token while retaining safe fields such as the origin URL.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestTunnelShutdownHardening().test_web_app_tunnel_start_logs_are_redacted_but_execution_is_unchanged()  # doctest: +SKIP
+    """
     token = "cloudflare-web-app-secret"
     command = (
       "cloudflared tunnel --no-autoupdate run "

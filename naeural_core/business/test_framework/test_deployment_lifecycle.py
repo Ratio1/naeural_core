@@ -1758,6 +1758,25 @@ class DeploymentCommandTest(unittest.TestCase):
       self.assertEqual(Account.recover_message(encode_defunct(text=message), signature=signature), wrapper.eth_address)
 
   def test_legacy_worker_inspection_and_conditional_retirement(self):
+    """Bind legacy worker retirement to a verified inspection of its current workload.
+
+    Exercise encrypted requests between synthetic peers, invalid scopes,
+    replay protection, a restart, and concurrent changes to the deployment.
+    Check that only matching evidence permits retirement and that inspection
+    does not disclose private configuration in reports or the journal.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> DeploymentCommandTest().test_legacy_worker_inspection_and_conditional_retirement()  # doctest: +SKIP
+    """
     from naeural_core import Logger
     from naeural_core.utils.plugins_base.bc_wrapper import BCWrapper
     from ratio1.bc import DefaultBlockEngine

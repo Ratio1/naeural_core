@@ -245,6 +245,23 @@ class FastApiServerIntegrationTest(unittest.TestCase):
     return results
 
   def test_generated_server_end_to_end(self):
+    """Send an ordinary request through generated HTTP and plugin IPC.
+
+    Verify the default success status, the plugin's reply, and the local
+    address that reaches the plugin.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> FastApiServerIntegrationTest().test_generated_server_end_to_end()  # doctest: +SKIP
+    """
     # An ordinary generated endpoint retains its default wire status.
     (status, data, client_ip), = self._serve([("ping", {}, None)])
     self.assertEqual(status, 200)
@@ -252,12 +269,46 @@ class FastApiServerIntegrationTest(unittest.TestCase):
     self.assertEqual(client_ip, "127.0.0.1")
 
   def test_client_ip_comes_from_forwarded_for_of_local_proxy(self):
+    """Use the address appended by the trusted local tunnel proxy.
+
+    Send a forwarding chain that also includes an address supplied by the
+    caller. The plugin must receive the address observed by the proxy.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> FastApiServerIntegrationTest().test_client_ip_comes_from_forwarded_for_of_local_proxy()  # doctest: +SKIP
+    """
     # A tunnel agent on 127.0.0.1 forwards the caller address; a value the caller
     # sent itself stays to the left and is ignored.
     (_, _, client_ip), = self._serve([("ping", {"X-Forwarded-For": "198.51.100.1, 203.0.113.7"}, None)])
     self.assertEqual(client_ip, "203.0.113.7")
 
   def test_client_ip_ignores_forwarded_for_of_untrusted_peer(self):
+    """Ignore forwarding headers sent directly by an untrusted connection.
+
+    Start the generated server with a trust list that excludes the requester
+    and confirm that the plugin sees the connected peer's address.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> FastApiServerIntegrationTest().test_client_ip_ignores_forwarded_for_of_untrusted_peer()  # doctest: +SKIP
+    """
     (_, _, client_ip), = self._serve(
       [("ping", {"X-Forwarded-For": "203.0.113.7"}, None)],
       extra_uvicorn_args=("--forwarded-allow-ips", "192.0.2.1"),

@@ -487,13 +487,65 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     # The original namespace must remain available to node-side providers.
     self.assertEqual(environment["APP_SECRET"], "synthetic-key")
     self.assertEqual(
-      redact_command("tool --token 'first part'last --password=other --node target mnemonic-fixture", environment),
-      "tool --token [REDACTED] --password=[REDACTED] --node target [REDACTED]",
+      redact_command("tool --token 'first part'last --database-password=other --node target mnemonic-fixture", environment),
+      "tool --token [REDACTED] --database-password=[REDACTED] --node target [REDACTED]",
     )
     self.assertEqual(
-      redact_command(["tool", "--api-key", "whole argument", "--port", "4000"], environment),
-      ["tool", "--api-key", "[REDACTED]", "--port", "4000"],
+      redact_command(["tool", "--api-key", "whole argument", "ENV_SECRET=multiple words", "--port", "4000"], environment),
+      ["tool", "--api-key", "[REDACTED]", "ENV_SECRET=[REDACTED]", "--port", "4000"],
     )
+    # Embedded URL authentication disappears while its destination stays visible.
+    self.assertEqual(redact_command("tool https://user:secret@example.test/path", {}),
+                     "tool https://[REDACTED]@example.test/path")
+
+  def test_application_snapshots_use_only_safe_settings(self):
+    """Keep an explicitly configured app credential in memory and off disk.
+
+    Exercises the setup and start environments plus all three launcher
+    snapshots on the normal asset initialization path.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestTunnelShutdownHardening().test_application_snapshots_use_only_safe_settings()
+    """
+    # Use synthetic node and app credentials that must never reach an unrelated child or a snapshot.
+    node_secret, app_secret = "node-store-fixture", "scoped-app-fixture"
+    plugin = BaseWebAppPlugin.__new__(BaseWebAppPlugin)
+    plugin.P = mock.Mock()
+    plugin.os_path = os.path
+    plugin.os_environ = {"PATH": "/bin", "REDMESH_SECRET_STORE_KEY": node_secret, "EE_MQTT": "broker-fixture"}
+    plugin.str_unique_identification = "fixture"
+    plugin.plugins_shmem = {"USED_PORTS": {"fixture": 8080}}
+    plugin.cfg_env_vars = {}
+    plugin.get_additional_env_vars = lambda: {}
+    plugin.plugin_id = "fixture"
+    with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as destination:
+      # A deployed app can still supply its own credential through its dotenv asset.
+      pathlib.Path(source, ".env").write_text(f"APP_TOKEN={app_secret}\nFLAG=visible\n", encoding="utf-8")
+      plugin.script_temp_dir = destination
+      plugin.get_output_folder = lambda: destination
+      app_environment = plugin._BaseWebAppPlugin__prepare_env(source)
+      plugin.initialize_assets(source, destination, {})
+      # The app receives its own token, while setup retains ordinary environment settings.
+      self.assertEqual(app_environment["APP_TOKEN"], app_secret)
+      self.assertEqual(plugin.base_env["PATH"], "/bin")
+      self.assertNotIn("REDMESH_SECRET_STORE_KEY", app_environment)
+      self.assertNotIn("EE_MQTT", app_environment)
+      self.assertEqual(plugin.os_environ["REDMESH_SECRET_STORE_KEY"], node_secret)
+      for name in (".env", ".start_env_used", ".setup_env_used"):
+        # Each file retains safe settings and neither parent nor scoped credentials.
+        snapshot = pathlib.Path(destination, name).read_text(encoding="utf-8")
+        self.assertIn("PATH=/bin\n", snapshot)
+        self.assertNotIn(node_secret, snapshot)
+        self.assertNotIn(app_secret, snapshot)
 
   def test_cloudflare_tunnel_start_redacts_token_but_executes_original_command(self):
     token = "cloudflare-tunnel-secret"
@@ -533,7 +585,7 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     plugin.get_setup_commands = lambda: []
     plugin.get_start_commands = lambda: [command]
     plugin.prepared_env = {}
-    plugin.add_payload_by_fields = lambda **kwargs: None
+    plugin.add_payload_by_fields = mock.Mock()
     plugin.time = mock.Mock(side_effect=[0, 10])
     process = mock.Mock()
     executed = []
@@ -549,6 +601,10 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     self.assertEqual(executed, [command])
     self.assertNotIn(token, serialized_logs)
     self.assertEqual(serialized_logs.count("[REDACTED]"), 3)
+    # The command status uses the same safe rendering as the logs.
+    status_command = plugin.add_payload_by_fields.call_args.kwargs["command_str"]
+    self.assertNotIn(token, status_command)
+    self.assertIn("--url http://127.0.0.1:8080", status_command)
     return
 
   def test_windows_fallback_kills_process_without_sigkill(self):

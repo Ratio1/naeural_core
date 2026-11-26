@@ -24,16 +24,15 @@ CREDENTIAL_ENV_NAMES = frozenset({
 })
 REDACTED = "[REDACTED]"
 _KEYWORDS = ("TOKEN", "SECRET", "KEY", "PASS")
-_SECRET_FLAGS = frozenset({
-  "--access-key", "--api-key", "--api-token", "--auth-token", "--client-secret",
-  "--pass", "--password", "--secret", "--secret-key", "--token",
-  "authtoken", "add-authtoken",
-})
+# Option suffixes cover application-specific prefixes while leaving options such as --token-file visible.
+_SECRET_OPTION = r"(?:--(?:[a-z0-9]+[-_])*(?:token|password|pass|secret|(?:api|access|secret)[-_]key)|authtoken|add-authtoken)"
+_SECRET_FLAG = re.compile(_SECRET_OPTION, re.IGNORECASE)
 # A shell word can combine quoted and unquoted fragments. Also consume incomplete quoted values.
 _SHELL_WORD = r"""(?:"(?:\\.|[^"\\])*(?:"|$)|'[^']*(?:'|$)|\\.|[^\s;&|"'\\])+"""
 # A standalone secret flag or environment assignment keeps its name and loses its entire value.
 _CREDENTIAL_ARGUMENT = re.compile(
-  r"(?<![\w-])(?P<option>" + "|".join(sorted(_SECRET_FLAGS, reverse=True)) +
+  r"(?P<scheme>[a-z][a-z0-9+.-]*://)[^/\s@\"']+@"
+  r"|(?<![\w-])(?P<option>" + _SECRET_OPTION +
   r")(?P<separator>=|\s+)(?P<argument>" + _SHELL_WORD + r")"
   r"|(?<![\w-])(?P<name>[a-z_][a-z0-9_]*)=(?P<assigned>" + _SHELL_WORD + r")",
   re.IGNORECASE,
@@ -150,6 +149,9 @@ def redact_command(command, environment, extra_values=()):
     >>> replace(matcher.search("--token hidden"))
     '--token [REDACTED]'
     """
+    if match["scheme"]:
+      # URL user information can contain credentials even without a named option.
+      return match["scheme"] + REDACTED + "@"
     if match["option"]:
       # Preserve the option and original separator.
       return match["option"] + match["separator"] + REDACTED
@@ -171,14 +173,17 @@ def redact_command(command, environment, extra_values=()):
     if redact_next:
       # Mask the entire argument, including any spaces or punctuation.
       output.append(REDACTED)
-    elif flag.lower() in _SECRET_FLAGS and separator:
+    elif separator and _SECRET_FLAG.fullmatch(flag):
       # Preserve the flag when its credential was passed with an equals sign.
+      output.append(flag + "=" + REDACTED)
+    elif separator and flag.isidentifier() and credential_env_names((flag,)):
+      # A vector assignment's whole value belongs to its environment key.
       output.append(flag + "=" + REDACTED)
     else:
       # Apply ordinary assignments and known literal checks to each non-option argument.
       output.append(matcher.sub(replace, arg))
     # Consume the next value only for a standalone option that was itself kept.
-    redact_next = not redact_next and arg.lower() in _SECRET_FLAGS
+    redact_next = not redact_next and _SECRET_FLAG.fullmatch(arg) is not None
   return output
 
 

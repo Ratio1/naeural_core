@@ -1221,7 +1221,9 @@ class BaseWebAppPlugin(
     self.dct_err_logs_reader = {}
 
     self.P(f"Port: {self.port}")
-    self.P(f"Setup commands: {setup_commands}")
+    # Initial setup diagnostics use the same safe rendering as subsequent command logs.
+    safe_setup_commands = [self._redact_tunnel_command_for_log(command) for command in setup_commands]
+    self.P(f"Setup commands: {safe_setup_commands}")
     safe_start_commands = [
       self._redact_tunnel_command_for_log(command)
       for command in start_commands

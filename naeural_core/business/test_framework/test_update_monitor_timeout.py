@@ -45,6 +45,17 @@ class UpdateMonitorTimeoutTests(unittest.TestCase):
       call("https://example.test/main/ver.py", headers={}, timeout=60),
       call("https://example.test/main/ver.py", headers={}, timeout=60),
     ])
+    # A locally provisioned token remains usable for a private update source.
+    plugin.cfg_version_token = "synthetic-local-token"
+    plugin.P.reset_mock()
+    plugin.requests.get.side_effect = TimeoutError(f"transport rejected {plugin.cfg_version_token}")
+    self.assertIsNone(plugin.get_git_server_version())
+    self.assertEqual(plugin.requests.get.call_args.kwargs["headers"],
+                     {"Authorization": "token synthetic-local-token"})
+    # The request log and quoted error both hide the complete credential.
+    diagnostics = "\n".join(entry.args[0] for entry in plugin.P.call_args_list)
+    self.assertNotIn(plugin.cfg_version_token, diagnostics)
+    self.assertIn("[REDACTED]", diagnostics)
 
 
 if __name__ == "__main__":

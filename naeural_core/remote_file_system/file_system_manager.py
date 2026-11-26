@@ -51,8 +51,9 @@ class FileSystemManager(Manager, _ConfigHandlerMixin):
     self.uploader_config = config
 
     try:
-      self.P("Creating file system manager plugin '{}' with config {}".format(
-        _cls.__name__, config), color='b'
+      # Log the configured fields without including access credentials.
+      self.P("Creating file system manager plugin '{}' with config fields {}".format(
+        _cls.__name__, sorted(config)), color='b'
       )
 
       file_system = _cls(

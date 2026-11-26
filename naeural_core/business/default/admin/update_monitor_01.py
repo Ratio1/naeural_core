@@ -53,6 +53,7 @@ Examples:
  
 """
 from naeural_core.business.base import BasePluginExecutor
+from naeural_core.utils.process_credentials import REDACTED, redact_command
 import os
 
 
@@ -462,10 +463,21 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
   def get_git_server_version(self):
     """Fetch the server version with a 60-second connect/read timeout.
 
+    Public sources work without a token. A private source can use a locally
+    configured token whose value is removed from diagnostics.
+
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     str or None
         Parsed version, or None when the request or version parsing fails.
+
+    Examples
+    --------
+    >>> monitor.get_git_server_version()  # doctest: +SKIP
     """
     ver = None
     branch = self.docker_branch if self.runs_in_docker else self.log.git_branch
@@ -474,19 +486,23 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
     if isinstance(url0, str) and url0.startswith('http'):
       if '{}' in url0:
         url0 = url0.format(branch)
+      # Keep enough diagnostics to identify the update route while hiding its credential.
+      safe_url = redact_command(url0, {}, extra_values=(token,))
       resp = None
       try:
         headers = {}
         if token not in [None, "", "git_version_access_token", "token_for_accessing_private_repositories"]:
           headers = {'Authorization': 'token ' + token}      
-        self.P("Retrieving version with url: {} and headers: {}".format(url0, headers))
+        # Log header names and indicate that the value was intentionally masked.
+        safe_headers = {name: REDACTED for name in headers}
+        self.P("Retrieving version with url: {} and headers: {}".format(safe_url, safe_headers))
         resp0 = self.requests.get(url0, headers=headers, timeout=60)
         status_code = resp0.status_code
         resp = resp0.content.decode()
         self.P("Retrieved for `{}:{}` status: {} data:\n{}".format(
           "docker" if self.runs_in_docker else "git-src", branch,
           status_code,
-          resp[:100].replace('\n', ' '))
+          redact_command(resp, {}, extra_values=(token,))[:100].replace('\n', ' '))
         )
         if resp0.status_code == 200:
           if self.cfg_use_yaml:
@@ -494,14 +510,17 @@ class UpdateMonitor01Plugin(BasePluginExecutor):
           else:
             ver = self.get_version_from_raw(resp)
         else:
-          self.P("Failed to retrieve version with url:{}, headers:{}. Response status: {} was: {}".format(
-            url0, headers, status_code, resp), color='r'
+          # Keep the failure status without returning arbitrary response contents to node logs.
+          self.P("Failed to retrieve version with url:{}, headers:{}. Response status: {}".format(
+            safe_url, safe_headers, status_code), color='r'
           )
       except Exception as exc:
-        self.P("Exception while retrieving version with url:{} , headers:{}. Response was: {}, exception: {}".format(
-          url0, headers, resp, exc), color='r')
+        # Request failures can quote locally supplied credentials.
+        safe_error = redact_command(str(exc), {}, extra_values=(token,))
+        self.P("Exception while retrieving version with url:{}, exception: {}".format(safe_url, safe_error), color='r')
     else:
-      self.P(f"Skipping version check: {url0=}, {token=}", color='r')
+      # A skipped check has no reason to display configured authentication.
+      self.P("Skipping version check because no HTTP update URL is configured.", color='r')
     return ver  
   
   

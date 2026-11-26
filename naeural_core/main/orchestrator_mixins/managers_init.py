@@ -172,16 +172,39 @@ class _ManagersInitMixin(object):
     return
 
   def _initialize_file_system_manager(self):
+    """Record the filesystem manager and start its configured uploader.
+
+    Keep a manager available even if an explicitly optional uploader was
+    disabled during application configuration loading.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> node._initialize_file_system_manager()  # doctest: +SKIP
+    """
     header = "Initializing File System manager..."
     self.P(header, color='b', boxed=True)
 
+    # Preserve the manager interface for plugins that check upload availability.
+    config = self._config_manager.cfg_app_file_upload
     self._file_system_manager = FileSystemManager(
       log=self.log,
-      config=self._config_manager.cfg_app_file_upload,
+      config=config,
       DEBUG=self.DEBUG
     )
-    self._file_system_manager.validate(raise_if_error=True)
-    self._file_system_manager.create_file_system()
+    if (config or {}).get("ENABLED", True):
+      # Keep validation and creation for explicitly configured uploaders.
+      self._file_system_manager.validate(raise_if_error=True)
+      self._file_system_manager.create_file_system()
+    else:
+      self.P("File upload is disabled because the optional uploader is unavailable.")
     self._app_shmem['file_system_manager'] = self._file_system_manager
     return
   

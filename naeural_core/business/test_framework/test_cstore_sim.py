@@ -99,6 +99,24 @@ class TestChainStoreFleet(unittest.TestCase):
                         for name, count in writer["plugin_stats"].items()))
 
   def test_saturated_oracle_keeps_up_with_the_incident_stream(self):
+    """Check that a saturated oracle continues to serve the simulated fleet.
+
+    The constrained oracle must process its input without loss, keep a small
+    queue, confirm most local writes and finish at least half its sync calls.
+    The save thread must also stay within its timing limit.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestChainStoreFleet().test_saturated_oracle_keeps_up_with_the_incident_stream()  # doctest: +SKIP
+    """
     result = _run("incident", 0.5)
     slow = result["nodes"]["n4"]
     self.assertNotIn("error", slow)
@@ -183,6 +201,24 @@ class TestChainStoreFleet(unittest.TestCase):
 
   @unittest.skipUnless(os.environ.get("EE_CSTORE_SIM_BASE_SRC"), "set EE_CSTORE_SIM_BASE_SRC to an older checkout")
   def test_old_and_new_oracles_interoperate(self):
+    """Verify that old and current chain-store peers agree on their records.
+
+    Run the healthy fleet with both checkouts. Every peer must stay healthy,
+    every attempted operation or local write must be confirmed, and the
+    replicas must converge.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestChainStoreFleet().test_old_and_new_oracles_interoperate()  # doctest: +SKIP
+    """
     result = _run("healthy", 0.4, variant="mixed", base_src=os.environ["EE_CSTORE_SIM_BASE_SRC"])
     self.assertTrue(result["replicas_identical"])
     for name, node in result["nodes"].items():

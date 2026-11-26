@@ -13,7 +13,7 @@ import weakref
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from ratio1.const.base import BCct
 from naeural_core.main.serialization_manager import SerializationManager
 
@@ -577,6 +577,39 @@ class DeploymentLifecycleTest(unittest.TestCase):
       # The targeted acknowledgement completes the durable readiness checkpoint.
       self.assertTrue(DeploymentLifecycle(self.path, "node").records["operation|deploy"]["ready_reported"])
 
+  def test_legacy_bound_ready_checkpoint_is_refreshed_on_restart(self):
+    """Reconfirm a legacy readiness flag whose coordinator delivery was unproven.
+
+    The saved workload remains admitted and reports readiness after reattachment.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> DeploymentLifecycleTest().test_legacy_bound_ready_checkpoint_is_refreshed_on_restart()
+    """
+    # An older worker recorded only a quorum flag for this bound workload.
+    pipeline = config()
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(ready=True))
+    initial = self.publish()
+    # Recreate the old journal shape before restarting with the new code.
+    self.lifecycle.records["operation|deploy"].pop("ready_coordinator_confirmed")
+    self.lifecycle._save()
+    self.restart_process()
+    self.assertFalse(self.lifecycle.records["operation|deploy"].get("ready_reported"))
+    # The reattached workload supplies a fresh ready observation for the same attempt.
+    self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(ready=True))
+    ready = self.publish()
+    self.assertGreater(ready["sequence"], initial["sequence"])
+    self.assertEqual(ready["status"], "ready")
+
   def test_ack_after_quorum_suppresses_redundant_source_replay(self):
     pipeline = config()
     pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"
@@ -905,7 +938,7 @@ class DeploymentLifecycleTest(unittest.TestCase):
     self.assertEqual(self.lifecycle.records["operation|deploy"]["status"], "failed")
 
   def test_restart_keeps_a_rejected_command_failed(self):
-    """A rejected command's record, failed with no failed instance, is published as failed again after a restart."""
+    """A rejected command that was not delivered remains failed and pending after restart."""
     # The live revision 3 of job 7.
     previous = config(revision=3)
     # Its job and revision, which a retirement must name.
@@ -918,8 +951,8 @@ class DeploymentLifecycleTest(unittest.TestCase):
     operation.update(job_id=7, expected_previous_operation_id="operation")
     # Rejected: its record is failed with the error on the record, and none of its instances failed.
     self.assertFalse(self.lifecycle.retire("app", previous, operation, "oracle", True))
-    # The rejection is published.
-    self.publish()
+    # The rejection has not reached the coordinator.
+    self.publish(succeed=False)
     # The node restarts.
     self.restart_process()
     # Keep only what is published from now on.
@@ -931,6 +964,81 @@ class DeploymentLifecycleTest(unittest.TestCase):
     # Published again (each snapshot goes to two keys), always as failed with the rejection, never as "starting".
     self.assertEqual({(record["status"], record["error"]["code"]) for record in observed},
                      {("failed", "CONFIGURATION_REJECTED")})
+
+  def test_confirmed_stop_is_not_republished_after_worker_restart(self):
+    """Load a confirmed terminal state without repeating its signed report.
+
+    The worker retains its terminal journal record and sequence.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> DeploymentLifecycleTest().test_confirmed_stop_is_not_republished_after_worker_restart()
+    """
+    # Stop an accepted native workload and deliver its terminal state.
+    self.lifecycle.admit(config(), "oracle", True)
+    self.lifecycle.attach(config(), "WORKER", "worker", plugin(alive=False, stopped=True))
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    delivered = self.publish()
+    self.assertEqual(delivered["status"], "stopped")
+    self.assertNotIn("terminal_report_digest", delivered)
+    # Restart the same worker with its original journal.
+    self.restart_process()
+    writer, signer = Mock(), Mock()
+    self.lifecycle.publish(writer, signer)
+    # A confirmed terminal record stays in the journal without another write or signature.
+    writer.assert_not_called()
+    signer.assert_not_called()
+    self.assertEqual(self.lifecycle.records["operation|deploy"]["sequence"], delivered["sequence"])
+
+  def test_terminal_quorum_without_coordinator_keeps_the_stop_pending(self):
+    """Deliver the stopped report to the coordinator after it returns.
+
+    Another recipient's acknowledgement does not settle a terminal delivery.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> DeploymentLifecycleTest().test_terminal_quorum_without_coordinator_keeps_the_stop_pending()
+    """
+    # Keep the original coordinator unreachable for the first stop publication.
+    self.lifecycle.admit(config(), "oracle", True)
+    self.lifecycle.attach(config(), "WORKER", "worker", plugin(alive=False, stopped=True))
+    self.lifecycle.admit(config("stop"), "oracle", True)
+    sessions = {"oracle": (False, None), "other": (True, 100)}
+    self.lifecycle._peer_session = sessions.__getitem__
+    self.lifecycle._confirmed_peers = lambda _key: ["other"]
+    with patch.object(module.time, "monotonic", return_value=10):
+      # The initial quorum leaves the coordinator pending.
+      self.publish()
+      original = self.writes[-1]
+      self.assertEqual(len(self.writes), 2)
+      sessions["oracle"] = (True, 1)
+      # Repair the exact current receipt and checkpoint only after it is acknowledged.
+      self.publish()
+      self.assertEqual(len(self.writes), 3)
+      self.assertEqual(self.writes[-1][:2], original[:2])
+      self.assertEqual(self.writes[-1][2]["peers"], ["oracle"])
+      self.assertTrue(self.writes[-1][2]["require_target_ack"])
+    self.restart_process()
+    # The now-delivered historical stop must not replay again.
+    writer = Mock()
+    self.lifecycle.publish(writer, Mock())
+    writer.assert_not_called()
 
   def test_restart_keeps_a_stopped_attempt_stopping(self):
     """A restart starts a start failure again only for a running attempt; a stopped one keeps its stop."""
@@ -1805,9 +1913,13 @@ class DeploymentCommandTest(unittest.TestCase):
       harness.shmem["deeploy_lifecycle"] = service
       with patch.object(module.time, "time", return_value=1200):
         send(retire)  # Expired retry against an absent pipeline must keep its complete receipt.
-        again = next(r for r in publish() if r["attempt"] == "retire")
-        self.assertEqual(again["instances"], stop["instances"])
+        # The coordinator already confirmed this receipt, so an expired retry does not resend it.
+        self.assertFalse(any(r["attempt"] == "retire" for r in publish()))
+        # Preserve the durable repair binding that fences a stale configuration after a restart.
+        again = service.records[retire["operation_id"] + "|retire"]
+        self.assertEqual(again["instances"][0]["runtime_artifacts"], bindings)
         self.assertEqual(again["status"], "stopped")
+        self.assertEqual(again["sequence"], stop["sequence"])
 
   def test_conditional_tombstone_prevents_merging_a_surviving_file_after_two_restarts(self):
     from naeural_core import constants as ct

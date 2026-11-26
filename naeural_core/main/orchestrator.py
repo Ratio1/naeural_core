@@ -1266,16 +1266,11 @@ class Orchestrator(DecentrAIObject,
     int
       Number of pipeline versions resolved during this pass (0 when the pass was skipped).
 
-    Raises
-    ------
-    ValueError
-      Not to the caller. It is raised inside the pass for a versioned pipeline (a ``secret_revision`` key, a
-      ``revision`` other than 0 in its deeploy specs, or an operation key) that names no secret revision, and
-      caught by the pass's own handler, which withholds that pipeline and retries it on the refusal's pace (up
-      to 300 s), as for a refusal by dAuth.
-
     Notes
     -----
+    A versioned pipeline with no secret revision is withheld and retried like a dAuth refusal. The pass
+    catches the validation error and retries at intervals of up to 300 seconds.
+
     Object identity is a safe "nothing changed" test because ``choose_current_running_streams``, the only
     code that replaces the dict after ``__init__``, assigns a new dict whenever any pipeline differs. A side
     effect: ``$EE_*`` references are no longer re-expanded every 0.25 s while the config is unchanged, so an

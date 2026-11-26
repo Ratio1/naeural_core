@@ -51,22 +51,119 @@ LOG = open(DATA / "node.log", "a")
 
 
 def log(msg):
+  """Append a timestamped message to the node's diagnostic log.
+
+  Flush each line for inspection while the simulator is running.
+
+  Parameters
+  ----------
+  msg : object
+    Message formatted with str.
+
+  Returns
+  -------
+  None
+
+  Raises
+  ------
+  OSError
+    Writing or flushing the log failed.
+
+  Examples
+  --------
+  >>> log("oracle ready")  # doctest: +SKIP
+
+  Notes
+  -----
+  The elapsed timestamp is relative to subprocess initialization.
+  """
   LOG.write("{:8.3f} {}\n".format(time.time() - T0, msg))
   LOG.flush()
 
 
 def send_frame(header, body=b""):
+  """Write a complete length-prefixed frame to the driver pipe.
+
+  Serialize the header to JSON and keep the payload bytes intact.
+
+  Parameters
+  ----------
+  header : dict
+    JSON-serializable metadata describing the frame.
+  body : bytes, optional
+    Payload, empty for control frames.
+
+  Returns
+  -------
+  None
+    The frame has been flushed to the pipe.
+
+  Raises
+  ------
+  OSError
+    Writing or flushing the pipe failed.
+  TypeError or ValueError
+    Header data cannot be encoded as JSON.
+  struct.error
+    A field is too long for an unsigned four-byte count.
+
+  Examples
+  --------
+  >>> send_frame({"t": "ready"})  # doctest: +SKIP
+
+  Notes
+  -----
+  The lock keeps the byte stream ordered when workload and control threads
+  both send frames.
+  """
+  # Encode control metadata separately from the opaque payload.
   head = json.dumps(header).encode()
   with OUT_LOCK:
+    # Keep both lengths and their contents together under the write lock.
     OUT.write(struct.pack(">I", len(head)) + head + struct.pack(">I", len(body)) + body)
+    # Flush so the driver can consume frames before the buffer fills.
     OUT.flush()
 
 
 def read_frame():
+  """Read the next frame sent by the driver.
+
+  Decode the header and read the body using their separate size prefixes.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  tuple of (dict, bytes) or tuple of (None, None)
+    Decoded header and opaque body. A short first size read ends the stream.
+
+  Raises
+  ------
+  OSError
+    The pipe read failed.
+  ValueError
+    The header bytes could not be decoded as JSON.
+  struct.error
+    The body length prefix is incomplete.
+
+  Examples
+  --------
+  >>> header, body = read_frame()  # doctest: +SKIP
+
+  Notes
+  -----
+  The frame protocol is private to the simulator. The body is read once
+  using the advertised length.
+  """
+  # Read the fixed-size header length before attempting JSON decoding.
   raw = INP.read(4)
   if len(raw) < 4:
     return None, None
+  # Decode just the JSON metadata so the payload remains opaque.
   header = json.loads(INP.read(struct.unpack(">I", raw)[0]))
+  # The separate length allows payloads containing any byte sequence.
   body = INP.read(struct.unpack(">I", INP.read(4))[0])
   return header, body
 
@@ -77,11 +174,54 @@ if FSYNC_DELAY > 0:
 
 
 def load_source(path, name, extra=None, strip=()):
+  """Load a simulator-selected definition from a source checkout.
+
+  Execute the file in a separate namespace with the supplied stand-ins.
+
+  Parameters
+  ----------
+  path : str or os.PathLike
+    Trusted Python source file from the checkout under test.
+  name : str
+    Name of the definition to retrieve.
+  extra : dict or None, optional
+    Additional globals made available to the file.
+  strip : iterable of str, optional
+    Literal substrings to remove before compilation.
+
+  Returns
+  -------
+  object
+    The definition bound to the requested name.
+
+  Raises
+  ------
+  OSError
+    Reading the source failed.
+  SyntaxError
+    The modified text could not be compiled.
+  KeyError
+    The requested definition was not provided by the file.
+
+  Examples
+  --------
+  >>> load_source(SRC / "main" / "example.py", "Example")  # doctest: +SKIP
+
+  Notes
+  -----
+  Top-level code is executed and can propagate errors of its own. Choose
+  only checkouts intended for this simulator.
+  """
+  # Read the exact source instead of importing all of Core.
   text = Path(path).read_text()
   for needle in strip:
+    # Apply each caller-requested literal substitution before compiling.
     text = text.replace(needle, "")
+  # Give the selected source its own name and minimal global environment.
   space = {"__name__": "sim_" + name}
+  # Supply only the additional dependencies provided by the caller.
   space.update(extra or {})
+  # Preserve the input path in tracebacks from the executed source.
   exec(compile(text, str(path), "exec"), space)
   return space[name]
 
@@ -124,35 +264,241 @@ _NOW, _SLEEP = time.time, time.sleep
 
 
 class PD:
+  """Name the payload fields used by the simulated transport.
+
+  Expose the names expected by the actual network mixin.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  PD
+    Object exposing the frame field constants.
+
+  Examples
+  --------
+  >>> fields = PD()
+
+  Notes
+  -----
+  The simulator forwards these names unchanged to the Core network mixin.
+  """
   EE_SENDER, EE_ID, EE_DESTINATION = "EE_SENDER", "EE_ID", "EE_DESTINATION"
   EE_IS_ENCRYPTED, EE_ENCRYPTED_DATA, EE_PAYLOAD_PATH = "EE_IS_ENCRYPTED", "EE_ENCRYPTED_DATA", "EE_PAYLOAD_PATH"
 
 
 class SimBC:
-  """Plugin-facing block-engine wrapper: real crypto, simulated registry."""
+  """Provide the chain store with its blockchain and roster interface.
+
+  Use the SDK engine for cryptography and the simulated roster for peer queries.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  SimBC
+    Plugin-facing blockchain interface.
+
+  Examples
+  --------
+  >>> blockchain = SimBC()
+
+  Notes
+  -----
+  The oracle address is derived from the subprocess's own signing engine.
+  """
   address = ENGINE.address
 
   def verify(self, dct_data, str_signature=None, sender_address=None, return_full_info=True, log_hash_sign_fails=True):
+    """Verify a signed payload using the oracle's SDK engine.
+
+    Pass the explicit signature, sender and return mode through to the verifier.
+
+    Parameters
+    ----------
+    dct_data : dict
+      Signed payload.
+    str_signature : str or None, optional
+      Explicit signature, if not read from the payload.
+    sender_address : str or None, optional
+      Explicit sender, if not read from the payload.
+    return_full_info : bool, optional
+      Choose the detailed SDK result.
+    log_hash_sign_fails : bool, optional
+      Accepted for compatibility with the caller.
+
+    Returns
+    -------
+    bool or object
+      Verification result returned by the SDK.
+
+    Examples
+    --------
+    >>> blockchain.verify(payload)  # doctest: +SKIP
+
+    Notes
+    -----
+    The compatibility logging argument is not forwarded.
+    """
     return ENGINE.verify(dct_data, signature=str_signature, sender_address=sender_address, return_full_info=return_full_info)
 
   def decrypt_str(self, str_b64data, str_sender):
+    """Decrypt a payload received from another simulated oracle.
+
+    Delegate ciphertext handling to the same engine that signs node messages.
+
+    Parameters
+    ----------
+    str_b64data : str
+      Encoded encrypted payload.
+    str_sender : str
+      Peer blockchain address.
+
+    Returns
+    -------
+    str or None
+      Plaintext when decryption succeeds.
+
+    Examples
+    --------
+    >>> blockchain.decrypt_str(ciphertext, peer)  # doctest: +SKIP
+
+    Notes
+    -----
+    A simulated peer still uses its own real local signing identity.
+    """
     return ENGINE.decrypt(str_b64data, str_sender)
 
   def get_whitelist(self, with_prefix=True):
+    """Return the other oracle addresses in this simulation.
+
+    Look up membership in the roster installed by the driver.
+
+    Parameters
+    ----------
+    with_prefix : bool, optional
+      Accepted for compatibility with the caller.
+
+    Returns
+    -------
+    list of str
+      Roster keys other than the current oracle's address.
+
+    Examples
+    --------
+    >>> blockchain.get_whitelist()  # doctest: +SKIP
+
+    Notes
+    -----
+    Addresses are returned as stored in the roster.
+    """
     return [addr for addr in ROSTER if addr != ENGINE.address]
 
   def node_address_to_eth_address(self, address):
+    """Look up a peer's Ethereum address.
+
+    Use the address mapping supplied in the driver's roster.
+
+    Parameters
+    ----------
+    address : str
+      Simulated peer's blockchain address.
+
+    Returns
+    -------
+    str
+      Peer's Ethereum address.
+
+    Raises
+    ------
+    KeyError
+      The peer or its Ethereum address is absent.
+
+    Examples
+    --------
+    >>> blockchain.node_address_to_eth_address(peer)  # doctest: +SKIP
+
+    Notes
+    -----
+    A missing peer remains observable as a lookup failure.
+    """
     return ROSTER[address]["eth"]
 
   def get_eth_oracles(self):
+    """List the protocol oracles in the simulated roster.
+
+    Project their Ethereum addresses for Core's membership checks.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list of str
+      Ethereum addresses of the simulated oracles.
+
+    Examples
+    --------
+    >>> blockchain.get_eth_oracles()  # doctest: +SKIP
+
+    Notes
+    -----
+    Includes the current oracle if present in the roster.
+    """
     return [node["eth"] for node in ROSTER.values()]
 
   def get_eth_dauth_oracles(self):
+    """List the simulated dAuth oracle Ethereum addresses.
+
+    Select peers marked for dAuth by the driver.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list of str
+      Ethereum addresses of the selected peers.
+
+    Examples
+    --------
+    >>> blockchain.get_eth_dauth_oracles()  # doctest: +SKIP
+
+    Notes
+    -----
+    Peers without the dAuth flag are excluded.
+    """
     return [node["eth"] for node in ROSTER.values() if node.get("dauth")]
 
 
 class SimBase(NPMixin, PersistMixin):
-  """Stands in for BasePluginExecutor: queue, loop services and helpers used by the plugin."""
+  """Provide the plugin services required by the loaded chain store.
+
+  Combine the real network and persistence mixins with local queue and runtime stand-ins.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  SimBase
+    Simulation service state for the plugin.
+
+  Examples
+  --------
+  >>> SimBase()  # doctest: +SKIP
+
+  Notes
+  -----
+  The roster, timing and scenario configuration belong to the oracle subprocess.
+  """
   CONFIG = {"VALIDATION_RULES": {}, "MAX_INPUTS_QUEUE_SIZE": 1024, "PROCESS_DELAY": 0}
   payload_handler = staticmethod(NPMixin.payload_handler)
 
@@ -172,6 +518,11 @@ class SimBase(NPMixin, PersistMixin):
     Examples
     --------
     >>> base = SimBase()  # doctest: +SKIP
+
+    Notes
+    -----
+    Per-oracle overrides replace plugin defaults before queues and persistence
+    measurements are initialized.
     """
     for key, value in type(self).CONFIG.items():
       setattr(self, "cfg_" + key.lower(), value)
@@ -204,6 +555,36 @@ class SimBase(NPMixin, PersistMixin):
 
   # services
   def P(self, msg, color=None, **kwargs):
+    """Write a plugin diagnostic to the simulator log.
+
+    Convert the message to text before applying the local length limit.
+
+    Parameters
+    ----------
+    msg : object
+      Diagnostic message.
+    color : str or None, optional
+      Supported for compatibility.
+    **kwargs
+      Extra logging options accepted for compatibility.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    OSError
+      Writing or flushing the diagnostic failed.
+
+    Examples
+    --------
+    >>> base.P("ready")  # doctest: +SKIP
+
+    Notes
+    -----
+    Keep at most 600 characters in the diagnostics.
+    """
     log(str(msg)[:600])
 
   time = staticmethod(_NOW)
@@ -212,29 +593,229 @@ class SimBase(NPMixin, PersistMixin):
   datetime, timezone = datetime, timezone
 
   def json_dumps(self, value, **kwargs):
+    """Serialize a plugin value to JSON text.
+
+    Forward serialization options to Python's JSON encoder.
+
+    Parameters
+    ----------
+    value : object
+      Value to encode.
+    **kwargs
+      JSON encoder options.
+
+    Returns
+    -------
+    str
+      Encoded JSON document.
+
+    Raises
+    ------
+    TypeError or ValueError
+      The value cannot be encoded using the supplied options.
+
+    Examples
+    --------
+    >>> base.json_dumps({"ready": True})  # doctest: +SKIP
+
+    Notes
+    -----
+    The simulator uses the same standard encoder for transport frames.
+    """
     return json.dumps(value, **kwargs)
 
   def uuid(self, size=13):
+    """Generate a random hexadecimal identifier.
+
+    Truncate a 128-bit random value to the requested length.
+
+    Parameters
+    ----------
+    size : int, optional
+      Requested prefix length in hexadecimal characters.
+
+    Returns
+    -------
+    str
+      Hexadecimal identifier prefix.
+
+    Examples
+    --------
+    >>> base.uuid(8)  # doctest: +SKIP
+
+    Notes
+    -----
+    The source produces at most 32 hexadecimal characters.
+    """
     return ("%032x" % random.getrandbits(128))[:size]
 
   def get_hash(self, text, algorithm="sha256", length=10):
+    """Compute a hexadecimal digest prefix for text.
+
+    Encode the supplied text as UTF-8 before hashing.
+
+    Parameters
+    ----------
+    text : str
+      Text to hash.
+    algorithm : str, optional
+      Hash name understood by hashlib.
+    length : int, optional
+      Number of hexadecimal characters to return.
+
+    Returns
+    -------
+    str
+      Digest prefix.
+
+    Raises
+    ------
+    ValueError
+      The digest algorithm is unavailable.
+
+    Examples
+    --------
+    >>> base.get_hash("store")  # doctest: +SKIP
+
+    Notes
+    -----
+    SHA-256 is used when no algorithm is supplied.
+    """
     return hashlib.new(algorithm, text.encode()).hexdigest()[:length]
 
   def str_to_base64(self, text, url_safe=False, **kwargs):
+    """Encode text as a Base64 string.
+
+    Encode UTF-8 bytes using the alphabet requested by the plugin.
+
+    Parameters
+    ----------
+    text : str
+      Text to encode.
+    url_safe : bool, optional
+      Choose the URL-safe alphabet.
+    **kwargs
+      Compatibility options.
+
+    Returns
+    -------
+    str
+      Padded Base64 string.
+
+    Examples
+    --------
+    >>> base.str_to_base64("ok")  # doctest: +SKIP
+
+    Notes
+    -----
+    The result retains the encoder's padding.
+    """
     return (base64.urlsafe_b64encode if url_safe else base64.b64encode)(text.encode()).decode()
 
   def base64_to_str(self, text, url_safe=False, **kwargs):
+    """Decode a Base64 string into UTF-8 text.
+
+    Restore any missing padding before applying the selected alphabet.
+
+    Parameters
+    ----------
+    text : str
+      Encoded text.
+    url_safe : bool, optional
+      Choose the URL-safe alphabet.
+    **kwargs
+      Compatibility options.
+
+    Returns
+    -------
+    str
+      Decoded text.
+
+    Raises
+    ------
+    ValueError
+      The encoded data or UTF-8 plaintext is invalid.
+
+    Examples
+    --------
+    >>> base.base64_to_str("b2s=")  # doctest: +SKIP
+
+    Notes
+    -----
+    Unpadded strings from storage keys can be decoded directly.
+    """
     text = text + "=" * ((4 - len(text) % 4) % 4)
     return (base64.urlsafe_b64decode if url_safe else base64.b64decode)(text.encode()).decode()
 
   def trace_info(self):
+    """Format the currently handled exception.
+
+    Use the standard traceback formatter for plugin diagnostics.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+      Formatted exception text.
+
+    Examples
+    --------
+    >>> base.trace_info()  # doctest: +SKIP
+
+    Notes
+    -----
+    Call while handling an exception to obtain its stack.
+    """
     import traceback
     return traceback.format_exc()
 
   def on_init(self):
+    """Provide an empty base initialization hook.
+
+    Allow the loaded plugin to call its inherited startup hook.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> base.on_init()  # doctest: +SKIP
+
+    Notes
+    -----
+    The simulator initializes its shared services in the constructor.
+    """
     return
 
   def on_close(self):
+    """Provide an empty base shutdown hook.
+
+    Allow the loaded plugin to invoke inherited cleanup.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> base.on_close()  # doctest: +SKIP
+
+    Notes
+    -----
+    The simulator driver coordinates process shutdown separately.
+    """
     return
 
   # persistence: the real mixin, with the folder fixed and the save timed on the calling thread
@@ -242,6 +823,26 @@ class SimBase(NPMixin, PersistMixin):
   plugin_id = "cstore"
 
   def _maybe_setup_persistence_fld(self):
+    """Keep the simulator's fixed persistence directory.
+
+    Satisfy the persistence mixin's setup hook.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> base._maybe_setup_persistence_fld()  # doctest: +SKIP
+
+    Notes
+    -----
+    The save path uses the configured node data directory and fixed plugin subfolder.
+    """
     return
 
   def cacheapi_save_pickle(self, obj, **kwargs):
@@ -261,9 +862,20 @@ class SimBase(NPMixin, PersistMixin):
     object
       The underlying persistence method's return value.
 
+    Raises
+    ------
+    Exception
+      The persistence method raised. The simulator records that failure and
+      lets the caller handle it.
+
     Examples
     --------
     >>> base.cacheapi_save_pickle(replica, strict=True)  # doctest: +SKIP
+
+    Notes
+    -----
+    Caller time is recorded even for failed writes. A successful save on
+    a thread other than the main and plugin threads counts as periodic.
     """
     start = time.time()
     try:
@@ -283,6 +895,37 @@ class SimBase(NPMixin, PersistMixin):
       self.save_max = max(self.save_max, elapsed)
 
   def cacheapi_load_pickle(self, default=None, verbose=True):
+    """Load the oracle replica from its fixed path.
+
+    Return the supplied default when the replica has not been written.
+
+    Parameters
+    ----------
+    default : object, optional
+      Fallback for an absent replica.
+    verbose : bool, optional
+      Compatibility option accepted from the plugin.
+
+    Returns
+    -------
+    object
+      Unpickled value or fallback.
+
+    Raises
+    ------
+    OSError
+      Opening or reading the replica failed.
+    pickle.UnpicklingError
+      The replica cannot be decoded.
+
+    Examples
+    --------
+    >>> base.cacheapi_load_pickle({})  # doctest: +SKIP
+
+    Notes
+    -----
+    Read failures propagate so the fixture exposes persistence errors.
+    """
     path = DATA / self._persistence_fld / "object.pickle"
     if path.exists():
       with open(path, "rb") as stream:
@@ -292,24 +935,167 @@ class SimBase(NPMixin, PersistMixin):
   # input queue, as BasePluginExecutor
   @property
   def input_queue_size(self):
+    """Measure the pending simulated input queue.
+
+    Use the current length of the plugin's bounded deque.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+      Number of pending inputs.
+
+    Examples
+    --------
+    >>> base.input_queue_size  # doctest: +SKIP
+
+    Notes
+    -----
+    This count excludes inputs already handed to the plugin.
+    """
     return len(self.upstream_inputs_deque)
 
   def add_inputs(self, inp):
+    """Deliver a frame to the plugin's bounded input queue.
+
+    Record each eviction when a full deque accepts a new input.
+
+    Parameters
+    ----------
+    inp : dict
+      Simulated input frame for the network mixin.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> base.add_inputs(frame)  # doctest: +SKIP
+
+    Notes
+    -----
+    The deque itself removes the oldest input when full.
+    """
     if len(self.upstream_inputs_deque) >= self.cfg_max_inputs_queue_size:
       self.lost_inputs_count += 1
     self.upstream_inputs_deque.append(inp)
 
   def get_next_avail_input(self):
+    """Take a copy of the oldest queued input.
+
+    Remove it from the deque before passing work to the plugin.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    dict or None
+      Next input or None when the deque is empty.
+
+    Examples
+    --------
+    >>> base.get_next_avail_input()  # doctest: +SKIP
+
+    Notes
+    -----
+    Copying keeps subsequent plugin mutations local to this observation.
+    """
     return deepcopy(self.upstream_inputs_deque.popleft()) if self.input_queue_size > 0 else None
 
   def dataapi_struct_datas(self, full=False, as_list=False):
+    """Return structured input payloads for the current plugin iteration.
+
+    Project the structured payload from each provided input.
+
+    Parameters
+    ----------
+    full : bool, optional
+      Accepted for compatibility with the plugin interface.
+    as_list : bool, optional
+      Accepted for compatibility. The result is always a list.
+
+    Returns
+    -------
+    list
+      Structured payloads or an empty list when there is no input.
+
+    Raises
+    ------
+    KeyError
+      An input item lacks its structured payload.
+
+    Examples
+    --------
+    >>> base.dataapi_struct_datas()  # doctest: +SKIP
+
+    Notes
+    -----
+    The plugin loop chooses which input is current.
+    """
     return [item["STRUCT_DATA"] for item in (self.inputs or {}).get("INPUTS", [])]
 
   # transport
   def send_encrypted_payload(self, node_addr, **kwargs):
+    """Queue a payload for the oracle's communication thread.
+
+    Normalize a single destination to the same list form as a multicast.
+
+    Parameters
+    ----------
+    node_addr : str or list of str
+      Addresses to receive the payload.
+    **kwargs
+      Payload fields to encrypt and send.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> base.send_encrypted_payload(peer, CHAIN_STORE_DATA=data)  # doctest: +SKIP
+
+    Notes
+    -----
+    This method queues data only. The communication thread performs the
+    encryption, signing and transport.
+    """
+    # Preserve a uniform recipient representation for the communication thread.
     self.outbox.append((node_addr if isinstance(node_addr, list) else [node_addr], kwargs))
 
   def receive_and_decrypt_payload(self, data, verbose=0):
+    """Recover transport fields and decrypt a payload addressed to this node.
+
+    Keep the visible envelope fields if decryption or JSON decoding fails.
+
+    Parameters
+    ----------
+    data : dict
+      Received transport envelope.
+    verbose : int, optional
+      Compatibility option accepted from the network mixin.
+
+    Returns
+    -------
+    dict
+      Envelope merged with decrypted fields, the public envelope on failure,
+      or an empty mapping when the node is not a recipient.
+
+    Examples
+    --------
+    >>> base.receive_and_decrypt_payload(envelope)  # doctest: +SKIP
+
+    Notes
+    -----
+    The incoming ciphertext field is removed from the returned envelope.
+    """
+    # Keep the transport envelope available without retaining the ciphertext field.
     result = {key: value for key, value in data.items() if key != PD.EE_ENCRYPTED_DATA}
     if ENGINE.address not in data.get(PD.EE_DESTINATION, []):
       return {}
@@ -345,6 +1131,27 @@ T_GO = [0.0]
 
 
 def running():
+  """Check whether workload writers should continue.
+
+  Consult both the process stop event and the settle phase event.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  bool
+    Whether writers can continue submitting workload traffic.
+
+  Examples
+  --------
+  >>> running()  # doctest: +SKIP
+
+  Notes
+  -----
+  The settle phase stops writes while the fleet can still drain input.
+  """
   return not STOP.is_set() and not QUIET.is_set()
 STATS = defaultdict(int)
 RESULTS = defaultdict(list)
@@ -352,10 +1159,55 @@ PLUGIN = None
 
 
 def hset_key(hkey, field):
+  """Encode a namespace and field as a simulated storage key.
+
+  Combine a short namespace digest with a URL-safe encoded field.
+
+  Parameters
+  ----------
+  hkey : str
+    Namespace name.
+  field : str
+    Field within the namespace.
+
+  Returns
+  -------
+  str
+    Storage key matching the chain store namespace format.
+
+  Examples
+  --------
+  >>> hset_key("APP_STATE", "node")  # doctest: +SKIP
+
+  Notes
+  -----
+  The input text is encoded as UTF-8 before hashing or Base64 encoding.
+  """
   return "hs:{}:{}".format(hashlib.sha256(hkey.encode()).hexdigest()[:10], base64.urlsafe_b64encode(field.encode()).decode())
 
 
 def storage():
+  """Access the current oracle's in-memory store.
+
+  Read the selected chain-store implementation's private storage mapping.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  dict
+    Live mapping of storage keys to records.
+
+  Examples
+  --------
+  >>> storage()  # doctest: +SKIP
+
+  Notes
+  -----
+  Call only after the simulator has initialized its plugin.
+  """
   return PLUGIN._ChainStoreBasePlugin__chain_storage
 
 
@@ -376,6 +1228,11 @@ def workload_records():
   Examples
   --------
   >>> len(workload_records())  # doctest: +SKIP
+
+  Notes
+  -----
+  The result shares record values with the live store. Only the mapping of
+  keys is filtered.
   """
   # Preload initializes every node with identical values, and catch-up state belongs to one node.
   return {key: record for key, record in storage().items()
@@ -383,7 +1240,31 @@ def workload_records():
 
 
 def blob(size, seed):
-  """Text of about ``size`` bytes that compresses about as well as a job configuration."""
+  """Generate deterministic synthetic workload rows.
+
+  Accumulate JSON row sizes until they reach the requested size.
+
+  Parameters
+  ----------
+  size : int
+    Target sum of encoded row sizes in bytes.
+  seed : int or float
+    Random generator seed.
+
+  Returns
+  -------
+  list of dict
+    Synthetic job configuration rows.
+
+  Examples
+  --------
+  >>> len(blob(1, 7))
+  1
+
+  Notes
+  -----
+  Row boundaries can exceed the target. The estimate excludes outer list separators.
+  """
   rnd = random.Random(seed)
   rows, total = [], 0
   while total < size:
@@ -395,7 +1276,26 @@ def blob(size, seed):
 
 
 def plugin_loop():
-  """plugin_loop + execute of the base plugin: one input per iteration, 20 ms floor."""
+  """Run the loaded plugin's input and processing loop.
+
+  Observe one queued input per iteration and measure loop rate and queue depth.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> plugin_loop()  # doctest: +SKIP
+
+  Notes
+  -----
+  Each iteration sleeps at least 20 milliseconds. Configured yields add scheduling contention.
+  """
   resolution, yields = CFG.get("loop_resolution", 20), CFG.get("loop_yields", 0)
   window = deque(maxlen=20)
   while not STOP.is_set():
@@ -421,7 +1321,26 @@ def plugin_loop():
 
 
 def comm_loop():
-  """Communication thread: encrypt for the recipients, sign, hand to the transport."""
+  """Encrypt and sign simulated network messages.
+
+  Drain the plugin's outbox into the transport pipe until shutdown.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> comm_loop()  # doctest: +SKIP
+
+  Notes
+  -----
+  Traffic counters account for recipient copies. Failures increment the communication error counter.
+  """
   while not STOP.is_set() or PLUGIN.outbox:
     if not PLUGIN.outbox:
       time.sleep(0.002)
@@ -447,7 +1366,27 @@ def comm_loop():
 
 
 def hog(duty):
-  """Pure Python work that holds the interpreter lock (another busy plugin)."""
+  """Create controlled interpreter contention in an oracle.
+
+  Alternate Python computation with idle time after the workload begins.
+
+  Parameters
+  ----------
+  duty : float
+    Fraction of a nominal 50 millisecond cycle spent computing.
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> hog(0.6)  # doctest: +SKIP
+
+  Notes
+  -----
+  The loop measures time inside this process. Other threads still compete for the interpreter.
+  """
   GO.wait()
   while not STOP.is_set():
     until = time.time() + 0.05 * duty
@@ -458,6 +1397,34 @@ def hog(duty):
 
 
 def timed_set(tag, key, value, **kwargs):
+  """Write one record and record its elapsed time and outcome.
+
+  Use the real simulated store API and convert its result to a boolean.
+
+  Parameters
+  ----------
+  tag : str
+    Results bucket for this workload.
+  key : str
+    Target storage key.
+  value : object
+    Record to write.
+  **kwargs
+    Options forwarded to the store's write call.
+
+  Returns
+  -------
+  bool
+    Whether the write was confirmed.
+
+  Examples
+  --------
+  >>> timed_set("local_write", key, {"value": 1})  # doctest: +SKIP
+
+  Notes
+  -----
+  Exceptions from the store count as failed samples and are logged.
+  """
   start = time.time()
   try:
     done = bool(PLUGIN._set_value(key, value, **kwargs))
@@ -469,7 +1436,27 @@ def timed_set(tag, key, value, **kwargs):
 
 
 def wl_operation(spec):
-  """The stuck Deeploy operation: a new signed snapshot every ``period`` s, re-published every ``republish`` s."""
+  """Publish and periodically resend signed operation snapshots.
+
+  Advance the sequence for new snapshots and resend the same record between new writes.
+
+  Parameters
+  ----------
+  spec : dict
+    Operation cadence, resend cadence, size and optional start and stop times.
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> wl_operation({"period": 1, "republish": 0.5})  # doctest: +SKIP
+
+  Notes
+  -----
+  Operation IDs rotate when more than one synthetic operation is configured.
+  """
   GO.wait()
   time.sleep(spec.get("start", 0))
   op_ids = ["{:016x}-{:032x}".format(random.getrandbits(64), random.getrandbits(128)) for _ in range(spec.get("ops", 1))]
@@ -495,7 +1482,27 @@ def wl_operation(spec):
 
 
 def wl_local(spec):
-  """A local service writing small records and waiting for their confirmation (custody-style writes)."""
+  """Write and confirm small namespace records periodically.
+
+  Use the local oracle and a bounded set of rotating field names.
+
+  Parameters
+  ----------
+  spec : dict
+    Write interval and optional start, namespace, size and retry settings.
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> wl_local({"period": 1})  # doctest: +SKIP
+
+  Notes
+  -----
+  Reused field names allow the workload to continue without unbounded growth.
+  """
   GO.wait()
   time.sleep(spec.get("start", 0))
   count = 0
@@ -526,7 +1533,12 @@ def wl_hsync(spec):
 
   Examples
   --------
-  >>> wl_hsync({"hkey": "APP_STATE", "period": 10, "all_peers": True})
+  >>> wl_hsync({"hkey": "APP_STATE", "period": 10, "all_peers": True})  # doctest: +SKIP
+
+  Notes
+  -----
+  During fallback rotation, an unsuccessful peer still consumes its turn.
+  A later interval can try a different online peer.
   """
   GO.wait()
   time.sleep(spec.get("start", 0))
@@ -556,7 +1568,27 @@ REVISIONS = "DAUTH_JOB_SECRET_REVISIONS"
 
 
 def wl_secrets(spec):
-  """dAuth custody: write secret revisions, later revoke some (marker, then tombstone) and add newer ones."""
+  """Write, revoke and replace synthetic secret revisions.
+
+  Store a revocation marker and then a tombstone for each selected revision.
+
+  Parameters
+  ----------
+  spec : dict
+    Initial revision count, revocation time and counts to revoke and append.
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> wl_secrets({"count": 3, "revoke_at": 5, "revoke": 1, "add": 1})  # doctest: +SKIP
+
+  Notes
+  -----
+  All data originates in the simulator. These revisions contain synthetic payloads.
+  """
   GO.wait()
   field = lambda idx: "{}|op{:04d}:deploy".format(100 + idx, idx)
   full = lambda idx: {"job_id": str(100 + idx), "revision": "op{:04d}:deploy".format(idx), "bundle": {"ENV": blob(spec.get("bytes", 4000), idx)}}
@@ -573,7 +1605,27 @@ def wl_secrets(spec):
 
 
 def secret_state():
-  """Count secret revisions stored in full, tombstones and markers (no values)."""
+  """Count the forms of secret revision records.
+
+  Classify entries as complete revisions, tombstones or revocation markers.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  dict of str to int
+    Counts by record form.
+
+  Examples
+  --------
+  >>> secret_state()  # doctest: +SKIP
+
+  Notes
+  -----
+  The summary contains counts without record values.
+  """
   prefix, counts = hset_key(REVISIONS, "")[:14], {"full": 0, "tombstones": 0, "markers": 0}
   for key, record in list(storage().items()):
     if not key.startswith(prefix):
@@ -589,7 +1641,26 @@ def secret_state():
 
 
 def watch_secrets():
-  """Record when this node's view of the secret revisions changes."""
+  """Sample the oracle's secret revision state until shutdown.
+
+  Append a time and count tuple when the sampled state changes.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  None
+
+  Examples
+  --------
+  >>> watch_secrets()  # doctest: +SKIP
+
+  Notes
+  -----
+  Sampling occurs every 250 milliseconds. Intermediate changes can occur between samples.
+  """
   GO.wait()
   last = None
   while not STOP.is_set():
@@ -601,7 +1672,32 @@ def watch_secrets():
 
 
 def wl_big_save(spec):
-  """Another manager saving a large snapshot (network monitor database, epochs status)."""
+  """Exercise periodic serialization of a large synthetic snapshot.
+
+  Time the caller while submitting through an available manager or writing directly.
+
+  Parameters
+  ----------
+  spec : dict
+    Save period and optional synthetic node count.
+
+  Returns
+  -------
+  None
+
+  Raises
+  ------
+  OSError
+    Preparing or writing the direct snapshot failed.
+
+  Examples
+  --------
+  >>> wl_big_save({"period": 5, "nodes": 100})  # doctest: +SKIP
+
+  Notes
+  -----
+  With a manager, the sample covers submission time. A direct write also includes disk synchronization.
+  """
   GO.wait()
   data = {"node-%d" % idx: [{"hb": blob(600, idx * 1000 + jdx)} for jdx in range(40)] for idx in range(spec.get("nodes", 400))}
   path = str(DATA / "network_monitor" / "db.pkl")
@@ -625,7 +1721,31 @@ WORKLOADS = {"operation": wl_operation, "local": wl_local, "hsync": wl_hsync, "b
 
 
 def preload():
-  """Give the store its production size before the plugin loads it."""
+  """Prepare a seeded replica before starting the chain store.
+
+  Write the configured synthetic baseline and any explicitly supplied records.
+
+  Parameters
+  ----------
+  None
+
+  Returns
+  -------
+  None
+
+  Raises
+  ------
+  OSError
+    Creating or writing the initial replica failed.
+
+  Examples
+  --------
+  >>> preload()  # doctest: +SKIP
+
+  Notes
+  -----
+  A replica already persisted by a previous process is left available for restart.
+  """
   spec = CFG.get("preload")
   path = DATA / SimBase._persistence_fld / "object.pickle"
   if not spec or path.exists():
@@ -662,6 +1782,11 @@ def report():
   Examples
   --------
   >>> report()["keys"]  # doctest: +SKIP
+
+  Notes
+  -----
+  Only workload record digests participate in fleet comparison. Local
+  restart state and the seeded preload are excluded from that projection.
   """
   usage = os.times()
   manager = MANAGER
@@ -707,6 +1832,11 @@ def main():
   Examples
   --------
   >>> main()  # doctest: +SKIP
+
+  Notes
+  -----
+  The node reuses its persisted data on restart. It only accepts writer
+  process kill commands for source trees with the legacy writer process.
   """
   global PLUGIN
   if CFG.get("cpus"):

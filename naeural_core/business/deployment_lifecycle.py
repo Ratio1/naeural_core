@@ -223,31 +223,53 @@ def deployment_source_mode(signature, pipeline, instance):
 class DeploymentLifecycle:
   """Track operation attempts independently of plugin execution threads.
 
+  Load and persist worker observations and publish signed deployment reports.
+  A report can outlive the thread that ran its workload.
+
   Parameters
   ----------
-  path : str
+  path : str or os.PathLike
       Private local journal path. Unreadable/corrupt journals fail closed.
   node_addr : str
       Blockchain address used for signed observations.
-  source_modes : bool
+  source_modes : bool, optional
       Whether the installed edge runtime supports following and pinned runners.
+
+  Returns
+  -------
+  DeploymentLifecycle
+      A journal and its in-memory observer and publisher state.
+
+  Raises
+  ------
+  ValueError
+      The primary journal is invalid JSON or its root is not a mapping.
+  OSError
+      Reading, synchronizing or migrating the primary journal failed.
+
+  Examples
+  --------
+  >>> DeploymentLifecycle("/var/cache/node/operations.json", node_addr)  # doctest: +SKIP
+
+  Notes
+  -----
+  Coordinator delivery receipts live beside the primary journal so older
+  publishers can read and sign the ordinary attempt records.
   """
 
   def __init__(self, path, node_addr, source_modes=False):
     """
     Load the node's deployment journal and reset the observations a restart makes stale.
 
-    Reads the private journal when it exists. A persisted readiness is not evidence after a node restart,
-    so such an attempt reports again from "starting", with its instances "initializing". The same holds
-    for a failed attempt that is not aborted, has at least one failed instance, and whose failed instances
-    all hold a start or image failure (`RECOVERABLE_ERRORS`): the restarted node starts its workload
-    again, and the plugin reports the failure again if the workload still cannot start. Stopping and
-    stopped attempts, a failed attempt without a failed instance (a rejected command, whose error is on
-    the record), and a failed attempt holding any other failure keep their persisted status.
+    Read the private journal when it exists. Restartable observations return
+    to "starting". Instances that still report return to "initializing".
+    A confirmed bound instance keeps its last observation. Inspection reports,
+    stopping and stopped attempts, and failures outside the recovery rules
+    retain their persisted status.
 
     Parameters
     ----------
-    path : str
+    path : str or os.PathLike
       Private local journal path. Unreadable/corrupt journals fail closed.
     node_addr : str
       Blockchain address used for signed observations.
@@ -266,13 +288,20 @@ class DeploymentLifecycle:
     json.JSONDecodeError
       If the journal is not valid JSON.
     OSError
-      If the journal exists but cannot be read.
+      If the primary journal cannot be read, synchronized or migrated.
 
     Examples
     --------
     >>> lifecycle = DeploymentLifecycle(os.path.join(data_folder, "deeploy_node_operations.json"), node_addr)
     >>> lifecycle.records["operation|deploy"]["status"]  # persisted "failed" with WORKLOAD_START_FAILED
     'starting'
+
+    Notes
+    -----
+    A non-aborted failed attempt recovers only if it has failed instances and
+    every failed instance has a recoverable error. Missing readiness proof
+    allows an active attempt to report again. An unchanged terminal receipt
+    suppresses replay only for the matching persisted report.
     """
     self.path = path
     self.node_addr = node_addr
@@ -284,6 +313,7 @@ class DeploymentLifecycle:
     self.records = {}
     # Keep delivery receipts outside the record mapping that previous runtimes sign.
     self._delivery_path = os.fspath(path) + ".deliveries"
+    # Start without proof so a missing file leaves eligible reports pending.
     self._delivery_receipts = {}
     self._replacement_revisions = {}  # Durable minimum revision after replacement, indexed by job and pipeline.
     self._legacy_repair_aborts = {}  # Index only versioned conditional retirements for fast legacy startup checks.
@@ -313,6 +343,7 @@ class DeploymentLifecycle:
       self._sync_journal_directory()
       # Checkpoints are optional proof. Missing or unreadable proof leaves delivery pending.
       self._load_delivery_receipts()
+      # Remove prior embedded fields before an older writer can sign them.
       self._migrate_embedded_receipts()
       # A persisted readiness observation is not evidence after node restart.
       for key, record in self.records.items():
@@ -349,6 +380,8 @@ class DeploymentLifecycle:
   def _save(self, records=None):
     """Persist a journal snapshot atomically and acknowledge its durability.
 
+    Write the primary journal in its existing record layout.
+
     Parameters
     ----------
     records : dict or None
@@ -357,11 +390,23 @@ class DeploymentLifecycle:
     Returns
     -------
     None
-      Raises on any failed write or sync.
+      The snapshot file and its directory entry have been synchronized.
+
+    Raises
+    ------
+    OSError
+      Creating, writing, replacing or syncing the snapshot failed.
+    TypeError or ValueError
+      The snapshot could not be encoded as JSON.
 
     Examples
     --------
     >>> service._save(staged_records)  # doctest: +SKIP
+
+    Notes
+    -----
+    A staged snapshot does not change the in-memory record mapping. Directory
+    synchronization can fail after replacement has made the new file visible.
     """
     # The primary journal keeps its existing record layout for older writers.
     self._save_json(self.path, self.records if records is None else records)
@@ -373,7 +418,7 @@ class DeploymentLifecycle:
 
     Parameters
     ----------
-    path : str
+    path : str or os.PathLike
       Journal or receipt path in the private journal directory.
     snapshot : dict
       Complete replacement contents.
@@ -385,26 +430,40 @@ class DeploymentLifecycle:
     Raises
     ------
     OSError
-      Writing, replacing or syncing the file failed.
+      Opening, writing, replacing, syncing or removing a file failed.
+    TypeError or ValueError
+      The snapshot could not be encoded as JSON.
 
     Examples
     --------
     >>> journal._save_json(journal.path, journal.records)  # doctest: +SKIP
+
+    Notes
+    -----
+    Each destination is replaced atomically by itself. A successful return
+    also requires the file and its parent directory to be synced.
     """
     # Write the complete snapshot to a private temporary file before replacing anything.
     folder = os.path.dirname(self.path)
+    # The first journal write may need to create its private directory.
     os.makedirs(folder, exist_ok=True)
+    # Keep the temporary file on the destination filesystem for atomic replacement.
     fd, temporary = tempfile.mkstemp(prefix=".deeploy-", dir=folder)
     try:
       with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        # Encode the entire snapshot with stable key ordering before exposing it.
         json.dump(snapshot, stream, sort_keys=True)
+        # Transfer buffered text to the file descriptor before syncing it.
         stream.flush()
+        # Persist the new file contents before replacing the destination.
         os.fsync(stream.fileno())
       # Replace the target only after the entire new file is durable.
       os.replace(temporary, path)
+      # Persist the replacement directory entry as a separate durability step.
       self._sync_journal_directory()
     finally:
       if os.path.exists(temporary):
+        # Remove the staging file if a failed replacement left it behind.
         os.unlink(temporary)
 
   def _load_delivery_receipts(self):
@@ -424,6 +483,11 @@ class DeploymentLifecycle:
     Examples
     --------
     >>> journal._load_delivery_receipts()  # doctest: +SKIP
+
+    Notes
+    -----
+    An unreadable file or invalid JSON leaves optional proof unavailable.
+    Each receipt is validated against the primary journal before use.
     """
     try:
       with open(self._delivery_path, encoding="utf-8") as stream:
@@ -449,28 +513,46 @@ class DeploymentLifecycle:
     -------
     None
 
+    Raises
+    ------
+    OSError
+      Rewriting the journal or saving a migrated receipt failed.
+    TypeError or ValueError
+      The journal snapshot or receipt data could not be encoded as JSON.
+
     Examples
     --------
     >>> journal._migrate_embedded_receipts()  # doctest: +SKIP
+
+    Notes
+    -----
+    During migration the old-format journal is made safe to sign before a
+    separate receipt file is updated. Interruption between writes can leave
+    the report without proof and eligible for re-delivery.
     """
     # Preserve all existing receipts and authoritative journal fields.
     receipts = self._delivery_receipts.copy()
+    # Avoid rewriting a journal that never contained embedded proof.
     rewritten = False
     for key, record in self.records.items():
       if "ready_coordinator_confirmed" not in record and "terminal_report_digest" not in record:
         continue
       # Remove these fields from every legacy-visible record before another runtime can sign it.
       ready = record.pop("ready_coordinator_confirmed", None)
+      # Extract the terminal digest separately for comparison with the current record.
       terminal = record.pop("terminal_report_digest", None)
+      # Even an invalid old receipt requires the authoritative file to be rewritten.
       rewritten = True
       # The earlier candidate stored this proof only after marking the ready record delivered.
       entry = receipts.get(key, {}).copy()
       if ready is True and record.get("ready_reported") is True:
+        # Bind the old readiness proof to this admitted attempt.
         entry["ready"] = self._delivery_checkpoint(record, "ready")
       if record["status"] in TERMINAL_REPORT_STATES and terminal == self._delivery_digest(self._report_fingerprint(record)):
         # Import only a terminal digest that describes the record still held by the journal.
         entry["terminal"] = self._delivery_checkpoint(record, "terminal")
       if entry:
+        # Retain either migrated or previously saved proof under the same journal key.
         receipts[key] = entry
     if rewritten:
       # Preserve the exact record contents other than the two implementation-private fields.
@@ -478,10 +560,14 @@ class DeploymentLifecycle:
       if receipts != self._delivery_receipts:
         # A lost sidecar update leaves an unproven record eligible for delivery.
         self._save_json(self._delivery_path, receipts)
+        # Expose receipts in memory only after the sidecar update succeeds.
         self._delivery_receipts = receipts
 
   def _sync_journal_directory(self):
     """Confirm durability of the directory entry for the journal.
+
+    Sync the containing directory after a file replacement or when resuming
+    a process that may have stopped before acknowledging that sync.
 
     Parameters
     ----------
@@ -490,11 +576,19 @@ class DeploymentLifecycle:
     Returns
     -------
     None
-      Raises if the directory cannot be synced.
+
+    Raises
+    ------
+    OSError
+      Opening, synchronizing or closing the directory failed.
 
     Examples
     --------
     >>> service._sync_journal_directory()  # doctest: +SKIP
+
+    Notes
+    -----
+    The directory descriptor is closed even when synchronization fails.
     """
     directory = os.open(os.path.dirname(self.path), os.O_RDONLY)
     try:
@@ -1626,6 +1720,12 @@ class DeploymentLifecycle:
     --------
     >>> DeploymentLifecycle._report_fingerprint({"sequence": 2, "status": "stopped"})
     {'status': 'stopped'}
+
+    Notes
+    -----
+    Routing changes can supersede delivery proof even when the workload
+    observation itself did not change. The result shares nested values
+    with the input record.
     """
     # One projection is used for the publish loop and restart recovery.
     return {name: value for name, value in record.items()
@@ -1648,10 +1748,20 @@ class DeploymentLifecycle:
     str
       Hex digest for the separate delivery checkpoint.
 
+    Raises
+    ------
+    TypeError or ValueError
+      The input is not serializable by the JSON encoder.
+
     Examples
     --------
     >>> len(DeploymentLifecycle._delivery_digest({"status": "stopped"}))
     64
+
+    Notes
+    -----
+    Sorted keys and compact separators make the digest independent of field
+    insertion order and JSON spacing.
     """
     # The journal already uses JSON for these fields.
     return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -1673,11 +1783,25 @@ class DeploymentLifecycle:
     Returns
     -------
     list
-      JSON-compatible sequence, report timestamp for readiness and identity digest.
+      Ready proof contains sequence, timestamp and an attempt identity digest.
+      Terminal proof contains sequence and a digest that includes the timestamp.
+
+    Raises
+    ------
+    KeyError
+      A required attempt identity or report generation field is absent.
+    TypeError or ValueError
+      The identity or report data cannot be encoded as JSON.
 
     Examples
     --------
     >>> journal._delivery_checkpoint(journal.records["operation|deploy"], "ready")  # doctest: +SKIP
+
+    Notes
+    -----
+    The receipt holds no signed payload. A terminal report can regain proof
+    after a rollback increments its sequence and the coordinator acknowledges
+    that generation.
     """
     if kind == "ready":
       # The attempt identity also remains stable while a following workload publishes newer observations.
@@ -1705,11 +1829,23 @@ class DeploymentLifecycle:
     Returns
     -------
     bool
-      Whether the saved readiness flag has matching coordinator delivery proof.
+      Whether the supplied record has matching coordinator delivery proof.
+
+    Raises
+    ------
+    KeyError
+      A structurally valid receipt has a journal record missing an identity
+      or generation field.
 
     Examples
     --------
     >>> journal._has_ready_delivery("operation|deploy", journal.records["operation|deploy"])  # doctest: +SKIP
+
+    Notes
+    -----
+    A receipt for the same generation must match the exact timestamp and
+    identity. Only an attempt with a source-following instance can reuse a
+    receipt from an earlier generation.
     """
     receipt = self._delivery_receipts.get(key, {}).get("ready")
     # A malformed or future receipt cannot establish a prior coordinator acknowledgement.
@@ -1740,11 +1876,17 @@ class DeploymentLifecycle:
     Raises
     ------
     OSError
-      The confirmed state could not be written to the journal.
+      The journal or its receipt file could not be persisted.
 
     Examples
     --------
-    >>> journal._save_report_deliveries([("operation|deploy", 1, "stopped")])
+    >>> journal._save_report_deliveries([("operation|deploy", 1, "stopped")])  # doctest: +SKIP
+
+    Notes
+    -----
+    Required changes to the old-readable journal are committed before proof
+    in the separate receipt file. An I/O failure evicts the affected
+    publication cache entries so a later pass can re-establish delivery.
     """
     with self.lock:
       # Only readiness needs to update the old journal's ready flag. All proof goes to the receipt file.
@@ -1762,15 +1904,19 @@ class DeploymentLifecycle:
           # The legacy flag is understood by older writers and already excluded from their signed wire format.
           kind = "ready"
           if not record.get("ready_reported"):
+            # Stage the first durable readiness acknowledgement in the primary journal.
             ready_updates[key] = dict(record, ready_reported=True)
         elif status in TERMINAL_REPORT_STATES:
+          # Terminal proof belongs only in the separate receipt file.
           kind = "terminal"
         else:
           continue
         # Keep both proof types when a following attempt moves between ready and failed.
         entry = receipt_updates.get(key, self._delivery_receipts.get(key, {}))
+        # Store proof for the report generation acknowledged by the coordinator.
         checkpoint = self._delivery_checkpoint(record, kind)
         if entry.get(kind) != checkpoint:
+          # Avoid rewriting an identical receipt.
           receipt_updates[key] = {**entry, kind: checkpoint}
       if ready_updates or receipt_updates:
         try:
@@ -1787,6 +1933,7 @@ class DeploymentLifecycle:
           raise
         # The worker can suppress delivery in memory only after both required writes complete.
         self.records.update(ready_updates)
+        # Commit the same proof in memory that is now available to a restarted worker.
         self._delivery_receipts.update(receipt_updates)
         for key in receipt_updates:
           record = self.records[key]
@@ -1799,6 +1946,9 @@ class DeploymentLifecycle:
   def _repair_source_delivery(self, setter):
     """Replay one current field to an oracle that missed it or restarted.
 
+    Check for delayed confirmations before selecting one due repair.
+    A peer's new session invalidates its earlier acknowledgement.
+
     Parameters
     ----------
     setter : callable
@@ -1810,9 +1960,20 @@ class DeploymentLifecycle:
       Attempt keys, sequences and statuses acknowledged by their coordinators.
       A failed transfer remains queued up to the repair limit per snapshot and peer session.
 
+    Raises
+    ------
+    Exception
+      Errors from the confirmation lookup or the selected CStore write are
+      propagated to the publication worker.
+
     Examples
     --------
-    >>> journal._repair_source_delivery(setter)
+    >>> journal._repair_source_delivery(setter)  # doctest: +SKIP
+
+    Notes
+    -----
+    One pass sends at most one targeted write with a two-second confirmation
+    timeout. Previous-session acknowledgements cannot complete a forced repair.
     """
     now = time.monotonic()
     peers = {peer for _, _, recipients in self._source_delivery.values() for peer in recipients}
@@ -1890,9 +2051,19 @@ class DeploymentLifecycle:
     -------
     None
 
+    Raises
+    ------
+    RuntimeError
+        The publication thread could not be started.
+
     Examples
     --------
     >>> lifecycle.start(lambda: shmem.get("__chain_storage_set"), blockchain_manager.sign, self.P)
+
+    Notes
+    -----
+    Publication runs on a daemon thread. Its one-second wait is between
+    passes, and a slow pass can make the interval longer.
     """
     if self._thread is not None:
       return

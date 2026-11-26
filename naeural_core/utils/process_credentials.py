@@ -47,8 +47,8 @@ def credential_env_names(environment):
 
   Parameters
   ----------
-  environment : collections.abc.Mapping
-    Environment names and their values.
+  environment : collections.abc.Iterable of str
+    Environment names. A mapping is accepted because iteration yields its keys.
 
   Returns
   -------
@@ -59,6 +59,11 @@ def credential_env_names(environment):
   --------
   >>> credential_env_names({"PATH": "/bin", "EE_MQTT": "example"})
   frozenset({'EE_MQTT'})
+
+  Notes
+  -----
+  Match names without regard to case and retain their original spelling.
+  Values need not be present for a name to be recognized.
   """
   # Match case-insensitively while retaining each original name for environment lookups.
   return frozenset(name for name in environment
@@ -73,7 +78,7 @@ def child_environment(environment, extra_values=()):
 
   Parameters
   ----------
-  environment : collections.abc.Mapping
+  environment : collections.abc.Mapping of str to str
     Parent environment.
   extra_values : iterable of str, optional
     Scoped credentials that must also be kept out of the inherited variables.
@@ -87,6 +92,12 @@ def child_environment(environment, extra_values=()):
   --------
   >>> child_environment({"PATH": "/bin", "EE_MQTT": "example"})
   {'PATH': '/bin'}
+
+  Notes
+  -----
+  Named credential variables are removed even if empty. Empty credential
+  values do not match unrelated variables. Nonempty values are compared as
+  literal case-sensitive substrings, including inside other settings.
   """
   # Identify all named credentials once so ordinary keys need only a literal value check.
   names = credential_env_names(environment)
@@ -102,11 +113,11 @@ def child_environment(environment, extra_values=()):
 def redact_command(command, environment, extra_values=()):
   """Render a command or diagnostic without its credential values.
 
-  Preserve the input's string or argument-vector representation.
+  Keep command text as text and command vectors as lists.
 
   Parameters
   ----------
-  command : str or list or tuple
+  command : str or sequence of str
     Text to redact or the command's individual arguments.
   environment : collections.abc.Mapping
     Credential values that may appear outside a named command option.
@@ -122,6 +133,12 @@ def redact_command(command, environment, extra_values=()):
   --------
   >>> redact_command("tool --token 'two words' --mode normal", {})
   'tool --token [REDACTED] --mode normal'
+
+  Notes
+  -----
+  Known literals are considered longest first. Credential options and
+  assignment names are retained. An ordinary assignment loses its whole
+  value if it contains a complete known credential.
   """
   # Match longer complete values first to avoid disclosing the remainder of overlapping credentials.
   secrets = {value for value in extra_values if isinstance(value, str)}
@@ -135,6 +152,9 @@ def redact_command(command, environment, extra_values=()):
 
   def replace(match):
     """Retain the matched option or assignment name while masking its value.
+
+    Handle URL user information, credential options, assignments and known
+    literals through the same regular expression pass.
 
     Parameters
     ----------
@@ -150,6 +170,11 @@ def redact_command(command, environment, extra_values=()):
     --------
     >>> replace(matcher.search("--token hidden"))
     '--token [REDACTED]'
+
+    Notes
+    -----
+    Only the matched text is replaced. Other shell words stay available for
+    diagnostics.
     """
     if match["scheme"]:
       # URL user information can contain credentials even without a named option.
@@ -201,6 +226,7 @@ def launch_with_tunnel_token(token, **popen_kwargs):
     Token to read through standard input, or None for an ordinary launch.
   **popen_kwargs
     Subprocess options, including the token-free command in ``args``.
+    Omit ``stdin`` when a token supplies that stream.
 
   Returns
   -------
@@ -210,13 +236,22 @@ def launch_with_tunnel_token(token, **popen_kwargs):
   Raises
   ------
   OSError
-    A pipe or subprocess could not be started.
+    Creating, writing or closing the pipe failed, or the subprocess could
+    not be started. A nonblocking pipe write may raise ``BlockingIOError``.
   ValueError
-    The token cannot fit in the input pipe in one write.
+    A write staged fewer bytes than the UTF-8 token contains, or a subprocess
+    option was rejected. A token that cannot be encoded raises
+    ``UnicodeEncodeError``.
 
   Examples
   --------
   >>> launch_with_tunnel_token(None, args=["cloudflared", "--version"])  # doctest: +SKIP
+
+  Notes
+  -----
+  Launch only after the whole token is staged. Closing the write end gives
+  cloudflared EOF. Pipe capacity is platform-dependent and measured in
+  encoded bytes.
   """
   if token is None:
     return subprocess.Popen(**popen_kwargs)
@@ -226,8 +261,10 @@ def launch_with_tunnel_token(token, **popen_kwargs):
     try:
       # Stage the full token before launch without waiting on a child or a full pipe.
       os.set_blocking(write_fd, False)
+      # A pipe consumes UTF-8 bytes, so compare the write against the encoded size.
       data = token.encode("utf-8")
       if os.write(write_fd, data) != len(data):
+        # Abort before Popen so a partial write never launches with a truncated token.
         raise ValueError("Cloudflare token exceeds the standard-input pipe capacity.")
     finally:
       # EOF lets cloudflared finish reading the token file.

@@ -1124,23 +1124,37 @@ class DeploymentLifecycleTest(unittest.TestCase):
     """
     # Create the durable ready then stopped record used by the previous candidate.
     pipeline = config()
+    # Admit the attempt before attaching its runnable instance.
     self.lifecycle.admit(pipeline, "oracle", True)
+    # The first workload observation is ready, so the coordinator can acknowledge it.
     self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(ready=True))
+    # Persist readiness proof before advancing the same attempt to a terminal state.
     self.publish()
+    # The stopped workload supplies the evidence the stop report needs.
     self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(alive=False, stopped=True))
+    # Apply a stop command to the same attempt, keeping its ready history.
     self.lifecycle.admit(config("stop"), "oracle", True)
+    # Persist the signed terminal observation whose digest the migration will import.
     self.assertEqual(self.publish()["status"], "stopped")
     # Reconstruct the original embedded format and keep a copy of the rollback-safe record.
     expected = json.loads(Path(self.path).read_text())
+    # The start and stop observations belong to the deploy attempt.
     key = "operation|deploy"
+    # Reuse the exact terminal record so only delivery metadata differs.
     old = self.lifecycle.records[key]
+    # Simulate the previous ready acknowledgement flag stored in the primary journal.
     old["ready_coordinator_confirmed"] = True
+    # Simulate the previous terminal proof using the old fingerprint format.
     old["terminal_report_digest"] = self.lifecycle._delivery_digest(self.lifecycle._report_fingerprint(old))
+    # Persist the old layout before dropping the newer receipt file.
     self.lifecycle._save()
+    # Removing the sidecar makes the restored record the sole migration source.
     Path(self.lifecycle._delivery_path).unlink()
+    # Reload through the current constructor to migrate both embedded fields.
     self.restart_process()
     # The previous writer now reads the same record data without the two private fields.
     self.assertEqual(json.loads(Path(self.path).read_text()), expected)
+    # A valid imported terminal receipt still suppresses another publication.
     self.assertIn(key, self.lifecycle._published)
 
   def test_terminal_quorum_without_coordinator_keeps_the_stop_pending(self):

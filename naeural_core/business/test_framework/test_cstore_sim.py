@@ -35,9 +35,23 @@ def _run(scenario, scale, variant="new", base_src=None):
   dict
     JSON report with per-node metrics and the convergence result.
 
+  Raises
+  ------
+  subprocess.TimeoutExpired
+    The simulator did not finish within 900 seconds.
+  AssertionError
+    The simulator process returned a nonzero exit status.
+  ValueError
+    The simulator output does not contain valid JSON.
+
   Examples
   --------
   >>> _run("healthy", 0.4)  # doctest: +SKIP
+
+  Notes
+  -----
+  A successful process can report divergent replicas. The calling test
+  must check the convergence result explicitly.
   """
   # Use the test interpreter for the driver and the oracle processes it launches.
   cmd = [sys.executable, str(DRIVER), "--scenario", scenario, "--variant", variant, "--scale", str(scale)]
@@ -54,11 +68,67 @@ def _run(scenario, scale, variant="new", base_src=None):
 
 @unittest.skipUnless(os.environ.get("EE_RUN_CSTORE_SIM") == "1", "set EE_RUN_CSTORE_SIM=1 to run the fleet simulator")
 class TestChainStoreFleet(unittest.TestCase):
+  """Verify fleet convergence, queue health and recovery across source trees.
+
+  The tests run the separate oracle processes through the simulator driver.
+
+  Parameters
+  ----------
+  methodName : str, optional
+    Standard unittest method name.
+
+  Returns
+  -------
+  TestChainStoreFleet
+    A unittest case for a selected fleet scenario.
+
+  Examples
+  --------
+  >>> TestChainStoreFleet("test_healthy_fleet_converges")  # doctest: +SKIP
+
+  Notes
+  -----
+  Fleet runs are opt-in. The mixed-source check additionally needs a base
+  source checkout.
+  """
 
   def assertHealthy(self, node, name):
+    """Require a complete report with no losses, errors or residual backlog.
+
+    Use the peer name as context in all assertion failures.
+
+    Parameters
+    ----------
+    node : dict
+      Summary for one simulated oracle.
+    name : str
+      Oracle name used in failure messages.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    AssertionError
+      The report is incomplete, reports a loss or loop error, or ends with
+      five or more queued inputs.
+
+    Examples
+    --------
+    >>> TestChainStoreFleet().assertHealthy({"lost_inputs": 0, "loop_errors": 0, "queue_end": 0}, "n0")
+
+    Notes
+    -----
+    Replica equality and save timing are tested separately.
+    """
+    # A missing oracle report is represented by an error marker.
     self.assertNotIn("error", node, name)
+    # A healthy peer does not drop incoming messages.
     self.assertEqual(node["lost_inputs"], 0, name)
+    # An unsuccessful plugin iteration is visible even when queues drain.
     self.assertEqual(node["loop_errors"], 0, name)
+    # Permit fewer than five pending frames at the final observation.
     self.assertLess(node["queue_end"], 5, name)
 
   def test_healthy_fleet_converges(self):
@@ -82,14 +152,19 @@ class TestChainStoreFleet(unittest.TestCase):
     result = _run("healthy", 0.4)
     # Every replica converges on actual workload records.
     self.assertTrue(result["replicas_identical"])
+    # Empty replicas could compare equal without exercising a single write.
     self.assertGreater(min(result["replica_keys"].values()), 0)
     for name, node in result["nodes"].items():
       self.assertHealthy(node, name)
+      # Confirm the peer processes more than ten loop iterations per second.
       self.assertGreater(node["loop_hz_mean"], 10, name)
+      # Bound a healthy asynchronous replica save below half a second.
       self.assertLess(node["save_thread_max_s"], 0.5, name)
+      # The manager report includes asynchronous errors even after input has drained.
       self.assertEqual(node["manager"]["errors"], 0, name)
       # The current manager must save from its independent writer thread.
       self.assertEqual(node["manager"]["backend"], "thread", name)
+      # A successful comparison must exercise at least one periodic save.
       self.assertGreater(node["manager"]["periodic_saves"], 0, name)
     # The synthetic coordinator's distinct writes must reach quorum.
     writer = result["nodes"]["n0"]

@@ -75,10 +75,11 @@ five minutes); add `EE_CSTORE_SIM_BASE_SRC=/path/to/older/checkout` for the mixe
   and the oracle registry are simulated; only the chain store, its two mixins and the
   SerializationManager run. Nothing from edge_node (Deeploy, dAuth, the local API) is loaded.
   A run inside real nodes is still needed before production.
-- The `crash` and `restart_sync` scenarios explicitly refresh namespaces to exercise recovery from
-  missing records. Stores with a one-response refresh API rotate requests across available peers.
-  The `crash` scenario enables record ordering on stores that support it. In report mode, a peer
-  snapshot that was taken before a local update can still replace that update.
+- The `crash`, `crash_ordered`, and `restart_sync` scenarios explicitly refresh namespaces to
+  exercise recovery from missing records. Stores with a one-response refresh API rotate requests
+  across available peers. In `crash` (report mode), a peer snapshot that predates a local update
+  can replace that update before convergence is measured. `crash_ordered` enables record
+  ordering and runs the same workload and fault schedule.
   The `kill_worker` events in `crash` apply to sources with a separate serialization worker process.
 - Give `--workdir` a folder on a real disk: on tmpfs an fsync costs nothing.
 - Each result records the hash of the source files it ran (`sources`), so a table can be tied to a commit.

@@ -488,12 +488,12 @@ def scenario_restart_sync(scale=1.0):
 
 
 def scenario_crash(scale=1.0):
-  """Recover a killed oracle while the fleet continues writing.
+  """Recover a killed oracle while the fleet reports ordering decisions.
 
   The oracle restarts after six seconds and reloads its replica before
-  refreshing two namespaces. Ordering is active where supported so a peer
-  snapshot cannot undo a newer write to the same key. Older implementations
-  with a separate serialization worker also receive worker kill events.
+  refreshing two namespaces. The fleet continues writing while the oracle
+  refreshes. Older implementations with a separate serialization worker
+  also receive worker kill events.
 
   Parameters
   ----------
@@ -510,8 +510,8 @@ def scenario_crash(scale=1.0):
   >>> scenario_crash()["duration"]
   75.0
   """
-  # Enable the current order rule because refreshes can race on keys reused after restart.
-  nodes = _fleet(4, plugin_config={"CSTORE_ORDER": "on"})
+  # Specify the shipped report behavior explicitly so future switches do not change this comparison.
+  nodes = _fleet(4, plugin_config={"CSTORE_ORDER": "report"})
   nodes[0]["workloads"] = [{"type": "operation", "period": 1.0, "republish": 0.5, "bytes": 20000}]
   for node in nodes[1:]:
     node["workloads"] = [{"type": "local", "period": 0.5}]
@@ -523,11 +523,41 @@ def scenario_crash(scale=1.0):
                      {"at": 36, "type": "sigkill", "node": "n3"}, {"at": 42, "type": "restart", "node": "n3", "cfg": {"workloads": back}}]}
 
 
+def scenario_crash_ordered(scale=1.0):
+  """Repeat the process crash with record ordering enabled where supported.
+
+  The workload, network and restart schedule match the report-mode scenario.
+
+  Parameters
+  ----------
+  scale : float, optional
+    Multiplier for the workload duration.
+
+  Returns
+  -------
+  dict
+    Crash scenario with enforced record ordering on its oracle processes.
+
+  Examples
+  --------
+  >>> scenario_crash_ordered()["name"]
+  'crash_ordered'
+  """
+  # Reuse the same fault and workload schedule for the comparison.
+  spec = scenario_crash(scale)
+  # Label the report so the two modes are distinguishable in saved results.
+  spec["name"] = "crash_ordered"
+  for node in spec["nodes"]:
+    # Older sources ignore the switch and retain their own write admission.
+    node["plugin_config"] = {"CSTORE_ORDER": "on"}
+  return spec
+
+
 SCENARIOS = {
   "healthy": scenario_healthy, "incident": scenario_incident, "incident_x4": scenario_incident_x4,
   "stolen_cpu": scenario_stolen_cpu, "flood": scenario_flood,
   "blocking_store": scenario_blocking_store, "big_saves": scenario_big_saves, "lossy": scenario_lossy, "crash": scenario_crash,
-  "restart_sync": scenario_restart_sync,
+  "restart_sync": scenario_restart_sync, "crash_ordered": scenario_crash_ordered,
 }
 
 

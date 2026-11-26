@@ -109,10 +109,9 @@ class TestChainStoreFleet(unittest.TestCase):
     self.assertLess(slow["save_thread_max_s"], 2.0)                   # the old code spends seconds per save on this thread
 
   def test_killed_oracle_recovers_its_replica(self):
-    """Recover the persisted replica and refresh data missed during a crash.
+    """Check restart and replica convergence with ordering in report mode.
 
-    The current serialization manager uses one thread per save. The process
-    crash exercises disk reload and namespace repair with record ordering enabled.
+    Continues to check equality even when a snapshot races with live writes.
 
     Parameters
     ----------
@@ -126,8 +125,50 @@ class TestChainStoreFleet(unittest.TestCase):
     --------
     >>> TestChainStoreFleet().test_killed_oracle_recovers_its_replica()  # doctest: +SKIP
     """
+    # Keep the shipped report-mode crash separate from the enforcing comparison.
+    self._assert_crash_recovery("crash")
+
+  def test_killed_oracle_recovers_its_ordered_replica(self):
+    """Check restart and replica convergence with ordering enforced.
+
+    The recovery workload is the same as the report-mode case.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestChainStoreFleet().test_killed_oracle_recovers_its_ordered_replica()  # doctest: +SKIP
+    """
+    # This case verifies recovery while stale snapshots are refused.
+    self._assert_crash_recovery("crash_ordered")
+
+  def _assert_crash_recovery(self, scenario):
+    """Recover the persisted replica and refresh data missed during a crash.
+
+    The current serialization manager uses one thread per save. The process
+    crash exercises disk reload and namespace repair on that manager.
+
+    Parameters
+    ----------
+    scenario : str
+      Crash scenario to exercise.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestChainStoreFleet()._assert_crash_recovery("crash_ordered")  # doctest: +SKIP
+    """
     # Run the full scenario so it includes process death, restart, and refresh.
-    result = _run("crash", 1.0)
+    result = _run(scenario, 1.0)
     for name, node in result["nodes"].items():
       self.assertNotIn("error", node, name)
       self.assertEqual(node["loop_errors"], 0, name)

@@ -2982,7 +2982,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       a refusal answer or the hand-off giving up), ``target_peers``, ``min_confirms``, and ``default_peers``:
       True when the write is meant for every default peer and is not a dAuth secret, so the hand-off adds a peer
       that joins later to its targets.
-      Deployment node reports also track positive acknowledgements in ``acknowledged_peers`` for delivery repair.
+      Explicitly targeted deployment node reports also track positive acknowledgements in
+      ``acknowledged_peers`` for delivery repair.
 
     Notes
     -----
@@ -2999,7 +3000,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return {
       self.CS_CONFIRMATIONS: 0, "confirmed_peers": [],
       # Delivery repair skips only peers that positively acknowledged deployment node reports.
-      **({"acknowledged_peers": []} if self.__namespace_for_key(key, ("DEEPLOY_NODE_OPERATIONS",)) else {}),
+      **({"acknowledged_peers": []} if not include_default_peers
+         and self.__namespace_for_key(key, ("DEEPLOY_NODE_OPERATIONS",)) else {}),
       # The targets as the peers are now, and the confirmations needed from them.
       "target_peers": self.__get_target_peers(peers=peers, include_default_peers=include_default_peers),
       # A delivery repair waits only for its explicit recipient, regardless of normal write quorum.

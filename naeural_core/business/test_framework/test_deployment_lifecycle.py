@@ -1088,6 +1088,48 @@ class ChainStoreAcknowledgmentTest(unittest.TestCase):
     self.assertFalse(store._set_value("key", "value", **kwargs))  # Normal write still uses its configured quorum.
     self.assertTrue(store._set_value("key", "value", require_target_ack=True, **kwargs))
 
+  def test_report_repair_can_distinguish_refusals_from_acknowledgements(self):
+    """Track positive acknowledgements separately for an explicitly routed report.
+
+    A stamped refusal settles a peer for CStore while leaving delivery repair
+    responsible for that peer.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> ChainStoreAcknowledgmentTest().test_report_repair_can_distinguish_refusals_from_acknowledgements()
+    """
+    # Create the store with two peers and its normal two-acknowledgement quorum.
+    store = self.make_store()
+    # Let the local report carry a stamp that a receiver can echo in a refusal.
+    store._ChainStoreBasePlugin__cs_modes["order"] = "report"
+    # The harness does not load real signing keys for this test.
+    store.bc = SimpleNamespace(verify=lambda *_args, **_kwargs: SimpleNamespace(valid=True))
+    # Use the signed namespace and field form that the real reporter publishes.
+    key = _hset_key(module.OBSERVATION_HKEY, "op|deploy|node")
+    # The signed report names its publishing node.
+    value = {"operation_id": "op", "attempt": "deploy", "sequence": 1, "node_addr": "node", "EE_SENDER": "node"}
+    # No response has been delivered yet, so the initial write times out.
+    self.assertFalse(store._set_value(key, value, owner="node", peers=["peer1", "peer2"],
+                                      include_default_peers=False, timeout=.1, max_retries=0))
+    # Capture the installed record and the entry point for incoming responses.
+    record, confirm = store.storage[key], store._ChainStoreBasePlugin__exec_received_confirm
+    # Both responses echo the write's stamp, but only one confirms the value.
+    response = {store.CS_KEY: key, store.CS_VER: record[store.CS_SENT_VER]}
+    # Process a refusal and then one positive confirmation.
+    confirm(dict(response, **{store.CS_REFUSED: "older"}), sender="peer1")
+    confirm(response, sender="peer2")
+    # Both peers settled, but the reporter must still try to reach the first peer.
+    self.assertEqual(record["confirmed_peers"], ["peer1", "peer2"])
+    self.assertEqual(record["acknowledged_peers"], ["peer2"])
+
   def test_writes_are_saved_by_the_flush_outside_persistence_lock_and_never_by_process(self):
     # The SerializationManager calls the flush on its own thread every CS_SAVE_INTERVAL seconds.
     store = self.make_store()

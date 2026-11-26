@@ -292,7 +292,7 @@ class DeploymentLifecycle:
     # The log method start() receives; publish() reports a refused snapshot through it.
     self._report = None
     self._last_repair_inspection_by_job = {}  # A slow inspection only throttles another probe of the same job.
-    # Keep just the latest confirmed signed report and outstanding recipients for each active following attempt.
+    # Keep the latest signed report and its outstanding recipients for active readiness and source updates.
     self._source_delivery = {}
     self._peer_sessions = {}
     self._peer_session = None
@@ -309,6 +309,9 @@ class DeploymentLifecycle:
       self._sync_journal_directory()
       # A persisted readiness observation is not evidence after node restart.
       for record in self.records.values():
+        if record.get("active") and not record["aborted"] and not record.get("ready_coordinator_confirmed"):
+          # An older journal's quorum flag does not say whether its coordinator received readiness.
+          record.pop("ready_reported", None)
         if record.get("stateless_replacement") is True:
           self._index_stateless_replacement(record)  # Reestablish the fence before loading recovered configs.
         if (record.get("parent_operation_id") or record.get("confirm_prior_stop") is True) and "job_id" in record:
@@ -1370,7 +1373,9 @@ class DeploymentLifecycle:
           item.get("source_mode") == "following" for item in record["instances"]
         ):
           continue
-        fingerprint = {name: value for name, value in record.items() if name not in ("sequence", "updated_at", "ready_reported")}
+        # Local delivery bookkeeping has no effect on the report's content.
+        fingerprint = {name: value for name, value in record.items()
+                       if name not in ("sequence", "updated_at", "ready_reported", "ready_coordinator_confirmed")}
         if self._published.get(key) == fingerprint:
           continue
         if self._refused.get(key) == (fingerprint, True):
@@ -1404,6 +1409,8 @@ class DeploymentLifecycle:
       record.pop("aborted")
       record.pop("active")
       record.pop("ready_reported", None)
+      # A local acknowledgement is not part of the signed report.
+      record.pop("ready_coordinator_confirmed", None)
       for instance in record["instances"]:
         instance.pop("possibly_started", None)
         instance.pop("process_id", None)
@@ -1427,16 +1434,24 @@ class DeploymentLifecycle:
                                      timeout=PUBLISH_TIMEOUT, max_retries=0, result_info=info)
       if success:
         self._published[key] = fingerprint
-        if (self._peer_session is not None and fingerprint.get("active") and not fingerprint["aborted"]
-            and any(i.get("source_mode") == "following" for i in record["instances"])):
+        # Runtimes with a peer-session reader can distinguish the designated coordinator from the quorum.
+        track_delivery = self._peer_session is not None and self._confirmed_peers is not None
+        # A standalone journal caller without peer information uses its setter's confirmation.
+        confirmed = self._confirmed_peers(storage_key) if track_delivery else peers
+        # Source-following apps keep all recipients current. A bound app must reach its coordinator.
+        following = any(instance.get("source_mode") == "following" for instance in record["instances"])
+        coordinator = record["coordinator"]
+        if track_delivery and fingerprint.get("active") and not fingerprint["aborted"] and (ready or following):
           # A bulk write can succeed with only one acknowledgement. Keep the exact signed current field
           # for the other recipients; never refresh its sequence, timestamp or eight history slots.
-          confirmed = self._confirmed_peers(storage_key)
+          recipients = peers if following else [coordinator]
+          # Keep the coordinator eligible for replay after a reconnect, even if it confirmed this publication.
           due = {peer: None if peer in confirmed else (time.monotonic() + PUBLISH_TIMEOUT, 0, False)
-                 for peer in peers if peer != self.node_addr}
+                 for peer in recipients if peer != self.node_addr}
           self._source_delivery[key] = (storage_key, record, due)
-        if ready:
-          ready_reported.append(key)
+        if ready and (coordinator in confirmed or coordinator == self.node_addr):
+          # Only the coordinator can complete the readiness checkpoint.
+          ready_reported.append((key, record["sequence"]))
       elif info and info["outcome"].startswith("refused_"):
         # Whether the record carries this node's address: with another one, the signed-record rule refuses it
         # whatever its sequence.
@@ -1453,18 +1468,59 @@ class DeploymentLifecycle:
           self._report("Deployment report {} (sequence {}) was refused by the chain store: {}; node address {}; {}.".format(
             key, record["sequence"], info["outcome"], "matches" if own else "differs",
             "not retried until the report changes" if final else "retried each pass"), color='r')
-    if ready_reported:
-      # Persist the end of reporting so a node restart does not re-announce it.
-      with self.lock:
-        for key in ready_reported:
-          self.records[key]["ready_reported"] = True
-        self._save()
     if not self._stop.is_set():
-      self._repair_source_delivery(setter)  # New reports always take precedence over a bounded repair.
+      # New reports take precedence over a bounded repair of a previously signed current field.
+      ready_reported.extend(self._repair_source_delivery(setter))
+    if ready_reported:
+      self._save_ready_deliveries(ready_reported)
     if observation_failed:
       # Preserve the worker's existing throttled error notification after all
       # independently observed jobs have had their publication opportunity.
       raise RuntimeError("Deployment workload observation failed; retrying.")
+
+  def _save_ready_deliveries(self, acknowledgements):
+    """Persist ready observations positively acknowledged by their coordinators.
+
+    Ignore a receipt if the attempt changed before the journal lock was acquired.
+
+    Parameters
+    ----------
+    acknowledgements : iterable of tuple
+      Attempt key and confirmed ready sequence.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    OSError
+      The confirmed state could not be written to the journal.
+
+    Examples
+    --------
+    >>> journal._save_ready_deliveries([("operation|deploy", 1)])
+    """
+    with self.lock:
+      # A retransmission to a restarted coordinator can confirm an already checkpointed report.
+      updates = {}
+      for key, sequence in acknowledgements:
+        # The latest journal state may have changed while network writes were in flight.
+        record = self.records.get(key)
+        if (record is not None and record["sequence"] == sequence and record["status"] == "ready"
+            and not record["aborted"] and not record.get("ready_coordinator_confirmed")):
+          # Only the local journal records the stronger acknowledgement requirement.
+          updates[key] = dict(record, ready_reported=True, ready_coordinator_confirmed=True)
+      if updates:
+        try:
+          # Publish the delivery checkpoint in memory only after its atomic save succeeds.
+          self._save({**self.records, **updates})
+        except OSError:
+          # A later publication can reacquire delivery proof if saving this checkpoint failed.
+          for key in updates:
+            self._published.pop(key, None)
+          raise
+        self.records.update(updates)
 
   def _repair_source_delivery(self, setter):
     """Replay one current field to an oracle that missed it or restarted.
@@ -1476,7 +1532,8 @@ class DeploymentLifecycle:
 
     Returns
     -------
-    None
+    list of tuple
+      Attempt keys and sequences whose ready report the coordinator acknowledged.
       A failed transfer remains queued up to the repair limit per snapshot and peer session.
 
     Examples
@@ -1502,7 +1559,9 @@ class DeploymentLifecycle:
         returning.add(peer)  # A peer can restart between heartbeats without appearing offline.
     self._peer_sessions.update(sessions)
     transfer = None
-    for storage_key, report, recipients in self._source_delivery.values():
+    # Delayed and targeted coordinator confirmations are equally valid.
+    ready_reported = []
+    for key, (storage_key, report, recipients) in self._source_delivery.items():
       for peer, pending in recipients.items():
         if peer in returning:
           pending = recipients[peer] = (now, 0, True)  # Ignore confirmations predating a peer restart.
@@ -1511,16 +1570,24 @@ class DeploymentLifecycle:
         due, tries, force = pending
         if not force and peer in self._confirmed_peers(storage_key):
           recipients[peer] = None  # The broadcast acknowledgement arrived after quorum; no replay needed.
+          if report["status"] == "ready" and peer == report["coordinator"]:
+            # A delayed acknowledgement completes delivery without sending a duplicate.
+            ready_reported.append((key, report["sequence"]))
         elif transfer is None or due < transfer[0]:
-          transfer = (due, peer, storage_key, report, recipients, tries)
+          # Keep the journal key with the one transfer allowed in this pass.
+          transfer = (due, key, peer, storage_key, report, recipients, tries)
     if transfer is not None and not self._stop.is_set():
-      _, peer, storage_key, report, recipients, tries = transfer
+      _, key, peer, storage_key, report, recipients, tries = transfer
       # Debiting the budget before calling the setter also bounds failures that raise.
       tries += 1
       recipients[peer] = (now + SOURCE_REPLAY_INTERVAL, tries, True) if tries < SOURCE_REPLAY_LIMIT else None
       if setter(storage_key, report, owner=self.node_addr, readonly=True, peers=[peer],
                 include_default_peers=False, timeout=2, max_retries=0, require_target_ack=True):
         recipients[peer] = None
+        if report["status"] == "ready" and peer == report["coordinator"]:
+          # A targeted delivery completes the original readiness observation.
+          ready_reported.append((key, report["sequence"]))
+    return ready_reported
 
   def start(self, setter_provider, signer, report_error, cleanup=None, peer_session=None, confirmed_peers=None):
     """

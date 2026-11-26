@@ -535,6 +535,48 @@ class DeploymentLifecycleTest(unittest.TestCase):
       self.publish()
       self.assertFalse(self.lifecycle._source_delivery)
 
+  def test_bound_ready_waits_for_its_coordinator_after_another_oracle_confirms(self):
+    """Repair a bound ready report after its coordinator returns.
+
+    A quorum from another peer still leaves the coordinator's delivery pending.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> DeploymentLifecycleTest().test_bound_ready_waits_for_its_coordinator_after_another_oracle_confirms()
+    """
+    # Admit a bound native workload and observe its actual readiness.
+    pipeline = config()
+    self.lifecycle.admit(pipeline, "oracle", True)
+    self.lifecycle.attach(pipeline, "WORKER", "worker", plugin(ready=True))
+    # The initial publication reaches the other oracle while the coordinator is away.
+    sessions = {"oracle": (False, None), "other": (True, 100)}
+    self.lifecycle._peer_session = sessions.__getitem__
+    self.lifecycle._confirmed_peers = lambda _key: ["other"]
+    with patch.object(module.time, "monotonic", return_value=10):
+      # Publish the ring slot and current field once.
+      self.publish()
+      current_field, signed_record, _ = self.writes[-1]
+      self.assertEqual(len(self.writes), 2)
+      # Missing coordinator delivery must survive a restart as an unreported ready state.
+      self.assertFalse(DeploymentLifecycle(self.path, "node").records["operation|deploy"].get("ready_reported"))
+      # The coordinator reappears while the existing worker stays ready.
+      sessions["oracle"] = (True, 1)
+      self.publish()
+      self.assertEqual(len(self.writes), 3)
+      self.assertEqual(self.writes[-1][:2], (current_field, signed_record))
+      self.assertEqual(self.writes[-1][2]["peers"], ["oracle"])
+      self.assertTrue(self.writes[-1][2]["require_target_ack"])
+      # The targeted acknowledgement completes the durable readiness checkpoint.
+      self.assertTrue(DeploymentLifecycle(self.path, "node").records["operation|deploy"]["ready_reported"])
+
   def test_ack_after_quorum_suppresses_redundant_source_replay(self):
     pipeline = config()
     pipeline["PLUGINS"][0]["SIGNATURE"] = "CONTAINER_APP_RUNNER"

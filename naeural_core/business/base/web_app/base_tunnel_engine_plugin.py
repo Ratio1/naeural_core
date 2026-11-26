@@ -86,8 +86,8 @@ class BaseTunnelEnginePlugin(
 
     Notes
     -----
-    Only a string matching the generated command exactly is eligible.
-    A manually supplied command or argument vector does not select this token.
+    Selection is based on the string matching the generated command exactly.
+    Other strings and argument vectors do not select this token.
     """
     if (isinstance(command, str)
         and command.startswith("cloudflared tunnel --no-autoupdate run --token-file /dev/stdin --url ")

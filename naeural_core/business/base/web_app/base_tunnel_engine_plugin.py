@@ -1,5 +1,5 @@
 import os
-import re
+import shlex
 import signal
 import subprocess
 import time
@@ -7,23 +7,7 @@ import time
 from naeural_core.business.base import BasePluginExecutor
 from naeural_core.business.mixins_libs.ngrok_mixin import _NgrokMixinPlugin
 from naeural_core.business.mixins_libs.cloudflare_mixin import _CloudflareMixinPlugin
-
-
-_CLOUDFLARED_TOKEN_RE = re.compile(
-  r"(--token(?:\s+|=))(?:\"[^\"]*\"|'[^']*'|[^\s;&|]+)",
-  flags=re.IGNORECASE,
-)
-_CLOUDFLARED_TOKEN_REDACTION = "[REDACTED]"
-
-
-def _redact_cloudflared_token(command):
-  """Return a log-safe Cloudflare tunnel command."""
-  if not isinstance(command, str) or "cloudflared" not in command.lower():
-    return command
-  return _CLOUDFLARED_TOKEN_RE.sub(
-    lambda match: match.group(1) + _CLOUDFLARED_TOKEN_REDACTION,
-    command,
-  )
+from naeural_core.utils.process_credentials import child_environment, launch_with_tunnel_token, redact_command
 
 
 _CONFIG = {
@@ -52,8 +36,55 @@ class BaseTunnelEnginePlugin(
   CONFIG = _CONFIG
 
   def _redact_tunnel_command_for_log(self, command):
-    """Return a tunnel command with its Cloudflare token masked for logging."""
-    return _redact_cloudflared_token(command)
+    """Prepare a command for logs and status payloads.
+
+    Preserve useful arguments while masking credentials in the command.
+
+    Parameters
+    ----------
+    command : str or list
+      Command or command text to display.
+
+    Returns
+    -------
+    str or list
+      Copy of the command with credential values masked.
+
+    Examples
+    --------
+    >>> plugin._redact_tunnel_command_for_log("cloudflared tunnel run --token hidden")
+    'cloudflared tunnel run --token [REDACTED]'
+    """
+    # Include names such as EE_MQTT which do not identify themselves by keyword.
+    return redact_command(command, os.environ)
+
+  def _configured_token_for_launch(self, command):
+    """Return the stdin credential for the generated Cloudflare command.
+
+    Only the exact managed Cloudflare command may receive the configured
+    credential. Other application commands retain their usual standard input.
+
+    Parameters
+    ----------
+    command : str or list
+      Command selected by the launcher.
+
+    Returns
+    -------
+    str or None
+      The Cloudflare credential for the managed launch, if selected.
+
+    Examples
+    --------
+    >>> plugin._configured_token_for_launch(["python", "app.py"]) is None
+    True
+    """
+    if (isinstance(command, str)
+        and command.startswith("cloudflared tunnel --no-autoupdate run --token-file /dev/stdin --url ")
+        and command == self._get_cloudflare_start_command()):
+      # The launcher sends this value on the pipe without including it in the command.
+      return self.get_cloudflare_token()
+    return None
 
   def use_cloudflare(self):
     """
@@ -124,25 +155,45 @@ class BaseTunnelEnginePlugin(
 
 
   def run_tunnel_command(self, command):
-    """
-    Run a tunnel command in the background using LogReader like in base web app.
-    This is a generic implementation for running tunnel engine commands.
+    """Run a tunnel command and attach output readers.
+
+    The generated Cloudflare command receives its managed credential through
+    a pipe and runs directly. Other tunnel command forms keep shell behavior.
+
+    Parameters
+    ----------
+    command : str
+      Command built by the selected tunnel engine.
+
+    Returns
+    -------
+    subprocess.Popen or None
+      Running tunnel process, or None if startup fails.
+
+    Examples
+    --------
+    >>> plugin.run_tunnel_command(plugin._get_cloudflare_start_command())  # doctest: +SKIP
     """
     if not command:
       return None
     
     try:
       self.P(f"Running tunnel command: {self._redact_tunnel_command_for_log(command)}")
+      # Only the generated cloudflared command receives a separate input credential.
+      token = self._configured_token_for_launch(command)
+      # Preserve the normal shell form of other tunnel engines.
       popen_kwargs = dict(
-        args=command,
-        shell=True,
+        args=command if token is None else shlex.split(command),
+        shell=token is None,
+        env=child_environment(os.environ, extra_values=(token,)),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,  # this is important for real-time output
       )
       if os.name != "nt":
         popen_kwargs["start_new_session"] = True
-      process = subprocess.Popen(**popen_kwargs)
+      # A managed Cloudflare launch has no credential argument or inherited token variable.
+      process = launch_with_tunnel_token(token, **popen_kwargs)
       self._remember_process_group(process)
       
       logs_reader = self.LogReader(process.stdout, size=100, daemon=None)

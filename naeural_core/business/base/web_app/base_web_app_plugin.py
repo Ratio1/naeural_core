@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+from naeural_core.utils.process_credentials import child_environment, credential_env_names, launch_with_tunnel_token, redact_command
 import tempfile
 import psutil
 
@@ -236,16 +237,27 @@ class BaseWebAppPlugin(
     }
 
   def __prepare_env(self, assets_path):
-    # pop all `EE_` keys
-    prepared_env = dict(self.os_environ)
-    to_pop_keys = []
-    for key in prepared_env:
-      if key.startswith('EE_'):
-        to_pop_keys.append(key)
-    # endfor all keys
+    """Prepare the setup and app process environments.
 
-    for key in to_pop_keys:
-      prepared_env.pop(key)
+    Ordinary inherited settings remain available. Application configuration
+    and assets may explicitly provide credentials needed by this app.
+
+    Parameters
+    ----------
+    assets_path : str or None
+      Directory containing the app's optional dotenv settings.
+
+    Returns
+    -------
+    dict
+      Start environment, including scoped application values.
+
+    Examples
+    --------
+    >>> plugin._BaseWebAppPlugin__prepare_env(None)["PORT"]  # doctest: +SKIP
+    """
+    # Keep the existing EE_ exclusion and also remove other credentials from inherited settings.
+    prepared_env = {key: value for key, value in child_environment(self.os_environ).items() if not key.startswith("EE_")}
 
     # add mandatory keys
     prepared_env["PWD"] = self.script_temp_dir
@@ -289,6 +301,30 @@ class BaseWebAppPlugin(
 
   # process handling methods
   def __run_command(self, command, env=None, read_stdout=True, read_stderr=True):
+    """Launch a web-app command with its scoped environment and output readers.
+
+    Managed cloudflared commands receive the configured token on stdin.
+
+    Parameters
+    ----------
+    command : str or list of str
+      Configured setup or start command.
+    env : dict or None, optional
+      Environment for the subprocess.
+    read_stdout : bool, optional
+      Capture the subprocess's standard output.
+    read_stderr : bool, optional
+      Capture the subprocess's standard error output.
+
+    Returns
+    -------
+    tuple
+      Subprocess, optional stdout reader, and optional stderr reader.
+
+    Examples
+    --------
+    >>> plugin._BaseWebAppPlugin__run_command(["python", "app.py"], {})  # doctest: +SKIP
+    """
     if isinstance(command, list):
       command_args = command
     elif isinstance(command, str):
@@ -296,8 +332,15 @@ class BaseWebAppPlugin(
     else:
       raise ValueError("Command must be a string or a list of strings")
 
-    process = subprocess.Popen(
-      command_args,
+    # App-scoped credentials are unrelated to its connector.
+    token = self._configured_token_for_launch(command)
+    if command_args and self.os_path.basename(command_args[0]) == "cloudflared":
+      # The process retains routing settings while the managed token travels on stdin.
+      env = child_environment(os.environ if env is None else env, extra_values=(token,))
+    # A generated managed tunnel gets its configured token on a one-use pipe.
+    process = launch_with_tunnel_token(
+      token,
+      args=command_args,
       env=env,
       cwd=self.script_temp_dir,
       stdout=subprocess.PIPE if read_stdout else None,
@@ -308,6 +351,27 @@ class BaseWebAppPlugin(
     logs_reader = self.LogReader(process.stdout, size=100, daemon=None) if read_stdout else None
     err_logs_reader = self.LogReader(process.stderr, size=100, daemon=None) if read_stderr else None
     return process, logs_reader, err_logs_reader
+
+  def _redact_tunnel_command_for_log(self, command):
+    """Mask parent and app-scoped credentials in command diagnostics.
+
+    Parameters
+    ----------
+    command : str or list
+      Command displayed in a log or status payload.
+
+    Returns
+    -------
+    str or list
+      Safe copy of the command.
+
+    Examples
+    --------
+    >>> plugin._redact_tunnel_command_for_log("tool --password hidden")
+    'tool --password [REDACTED]'
+    """
+    # App-only values can be referenced by commands without a named secret option.
+    return redact_command(command, {**os.environ, **(self.prepared_env or {})})
 
   def __wait_for_command(self, process, timeout):
     process_finished = False
@@ -517,7 +581,8 @@ class BaseWebAppPlugin(
       return
 
     if not self.setup_commands_started[idx]:
-      self.P(f"Running setup command nr {idx}: {self.get_setup_commands()[idx]}")
+      # Setup commands can contain app credentials just as start commands can.
+      self.P(f"Running setup command nr {idx}: {self._redact_tunnel_command_for_log(self.get_setup_commands()[idx])}")
       proc, logs_reader, err_logs_reader = self.__run_command(self.get_setup_commands()[idx], self.base_env)
       self.setup_commands_processes[idx] = proc
       self.dct_logs_reader[f"setup_{idx}"] = logs_reader
@@ -540,7 +605,8 @@ class BaseWebAppPlugin(
         self.add_payload_by_fields(
           command_type="setup",
           command_idx=idx,
-          command_str=self.get_setup_commands()[idx],
+          # A status payload is visible outside this process.
+          command_str=self._redact_tunnel_command_for_log(self.get_setup_commands()[idx]),
           command_status="success"
         )
         self.P(f"Setup command nr {idx} finished successfully")
@@ -549,7 +615,8 @@ class BaseWebAppPlugin(
         self.add_payload_by_fields(
           command_type="setup",
           command_idx=idx,
-          command_str=self.get_setup_commands()[idx],
+          # A failed launch reports the same redacted command as a successful one.
+          command_str=self._redact_tunnel_command_for_log(self.get_setup_commands()[idx]),
           command_status="failed"
         )
         self.P(f"ERROR: Setup command nr {idx} finished with exit code {self.setup_commands_processes[idx].returncode}")
@@ -562,7 +629,8 @@ class BaseWebAppPlugin(
           self.add_payload_by_fields(
             command_type="setup",
             command_idx=idx,
-            command_str=self.get_setup_commands()[idx],
+            # A timeout report also omits the complete credential values.
+            command_str=self._redact_tunnel_command_for_log(self.get_setup_commands()[idx]),
             command_status="timeout"
           )
           self.failed = True
@@ -656,7 +724,8 @@ class BaseWebAppPlugin(
         self.add_payload_by_fields(
           command_type="start",
           command_idx=idx,
-          command_str=self.get_start_commands()[idx],
+          # Keep failure diagnostics without sending the original command.
+          command_str=self._redact_tunnel_command_for_log(self.get_start_commands()[idx]),
           command_status="failed"
         )
         self.P(f"Start command nr {idx} finished unexpectedly. Please check the logs.")
@@ -664,14 +733,14 @@ class BaseWebAppPlugin(
 
       elif self.time() - self.start_commands_start_time[idx] > timeout:
         self.start_commands_finished[idx] = True
-        cmd = self.get_start_commands()[idx]
+        # Share the same safe rendering between the status report and log.
+        safe_cmd = self._redact_tunnel_command_for_log(self.get_start_commands()[idx])
         self.add_payload_by_fields(
           command_type="start",
           command_idx=idx,
-          command_str=cmd,
+          command_str=safe_cmd,
           command_status="success"
         )
-        safe_cmd = self._redact_tunnel_command_for_log(cmd)
         self.P(f"Start cmd {idx} '{safe_cmd}' is running after {timeout}s.")
     # endif setup command finished
     return
@@ -1269,6 +1338,7 @@ class BaseWebAppPlugin(
     All files from the source directory are copied to the
     destination directory with the following exceptions:
       - are symbolic links are ignored
+      - the root dotenv file is consumed in memory and replaced by a sanitized snapshot
       - files named ending with .jinja are expanded as jinja templates,
         .jinja is removed from the filename and the result copied to
         the destination folder.
@@ -1306,6 +1376,9 @@ class BaseWebAppPlugin(
       for root, _, files in os.walk(src_dir):
         for file in files:
           src_file_path = self.os_path.join(root, file)
+          # The root dotenv values are already in prepared_env, so they need no plaintext copy.
+          if root == src_dir and file == ".env":
+            continue
           dst_file_path = self.os_path.join(
             dst_dir,
             self.os_path.relpath(src_file_path, src_dir)
@@ -1340,20 +1413,16 @@ class BaseWebAppPlugin(
       # endfor os.walk
     # endif src_dir is not None
 
-    # write .env file in the target directory
-    # environment variables are passed in subprocess.Popen, so this is not needed
-    # but it's useful for debugging
-    with open(self.os_path.join(self.script_temp_dir, '.env'), 'w') as f:
-      for key, value in self.prepared_env.items():
-        f.write(f"{key}={value}\n")
-
-    with open(self.os_path.join(self.script_temp_dir, '.start_env_used'), 'w') as f:
-      for key, value in self.prepared_env.items():
-        f.write(f"{key}={value}\n")
-
-    with open(self.os_path.join(self.script_temp_dir, '.setup_env_used'), 'w') as f:
-      for key, value in self.base_env.items():
-        f.write(f"{key}={value}\n")
+    # Diagnostics can retain ordinary settings without persisting the real process environment.
+    for filename, environment in ((".env", self.prepared_env), (".start_env_used", self.prepared_env),
+                                  (".setup_env_used", self.base_env)):
+      # Skip credential assignments entirely so dotenv cannot replace live app credentials with a placeholder.
+      sensitive = credential_env_names(environment)
+      with open(self.os_path.join(self.script_temp_dir, filename), "w") as stream:
+        for key, value in environment.items():
+          if key not in sensitive:
+            # Mask parent and app-scoped credentials even if a diagnostic key uses an alias.
+            stream.write(f"{key}={self._redact_tunnel_command_for_log(str(value))}\n")
 
     # now cleanup the download folder if it exists
     downloaded_assets_path = self.os_path.join(self.get_output_folder(), 'downloaded_assets', self.plugin_id)

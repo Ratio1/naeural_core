@@ -19,10 +19,31 @@ class _CloudflareMixinPlugin(_TunnelEngineMixin):
   """CLOUDFLARE UTILS METHODS"""
   if True:
     def _get_cloudflare_start_command(self):
+      """Build the Cloudflare web-app launch command.
+
+      The managed tunnel command names a standard-input token file. The
+      caller supplies the configured credential separately.
+
+      Parameters
+      ----------
+      None
+
+      Returns
+      -------
+      str
+        Managed or tokenless Cloudflare command line.
+
+      Examples
+      --------
+      >>> plugin._get_cloudflare_start_command()  # doctest: +SKIP
+      """
+      # The presence of a configured token still selects a managed tunnel.
       token = self.get_cloudflare_token()
+      # The configured origin protocol also applies to tokenless tunnels.
       protocol = self.get_cloudflare_protocol()
       if token is not None:
-        return f"cloudflared tunnel --no-autoupdate run --token {token} --url {protocol}://127.0.0.1:{self.port}"
+        # The subprocess receives the value on stdin, so the command is safe in a status payload.
+        return f"cloudflared tunnel --no-autoupdate run --token-file /dev/stdin --url {protocol}://127.0.0.1:{self.port}"
       return f"cloudflared tunnel --no-autoupdate --url {protocol}://127.0.0.1:{self.port}"
   """END CLOUDFLARE UTILS METHODS"""
 

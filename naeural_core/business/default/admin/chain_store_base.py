@@ -2013,7 +2013,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       return False
     expected = operation_id
     if namespace == "DEEPLOY_NODE_OPERATIONS":
-      if value.get("attempt") not in ("deploy", "restore", "retire"):
+      if value.get("attempt") not in ("deploy", "restore", "retire", "inspect"):
         return False
       expected += "|" + value["attempt"] + "|" + principal
     if field not in (expected, expected + "|" + str(value["sequence"] % 8)):
@@ -2958,7 +2958,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     return self.__chain_storage.get(key, {}).get(self.CS_MIN_CONFIRMATIONS, 0)
 
 
-  def __reset_confirmations(self, key, peers=None, include_default_peers=True):
+  def __reset_confirmations(self, key, peers=None, include_default_peers=True, require_target_ack=False):
     """
     Give the confirmation fields of a new own record: no confirmation yet, its targets and how many must confirm.
 
@@ -2972,6 +2972,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     include_default_peers : bool, optional
       If True, include the default chain peer set when deriving the minimum
       confirmation count. Default is True.
+    require_target_ack : bool, optional
+      Use one confirmation for replay to a single explicit recipient.
 
     Returns
     -------
@@ -2980,6 +2982,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       a refusal answer or the hand-off giving up), ``target_peers``, ``min_confirms``, and ``default_peers``:
       True when the write is meant for every default peer and is not a dAuth secret, so the hand-off adds a peer
       that joins later to its targets.
+      Deployment node reports also track positive acknowledgements in ``acknowledged_peers`` for delivery repair.
 
     Notes
     -----
@@ -2995,10 +2998,12 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     # The fields, built before the record is stored.
     return {
       self.CS_CONFIRMATIONS: 0, "confirmed_peers": [],
+      # Delivery repair skips only peers that positively acknowledged deployment node reports.
+      **({"acknowledged_peers": []} if self.__namespace_for_key(key, ("DEEPLOY_NODE_OPERATIONS",)) else {}),
       # The targets as the peers are now, and the confirmations needed from them.
       "target_peers": self.__get_target_peers(peers=peers, include_default_peers=include_default_peers),
-      # The confirmations needed.
-      self.CS_MIN_CONFIRMATIONS: self.__get_min_peer_confirmations(
+      # A delivery repair waits only for its explicit recipient, regardless of normal write quorum.
+      self.CS_MIN_CONFIRMATIONS: 1 if require_target_ack else self.__get_min_peer_confirmations(
         peers=peers,
         include_default_peers=include_default_peers,
       ),
@@ -3057,6 +3062,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     peers=None,
     include_default_peers=True,
     ver=None,
+    require_target_ack=False,
   ):
     """
     Set a key-value pair in the local chain-store replica.
@@ -3092,6 +3098,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     ver : list, optional
       The write's version stamp ``[ms, address]``, stored as the record's ``ver``; None (the default, and
       always with the order switch 'off') stores no ``ver`` field, as the previous release.
+    require_target_ack : bool, optional
+      Wait for one confirmation when replaying to a single explicit recipient.
 
     Returns
     -------
@@ -3182,7 +3190,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       # node's peer lists, which nothing read. A local record (or a local delete's tombstone): its confirmation fields.
       **({self.CS_CONFIRMATIONS: -1, self.CS_MIN_CONFIRMATIONS: 0} if local_sync_storage_op else
          # The local record's fields, for the write's own key (the deleted key for a tombstone).
-         self.__reset_confirmations(key, peers=peers, include_default_peers=include_default_peers)),
+         self.__reset_confirmations(
+           key, peers=peers, include_default_peers=include_default_peers, require_target_ack=require_target_ack,
+         )),
     }
     return
 
@@ -3205,6 +3215,7 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
     sender=None,
     resend=False,
     wait=True,
+    require_target_ack=False,
   ):
     """
     Set a value in chain storage and optionally wait for confirmations.
@@ -3271,6 +3282,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
       thread holds the lock longer (a merge, a save's copy) it applies
       nothing and returns False with the outcome ``not_ready`` too, and its
       caller writes again later.
+    require_target_ack : bool, optional
+      Confirm a replay to one explicit peer using that peer's acknowledgement.
+      Intended for the node reporter's delivery repair, after normal quorum.
 
     Returns
     -------
@@ -3532,6 +3546,10 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
         peers=peers,
         include_default_peers=include_default_peers,
       )
+      if require_target_ack and (
+        not wait or include_default_peers or local_sync_storage_op or len(target_peers) != 1 or value is None
+      ):
+        raise ValueError("A targeted acknowledgement requires a waiting local value write to one explicit peer.")
       # A local write of a Tunnels Manager namespace goes only to oracle registry members, the senders a write or a
       # sync request of it is taken from: the default peers (the allowed list) and the configured or extra peers may
       # name other nodes, which are left out of this write's targets.
@@ -3757,6 +3775,8 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
             # The stamp the record keeps; None with the order switch 'off', and for an outsider's delete that leaves no
             # tombstone (above).
             ver=ver,
+            # The replay waits for the explicit recipient instead of the normal quorum.
+            require_target_ack=require_target_ack,
           )
           # The record this write left: a wait=False write registers its re-sends below only while it is still held.
           mine = self.__chain_storage.get(key)
@@ -4501,6 +4521,9 @@ class ChainStoreBasePlugin(NetworkProcessorPlugin):
           return
         # Settled by its confirmation.
         record["confirmed_peers"].append(sender)
+        if "acknowledged_peers" in record:
+          # A refusal or a hand-off expiry also settles a peer, but only an acknowledgement satisfies repair.
+          record["acknowledged_peers"].append(sender)
         # Counted on the record confirmed: the tombstone's own counter for a delete.
         self.__increment_confirmations(target)
         # The hand-off's entry of the record, when it tracks it.

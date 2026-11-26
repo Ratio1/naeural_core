@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 
 from copy import deepcopy
@@ -19,6 +20,7 @@ for _key in (
     _network.setdefault(_key, 0)
 
 from naeural_core import constants as ct
+from naeural_core.business.deployment_lifecycle import DeploymentLifecycle, SERVICE_KEY
 from naeural_core.config.config_manager import ConfigManager
 from naeural_core.config.runtime_secret_resolution import (
   DAUTH_SECRET_PLACEHOLDER,
@@ -711,6 +713,9 @@ class OrchestratorRuntimeSecretTests(unittest.TestCase):
 class ConfigManagerSecretBarrierTests(unittest.TestCase):
   def _make_manager(self):
     manager = ConfigManager.__new__(ConfigManager)
+    directory = tempfile.TemporaryDirectory()
+    self.addCleanup(directory.cleanup)
+    manager.shmem = {SERVICE_KEY: DeploymentLifecycle(str(Path(directory.name) / "journal"), "worker")}
     manager.dct_config_streams = {"secret_pipeline": _pipeline()}
     instance = manager.dct_config_streams["secret_pipeline"]["PLUGINS"][0]["INSTANCES"][0]
     manager._get_plugin_instance = lambda **kwargs: instance

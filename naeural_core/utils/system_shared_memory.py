@@ -349,22 +349,30 @@ class NumpySharedMemory(DecentrAIObject):
     return None
 
   def check_data(self, data):
-    """
-    Checks if the data is a valid for the shared memory buffer.
-    This is used only in buffer mode.
+    """Check admission dimensions and element count in buffer mode.
+
     Parameters
     ----------
-    data : any
+    data : Any
+      Candidate array; unusual inputs retain the legacy shape access/errors.
 
     Returns
     -------
-    True if the data is valid, False otherwise.
+    bool
+      Whether the array fits the existing element and dimension limits.
+
+    Notes
+    -----
+    Exact ndarrays expose their element count directly. Subclasses can override
+    shape or size, so they retain the legacy shape reduction and its side effects.
+    This validation does not reserve slots, copy bytes or change metadata.
     """
     valid = True
     if not isinstance(data, np.ndarray):
       self._add_warning("Data is not a numpy array")
       valid = False
-    if np.prod(data.shape) > self._max_element_size:
+    data_size = data.size if type(data) is np.ndarray else np.prod(data.shape)
+    if data_size > self._max_element_size:
       self._add_warning("Data of shape {} is larger than the maximum size {}. init_np_shape: {}".format(
         data.shape, self._max_element_size, self._init_np_shape, 
       ))
@@ -787,9 +795,3 @@ if __name__ == '__main__':
     
     shm1.shutdown()
     shm2.shutdown()
-    
-  
-  
-
-    
-    

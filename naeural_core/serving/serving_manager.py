@@ -36,6 +36,8 @@ from naeural_core.manager import Manager
 from naeural_core.serving.base.serving_utils import comm_generator
 
 _FULL_DEBUG = True
+# None and [] are completed unavailable-GPU observations, not missing arguments.
+_GPU_SNAPSHOT_UNSET = object()
 
 class SMConst:
   PCOUNT = 'PCOUNT'
@@ -286,8 +288,39 @@ class ServingManager(Manager):
 
   @property
   def default_cuda(self):
+    """Return the configured device after a fresh GPU availability observation.
+
+    Returns
+    -------
+    Any
+      Configured device unchanged, or ``'cpu'`` when no GPU was observed.
+    """
+    return self.get_default_cuda()
+
+  def get_default_cuda(self, gpu_info=_GPU_SNAPSHOT_UNSET):
+    """Resolve the default device from an already collected GPU observation.
+
+    Parameters
+    ----------
+    gpu_info : list of dict or None, optional
+      Current transaction's unfiltered GPU snapshot. An empty list or ``None``
+      is a completed unavailable-GPU result, never a request to collect again.
+      Omission collects once after reading configuration, preserving the
+      standalone property's original ordering if configuration changes mid-read.
+
+    Returns
+    -------
+    Any
+      Configured value unchanged when any GPU is available, otherwise ``'cpu'``.
+
+    Notes
+    -----
+    Preserve the existing availability-only decision: do not validate or remap
+    a configured CUDA index, and do not cache observations between transactions.
+    """
     configured_cuda = self.cfg_serving_environment.get(ct.DEFAULT_CUDA, 'cuda:0')
-    gpu_info = self.log.gpu_info()
+    if gpu_info is _GPU_SNAPSHOT_UNSET:
+      gpu_info = self.log.gpu_info()
     if gpu_info is None or len(gpu_info) == 0:
       return 'cpu'
     return configured_cuda

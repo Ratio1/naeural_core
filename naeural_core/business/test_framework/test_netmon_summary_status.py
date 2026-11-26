@@ -127,6 +127,18 @@ def _local_heartbeat_envelope(**fields):
 
 class TestNetmonSummaryStatus(unittest.TestCase):
 
+  def test_report_replay_can_detect_restart_from_authorized_summary_uptime(self):
+    netmon, patcher = _make_netmon(summary_enabled=True)
+    self.addCleanup(patcher.stop)
+    node = _summary_node()
+    for encoded, expected in (("103:00:09", 370809), ("00:00:06", 6), ("00:99:11", None), (None, None)):
+      node[ct.PAYLOAD_DATA.NETMON_UPTIME] = encoded
+      netmon.register_network_status_snapshot("0xai_ORACLE", {"REMOTE": node}, reporter_is_authorized=True)
+      self.assertEqual(netmon.network_node_uptime("0xai_REMOTE", as_str=False, allow_summary=True), expected)
+    # Existing consumers retain the direct-heartbeat contract when no summary was requested.
+    with self.assertRaises(ValueError):
+      netmon.network_node_uptime("0xai_REMOTE", as_str=False)
+
   def test_policy_mode_derives_summary_status_for_non_supervisor(self):
     netmon, patcher = _make_netmon(
       summary_enabled=None,

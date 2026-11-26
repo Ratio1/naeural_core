@@ -72,6 +72,7 @@ class CentroidObjectTracker:
         linear_recovery_max_age=2,
         linear_recovery_max_relative_dist=3.0,
         linear_recovery_center_scale=1.25,
+        tracking_history_max_entries=0,
         **kwargs
     ):
         """
@@ -139,10 +140,30 @@ class CentroidObjectTracker:
             Recovery still requires predicted center distance to stay under
             this bounded limit.
 
+        tracking_history_max_entries : int, optional
+            Maximum retired linear-track records retained by this tracker.
+            Zero (default) preserves unlimited history. A positive value evicts
+            the oldest retired records, never active tracks. This is an entry
+            count, not a byte or time bound; enable only when late-history
+            consumers tolerate missing IDs. Evicted records are not recoverable.
+
         **kwargs
             Additional keyword arguments.
 
+        Raises
+        ------
+        ValueError
+            If ``tracking_history_max_entries`` is not a nonnegative integer
+            or is a boolean.
+
         """
+        # The shared config validator accepts bool as int; True must never
+        # silently opt into irreversible one-entry retention. Do not coerce.
+        if (isinstance(tracking_history_max_entries, bool)
+                or not isinstance(tracking_history_max_entries, int)
+                or tracking_history_max_entries < 0):
+            raise ValueError("tracking_history_max_entries must be a nonnegative non-boolean integer")
+        self.tracking_history_max_entries = tracking_history_max_entries
         self.nextObjectID = 0
         self.objects = OrderedDict()
         self.disappeared = OrderedDict()
@@ -231,9 +252,19 @@ class CentroidObjectTracker:
         objectID : int
             The ID of the object to deregister.
 
+        Notes
+        -----
+        A positive archive cap evicts in retirement order, independently of ID
+        order or history reads. Getters retain their existing missing-ID
+        defaults after eviction; higher-level consumers must handle those
+        defaults before opting in. Active records and ID allocation are intact.
+
         """
         self.objects_history[objectID] = self.objects.pop(objectID)
         self.disappeared.pop(objectID, None)
+        if self.tracking_history_max_entries > 0:
+            while len(self.objects_history) > self.tracking_history_max_entries:
+                self.objects_history.popitem(last=False)
 
     def reset_old_objects(self):
         """

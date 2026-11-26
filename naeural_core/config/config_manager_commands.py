@@ -1,7 +1,7 @@
 import os
 
 from naeural_core import constants as ct
-from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY
+from naeural_core.business.deployment_lifecycle import OPERATION_KEY, SERVICE_KEY, STATELESS_REPLACEMENT_START
 
 class ConfigCommandHandlers:
   
@@ -44,24 +44,84 @@ class ConfigCommandHandlers:
       
 
     operation = delta_config_stream.get(OPERATION_KEY)
-    if operation is not None:
-      lifecycle = self.shmem[SERVICE_KEY]
-      if operation.get("action") == "retire":
+    lifecycle = self.shmem[SERVICE_KEY]
+    replace_stopped_attempt = False  # Repair rollback may find the failed attempt's file after a restart.
+    if operation is None and not lifecycle.allows_untracked_update(delta_config_stream, self.dct_config_streams.get(stream_name, {})):
+      # Dotted fields and updates without PLUGINS can still override a repaired stream.
+      self.P(f"Ignored a legacy UPDATE_CONFIG for repaired Deeploy pipeline {stream_name!r}.", color="y")
+      return
+    replacement_start = operation is not None and operation.get("action") == STATELESS_REPLACEMENT_START
+    if replacement_start:
+      if not validated_command or operation.get("coordinator") != sender_addr:
+        self.P("Refused a stateless replacement from an unauthenticated coordinator.", color="y")
+        return
+      try:
+        sender_eth = self.owner.bc.node_address_to_eth_address(sender_addr).lower()
+        registered = {address.lower() for address in self.owner.bc.get_eth_oracles()}
+      except Exception:
+        # A registry read failure leaves the previous config intact and can be retried by the coordinator.
+        self.P("Stateless replacement coordinator authorization is unavailable.", color="y")
+        return
+      if sender_eth not in registered:
+        self.P("Refused a stateless replacement from an unregistered coordinator.", color="y")
+        return
+      try:
         with lifecycle.lock:
-          current = self.dct_config_streams.get(stream_name, {})
-          if lifecycle.retire(stream_name, current, operation, sender_addr, validated_command):
+          if not lifecycle.can_replace_stateless_worker(delta_config_stream, self.dct_config_streams.get(stream_name, {})):
+            self.P(f"Refused stateless replacement for {stream_name!r} because of its local deployment state.", color="y")
+            return
+          if not lifecycle.admit(delta_config_stream, sender_addr, validated_command):
+            self.P(f"Refused stateless replacement for {stream_name!r} at lifecycle admission.", color="y")
+            return
+      except (ValueError, TypeError, KeyError, AttributeError):
+        # Refuse a malformed config without logging configuration values or changing the local workload.
+        self.P(f"Refused invalid stateless replacement configuration for {stream_name!r}.", color="y")
+        return
+      operation = dict(operation, action="start")  # Reuse the existing supervised plugin restart and reports.
+      delta_config_stream[OPERATION_KEY] = operation
+    elif operation is not None:
+      if operation.get("action") in ("retire", "inspect_worker_v1", "retire_worker_v1"):
+        def get_current():
+          return self.dct_config_streams.get(stream_name, {})
+
+        def retire_current(current, retire_operation, evidence=None):
+          # Adopt the runtime and remove its config under the same lock as the final retirement check.
+          if lifecycle.retire(stream_name, current, retire_operation, sender_addr, validated_command, repair_evidence=evidence):
             manager = self.owner._business_manager
             if manager is not None:
               for plugin in list(manager.current_instances.values()):
                 if plugin is not None and plugin.get_stream_id() == stream_name:
-                  tracked_config = {OPERATION_KEY: operation}
+                  tracked_config = {OPERATION_KEY: retire_operation}
                   lifecycle.attach(tracked_config, plugin.get_signature(), plugin.get_instance_id(), plugin)
-                  plugin._deployment_operation_key = lifecycle.key(operation)
+                  plugin._deployment_operation_key = lifecycle.key(retire_operation)
             if current:
               self.delete_config_stream(stream_name, initiator_id, session_id, verbose=verbose)
+
+        if operation["action"] == "retire":
+          with lifecycle.lock:
+            retire_current(get_current(), operation)
+        else:
+          # Inspection and a rejected conditional retirement never remove a pipeline.
+          lifecycle.check_worker_repair(stream_name, get_current, operation, sender_addr, validated_command,
+                                        self.owner.bc, self.owner._business_manager, retire_current)
         return
+      if operation.get("action") == "start_repaired_worker_v1":
+        occupant = self.dct_config_streams.get(stream_name, {})
+        tracked = occupant.get(OPERATION_KEY)
+        if occupant and ((not tracked and lifecycle.allowed(occupant))
+                         or (tracked and tracked.get("operation_id") != operation.get("operation_id"))):
+          return  # A worker reoccupied after the stopped-worker preflight cannot be silently overwritten.
+        if tracked and lifecycle.key(tracked) != lifecycle.key(operation):
+          # Verify the stopped predecessor before admitting a start that changes the active journal record.
+          if (operation["attempt"] != "restore" or tracked["attempt"] != "deploy"
+              or not lifecycle.stopped(occupant)):
+            return
+          replace_stopped_attempt = True
       if not lifecycle.admit(delta_config_stream, sender_addr, validated_command):
         return
+      if operation["action"] == "start_repaired_worker_v1":
+        operation = dict(operation, action="start")  # Runtime, restart and later tracked updates use the usual contract.
+        delta_config_stream[OPERATION_KEY] = operation
       if operation["action"] == "stop":
         # A delayed stop cannot remove another deployment or its restoration.
         current = self.dct_config_streams.get(stream_name, {})
@@ -94,6 +154,11 @@ class ConfigCommandHandlers:
     #endif
 
     config_stream = self.dct_config_streams.get(stream_name, {})
+    if replacement_start or replace_stopped_attempt or (operation is not None and operation["action"] == "start" and config_stream and
+                                   config_stream.get(OPERATION_KEY) is None and not lifecycle.allowed(config_stream)):
+      # A crash after conditional retirement may leave this obsolete file. Build the accepted tracked
+      # replacement from its complete input so removed fields and old secret references cannot survive.
+      config_stream = {}
     is_new = False
     if len(config_stream) > 0:
       msg = "Received {} command to update for existing pipeline '{}' ({}) from {}:{}".format(
@@ -204,7 +269,12 @@ class ConfigCommandHandlers:
       notif_code=ct.NOTIFICATION_CODES.PIPELINE_FAILED
       info = "Command should contain NAME, SIGNATURE, INSTANCE_ID as well as INSTANCE_CONFIG 'delta' object and MUST address a existing pipeline. Full received command: {}".format(dct_config_data)
     else:
-      
+      lifecycle = self.shmem.get(SERVICE_KEY)
+      # Single and batched deltas address the current instance without a deployment revision.
+      if lifecycle is not None and not lifecycle.allows_instance_update(self.dct_config_streams[pipeline_name]):
+        self.P(f"Ignored UPDATE_PIPELINE_INSTANCE for inactive Deeploy pipeline {pipeline_name!r}.", color="y")
+        return None
+
       if session_id is None:
         session_id = self.dct_config_streams[pipeline_name].get(ct.PAYLOAD_DATA.SESSION_ID)
       else:
@@ -325,7 +395,7 @@ class ConfigCommandHandlers:
         if res is not None:
           results.append(res)
       #endfor
-      msg = "Successfully updated {} pipelines with `batch_update_pipeline_instance`".format(len(lst_configs))
+      msg = "Successfully updated {} pipelines with `batch_update_pipeline_instance`".format(len(results))
       info = " Pipelines:\n  - " +"\n  - ".join([
         str(res)
         for res in results

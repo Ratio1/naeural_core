@@ -29,6 +29,77 @@ canonical configuration is already absent, any active matching journal record
 still supplies workload identities for cleanup; absence of a configuration alone
 cannot acknowledge a journaled workload as stopped.
 
+### Same-host legacy worker inspection
+
+An authenticated current protocol oracle can inspect a named untracked job with
+one `WORKER_APP_RUNNER` instance. The transport addresses the worker by its
+current identity. The versioned actions below require a coordinator-prefixed
+operation ID, integer job ID, revision zero, exact `instance_id`, `node_addr`,
+a 32-character lowercase hex `challenge` and an integer Unix `expires_at`.
+The coordinator issues a 110-second challenge. A worker accepts it while the
+deadline is in its future, up to 180 seconds from its local clock. The worker
+throttles repeated running-worker inspections for the same job for five seconds.
+The coordinator encrypts the full canonical configuration fingerprint
+to this worker as `config_seal`. The worker decrypts it with the authenticated
+sender identity and compares it locally on both commands. Only the ciphertext's
+SHA-256 tag, `config_seal_hash`, appears in the journal and signed receipts.
+The fingerprint preserves scalar values and all list order, excluding transport
+and response metadata. Older command handlers reject these action names.
+
+- `action=inspect_worker_v1`, `attempt=inspect` uses the existing parent
+  operation ID. The worker compares its local stream and live runner and reads
+  Git HEAD from the live container. It returns a node-signed observation at
+  `<parent operation ID>|inspect|<node>` in `DEEPLOY_NODE_OPERATIONS` with
+  `status=observed`, the challenge, deadline, job, app, revision, exact worker
+  identity, Git commit and `order_digest`. The digest is SHA-256 of compact
+  UTF-8 JSON for `[current_target_nodes, BUILD_AND_RUN_COMMANDS, CHAINSTORE_PEERS]`,
+  preserving order and emitting Unicode literally. Only the coordinator receives
+  the observation. An absent worker or expired challenge yields no new report.
+  Reading the commit establishes what is checked out locally. The coordinator
+  separately checks restoration source availability. The worker runs the Docker
+  probe outside its shared lifecycle lock, then confirms that the runtime,
+  config and recorded challenge still match under the lock.
+  For a previously stopped worker the same request can use
+  `confirm_prior_stop=true`. It verifies the matching local journal STOP
+  and Git pin, absence of the stream and live instance, and no pending start.
+  The signed receipt carries that flag and the pin without a config seal or
+  order digest. The worker persists the legacy replay fence with this receipt
+  before responding. An older direct parent STOP may lack a job ID. That
+  compatibility path still binds the exact parent, coordinator, pipeline and
+  instance. New conditional STOP records must include the job ID.
+- `action=retire_worker_v1`, `attempt=retire` uses a new child operation ID and
+  supplies `parent_operation_id`, the same challenge and deadline, accepted
+  digest, ciphertext and `git_commit`. The worker rechecks its observation and live checkout
+  before entering the existing durable retire path. The signed stop carries
+  the parent ID, challenge, order digest and per-instance runtime binding.
+  The inspected live Git commit remains authoritative when the runner
+  attaches or reports cached artifact identifiers.
+  A durable conditional abort also prevents the old untracked job from starting
+  if its stream file survives a crash between journal and configuration writes.
+  The reporter sees retirement only after the journal file and its directory
+  entry are synced. A restart syncs the directory before using the recovered
+  journal.
+  Its tombstone survives admission of a later tracked revision. A tracked start
+  encountering that obsolete file builds its replacement from the supplied
+  pipeline so removed settings and credential references cannot carry forward.
+- `action=start_repaired_worker_v1` starts the tracked `deploy` or `restore`
+  attempt on either target. It requires this worker's matching local stop
+  record, the parent operation, job ID and the child's immutable repair secret
+  revision. The node persists that the legacy revision was retired, including on
+  the target that had already stopped. Subsequent untracked `UPDATE_CONFIG`
+  messages for the repaired job, including partial and dotted updates, are
+  discarded before config merge. Single and batched instance updates address
+  the current local instance. They can target the active tracked deployment
+  or restoration and are rejected for a retired local configuration. The
+  instance command format carries no deployment revision. The diagnostic
+  names the pipeline and omits the payload.
+  A restore that finds the failed deployment's config file after a restart
+  replaces it with the complete restore config after verifying the stopped
+  attempt in the journal.
+  Retries against an absent pipeline leave the existing retirement receipt intact.
+  A changed job, instance, command order, Git commit or expired authorization
+  leaves the current pipeline running.
+
 ## Durable observations and cleanup
 
 `DeploymentLifecycle` is owned by ConfigManager and publishes on an independent
@@ -75,12 +146,29 @@ sequence, and Unix `updated_at`. They are signed with
 when its observable state changes, with a `PUBLISH_TIMEOUT` (15 s) confirmation
 wait, and is retried on the next pass until a write is confirmed. Stop and failure
 snapshots are written first in each pass, and a snapshot's second field is
-skipped once its first write is unconfirmed. There is no periodic refresh. Once a ready snapshot of an attempt is confirmed, the journal
-marks it reported and nothing more is published for that attempt, including
-after a node restart, unless the coordinator stops or retires it; workload
-liveness after deployment comes from NetMon. Sequence is persisted before
-publication. Consumers must verify signatures and expected node/operation
-identity; `updated_at` is not a liveness signal.
+skipped once its first write is unconfirmed. Each updated Deeploy app runner reports its
+`source_mode` (`following`, `pinned` or `service`) from admission. Saved
+Deeploy pipelines use the same source policy after node restart. Direct SDK
+pipelines keep the runner's regular source and pull settings. A
+following runner continues to report changes to its status and actual commit or
+image after readiness. A branch lookup failure can coexist with readiness and
+appears as `source_error: SOURCE_UNREACHABLE`. A new start can clear a workload
+start, health, image pull or source access failure. Infrastructure failures
+remain terminal for the affected runner. A new runner on node restart observes
+its own health after a previously confirmed deployment. Bound instances retain
+their confirmed ready snapshot until retirement or stop.
+
+The node replays the latest signed current field to an intended oracle that
+missed publication, came back online, or whose reported process uptime fell.
+The replay preserves the original sequence, timestamp and history slots.
+It waits for an acknowledgement from that specific oracle and makes up to
+three attempts per snapshot and oracle session. A new observation or a
+returning oracle starts a fresh retry budget.
+The node accepts process uptime from direct heartbeats and fresh authorized
+network summaries. If an older summary omits uptime and the oracle restarts
+after acknowledging but before its disk flush, a restart that never appears
+offline can leave its replica behind until the next observation. Consumers must verify signatures and
+expected node/operation identity and use node liveness to detect stale reports.
 
 These are bounded recent snapshots, not a permanent event log. Tombstones and
 operation journal records are retained; operator retention must not discard aborts
@@ -113,6 +201,22 @@ Tracked plugin construction is serialized with lifecycle admission and reporting
 the lock is acquired after prior-instance shutdown and is never held across that
 thread join. Stop acknowledgment cannot race a constructor creating an external
 workload. Runner `get_deployment_runtime_artifacts()` must return cached values
-without I/O. The node journals and reports only `image_id` (full sha256 Docker
-identity) and optional `git_commit` (40 hexadecimal characters), including after
-retirement/restart. Missing bindings remain absent so restoration can fail closed.
+without I/O. The node journals the actual `image_id` (local Docker identity),
+the immutable registry `image_ref` when available, and the worker's checked-out
+`git_commit`. Retirement keeps this evidence. Restoring a bound instance
+requires its recorded artifact. A following instance resolves its source again.
+
+## Stateless replacement
+
+A validated command from an enrolled oracle can use
+`start_stateless_replacement_v1` to send a complete configuration without a
+prior retirement receipt. The job, owner and runtime component identities must
+match any local occupant. Native and runner plugins go through normal plugin
+validation and the replacement configuration checks. The new
+attempt is journaled before the config changes. The business manager uses the
+ordinary tracked restart path, including local shutdown before reconstructing a
+component with the same identity. The journal fences older starts and
+unversioned pipeline writes for the job across a worker restart. The journal
+orders new starts against same-job retirements even after the config file is
+removed. Historical per-node overlays are checked for local mounts. Instance
+commands still address the active tracked attempt.

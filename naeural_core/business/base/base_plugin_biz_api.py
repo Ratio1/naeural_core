@@ -1,3 +1,5 @@
+from math import isfinite
+
 
 class _BasePluginAPIMixin:
   def __init__(self) -> None:
@@ -861,6 +863,42 @@ class _BasePluginAPIMixin:
       value = self.chainstore_hget(hkey, key, token=token, debug=debug)
       result[key] = value
     return result
+
+
+  def chainstore_hsync_from_peer(self, hkey, peer, timeout):
+    """Fetch one peer's hash snapshot from a background worker.
+
+    Use the registered ChainStore implementation for authorization, response
+    validation and merging. The caller can retry when the store is unavailable.
+    Plugin-thread timer stacks and the unbounded initialization wait are bypassed.
+
+    Parameters
+    ----------
+    hkey : str
+      Hash namespace accepted by ChainStore.
+    peer : str
+      The single remote peer to query.
+    timeout : float
+      Maximum positive finite wait for this peer's response, in seconds.
+
+    Returns
+    -------
+    dict
+      ChainStore's result, including the accepted peer and merged field count.
+
+    Examples
+    --------
+    >>> result = plugin.chainstore_hsync_from_peer("players", "peer-A", timeout=5)
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not isfinite(timeout) or timeout <= 0:
+      raise ValueError("Background peer sync requires a positive finite timeout.")
+    if not isinstance(peer, str) or not peer or peer == self.ee_addr:
+      raise ValueError("Background peer sync requires one remote peer.")
+    sync = self.__chainstorage_memory().get('__chain_storage_hsync')
+    if not callable(sync):
+      raise ValueError("Chain storage hsync is not ready.")
+    # The backend performs the same namespace and proof checks as ordinary hsync.
+    return sync(hkey, peers=[peer], include_default_peers=False, timeout=timeout, debug=False)
 
 
   def chainstore_hsync(

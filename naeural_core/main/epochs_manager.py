@@ -201,6 +201,9 @@ class EpochsManager(Singleton):
     self._last_cached_data_refresh = None
     self._cached_data_dirty_nodes = set()
     self._dirty_signature_epochs = set()
+    self.__save_generation = 0  # Incremented with snapshot creation under EPOCHMON_MUTEX.
+    self.__last_persisted_generation = 0  # Only the serialized disk writer changes this.
+    self.__persist_lock = Lock()  # Disk writes must finish in generation order or be superseded.
     self._save_cache_signatures = {}
     self._save_cache_agreement_cid = {}
     self._save_cache_signatures_cid = {}
@@ -547,10 +550,10 @@ class EpochsManager(Singleton):
 
     Returns
     -------
-    tuple[dict, int]
+    tuple[dict, int, int]
       Detached payload matching the on-disk ``epochs_status.pkl`` schema and
       the number of signature epochs that were dirty before the incremental
-      signature-save cache refresh.
+      signature-save cache refresh, and the local save generation.
     """
     def _build_snapshot():
       self.P(f"{self.__class__.__name__} saving epochs status for {len(self.__data)} nodes...")
@@ -572,29 +575,42 @@ class EpochsManager(Singleton):
         if key in [SYNC_NODES, SYNC_SIGNATURES, SYNC_AGREEMENT_CID, SYNC_SIGNATURES_CID]:
           continue
         snapshot[key] = deepcopy(value)
-      return snapshot, dirty_signature_epochs
+      self.__save_generation += 1  # Assign order before releasing the snapshot mutex.
+      return snapshot, dirty_signature_epochs, self.__save_generation
 
     if with_lock:
       with self.log.managed_lock_resource(EPOCHMON_MUTEX):
         return _build_snapshot()
     return _build_snapshot()
 
-  def __persist_full_data_snapshot(self, snapshot):
-    """
-    Persist a detached epochs-status payload to disk.
+  def __persist_full_data_snapshot(self, snapshot, generation):
+    """Write a detached snapshot unless a newer generation reached disk first.
+
+    A periodic save can release the epoch mutex before rollover and reach disk
+    after the rollover save. Serialize writers outside the epoch mutex.
 
     Parameters
     ----------
     snapshot : dict
-      Detached payload previously produced by
-      ``__snapshot_full_data_for_save``.
+      Detached epochs state matching the existing pickle format.
+    generation : int
+      Local capture order assigned under the epoch mutex.
+
+    Returns
+    -------
+    bool
+      True if this snapshot was submitted to the disk writer.
+
+    Examples
+    --------
+    An older paused writer returns False after a rollover writer completes.
     """
-    self.log.save_pickle_to_data(
-      data=snapshot,
-      fn=FN_NAME,
-      subfolder_path=FN_SUBFOLDER,
-    )
-    return
+    with self.__persist_lock:
+      if generation <= self.__last_persisted_generation:
+        return False  # The newer snapshot already represents this state.
+      self.log.save_pickle_to_data(data=snapshot, fn=FN_NAME, subfolder_path=FN_SUBFOLDER)
+      self.__last_persisted_generation = generation
+      return True
 
   def save_status(self):
     """
@@ -613,9 +629,10 @@ class EpochsManager(Singleton):
     """
     save_start = time()
     lock_start = time()
-    snapshot, dirty_signature_epochs = self.__snapshot_full_data_for_save(with_lock=True)
+    snapshot, dirty_signature_epochs, generation = self.__snapshot_full_data_for_save(with_lock=True)
     lock_elapsed = time() - lock_start
-    self.__persist_full_data_snapshot(snapshot)
+    if not self.__persist_full_data_snapshot(snapshot, generation):
+      return  # The rollover or periodic save that superseded this one already logged its result.
     elapsed = time() - save_start
     self.P(
       "Epochs status saved in {:.2f} seconds (epochmon_mutex={:.4f}s, dirty_signature_epochs={})".format(
@@ -1414,7 +1431,7 @@ class EpochsManager(Singleton):
         self.P("Starting epoch: {}".format(current_epoch))
         self.__current_epoch = current_epoch 
         self.__reset_all_timestamps()
-        save_snapshot, _dirty_signature_epochs = self.__snapshot_full_data_for_save(with_lock=False)
+        save_snapshot, _dirty_signature_epochs, generation = self.__snapshot_full_data_for_save(with_lock=False)
       #endif current epoch is not None
       # This is included in order to ensure that if a parallel process checks the epoch ending
       # it will also wait in case the cache needs to be updated.
@@ -1422,7 +1439,7 @@ class EpochsManager(Singleton):
         self.maybe_update_cached_data(force=True, with_lock=False)
     # endwith lock
     if save_snapshot is not None:
-      self.__persist_full_data_snapshot(save_snapshot)
+      self.__persist_full_data_snapshot(save_snapshot, generation)
     return result
 
 

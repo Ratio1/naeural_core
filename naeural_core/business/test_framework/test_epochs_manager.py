@@ -497,6 +497,30 @@ class TestEpochsManager(unittest.TestCase):
     self.assertTrue(len(saved_payloads) > 0)
     self.assertIsInstance(saved_payloads[-1], dict)
 
+  def test_delayed_pre_rollover_save_cannot_replace_new_epoch_on_disk(self):
+    entered, proceed = Event(), Event()
+    written = []
+    persist = self.manager._EpochsManager__persist_full_data_snapshot
+    def delay_old_snapshot(snapshot, *args):
+      current = snapshot[SYNC_NODES][self.owner.node_addr][EPCT.CURRENT_EPOCH][EPCT.ID]
+      if current == 0:
+        entered.set()  # The periodic saver has released EPOCHMON_MUTEX with an old snapshot.
+        proceed.wait(timeout=3)
+      return persist(snapshot, *args)
+    self.log.save_pickle_to_data = lambda data, **kw: written.append(data)
+    with patch.object(self.manager, '_EpochsManager__persist_full_data_snapshot', side_effect=delay_old_snapshot):
+      saver = Thread(target=self.manager.save_status)
+      saver.start()
+      self.assertTrue(entered.wait(timeout=2))
+      try:
+        self.manager._set_dbg_date(self.manager.get_current_date() + timedelta(seconds=self.manager.epoch_length))
+        self.manager.maybe_close_epoch()  # Publish the next epoch while the periodic saver is paused.
+      finally:
+        proceed.set()
+        saver.join(timeout=3)
+    self.assertFalse(saver.is_alive())
+    self.assertEqual(written[-1][SYNC_NODES][self.owner.node_addr][EPCT.CURRENT_EPOCH][EPCT.ID], 1)
+
   def test_local_self_rollover_updates_owner_without_recalculating_cached_peer(self):
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = "1"
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = "60"

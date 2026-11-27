@@ -3090,7 +3090,7 @@ class Orchestrator(DecentrAIObject,
       oracles = list(self.__cached_node_oracles)
       version = self.__node_oracle_refresh_version
       registered = self.__cached_summary_registry if self._use_summary_oracle_refresh else ()
-    if version == 0 or version == self.__node_oracle_apply_version:
+    if not oracles or version == self.__node_oracle_apply_version:
       return 0
     try:
       if self._use_summary_oracle_refresh:
@@ -3099,7 +3099,9 @@ class Orchestrator(DecentrAIObject,
         still_fresh = set(self.netmon.resolve_summary_oracles(registered))
         oracles = [pair for pair in oracles if pair[0] in still_fresh]
         if len(oracles) < max(1, len(registered) // 2):
-          self.__node_oracle_apply_version = version
+          with self.__node_oracle_refresh_lock:
+            if version == self.__node_oracle_refresh_version:
+              self.__node_oracle_apply_version = version  # Only retire the snapshot we actually checked.
           return 0
       existing = set(self.whitelist_full)
       missing_oracles = []
@@ -3120,13 +3122,18 @@ class Orchestrator(DecentrAIObject,
         missing_oracles.append(oracle_entry)
       #endfor
 
-      if len(missing_oracles) == 0:
+      # Commit to the local allowlist only while this registry snapshot is still current.
+      # Registry RPC and summary identity resolution both happen outside this short critical section.
+      with self.__node_oracle_refresh_lock:
+        if version != self.__node_oracle_refresh_version or version == self.__node_oracle_apply_version:
+          return 0
+        if missing_oracles:
+          self.blockchain_manager.add_address_to_allowed(missing_oracles)
         self.__node_oracle_apply_version = version
+      if not missing_oracles:
         self.P("All blockchain oracle nodes are already whitelisted.", color='g')
         return 0
 
-      self.blockchain_manager.add_address_to_allowed(missing_oracles)
-      self.__node_oracle_apply_version = version
       self.P("Added {} missing blockchain oracle node(s) to whitelist.".format(len(missing_oracles)), color='g')
       return len(missing_oracles)
     except Exception as exc:
@@ -3149,6 +3156,8 @@ class Orchestrator(DecentrAIObject,
         with self.__node_oracle_refresh_lock:
           self.__cached_node_oracles = []
           self.__cached_summary_registry = ()
+          self.__node_oracle_refresh_version += 1  # Invalidate applications already holding a copy.
+          refresh_attempt = self.__node_oracle_refresh_version
         try:
           # Use the protocol registry once per cycle and count distinct identities.
           registered = list(dict.fromkeys(address.lower() for address in self.bc.get_eth_oracles()))
@@ -3174,9 +3183,11 @@ class Orchestrator(DecentrAIObject,
         oracle_alias = aliases[idx] if idx < len(aliases) else ""
         cached_oracles.append((oracle_addr, oracle_alias))
       with self.__node_oracle_refresh_lock:
-        self.__cached_node_oracles = cached_oracles
         if self._use_summary_oracle_refresh:
+          if refresh_attempt != self.__node_oracle_refresh_version:
+            return 0  # A newer attempt already retired this result while its registry read was in flight.
           self.__cached_summary_registry = tuple(registered)
+        self.__cached_node_oracles = cached_oracles
         self.__node_oracle_refresh_version += 1
       return len(oracles)
     except Exception as exc:

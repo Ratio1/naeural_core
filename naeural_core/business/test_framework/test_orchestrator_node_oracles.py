@@ -162,6 +162,27 @@ class TestOrchestratorNodeOracleRefresh(unittest.TestCase):
     self.assertEqual(node.apply_cached_node_oracles_to_whitelist(), 0)
     self.assertNotIn("0xai_late", node.whitelist_full)
 
+  def test_new_failed_refresh_invalidates_an_application_already_in_flight(self):
+    node = self._make_orchestrator(whitelist=["0xai_known"])
+    node._use_summary_oracle_refresh = True
+    node._bc, node._network_monitor = mock.Mock(), mock.Mock()
+    node._bc.get_eth_oracles.return_value = ["0x01"]
+    node.netmon.resolve_summary_oracles.return_value = ["0xai_new"]
+    self.assertEqual(node.refresh_node_oracles_cache(), 1)
+
+    def finish_next_refresh_before_apply(_registry):
+      node._bc.get_eth_oracles.side_effect = OSError("registry unavailable")
+      self.assertEqual(node.refresh_node_oracles_cache(), 0)  # The old apply holds a detached snapshot.
+      return ["0xai_new"]
+
+    node.netmon.resolve_summary_oracles.side_effect = finish_next_refresh_before_apply
+    self.assertEqual(node.apply_cached_node_oracles_to_whitelist(), 0)
+    self.assertEqual(node.blockchain_manager.added_batches, [])
+    self.assertEqual(node.whitelist_full, ["0xai_known"])
+    node._bc.get_eth_oracles.side_effect = node.netmon.resolve_summary_oracles.side_effect = None
+    self.assertEqual(node.refresh_node_oracles_cache(), 1)
+    self.assertEqual(node.apply_cached_node_oracles_to_whitelist(), 1)
+
   def test_appends_only_missing_oracles(self):
     orchestrator = self._make_orchestrator(whitelist=["existing_node"])
     setattr(

@@ -230,7 +230,38 @@ class _OldNetmonStub:
 
 
 class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
+  # The mode of every switch of the store in a harness: 'off' runs these suites as the previous release behaves; the
+  # report-mode run in test_chain_store_switches.py sets 'report' here for each of its tests.
+  CSTORE_MODE = "off"
+
   def __init__(self, ee_addr, default_peers=None, storage=None):
+    """
+    Build a chain store with the state on_init would give it, without starting it.
+
+    Parameters
+    ----------
+    ee_addr : str
+      The node's address: its writes and confirmations are sent from it.
+    default_peers : list of str, optional
+      The replication peers the store starts with, as a peer refresh would leave them; none by default.
+    storage : dict, optional
+      Records (composed key -> record) the store holds, deep-copied; empty by default.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Every switch of the store is in the class's ``CSTORE_MODE``: both as the ``cfg_cstore_*`` value on_init reads
+    and in the mode table on_init would build from them. The save back-off has its 30 s ceiling and no pause yet.
+
+    Examples
+    --------
+    >>> store = _ChainStoreRuntimeHarness("peer-1", default_peers=["peer-2"])
+    >>> store._ChainStoreBasePlugin__cs_modes["save_backoff"]
+    'off'
+    """
     self.ee_addr = ee_addr
     self.ee_id = f"{ee_addr}-id"
     self._stream_id = "stream"
@@ -258,6 +289,68 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     self._ChainStoreBasePlugin__cs_stats_last, self._ChainStoreBasePlugin__cs_stats_queue_peak = self._now, 0
     self._ChainStoreBasePlugin__cs_stats_lost = 0
     self.lost_inputs_count = 0
+    # The four switches as on_init reads them from the plugin config, each in this harness's mode.
+    self.cfg_cstore_order = self.cfg_cstore_lean_confirm = self.CSTORE_MODE
+    # The other two.
+    self.cfg_cstore_handoff = self.cfg_cstore_save_backoff = self.CSTORE_MODE
+    # The mode table on_init builds from them.
+    self._ChainStoreBasePlugin__cs_modes = dict.fromkeys(("order", "lean_confirm", "handoff", "save_backoff"),
+                                                         self.CSTORE_MODE)
+    # The save back-off's ceiling as the config gives it (the 30 s default) and as on_init reads it.
+    self.cfg_cstore_save_max_gap, self._ChainStoreBasePlugin__save_max_gap = 30, 30.0
+    # No save yet, so no pause: the first save is immediate, as after on_init.
+    self._ChainStoreBasePlugin__save_resume = 0.0
+    # The stamp bound as the config gives it (60 s) and as on_init reads it (ms); no stamp taken yet, a clock at 0.
+    self.cfg_cstore_ver_max_ahead, self._ChainStoreBasePlugin__ver_ahead = 60, 60000
+    # The largest stamp lead of the period and the stamp clock, as on_init starts them on an empty store.
+    self._ChainStoreBasePlugin__ver_lead = self._ChainStoreBasePlugin__ver_clock = 0
+    # Nothing held without a dirty mark.
+    self._ChainStoreBasePlugin__chain_storage_unmarked = False
+    # The tombstone life (7 days) and cap (570) as the config gives them and as on_init reads them; no horizon yet.
+    self.cfg_cstore_tombstone_days, self.cfg_cstore_tombstone_cap = 7, 570
+    # As on_init reads them: the life in ms, the cap, and the horizon of a store that removed no tombstone.
+    self._ChainStoreBasePlugin__tomb_ms, self._ChainStoreBasePlugin__tomb_cap = 7 * 86_400_000, 570
+    # No tombstone removed yet.
+    self._ChainStoreBasePlugin__tomb_horizon = 0
+    # The hand-off's numbers as the config gives them (first re-send after 300 s, 8 in flight per peer) and as on_init
+    # reads them.
+    self.cfg_cstore_handoff_first_s, self.cfg_cstore_handoff_window = 300, 8
+    # As on_init reads them.
+    self._ChainStoreBasePlugin__handoff_first, self._ChainStoreBasePlugin__handoff_window = 300.0, 8
+    # The limit of new keys per outside sender as the config gives it and as on_init reads it: 0, they are only counted.
+    self.cfg_cstore_new_keys_max = self._ChainStoreBasePlugin__new_keys_max = 0
+    # The oracles a catch-up asks, as the config gives it and as on_init reads it.
+    self.cfg_cstore_pull_peers = self._ChainStoreBasePlugin__pull_peers = 2
+    # No marks owed and no catch-up running, as on_init leaves a store that keeps none (every switch 'off', or a
+    # replica without the record).
+    self._ChainStoreBasePlugin__pull_owed = self._ChainStoreBasePlugin__pull = None
+    # No save made yet, so no duration of one for the catch-up's pace.
+    self._ChainStoreBasePlugin__save_took = 0.0
+    # How many inputs one lap takes, as the plugin config gives it: with more than that waiting, no page is sent.
+    self.cfg_max_inputs_per_iteration = 32
+    # No page sent yet, and the key prefixes no page carries, as on_init computes them: the tombstones' own, the
+    # reserved key and the indexes of the six protected namespaces.
+    self._ChainStoreBasePlugin__pull_sent, self._ChainStoreBasePlugin__pull_skip = 0, (
+      "dl:", "hs:cstore_pull", *map(_hset_index, ChainStoreBasePlugin.CS_PROTECTED_NAMESPACES))
+    # The hand-off's state as on_init leaves it at time 0: an empty table, the first sweep at 300 s, nothing pending.
+    self._ChainStoreBasePlugin__handoff, self._ChainStoreBasePlugin__handoff_next = {}, 300.0
+    # Nothing pending.
+    self._ChainStoreBasePlugin__handoff_pending = 0
+    # No peer dropped as lost or back yet, and no peer proven to stamp its stores.
+    self._ChainStoreBasePlugin__peer_left, self._ChainStoreBasePlugin__peer_back = {}, {}
+    # No stamped store received yet.
+    self._ChainStoreBasePlugin__stamped_peers = set()
+    # No write made with wait=False owed a re-send.
+    self._ChainStoreBasePlugin__unwaited = {}
+    # The plugin loop runs (the base plugin sets this when its loop is told to stop).
+    self.done_loop = False
+    # The UTC hour of the start (time 0), as on_init sets it: no CSTORE_CENSUS line before the next full hour.
+    self._ChainStoreBasePlugin__census_hour = 0
+    # The resync of the signed namespaces as on_init leaves it: due at the first lap that finds a peer, at its first
+    # namespace.
+    self._ChainStoreBasePlugin__resync_next, self._ChainStoreBasePlugin__resync_turn = 0, 0
+    # No namespace owed a second request, as on_init leaves it.
+    self._ChainStoreBasePlugin__resync_again = []
 
   def P(self, msg, color=None, **kwargs):  # pylint: disable=unused-argument
     self.messages.append(msg)
@@ -287,10 +380,45 @@ class _ChainStoreRuntimeHarness(ChainStoreBasePlugin):
     return encoded.decode("utf-8")
 
   @staticmethod
-  def base64_to_str(value, url_safe=True):  # pylint: disable=unused-argument
-    padding = "=" * ((4 - len(value) % 4) % 4)
-    raw = f"{value}{padding}".encode("utf-8")
+  def base64_to_str(value, url_safe=True):
+    """
+    Decode base64 text to a str exactly as the node's helper does (``plugin_base_utils.base64_to_str``).
+
+    No padding is added and nothing is caught, so a text the node's helper raises for raises here too: one
+    without its padding, one that is not UTF-8 once decoded, one that holds a lone surrogate. Before, this
+    stand-in added the missing padding, and a key no node decodes passed in the tests.
+
+    Parameters
+    ----------
+    value : str
+      The base64 text, for example the field part of a composed hash key.
+    url_safe : bool, optional
+      True (the default) for the URL-safe alphabet the hash keys use; False for the standard one.
+
+    Returns
+    -------
+    str
+      The decoded text.
+
+    Raises
+    ------
+    ValueError
+      ``binascii.Error`` for wrong padding, ``UnicodeDecodeError`` for bytes that are not UTF-8,
+      ``UnicodeEncodeError`` for a text UTF-8 cannot encode (all are ValueError).
+
+    Examples
+    --------
+    >>> _ChainStoreRuntimeHarness.base64_to_str("YWxwaGE=")
+    'alpha'
+    >>> _ChainStoreRuntimeHarness.base64_to_str("YWxwaGE")
+    Traceback (most recent call last):
+    binascii.Error: Incorrect padding
+    """
+    # The text as bytes, as the node's helper encodes it.
+    raw = value.encode("utf-8")
+    # Decoded with the alphabet asked for.
     decoded = base64.urlsafe_b64decode(raw) if url_safe else base64.b64decode(raw)
+    # And read as UTF-8.
     return decoded.decode("utf-8")
 
   @staticmethod
@@ -436,6 +564,21 @@ class TestChainStoreHsync(unittest.TestCase):
     self.assertEqual(set_result["kwargs"]["include_default_peers"], False)
     self.assertEqual(hsync_result["kwargs"]["include_default_peers"], False)
 
+  def test_background_sync_targets_one_peer_without_plugin_timers_or_startup_wait(self):
+    plugin = _PeerSelectionHarness()
+    plugin.start_timer = plugin.end_timer = plugin.sleep = lambda *args: self.fail("touched plugin thread state")
+    result = plugin.chainstore_hsync_from_peer('players', 'peer-A', 2.5)
+    self.assertEqual(result['kwargs'], {'peers': ['peer-A'], 'timeout': 2.5, 'include_default_peers': False, 'debug': False})
+    for timeout in (None, 0, -1, True, float('nan'), float('inf')):
+      with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+        plugin.chainstore_hsync_from_peer('players', 'peer-A', timeout)
+    for invalid in (None, '', 'peer-self', ['peer-A', 'peer-B']):
+      with self.subTest(peer=invalid), self.assertRaises(ValueError):
+        plugin.chainstore_hsync_from_peer('players', invalid, 1)
+    plugin.plugins_shmem.clear()
+    with self.assertRaisesRegex(ValueError, 'not ready'):
+      plugin.chainstore_hsync_from_peer('players', 'peer-A', 1)
+
   def test_hsync_uses_backend_default_peers_when_no_explicit_targets(self):
     requester = _ChainStoreRuntimeHarness("peer-requester", default_peers=["peer-1"])
     responder = _ChainStoreRuntimeHarness(
@@ -489,6 +632,152 @@ class TestChainStoreHsync(unittest.TestCase):
     )
     self.assertEqual(len(requester.sent_payloads), 1)
     self.assertEqual(len(responder.sent_payloads), 1)
+
+  def test_restart_sync_brings_back_an_old_value_unless_the_record_carries_a_revision(self):
+    """A restarted replica that holds the newer value and syncs from a peer holding an older one keeps its own
+    value when the record carries a cs_rev revision; without one the older copy wins, as before."""
+    # The field both replicas hold.
+    field = _hset_key("secrets", "wallet")
+    # Without revisions the peer's old token replaces the new one; with revisions the new one is kept.
+    for versioned, kept in ((False, "old-token"), (True, "new-token")):
+      # One sub-test each.
+      with self.subTest(versioned=versioned):
+        # The revisions of the new and the old value, or none.
+        new_rev, old_rev = ({"cs_rev": 200}, {"cs_rev": 100}) if versioned else ({}, {})
+        # The replica that holds the new value and restarts.
+        restarted = _ChainStoreRuntimeHarness(
+          "peer-requester",
+          storage=_build_hset_storage("secrets", {"wallet": {"token": "new-token", **new_rev}},
+                                      owner="peer-requester"),
+        )
+        # The peer that still holds the old value.
+        stale_peer = _ChainStoreRuntimeHarness(
+          "peer-1",
+          storage=_build_hset_storage("secrets", {"wallet": {"token": "old-token", **old_rev}}, owner="peer-1"),
+        )
+        # The network both answer on.
+        network = _FakeNetwork()
+        # The restarted replica, reachable for the answer.
+        network.register(restarted)
+        # The peer, which answers the sync.
+        network.register(stale_peer)
+        # The sync after the restart.
+        result = restarted._hsync("secrets", peers=["peer-1"], include_default_peers=False)
+        # Nothing merged when the record is versioned, the old copy merged when it is not.
+        self.assertEqual(result["merged_fields"], 0 if versioned else 1)
+        # The token the restarted replica holds.
+        self.assertEqual(restarted.storage[field][ChainStoreBasePlugin.CS_VALUE]["token"], kept)
+        # The other direction still works: a replica that is behind takes the newer copy.
+        stale_peer._hsync("secrets", peers=["peer-requester"], include_default_peers=False)
+        # Both replicas now hold the same token.
+        self.assertEqual(stale_peer.storage[field][ChainStoreBasePlugin.CS_VALUE]["token"], kept)
+
+  def test_a_live_write_is_ordered_by_its_revision_and_a_snapshot_never_downgrades(self):
+    """A live write with a lower cs_rev is refused (refused_cs_rev, not confirmed), a higher or unversioned one is
+    applied; a sync copy replaces a versioned record only with a higher revision."""
+    # The field written.
+    field = _hset_key("secrets", "wallet")
+    # A replica of "peer-1" holding the field at cs_rev 200, with "peer-2" as its peer.
+    node = self.make_versioned_replica(field)
+    # A late or replayed copy at cs_rev 100 from "peer-2": refused and not confirmed.
+    self.assertEqual(self.store_from_peer(node, field, {"token": "old-token", "cs_rev": 100}), 0)
+    # The new token kept, and the refusal counted under its word.
+    self.assertEqual((node.storage[field][node.CS_VALUE]["token"], node._ChainStoreBasePlugin__cs_stats),
+                     ("new-token", {field[:14] + "/remote/refused_cs_rev": 1}))
+    # The caller's dict of a local write.
+    info = {}
+    # The same old copy written locally: False with its word.
+    self.assertEqual(
+      (node._set_value(field, {"token": "old-token", "cs_rev": 100}, owner="local-writer", result_info=info), info),
+      (False, {"outcome": "refused_cs_rev"}))
+    # A newer copy from the peer: applied and confirmed.
+    self.assertEqual(self.store_from_peer(node, field, {"token": "newer-token", "cs_rev": 300}), 1)
+    # Its token stored.
+    self.assertEqual(node.storage[field][node.CS_VALUE]["token"], "newer-token")
+    # A writer that does not version yet (an oracle on older code): last arrival wins, as before.
+    self.assertEqual(self.store_from_peer(node, field, {"token": "legacy-writer"}), 1)
+    # Its token stored.
+    self.assertEqual(node.storage[field][node.CS_VALUE]["token"], "legacy-writer")
+    # A snapshot is old state by nature: it replaces a versioned record only with a newer version.
+    for snapshot_value, kept in (({"token": "unversioned"}, "new-token"),
+                                 ({"token": "old", "cs_rev": 100}, "new-token"),
+                                 ({"token": "newest", "cs_rev": 300}, "newest")):
+      # One sub-test each.
+      with self.subTest(snapshot=snapshot_value):
+        # A fresh replica holding cs_rev 200.
+        node = self.make_versioned_replica(field)
+        # The peer's record as a sync answer carries it.
+        key, record = _hset_record("secrets", "wallet", snapshot_value, owner="peer-2")
+        # The merge of that answer.
+        node._ChainStoreBasePlugin__merge_hset_snapshot("secrets", {key: record})
+        # The token kept or taken.
+        self.assertEqual(node.storage[field][node.CS_VALUE]["token"], kept)
+
+  @staticmethod
+  def make_versioned_replica(field):
+    """
+    Build the replica of "peer-1" holding ``field`` = {"token": "new-token", "cs_rev": 200}, written by "peer-2".
+
+    Parameters
+    ----------
+    field : str
+      The composed key of the "wallet" field of the "secrets" namespace.
+
+    Returns
+    -------
+    _ChainStoreRuntimeHarness
+      The replica, with "peer-2" as its only peer and an instance path for its confirmations.
+
+    Examples
+    --------
+    >>> node = TestChainStoreHsync.make_versioned_replica(_hset_key("secrets", "wallet"))
+    """
+    # The replica, with its peer and the versioned record.
+    node = _ChainStoreRuntimeHarness(
+      "peer-1", default_peers=["peer-2"],
+      storage=_build_hset_storage("secrets", {"wallet": {"token": "new-token", "cs_rev": 200}}, owner="peer-2"),
+    )
+    # The instance path its confirmations name: a list's copy method returns the path when called.
+    node.get_instance_path = ["peer-1", "stream", "CHAIN_STORE", "instance"].copy
+    # Ready.
+    return node
+
+  @staticmethod
+  def store_from_peer(node, field, value):
+    """
+    Deliver a live store of ``field`` = ``value`` from "peer-2" to ``node`` through its payload handler.
+
+    Parameters
+    ----------
+    node : _ChainStoreRuntimeHarness
+      The receiving replica.
+    field : str
+      The composed key written.
+    value : dict
+      The value written.
+
+    Returns
+    -------
+    int
+      How many payloads ``node`` sent back: 1 when it stored and confirmed the write, 0 when it refused it.
+
+    Examples
+    --------
+    >>> TestChainStoreHsync.store_from_peer(node, field, {"token": "t", "cs_rev": 300})
+    1
+    """
+    # Only what this store makes the replica send.
+    node.sent_payloads.clear()
+    # The payload as the network delivers it.
+    node.default_handler({
+      _PayloadData.EE_SENDER: "peer-2", _PayloadData.EE_ID: "peer-2", _PayloadData.EE_DESTINATION: ["peer-1"],
+      _PayloadData.EE_IS_ENCRYPTED: True,
+      "decoded": {node.CS_DATA: {
+        node.CS_OP: node.CS_STORE, node.CS_KEY: field, node.CS_VALUE: value, node.CS_OWNER: "peer-2",
+      }},
+    })
+    # The confirmations sent back.
+    return len(node.sent_payloads)
 
   def test_hsync_treats_empty_snapshot_as_successful_cold_state(self):
     requester = _ChainStoreRuntimeHarness(

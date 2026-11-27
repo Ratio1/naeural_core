@@ -3,7 +3,8 @@ import random
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
-from threading import Lock
+from threading import Event, Lock, Thread
+from unittest.mock import patch
 
 from naeural_core import constants as ct
 from naeural_core.core_logging import Logger
@@ -78,6 +79,9 @@ class _StubOwner:
 
   def network_node_hb_interval(self, addr=None):  # pylint: disable=unused-argument
     return 10
+
+  def network_node_info_available(self, node_addr):
+    return True  # Every fixture node initially has NetMon telemetry.
 
   def network_node_is_online(self, node_addr, dt_now=None):  # pylint: disable=unused-argument
     return True
@@ -493,6 +497,58 @@ class TestEpochsManager(unittest.TestCase):
     self.assertTrue(len(saved_payloads) > 0)
     self.assertIsInstance(saved_payloads[-1], dict)
 
+  def test_delayed_pre_rollover_save_cannot_replace_new_epoch_on_disk(self):
+    entered, proceed = Event(), Event()
+    written = []
+    persist = self.manager._EpochsManager__persist_full_data_snapshot
+    def delay_old_snapshot(snapshot, *args):
+      current = snapshot[SYNC_NODES][self.owner.node_addr][EPCT.CURRENT_EPOCH][EPCT.ID]
+      if current == 0:
+        entered.set()  # The periodic saver has released EPOCHMON_MUTEX with an old snapshot.
+        proceed.wait(timeout=3)
+      return persist(snapshot, *args)
+    self.log.save_pickle_to_data = lambda data, **kw: written.append(data)
+    with patch.object(self.manager, '_EpochsManager__persist_full_data_snapshot', side_effect=delay_old_snapshot):
+      saver = Thread(target=self.manager.save_status)
+      saver.start()
+      self.assertTrue(entered.wait(timeout=2))
+      try:
+        self.manager._set_dbg_date(self.manager.get_current_date() + timedelta(seconds=self.manager.epoch_length))
+        self.manager.maybe_close_epoch()  # Publish the next epoch while the periodic saver is paused.
+      finally:
+        proceed.set()
+        saver.join(timeout=3)
+    self.assertFalse(saver.is_alive())
+    self.assertEqual(written[-1][SYNC_NODES][self.owner.node_addr][EPCT.CURRENT_EPOCH][EPCT.ID], 1)
+
+  def test_failed_newer_save_keeps_older_pending_generation_eligible(self):
+    persist = self.manager._EpochsManager__persist_full_data_snapshot
+    with patch.object(self.log, "save_pickle_to_data", side_effect=[None, OSError("disk full"), None]) as save:
+      self.assertTrue(persist({"epoch": 1}, 1))
+      self.assertFalse(persist({"epoch": 3}, 3))  # The newer snapshot failed to replace generation 1.
+      self.assertTrue(persist({"epoch": 2}, 2))  # A delayed but newer-than-disk writer can still recover.
+      self.assertFalse(persist({"epoch": 1}, 1))
+    self.assertEqual(save.call_count, 3)
+    self.assertTrue(all(call.kwargs["raise_on_error"] for call in save.call_args_list))
+
+  def test_legacy_writer_cannot_acknowledge_a_missing_stage(self):
+    import tempfile
+    from pathlib import Path
+    from naeural_core.main.epochs_manager import FN_NAME
+    persist = self.manager._EpochsManager__persist_full_data_snapshot
+    with tempfile.TemporaryDirectory() as directory:
+      def legacy_writer(data, fn, subfolder_path=None):
+        staged = Path(directory, fn)
+        if data != "failed":
+          staged.write_text(data)  # The old SDK returns this filename on either outcome.
+        return str(staged)
+      self.log.save_pickle_to_data = legacy_writer
+      self.assertTrue(persist("first", 1))
+      self.assertFalse(persist("failed", 3))
+      self.assertTrue(persist("pending", 2))
+      self.assertEqual(list(Path(directory).iterdir()), [Path(directory, FN_NAME)])
+      self.assertEqual(Path(directory, FN_NAME).read_text(), "pending")
+
   def test_local_self_rollover_updates_owner_without_recalculating_cached_peer(self):
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = "1"
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = "60"
@@ -612,6 +668,90 @@ class TestEpochsManager(unittest.TestCase):
       f"Stress timings register={register_time:.2f}s, "
       f"accum_avail={accum_time:.2f}s, legacy_avail={legacy_time:.2f}s"
     )
+
+
+  def test_cached_stats_remain_detached_while_refresh_is_blocked_or_fails(self):
+    node = self.owner.node_addr
+    self.assertIn('error', self.manager.get_cached_stats())
+    good = {'error': None, node: {'tags': ['original'], 'is_online': False}}
+    with patch.object(self.manager, '_EpochsManager__get_stats', return_value=good):
+      self.manager.get_stats(force_refresh=True)[node]['tags'].clear()
+    self.assertEqual(self.manager.get_cached_stats()[node]['tags'], ['original'])
+    entered, proceed = Event(), Event()
+    def blocked(**kwargs):
+      entered.set()
+      proceed.wait(timeout=3)
+      return {'error': 'partial build', node: {'tags': ['partial']}}
+    with patch.object(self.manager, '_EpochsManager__get_stats', side_effect=blocked):
+      worker = Thread(target=self.manager.get_stats, kwargs={'force_refresh': True})
+      worker.start()
+      self.assertTrue(entered.wait(timeout=2))
+      try:
+        self.assertEqual(self.manager.get_cached_stats(node_addrs=[node]), {node: good[node]})
+        self.assertEqual(self.manager.get_cached_stats(online_only=True), {'error': None})
+      finally:
+        proceed.set()
+        worker.join(timeout=2)
+    self.assertEqual(self.manager.get_cached_stats(), good)
+
+  def test_rebuild_rechecks_expiry_after_another_publisher_and_obeys_force(self):
+    entered, proceed = Event(), Event()
+    def build(**kwargs):
+      entered.set()
+      proceed.wait(timeout=3)
+      return {'error': None, 'node': {'tags': ['complete']}}
+    with patch.object(self.manager, '_EpochsManager__get_stats', side_effect=build) as rebuild:
+      workers = [Thread(target=self.manager.get_stats) for _ in range(2)]
+      for worker in workers:
+        worker.start()
+      self.assertTrue(entered.wait(timeout=2))
+      proceed.set()
+      for worker in workers:
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+      self.assertEqual(rebuild.call_count, 1)
+      self.manager.get_stats(force_refresh=True)
+      self.assertEqual(rebuild.call_count, 2)
+
+  def test_failing_known_telemetry_preserves_good_generation(self):
+    self._build_manager(current_epoch=5)  # Statistics require a completed epoch range.
+    node = self.owner.node_addr
+    self.manager.maybe_update_cached_data(force=True)
+    good = self.manager.get_stats(force_refresh=True)
+    self.assertIsNone(good['error'])
+    self.assertIn(node, good)
+    with patch.object(self.owner, 'get_network_node_tags', side_effect=ValueError('telemetry broken')):
+      self.manager.get_stats(force_refresh=True)
+    self.assertEqual(self.manager.get_cached_stats(), good)
+    with patch.object(self.owner, 'get_network_node_tags', return_value=['recovered']):
+      self.manager.get_stats(force_refresh=True)
+    self.assertEqual(self.manager.get_cached_stats()[node]['tags'], ['recovered'])
+
+  def test_stalled_snapshot_logs_age_once_per_interval_and_recovers(self):
+    node = self.owner.node_addr
+    row = {'error': None, node: {'tags': []}}
+    with patch('naeural_core.main.epochs_manager.time', return_value=100), patch.object(self.manager, '_EpochsManager__get_stats', return_value=row):
+      self.manager.get_stats(force_refresh=True)
+    with patch('naeural_core.main.epochs_manager.time', return_value=500), patch.object(self.manager, 'P') as log:
+      self.assertEqual(self.manager.get_cached_stats(), row)
+      self.manager.get_cached_stats()
+      log.assert_called_once()
+      self.assertIn('400s', log.call_args.args[0])
+
+  def test_external_references_do_not_mutate_transferred_epoch(self):
+    node = self.owner.node_addr
+    timestamp = self.manager.get_current_date()
+    self.manager.register_data(node, self._make_hb(timestamp))
+    external = [self.manager.data[node], self.manager.full_data[SYNC_NODES][node], self.manager.get_full_node_state(node)]
+    old_record = self.manager._EpochsManager__data[node][EPCT.CURRENT_EPOCH]
+    self.manager._set_dbg_date(timestamp + timedelta(seconds=self.manager.epoch_length))
+    self.manager.maybe_close_epoch()
+    current = self.manager._EpochsManager__data[node]
+    self.assertIs(current[EPCT.LAST_EPOCH], old_record)
+    self.assertIsNot(current[EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS], old_record[EPCT.HB_TIMESTAMPS])
+    for view in external:
+      view[EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS].clear()
+    self.assertEqual(current[EPCT.LAST_EPOCH][EPCT.HB_TIMESTAMPS], {timestamp})
 
 
 class TestNetMonDuplicates(unittest.TestCase):

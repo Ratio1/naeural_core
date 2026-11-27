@@ -646,17 +646,68 @@ class ConfigManager(
     return
   
   def load(self):
+    """Load and resolve the cached node application configuration.
+
+    A configured optional uploader can be disabled when its environment is
+    absent. The rest of the application configuration still resolves strictly.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+      A required environment setting is absent.
+    Exception
+      The application configuration could not be loaded.
+
+    Examples
+    --------
+    >>> manager.load()  # doctest: +SKIP
+
+    Notes
+    -----
+    An exact legacy stock MinIO mapping counts as optional unless explicitly
+    overridden. If an optional uploader references a missing or empty value,
+    its mapping is disabled and cleared before resolving required settings,
+    including MQTT.
+    """
     # loads `config_app.txt` json available in `_data/box...`
     self.P("Loading '{}' from local cache...".format(self._fn_app_config), color='b')
+    # Inspect the optional uploader before resolving the remaining environment settings.
     self.config_app = self.log.load_data_json(
       fname=self._fn_app_config, 
       numeric_keys=False,
-      replace_environment_secrets='$EE_',
-      allow_missing_secrets=False,
     )
     if self.config_app is None:
       msg = "CRITICAL ERROR! The device cannot start - there is no app configuration"
       raise Exception(msg)
+
+    # A saved copy of the previous default config still has the stock MinIO placeholder mapping.
+    upload = self.config_app.get(ct.FILE_UPLOAD)
+    if isinstance(upload, dict):
+      # Preserve strict validation for custom uploaders unless their configuration makes them optional.
+      uploader = upload.get("CONFIG_UPLOADER")
+      stock_minio = upload.get(ct.TYPE) == "minio" and uploader == {
+        "ACCESS_KEY": "$EE_MINIO_ACCESS_KEY", "BUCKET_NAME": "$EE_MINIO_UPLOAD_BUCKET",
+        "ENDPOINT": "$EE_MINIO_ENDPOINT", "SECRET_KEY": "$EE_MINIO_SECRET_KEY",
+        "SECURE": "$EE_MINIO_SECURE",
+      }
+      # The existing default worker config is also optional when loaded from a previous cache.
+      optional = upload.get("OPTIONAL", stock_minio) is True
+      if optional and isinstance(uploader, dict) and any(
+        isinstance(value, str) and value.startswith("$EE_") and not os.environ.get(value[1:])
+        for value in uploader.values()
+      ):
+        # Leave a disabled config for the filesystem manager and strip unresolved uploader-only settings.
+        upload.update(ENABLED=False, CONFIG_UPLOADER={})
+    # Keep MQTT and any remaining configured credentials required at startup.
+    self.log.replace_secrets(self.config_app, pattern="$EE_", allow_missing=False)
 
     # set the communication configuration in shmem to be used in a facile way in map reduce streams
     self.shmem['config_communication'] = self.cfg_app_communication

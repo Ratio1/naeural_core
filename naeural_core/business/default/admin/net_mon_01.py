@@ -49,9 +49,9 @@ _CONFIG = {
   # status, about 20 MB). A setting of its own: it was SAVE_NMON_EACH (12) iterations of PROCESS_DELAY, so
   # 120 s with the default PROCESS_DELAY of 10. One save costs an oracle with 0.7 CPU core 1.5-1.9 s when
   # idle and 6.1-6.3 s when busy, so 600 s means five times fewer of them. The status is also saved once
-  # more as the last step of a clean stop, so the longer interval costs data only when the node crashes or
-  # is killed before its close ends (a container stop timeout shorter than the close): then up to 10
-  # minutes of recorded heartbeats, plus the time of one save.
+  # more at a clean stop, starting as the first step of the close, so the longer interval costs data only
+  # when the node crashes or is killed before that save is written: then up to 10 minutes of recorded
+  # heartbeats, plus the time of one save.
   "SAVE_NMON_SECONDS"   : 600,
 
   'VALIDATION_RULES': {
@@ -129,10 +129,10 @@ class NetMon01Plugin(
     number of plugin iterations: before, an oracle saved every ``SAVE_NMON_EACH`` (12, at most 20)
     iterations and any other node every 30, one iteration being ``PROCESS_DELAY`` seconds, so every 120 s
     and 300 s with the default ``PROCESS_DELAY`` of 10. ``SAVE_NMON_EACH`` is no longer read. The save is
-    registered with ``at_stop``: it runs once more as the last step of a clean stop, so it is made when the
-    close reaches its end (before, nothing was saved at stop and a restart lost what was recorded since the
-    last periodic save). The interval is read once, here: a later change of ``SAVE_NMON_SECONDS`` applies
-    when the plugin starts again.
+    registered with ``at_stop``: it runs once more at a clean stop, starting as the first step of the close
+    and written while the rest of the node closes (before, nothing was saved at stop and a restart lost what
+    was recorded since the last periodic save). The interval is read once, here: a later change of
+    ``SAVE_NMON_SECONDS`` applies when the plugin starts again.
 
     Examples
     --------
@@ -203,11 +203,11 @@ class NetMon01Plugin(
     # The SerializationManager runs the save on a thread kept for this save alone. On this thread one save
     # stopped this plugin's iteration (history, rankings, the current-network payload) for 1.5-1.9 s on an
     # idle node and 6.1-6.3 s on a busy one (20 MB, 0.7 CPU); now the iteration does not wait for it.
-    # at_stop: one more save as the last step of a clean stop, so a restart whose close reaches its end loses
-    # nothing of what was recorded since the last periodic save. A restart the node starts itself, such as
-    # a release update, does; a stop from the host does when the container's stop timeout leaves room for the
-    # close. Before, nothing was saved at stop and every restart lost up to one interval, which would now be
-    # up to 600 s on an oracle.
+    # at_stop: one more save at a clean stop. It starts as the first step of the close and is written while
+    # the rest of the node closes, so a restart loses only the few seconds recorded after it. A stop from the
+    # host keeps it when the container's stop timeout leaves room for this one save, not for the whole close.
+    # Before, nothing was saved at stop and every restart lost up to one interval, which would now be up to
+    # 600 s on an oracle.
     SerializationManager.instance.register(save, every=every, at_stop=True)
     self.P("Netmon status save registered every {}s and at a clean stop".format(every))
     return
@@ -399,8 +399,14 @@ class NetMon01Plugin(
     -----
     The periodic save of the network status is not made here: ``on_init`` registered it with the
     SerializationManager, which runs it on a thread kept for this save alone, every ``SAVE_NMON_SECONDS``
-    on an oracle (300 s on any other node) and once more as the last step of a clean stop. One save used to
+    on an oracle (300 s on any other node) and once more at the start of a clean stop's close. One save used to
     stop this thread for 1.5-1.9 s on an idle node and 6.1-6.3 s on a busy one (20 MB at 0.7 CPU).
+
+    Examples
+    --------
+    >>> payload = self._process()   # the plugin's loop, at each iteration
+    >>> payload is None             # the sending period has not passed, or this node does not send
+    True
     """
     payload = None
     self.netmon.epoch_manager.maybe_update_cached_data()

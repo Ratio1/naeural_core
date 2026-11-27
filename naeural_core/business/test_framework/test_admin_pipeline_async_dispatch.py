@@ -99,9 +99,24 @@ class _FakeCaptureManager:
 
 class _FakeAdminBusinessManager:
   def __init__(self):
+    """
+    Build the stand-in with nothing built, dispatched or bootstrapped, and one admin instance known.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> _FakeAdminBusinessManager()._admin_instance_hashes
+    {'admin_hash'}
+    """
     self.built_from = None
     self.dispatched_inputs = None
     self.bootstrapped_streams = None
+    # The admin instances known, as the real manager's set holds them once its admin bootstrap ran; the
+    # orchestrator's collection takes no input while it is empty.
+    self._admin_instance_hashes = {"admin_hash"}
 
   def bootstrap_admin_pipeline_instances(self, dct_config_streams):
     self.bootstrapped_streams = deepcopy(dct_config_streams)
@@ -524,6 +539,68 @@ class TestAdminPipelineAsyncDispatch(unittest.TestCase):
     })
 
     self.assertEqual(dct_business_inputs, {})
+
+  def test_an_input_captured_before_the_admin_instances_are_known_reaches_its_plugin(self):
+    """An admin input captured while the admin bootstrap is still creating the plugins (the manager knows no admin
+    instance yet) is left in the capture by the collection thread, and reaches its plugin once the bootstrap has
+    refreshed the instance set. Before, the collection took it and routed it to no plugin."""
+    # A real manager with its dispatch lane and its admin plugin created, but no admin instance known yet.
+    manager = self._make_manager(async_enabled=True)
+    # Its dispatch lane.
+    manager._initialize_admin_async_dispatch()
+    # The admin plugin, created by the bootstrap.
+    admin_plugin = _FakePlugin()
+    # Among the manager's instances.
+    manager._dct_subalterns[self.ADMIN_HASH] = admin_plugin
+    # The set the bootstrap refreshes only once every admin plugin exists.
+    manager._admin_instance_hashes = set()
+    # An orchestrator over this manager (the collection lane's builder), with the admin pipeline running.
+    orchestrator = TestAdminPipelineCollectionLane._make_orchestrator(self)
+    # The real manager.
+    orchestrator._business_manager = manager
+    # The admin pipeline among the running streams.
+    orchestrator._current_dct_config_streams = deepcopy(orchestrator._config_manager.dct_config_streams)
+    # And runtime-eligible.
+    orchestrator._runtime_dct_config_streams = deepcopy(orchestrator._current_dct_config_streams)
+    # What the capture holds; a take empties it, as a capture's does.
+    held = orchestrator._capture_manager._captures
+
+    def take(stream_name):
+      """
+      Give the stream's captured inputs once, as a capture does, and record the take.
+
+      Parameters
+      ----------
+      stream_name : str
+        The stream whose inputs are taken.
+
+      Returns
+      -------
+      dict
+        ``{stream_name: capture}`` the first time, ``{}`` after.
+
+      Examples
+      --------
+      >>> take("admin_pipeline")
+      {'admin_pipeline': {...}}
+      """
+      # Recorded.
+      orchestrator._capture_manager.get_stream_calls.append(stream_name)
+      # The inputs, once.
+      return {stream_name: held.pop(stream_name)} if stream_name in held else {}
+    # The capture's take.
+    orchestrator._capture_manager.get_single_stream_captured_data = take
+    # The collection thread's turn during the bootstrap: the capture is started, nothing is taken or queued.
+    self.assertEqual((orchestrator._collect_admin_pipeline_inputs_once(), orchestrator._capture_manager.get_stream_calls,
+                      len(orchestrator._capture_manager.ensure_calls)), (0, [], 1))
+    # The bootstrap ends: the instance set is refreshed.
+    manager._refresh_admin_instance_hashes([self.ADMIN_HASH])
+    # The next turn takes the input and queues it for its plugin.
+    self.assertEqual(orchestrator._collect_admin_pipeline_inputs_once(), 1)
+    # The plugin gets it.
+    self.assertTrue(admin_plugin.added_event.wait(1.0))
+    # The input captured during the bootstrap.
+    self.assertEqual(admin_plugin.added_inputs[0]["INPUTS"][0]["STRUCT_DATA"], {"payload": "admin"})
 
 
 class TestAdminPipelineCollectionLane(unittest.TestCase):

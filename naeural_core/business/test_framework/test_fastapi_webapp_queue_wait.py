@@ -26,7 +26,12 @@ HARNESS_METHODS = (
   "_reply_unhandled_request",
   "_reject_expired_request",
   "_process_incoming_request",
+  # The postponed request's record reader and runner.
+  "parse_postponed_dict",
+  "_process_postponed_request",
   "_start_request_monitor_thread",
+  # The monitor's hook, which the monitor calls on each turn (the base web app's no-op).
+  "on_request_monitor_tick",
 )
 
 
@@ -163,6 +168,142 @@ class TestFastApiWebAppQueueWait(unittest.TestCase):
     time.sleep(0.05)
     self.plugin._stop_request_monitor.set()
     self.plugin._request_monitor_thread.join(timeout=2)
+
+  def test_monitor_runs_its_hook_while_idle_and_after_each_request_even_when_the_hook_raises(self):
+    """The request monitor calls on_request_monitor_tick before each read of the server queue: right after each
+    request (with two requests queued before it starts, no read times out before both are admitted, yet the hook runs
+    with 0, 1 and 2 admitted) and while idle; a hook that raises is logged in red and the requests are still queued."""
+    # A hook that records each call, then one that also raises.
+    for raising in (False, True):
+      # One sub-test each.
+      with self.subTest(raising=raising):
+        # How many requests were admitted at each call of the hook.
+        seen = []
+
+        def tick():
+          """
+          Stand for a web app's hook: record how many requests were admitted, and raise in the raising sub-test.
+
+          Returns
+          -------
+          None
+
+          Raises
+          ------
+          RuntimeError
+            In the sub-test of a raising hook.
+          """
+          # Recorded.
+          seen.append(len(self.plugin._incoming_requests))
+          if raising:
+            # The hook's error, which the monitor must log and survive.
+            raise RuntimeError("hook")
+        # The plugin's hook, for this sub-test (the compiled one is the base web app's no-op).
+        self.plugin.on_request_monitor_tick = tick
+        # Nothing admitted, a fresh monitor.
+        self.plugin._incoming_requests.clear()
+        # Its stop flag.
+        self.plugin._stop_request_monitor = threading.Event()
+        # No thread yet.
+        self.plugin._request_monitor_thread = None
+        # Two requests queued before the monitor starts, so no read times out until both are admitted.
+        for request_id in ("r1", "r2"):
+          # Queued on the server side.
+          self.plugin._server_queue.put(self._request(waited_s=0, request_id=request_id))
+        # Started.
+        self.plugin._start_request_monitor_thread()
+        # Idle for 0.6 s after them: reads time out every 0.25 s.
+        time.sleep(0.6)
+        # Stopped.
+        self.plugin._stop_request_monitor.set()
+        # Its thread ends.
+        self.plugin._request_monitor_thread.join(timeout=2)
+        # One call before each read (0, then 1, then 2 admitted), then the idle calls; both queued; the raise logged.
+        self.assertEqual((seen[:3], len(seen) > 3, [request["id"] for request in self.plugin._incoming_requests],
+                          any("Exception in on_request_monitor_tick" in msg for msg in self.plugin.logged)),
+                         ([0, 1, 2], True, ["r1", "r2"], raising))
+
+  def test_an_endpoint_error_logs_the_argument_names_never_their_values(self):
+    """When an endpoint raises, the red line names the endpoint and its arguments' names (the positional ones by the
+    endpoint's parameters, the keyword ones by their keys) and holds none of their values; the caller gets a 500."""
+
+    def add_secrets(token, payload, **kwargs):
+      """
+      Stand for an endpoint that takes a credential and raises.
+
+      Parameters
+      ----------
+      token : str
+        A credential.
+      payload : dict
+        A body holding a credential.
+      **kwargs
+        Extra arguments.
+
+      Returns
+      -------
+      None
+
+      Raises
+      ------
+      TypeError
+        Always, as a call that fails inside the endpoint.
+      """
+      # The endpoint's failure.
+      raise TypeError("unexpected keyword argument 'result_info'")
+    # The plugin's only endpoint.
+    self.plugin._endpoints = {"add_secrets": add_secrets}
+    # A request with a token, a payload and a keyword dict, each holding a secret value.
+    self.plugin._process_incoming_request({"id": "r1", "value": (
+      "add_secrets", "tok-123", {"api_key": "cf-secret"}, {"extra": "x-secret"}), "profile": None, "client_ip": None})
+    # The red line about the error.
+    line = next(msg for msg in self.plugin.logged if msg.startswith("Exception occured"))
+    # The answer to the caller.
+    [reply] = self._replies()
+    # The endpoint and the three names in the line, no value, and a 500.
+    self.assertEqual(("add_secrets" in line, "['token', 'payload', 'extra']" in line,
+                      [secret for secret in ("tok-123", "cf-secret", "x-secret") if secret in line],
+                      reply["value"]["result"]["status_code"]), (True, True, [], 500))
+
+  def test_a_postponed_request_error_logs_the_argument_names_never_their_values(self):
+    """When the solver of a postponed request raises, the red line names the endpoint, the solver and its keyword
+    arguments' names and holds none of their values; the caller gets a 500."""
+
+    def solve(api_key, payload):
+      """
+      Stand for a postponed request's solver that takes request data holding credentials, and raises.
+
+      Parameters
+      ----------
+      api_key : str
+        A credential.
+      payload : dict
+        A body holding a credential.
+
+      Returns
+      -------
+      None
+
+      Raises
+      ------
+      TypeError
+        Always, as a solver that fails.
+      """
+      # The solver's failure.
+      raise TypeError("solver failed")
+    # The postponed request, its solver's keyword arguments holding secret values.
+    postponed = self.plugin.get_postponed_dict(
+      "r1", PostponedRequest(solve, {"api_key": "cf-secret", "payload": {"token": "tok-123"}}), "add_secrets")
+    # Run once: answered, not postponed again.
+    self.assertIsNone(self.plugin._process_postponed_request(postponed))
+    # The red line about the error.
+    line = next(msg for msg in self.plugin.logged if msg.startswith("Exception occurred while processing postponed"))
+    # The answer to the caller.
+    [reply] = self._replies()
+    # The endpoint, the solver and the two names in the line, no value, and a 500.
+    self.assertEqual(("add_secrets" in line, "solve" in line, "['api_key', 'payload']" in line,
+                      [secret for secret in ("cf-secret", "tok-123") if secret in line],
+                      reply["value"]["result"]["status_code"]), (True, True, True, [], 500))
 
   def test_monitor_refuses_at_once_while_the_oldest_queued_request_has_expired(self):
     self.plugin._incoming_requests.extend([self._request(waited_s=100, request_id="old"), {"id": "q1"}])

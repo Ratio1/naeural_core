@@ -1,3 +1,5 @@
+from math import isfinite
+
 
 class _BasePluginAPIMixin:
   def __init__(self) -> None:
@@ -413,6 +415,8 @@ class _BasePluginAPIMixin:
     include_configured_peers=True,
     timeout=None,
     max_retries=None,
+    result_info=None,
+    wait=True,
   ):
     """
     Set data in the R1 Chain Storage.
@@ -488,22 +492,86 @@ class _BasePluginAPIMixin:
       Maximum number of timeout-triggered rebroadcast retries for this write.
       If None, use the backend default behavior. Default is None.
 
+    result_info : dict, optional
+      Opt-in: a dict whose ``"outcome"`` this call sets to the word that says how the write ended, so a
+      caller can tell a refusal from a write that was not confirmed. Default is None, which changes nothing.
+      The words: ``changed``, ``identical`` and ``absent_delete`` for a write this node applied; one
+      ``refused_<reason>`` per refusal (``refused_no_peers``, ``refused_oracle_only``,
+      ``refused_not_member``, ``refused_versioned``, ``refused_cs_rev``, ``refused_secret_rule``,
+      ``refused_token``, ``refused_readonly``, ``refused_too_large`` for a record over 512 KiB on the wire,
+      ``refused_too_deep`` for a value or token nested deeper than 64 levels of dicts and lists,
+      ``refused_unencodable`` for a key or value that holds a string UTF-8 cannot encode, and with the store's
+      order switch ``CSTORE_ORDER`` 'on'
+      ``refused_older``, ``refused_older_than_delete``, ``refused_future``, ``refused_origin``,
+      ``refused_unstamped``, ``refused_collision``); ``unconfirmed``, ``overwritten`` or ``refused_by_peers``
+      (every peer settled, one at least by a refusal answer) for a write applied here whose wait failed;
+      ``error`` when the call raised (a value that is not JSON, a bad timeout, ``wait=False`` in a protected
+      namespace, and so on); ``not_ready`` for a
+      ``wait=False`` call made before the chain store started, after its plugin loop ended, or while the store's
+      persistence lock stayed held longer than the call waits for it (1 ms): nothing was stored, and the same
+      write can be made again later.
+
+    wait : bool, optional
+      True (the default) waits for the chain store to start and for the confirmations, as before. False runs
+      every check and the local apply of a blocking write, queues the same store and returns without waiting
+      for any confirmation: True when
+      the write was stored here and queued (the store re-sends it while it is unconfirmed, as the blocking wait
+      would), False on a refusal, as a blocking write. It never waits for the store to start: before the store
+      started, and after the chain-store plugin's loop ended (a stop, or a restart before the next instance
+      starts), it returns False with outcome ``not_ready`` and stores nothing. It waits at most 1 ms for the
+      store's persistence lock, which a namespace sync's merge holds for seconds: held longer, it returns False
+      with outcome ``not_ready`` and stores nothing as well, and the caller writes again later. Refused
+      (``error``) in the protected namespaces, whose callers rely on the confirmation.
+
     Returns
     -------
     bool
       True if the value was successfully stored and confirmed by peers,
       False if the operation failed (timeout, no confirmations, etc.)
+      The same with and without ``result_info``. With ``wait=False``, True means stored and queued.
+
+    Notes
+    -----
+    ``result_info`` is filled when the chain store's setter ran, when the call raised, or with ``not_ready`` for a
+    ``wait=False`` call while no chain store runs. A blocking write made after the chain-store plugin's loop ended
+    is still applied to the shared store but not sent, and returns False when its wait runs out, as before.
+    The ``refused_<reason>``
+    words are this node's own refusals and end the call at once; a write with no peer to send it to
+    (``refused_no_peers``, for example on a seed whose only whitelisted node is itself) no longer waits for
+    confirmations first. A peer that refuses the write answers only when its order switch is 'on' and the write
+    carries a stamp; then the caller sees ``refused_by_peers`` as soon as every peer settled. Otherwise it does not
+    answer, and the caller sees ``unconfirmed`` after the wait, as it saw False before.
+
+    A ``wait=False`` call is timed under its own timer name, ``chainstore_set_nowait``: it may run on another thread
+    (the request monitor) while this plugin's thread is inside a blocking call, and the plugin's timers of one name
+    are shared by its threads (one start overwrote the other's, so the blocking call's elapsed time was wrong).
 
     See Also
     --------
     chainstore_get : Retrieve a value from chain storage
     chainstore_hset : Store a value in a hash set within chain storage
+
+    Examples
+    --------
+    >>> info = {}
+    >>> self.chainstore_set("my_key", {"a": 1}, result_info=info)   # no peer confirmed it in time
+    False
+    >>> info
+    {'outcome': 'unconfirmed'}
+    >>> self.chainstore_set("my_key", {"a": 2}, wait=False, result_info=info), info   # stored here and queued
+    (True, {'outcome': 'changed'})
     """
-    self.start_timer("chainstore_set")
+    # A wait=False call may run on another thread (the request monitor) while this plugin's thread is inside a
+    # blocking one: its own timer name keeps the two from sharing one timer of this plugin's section.
+    timer = "chainstore_set" if wait else "chainstore_set_nowait"
+    # Timed under that name.
+    self.start_timer(timer)
     memory = self.__chainstorage_memory()
     result = False
     try:
-      self.__maybe_wait_for_chain_state_init()
+      if wait:
+        # A blocking call waits for the store's setter, with no timeout, as before; a non-blocking one never waits.
+        self.__maybe_wait_for_chain_state_init()
       func = memory.get('__chain_storage_set')
 
       # JSON normalization: ensure deterministic storage by normalizing through JSON.
@@ -531,18 +599,31 @@ class _BasePluginAPIMixin:
           timeout=timeout,
           max_retries=max_retries,
           debug=debug,
+          # The caller's dict, filled by the store with the word of how the write ended.
+          result_info=result_info,
+          # Whether the store waits for the confirmations.
+          wait=wait,
         )
-        elapsed = self.end_timer("chainstore_set")        
+        # The timer of this call's form.
+        elapsed = self.end_timer(timer)
         if debug:
           self.P(" ====> `chainstore_set`in {:.4f}s".format(elapsed), color="green")
       else:
-        elapsed = self.end_timer("chainstore_set")
+        # The timer of this call's form.
+        elapsed = self.end_timer(timer)
         if debug:
           self.P("No chain storage set function found in {:.4f}s".format(elapsed), color="red")
+        if result_info is not None:
+          # Only a wait=False call gets here (a blocking one waited for the setter): the store has not started.
+          result_info["outcome"] = "not_ready"
     except Exception as ex:
-      elapsed = self.end_timer("chainstore_set")
+      # The timer of this call's form.
+      elapsed = self.end_timer(timer)
       msg = "Error in chainstore_set: {} after {:.4f}s".format(ex, elapsed)
       self.P(msg, color="red")      
+      if result_info is not None:
+        # The call raised, here or in the store: the caller reads "error" whatever the store had set.
+        result_info["outcome"] = "error"
     return result
   
   
@@ -628,6 +709,8 @@ class _BasePluginAPIMixin:
     include_configured_peers=True,
     timeout=None,
     max_retries=None,
+    result_info=None,
+    wait=True,
   ):
     """
     Store one field of a hash-like namespace in chain storage.
@@ -667,16 +750,35 @@ class _BasePluginAPIMixin:
     max_retries : int, optional
       Maximum number of timeout-triggered rebroadcast retries. If None, use
       the backend default behavior. Default is None.
+    result_info : dict, optional
+      Opt-in dict whose ``"outcome"`` is set to the word of how the write ended, as in
+      ``chainstore_set``. Default is None, which changes nothing.
+    wait : bool, optional
+      True (the default) waits for the confirmations; False returns without waiting for any confirmation once
+      the write is stored here and queued (it waits at most 1 ms for the store's persistence lock, else it ends
+      ``not_ready``), as in ``chainstore_set``.
 
     Returns
     -------
     bool
       True if the composed key was stored successfully, False otherwise.
 
+    Notes
+    -----
+    ``result_info`` and ``wait`` are passed to ``chainstore_set`` as they are.
+
     See Also
     --------
     chainstore_set : Underlying chain-store write operation.
     chainstore_hget : Retrieve one field from a hash-like namespace.
+
+    Examples
+    --------
+    >>> info = {}
+    >>> self.chainstore_hset("tunnels_manager_secrets", "0xabc", {"cs_rev": 1}, result_info=info)  # no oracle peer
+    False
+    >>> info
+    {'outcome': 'refused_oracle_only'}
     """
     start_1 = self.time()
     composed_key = self.__hset_key(hkey, key)
@@ -693,6 +795,10 @@ class _BasePluginAPIMixin:
       include_configured_peers=include_configured_peers,
       timeout=timeout,
       max_retries=max_retries,
+      # The caller's dict, filled by chainstore_set.
+      result_info=result_info,
+      # Whether the write waits for its confirmations.
+      wait=wait,
     )
     elapsed_2 = self.time() - start_2
     if debug:
@@ -757,6 +863,42 @@ class _BasePluginAPIMixin:
       value = self.chainstore_hget(hkey, key, token=token, debug=debug)
       result[key] = value
     return result
+
+
+  def chainstore_hsync_from_peer(self, hkey, peer, timeout):
+    """Fetch one peer's hash snapshot from a background worker.
+
+    Use the registered ChainStore implementation for authorization, response
+    validation and merging. The caller can retry when the store is unavailable.
+    Plugin-thread timer stacks and the unbounded initialization wait are bypassed.
+
+    Parameters
+    ----------
+    hkey : str
+      Hash namespace accepted by ChainStore.
+    peer : str
+      The single remote peer to query.
+    timeout : float
+      Maximum positive finite wait for this peer's response, in seconds.
+
+    Returns
+    -------
+    dict
+      ChainStore's result, including the accepted peer and merged field count.
+
+    Examples
+    --------
+    >>> result = plugin.chainstore_hsync_from_peer("players", "peer-A", timeout=5)
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not isfinite(timeout) or timeout <= 0:
+      raise ValueError("Background peer sync requires a positive finite timeout.")
+    if not isinstance(peer, str) or not peer or peer == self.ee_addr:
+      raise ValueError("Background peer sync requires one remote peer.")
+    sync = self.__chainstorage_memory().get('__chain_storage_hsync')
+    if not callable(sync):
+      raise ValueError("Chain storage hsync is not ready.")
+    # The backend performs the same namespace and proof checks as ordinary hsync.
+    return sync(hkey, peers=[peer], include_default_peers=False, timeout=timeout, debug=False)
 
 
   def chainstore_hsync(

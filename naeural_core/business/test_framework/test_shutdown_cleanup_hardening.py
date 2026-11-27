@@ -1,12 +1,15 @@
 import importlib.util
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from collections import deque
 from types import SimpleNamespace
 from unittest import mock
+from naeural_core.utils.process_credentials import child_environment, credential_env_names, redact_command
 
 
 def _load_capture_manager_module():
@@ -417,6 +420,185 @@ def _fake_proc_stat_open(proc_entries):
 
 class TestTunnelShutdownHardening(unittest.TestCase):
 
+  def test_managed_web_app_tunnel_relaunch_uses_a_new_stdin_pipe(self):
+    """Verify token delivery and argument isolation on initial launch and relaunch.
+
+    The subprocess fixture reads the real pipe supplied by Popen and checks
+    that both managed launches use the node's configured installation.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestTunnelShutdownHardening().test_managed_web_app_tunnel_relaunch_uses_a_new_stdin_pipe()
+    """
+    # Build a plugin without network or application startup.
+    plugin = BaseWebAppPlugin.__new__(BaseWebAppPlugin)
+    # The configured tunnel command carries only the token-file switch.
+    command = "cloudflared tunnel --no-autoupdate run --token-file /dev/stdin --url http://127.0.0.1:8080"
+    # Both launches consume the same configured fixture through independent pipes.
+    token = "managed test credential; one opaque value"
+    plugin._get_cloudflare_start_command = lambda: command
+    plugin.get_cloudflare_token = lambda: token
+    plugin.os_path = os.path
+    plugin.LogReader = mock.Mock()
+    process = mock.Mock()
+    pipe_reads = []
+    with tempfile.TemporaryDirectory() as folder:
+      # Place the node installation and app working directory in separate locations.
+      root = pathlib.Path(folder)
+      node_bin = root / "node-bin"
+      node_bin.mkdir()
+      app_dir = root / "app"
+      app_dir.mkdir()
+      # Make an executable marker for resolution only. Popen is mocked and never executes it.
+      connector = node_bin / "cloudflared"
+      connector.touch()
+      connector.chmod(0o700)
+      # Real web-app commands use the script directory for their current directory.
+      plugin.script_temp_dir = str(app_dir)
+      # Capture Popen's stdin during launch, before the parent releases its copy.
+      popen = mock.Mock(side_effect=lambda **kwargs: (pipe_reads.append(os.read(kwargs["stdin"], 4096)) or process))
+      # Simulate the operator making its connector available to the node process.
+      with mock.patch.dict(os.environ, {"PATH": str(node_bin)}), mock.patch.object(_BASE_WEB_APP_MODULE.subprocess, "Popen", popen):
+        for _ in range(2):
+          # The app's scoped tokens and the tunnel credential cannot become connector environment variables.
+          plugin._BaseWebAppPlugin__run_command(command, {
+            "PATH": str(app_dir), "APP_TOKEN": "app-secret", "ALIAS": token, "FLAG": "normal",
+          })
+    # Both pipes contained the full token, and their process arguments were identical and token-free.
+    self.assertEqual(pipe_reads, [token.encode(), token.encode()])
+    # The connector runs from the node installation with only safe inherited settings.
+    args = [str(connector), *command.split()[1:]]
+    self.assertEqual([call.kwargs["args"] for call in popen.call_args_list], [args, args])
+    self.assertEqual([call.kwargs["env"] for call in popen.call_args_list], [{"PATH": str(node_bin), "FLAG": "normal"}] * 2)
+
+  def test_managed_connector_requires_node_installation_only_with_token(self):
+    """Require a managed connector before staging a token.
+
+    Tokenless and ordinary app launches keep the search path of the caller.
+    """
+    # Construct the launch boundary without starting a web app or connection.
+    plugin = BaseWebAppPlugin.__new__(BaseWebAppPlugin)
+    managed = "cloudflared tunnel --no-autoupdate run --token-file /dev/stdin --url http://127.0.0.1:8080"
+    plugin._get_cloudflare_start_command = lambda: managed
+    plugin.get_cloudflare_token = lambda: "synthetic-token"
+    plugin.os_path = os.path
+    with tempfile.TemporaryDirectory() as folder:
+      # Set the node search path to a directory with no installed connector.
+      plugin.script_temp_dir = folder
+      parent_path = {"PATH": folder}
+      app_env = {"PATH": os.path.join(folder, "app-bin"), "FLAG": "normal"}
+      with mock.patch.dict(os.environ, parent_path):
+        # Observe the credential helper to prove no managed pipe is opened without an installation.
+        with mock.patch.object(_BASE_WEB_APP_MODULE, "launch_with_tunnel_token") as launch:
+          with self.assertRaisesRegex(FileNotFoundError, "Install cloudflared for the node"):
+            plugin._BaseWebAppPlugin__run_command(managed, app_env, False, False)
+          launch.assert_not_called()
+        # Capture normal launch options without executing either fixture command.
+        with mock.patch.object(_BASE_WEB_APP_MODULE.subprocess, "Popen") as popen:
+          for command in ("cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080", "python app.py"):
+            with self.subTest(command=command):
+              plugin._BaseWebAppPlugin__run_command(command, app_env, False, False)
+              self.assertEqual(popen.call_args.kwargs["args"], command.split())
+              self.assertEqual(popen.call_args.kwargs["env"], app_env)
+              self.assertNotIn("stdin", popen.call_args.kwargs)
+
+  def test_command_redaction_displays_safe_arguments_and_discoverable_names(self):
+    """Cover explicit credential names, keyword discovery, and whole command arguments.
+
+    Synthetic values mimic configured and inherited credentials.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestTunnelShutdownHardening().test_command_redaction_displays_safe_arguments_and_discoverable_names()
+    """
+    # MQTT has no keyword, while the installed app credential is discovered by name.
+    environment = {"PATH": "/bin", "EE_MQTT": "mnemonic-fixture", "APP_SECRET": "synthetic-key", "ALIAS": "synthetic-key"}
+    self.assertEqual(credential_env_names(environment), {"EE_MQTT", "APP_SECRET"})
+    self.assertEqual(child_environment(environment), {"PATH": "/bin"})
+    # The original namespace must remain available to node-side providers.
+    self.assertEqual(environment["APP_SECRET"], "synthetic-key")
+    # A short credential can be embedded in a larger setting. Preserve empty settings and case variants.
+    composite = {"APP_TOKEN": "q+", "ENDPOINT": "origin/q+/path", "SCOPED_ALIAS": "origin/Z7/path",
+                 "NORMAL_PATH": "origin/qq/Q+/path", "EMPTY_TOKEN": "", "OPTIONAL_VALUE": ""}
+    self.assertEqual(child_environment(composite, extra_values=("Z7",)),
+                     {"NORMAL_PATH": "origin/qq/Q+/path", "OPTIONAL_VALUE": ""})
+    self.assertEqual(
+      redact_command("tool --token 'first part'last --database-password=other --node target mnemonic-fixture", environment),
+      "tool --token [REDACTED] --database-password=[REDACTED] --node target [REDACTED]",
+    )
+    self.assertEqual(
+      redact_command(["tool", "--api-key", "whole argument", "ENV_SECRET=multiple words", "--port", "4000"], environment),
+      ["tool", "--api-key", "[REDACTED]", "ENV_SECRET=[REDACTED]", "--port", "4000"],
+    )
+    # Embedded URL authentication disappears while its destination stays visible.
+    self.assertEqual(redact_command("tool https://user:secret@example.test/path", {}),
+                     "tool https://[REDACTED]@example.test/path")
+
+  def test_application_snapshots_use_only_safe_settings(self):
+    """Keep an explicitly configured app credential in memory and off disk.
+
+    Exercises the setup and start environments plus all three launcher
+    snapshots on the normal asset initialization path.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestTunnelShutdownHardening().test_application_snapshots_use_only_safe_settings()
+    """
+    # Use synthetic node and app credentials that must never reach an unrelated child or a snapshot.
+    node_secret, app_secret = "node-store-fixture", "scoped-app-fixture"
+    plugin = BaseWebAppPlugin.__new__(BaseWebAppPlugin)
+    plugin.P = mock.Mock()
+    plugin.os_path = os.path
+    plugin.os_environ = {"PATH": "/bin", "REDMESH_SECRET_STORE_KEY": node_secret, "EE_MQTT": "broker-fixture"}
+    plugin.str_unique_identification = "fixture"
+    plugin.plugins_shmem = {"USED_PORTS": {"fixture": 8080}}
+    plugin.cfg_env_vars = {}
+    plugin.get_additional_env_vars = lambda: {}
+    plugin.plugin_id = "fixture"
+    with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as destination:
+      # A deployed app can still supply its own credential through its dotenv asset.
+      pathlib.Path(source, ".env").write_text(f"APP_TOKEN={app_secret}\nFLAG=visible\n", encoding="utf-8")
+      plugin.script_temp_dir = destination
+      plugin.get_output_folder = lambda: destination
+      app_environment = plugin._BaseWebAppPlugin__prepare_env(source)
+      plugin.initialize_assets(source, destination, {})
+      # The app receives its own token, while setup retains ordinary environment settings.
+      self.assertEqual(app_environment["APP_TOKEN"], app_secret)
+      self.assertEqual(plugin.base_env["PATH"], "/bin")
+      self.assertNotIn("REDMESH_SECRET_STORE_KEY", app_environment)
+      self.assertNotIn("EE_MQTT", app_environment)
+      self.assertEqual(plugin.os_environ["REDMESH_SECRET_STORE_KEY"], node_secret)
+      for name in (".env", ".start_env_used", ".setup_env_used"):
+        # Each file retains safe settings and neither parent nor scoped credentials.
+        snapshot = pathlib.Path(destination, name).read_text(encoding="utf-8")
+        self.assertIn("PATH=/bin\n", snapshot)
+        self.assertNotIn(node_secret, snapshot)
+        self.assertNotIn(app_secret, snapshot)
+
   def test_cloudflare_tunnel_start_redacts_token_but_executes_original_command(self):
     token = "cloudflare-tunnel-secret"
     command = (
@@ -440,6 +622,24 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     return
 
   def test_web_app_tunnel_start_logs_are_redacted_but_execution_is_unchanged(self):
+    """Check how the web-app start sequence presents a tunnel command.
+
+    Capture the command at the execution boundary and compare it with the
+    original. The setup and start logs and the status payload must omit the
+    token while retaining safe fields such as the origin URL.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> TestTunnelShutdownHardening().test_web_app_tunnel_start_logs_are_redacted_but_execution_is_unchanged()  # doctest: +SKIP
+    """
     token = "cloudflare-web-app-secret"
     command = (
       "cloudflared tunnel --no-autoupdate run "
@@ -455,7 +655,7 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     plugin.get_setup_commands = lambda: []
     plugin.get_start_commands = lambda: [command]
     plugin.prepared_env = {}
-    plugin.add_payload_by_fields = lambda **kwargs: None
+    plugin.add_payload_by_fields = mock.Mock()
     plugin.time = mock.Mock(side_effect=[0, 10])
     process = mock.Mock()
     executed = []
@@ -471,6 +671,10 @@ class TestTunnelShutdownHardening(unittest.TestCase):
     self.assertEqual(executed, [command])
     self.assertNotIn(token, serialized_logs)
     self.assertEqual(serialized_logs.count("[REDACTED]"), 3)
+    # The command status uses the same safe rendering as the logs.
+    status_command = plugin.add_payload_by_fields.call_args.kwargs["command_str"]
+    self.assertNotIn(token, status_command)
+    self.assertIn("--url http://127.0.0.1:8080", status_command)
     return
 
   def test_windows_fallback_kills_process_without_sigkill(self):

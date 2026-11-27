@@ -28,8 +28,6 @@ import time
 import argparse 
 from naeural_core.utils.kalman_filter import KalmanFilter
 
-np.random.seed(0)
-
 
 def linear_assignment(cost_matrix):
   try:
@@ -273,6 +271,10 @@ if __name__ == '__main__':
   phase = args.phase
   total_time = 0.0
   total_frames = 0
+  # The fixed seed of the demo colours, only when this file is run as the demo. It was at module level, so
+  # importing the module (every plugin load does) reset the process-wide generator to seed 0: every node then
+  # drew the same "random" numbers in the same order.
+  np.random.seed(0)
   colours = np.random.rand(32, 3) #used only for display
   if(display):
     if not os.path.exists('mot_benchmark'):

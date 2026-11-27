@@ -19,7 +19,9 @@ network-monitor save. They still compete for the interpreter and the disk when b
 
 A save can ask for one more run when the node stops cleanly (``at_stop``). The network monitor does: it
 saves its 20 MB status only every 600 s, and without that last run a restart would lose the heartbeats
-recorded since the last periodic save.
+recorded since the last periodic save. The node asks for these last runs at the start of its close
+(``start_last_saves``), not at the end: a close can take longer than the time a host gives a node to stop,
+and a last save that waits for the end of the close is then never made.
 
 Every ``STATS_INTERVAL`` seconds each thread logs one ``SERIALIZATION_STATS`` line with how many times its
 save ran and how long the runs took in total and at most; this is how the cost of each save is read from a
@@ -41,7 +43,8 @@ class SerializationManager:
   The Orchestrator creates it before any manager or plugin exists and stops it when the node closes.
   Owners reach it through ``SerializationManager.instance``. A save's thread ends when the save is
   unregistered or registered again, or when the manager stops; a save registered with ``at_stop`` runs
-  once more at that stop.
+  once more when the last saves are asked for (``start_last_saves``, at the start of the node's close) or,
+  without that call, when the manager stops, and its thread ends after that run.
   """
 
   # The node's manager, set by start(). It is None until then, so a save registered without a started
@@ -80,6 +83,10 @@ class SerializationManager:
     self._lock = threading.Lock()
     # Set by stop(); it also wakes every save's thread from its one-second wait.
     self._stopping = threading.Event()
+    # Set by start_last_saves() at the start of the node's close: the thread of a save registered with
+    # at_stop then makes its last run at its next check, instead of when stop() is called at the end of the
+    # close, which a node stopped by its host with a time limit often does not reach.
+    self._last_saves = threading.Event()
     # The threads register() started, one per registration, so stop() can wait for each; a register() that
     # starts a thread also drops the ones that have ended. The list is replaced, never changed in place.
     self._threads = []
@@ -129,9 +136,10 @@ class SerializationManager:
       refused). The first run comes ``every`` seconds after the registration.
     at_stop : bool, optional
       True runs ``save()`` once more when ``stop`` is asked, on the save's own thread, so what the owner
-      gathered since the last periodic run is not lost when the node stops cleanly. Default False: no run
-      at stop (the chain store saves in its own closing code). A registration made after ``stop`` was
-      asked gets no run either.
+      gathered since the last periodic run is not lost when the node stops cleanly. That run comes when
+      ``start_last_saves`` is called (the start of the node's close) and is the save's last: its thread ends
+      after it. Default False: no run at stop (the chain store saves in its own closing code). A
+      registration made after ``start_last_saves`` or ``stop`` was asked gets no such run either.
 
     Returns
     -------
@@ -177,8 +185,9 @@ class SerializationManager:
     entry = [every, monotonic() + every]
     # A registration made after stop() was asked gets no run at stop, as before this option existed: its
     # thread ends at its first check. With the run it would save at once, outside the wait of stop() and
-    # beside the last run of the registration it replaces.
-    at_stop = at_stop and not self._stopping.is_set()
+    # beside the last run of the registration it replaces. The same holds once the last saves were asked for:
+    # the thread would make its "last" run at its first check, one second after the registration.
+    at_stop = at_stop and not self._stopping.is_set() and not self._last_saves.is_set()
     # Before, each owner ran its save on its own plugin thread. Now each save gets a daemon thread of its own:
     # the owner's thread does not spend the write, and a chain-store save that becomes due does not wait while
     # the network-monitor save is being written, as it would on one thread shared by all saves. A killed node
@@ -240,6 +249,41 @@ class SerializationManager:
       del self._saves[save]
     return
 
+  def start_last_saves(self):
+    """
+    Ask every save registered with ``at_stop`` for its last run now, at the start of the node's close.
+
+    The thread of each such save leaves its loop at its next check (within a second, or after the periodic
+    run it is writing), runs the save once more and ends; no periodic run of that save follows. The saves
+    registered without ``at_stop`` keep their cadence until ``stop``. The method only sets an event and
+    returns at once: ``stop``, at the end of the close, waits for the last runs.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Before, the last runs were started by ``stop``, the last step of the close, after the communicators and
+    every plugin had closed. A host that stops the node with a time limit shorter than the close ended it
+    before that step, and each such stop lost what the owner had gathered since its last periodic save (for
+    the network monitor of an oracle up to 600 s of recorded heartbeats). Started first, the last run is
+    written while the rest of the node closes. Its price: what the owner gathers between this run and the
+    end of the close (a few seconds of heartbeats, until the communicators close) is not saved. The last
+    run now overlaps the plugins' close, so, as for a periodic run, a save whose file another thread also
+    writes must be safe against that.
+
+    Calling it more than once changes nothing. A registration made after the call gets no last run.
+
+    Examples
+    --------
+    >>> SerializationManager.instance.start_last_saves()   # first step of Orchestrator.close_main_loop()
+    """
+    # Only an event: each at_stop save's thread reads it at its next one-second check and makes its last run
+    # there, on its own thread, while the caller goes on closing the node.
+    self._last_saves.set()
+    return
+
   def stop(self, timeout):
     """
     Stop every save's thread, letting the saves that are being written finish and the last runs happen.
@@ -257,10 +301,11 @@ class SerializationManager:
     -----
     No periodic run starts once stop was asked. A save picked just before (its thread passed the check
     under the table lock) still runs, and this method waits for it within the timeout. A save whose
-    current registration has ``at_stop=True`` then runs once more, on its own thread, and this method
-    waits for that run within the same timeout; when the timeout ends first the node goes on closing and
-    the unfinished write is lost with the process (the owner's file is replaced only by a finished
-    write). Other saves get no run at stop: their owners save in their own closing code, as before.
+    current registration has ``at_stop=True`` runs once more, on its own thread: from ``start_last_saves``
+    on when the node called it earlier in its close, otherwise now. This method waits for that run within
+    the same timeout; when the timeout ends first the node goes on closing and the unfinished write is lost
+    with the process (the owner's file is replaced only by a finished write). Other saves get no run at
+    stop: their owners save in their own closing code, as before.
 
     Examples
     --------
@@ -283,10 +328,11 @@ class SerializationManager:
     Thread body of one save: once a second, run it when it is due, until this registration of it ends.
 
     The registration ends when the save is unregistered or registered again. The current time is read from
-    the monotonic clock, the clock ``register`` schedules on. The thread also ends when ``stop`` is called;
-    with ``at_stop`` it first runs the save once more, if this registration is still the save's own, and
-    logs how long that run took. A last run that raises is logged in red with its traceback. When stop is
-    asked while a periodic run is being written, the last run follows it.
+    the monotonic clock, the clock ``register`` schedules on. The thread also ends when ``stop`` is called
+    and, with ``at_stop``, when ``start_last_saves`` is called; with ``at_stop`` it first runs the save once
+    more, if this registration is still the save's own, and logs how long that run took. A last run that
+    raises is logged in red with its traceback. When the last run is asked for while a periodic run is being
+    written, the last run follows it.
 
     Parameters
     ----------
@@ -295,7 +341,8 @@ class SerializationManager:
     entry : list
       The entry ``register`` stored for this thread, ``[seconds between runs, time of the next run]``.
     at_stop : bool
-      What ``register`` was given: True runs the save once more when ``stop`` is asked.
+      What ``register`` was given: True runs the save once more when ``start_last_saves`` or ``stop`` is
+      asked, whichever comes first, and ends the thread.
 
     Returns
     -------
@@ -316,6 +363,10 @@ class SerializationManager:
     stats = [monotonic(), 0, 0.0, 0.0]
     # Wake once a second (one cheap check) and leave as soon as stop() sets the event.
     while not self._stopping.wait(1):
+      if at_stop and self._last_saves.is_set():
+        # The node began to close and this save has a last run: leave the loop for it now, on this thread,
+        # instead of waiting for stop() at the end of the close. No periodic run follows.
+        break
       # Run only this thread's save, on the monotonic clock so a wall clock stepped back does not hold it back;
       # the thread ends once this registration of the save is gone (unregistered or registered again) or
       # stop() was called.
@@ -325,9 +376,10 @@ class SerializationManager:
         break
     # Same lock as every other look at the table.
     with self._lock:
-      # The loop ends when stop() was asked, or when the save was unregistered or registered again. The last
-      # run is for the stop only: with the registration this thread serves gone from the table there is
-      # none, also when the stop comes before this thread has noticed that its registration ended.
+      # The loop ends when stop() or, for an at_stop save, the last saves were asked, or when the save was
+      # unregistered or registered again. The last run is for the stop only: with the registration this thread
+      # serves gone from the table there is none, also when the stop comes before this thread has noticed that
+      # its registration ended.
       last = at_stop and self._saves.get(save) is entry
     if last:
       # Time the last run for its log line: it adds to the time the node needs to stop.

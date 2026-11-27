@@ -82,6 +82,11 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## NetMon and epochs
 
+- A regular worker receiving authorized `NET_MON_01` summaries resolves registered oracle addresses on the normal
+  15-minute refresh. It derives the Ethereum identity from the reported public key and requires fresh observations
+  and the registry conversion threshold. Direct-heartbeat oracles retain epoch-based resolution. A registry or
+  summary gap preserves existing allowed senders. Summary observations never populate heartbeat or epoch history.
+
 - NetMon keeps each node's newest heartbeat complete and reduces older ones to `HISTORY_HB_KEYS`
   in `main/net_mon.py`. A field missing from that tuple exists only in the newest heartbeat, so a
   new field read from history must be added there. Nodes silent for over 24 hours keep one
@@ -94,6 +99,13 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
   `get_full_node_state()` for full debug state so heartbeat registration does not wait on copies.
 - `save_status` keeps detached per-epoch caches of `SYNC_SIGNATURES`, `SYNC_AGREEMENT_CID` and
   `SYNC_SIGNATURES_CID`, refreshing only dirty epochs before saving.
+- The supervisor NetMon loop publishes completed statistics generations. Use
+  `get_cached_stats(node_addrs=...)` to read a detached view during a rebuild.
+  Cold reads carry an error, and failed rebuilds retain the preceding generation.
+  `get_stats(force_refresh=True)` still requests a rebuild.
+- `EpochsManager.data` and `full_data` provide detached diagnostic snapshots.
+  Use `get_node_list()` for addresses and `get_full_node_state(addr)` for one node.
+  Closing an epoch transfers its timestamp set and allocates a fresh current record.
 - NetMon's pipeline cache is refreshed by `NET_CONFIG_MONITOR` payloads, not only by heartbeats.
 
 ## Plugins and business manager
@@ -167,7 +179,10 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
   payload, so capture metadata growth increases wire size.
 - `ADMIN_PIPELINE_ASYNC_DISPATCH` is on by default: `admin_pipeline` capture and dispatch run on
   their own lanes, primed before serving warmup, controlled by `ADMIN_PIPELINE_DISPATCH_POLL_SECONDS`,
-  `ADMIN_PIPELINE_QUEUE_MAXLEN` and `ADMIN_PIPELINE_STALL_WARNING_SECONDS`.
+  `ADMIN_PIPELINE_QUEUE_MAXLEN` and `ADMIN_PIPELINE_STALL_WARNING_SECONDS`. The collection lane starts
+  before the admin bootstrap and takes no input from the capture while the business manager knows no
+  admin instance: what arrives while the admin plugins are created waits in the capture, where it was
+  taken and routed to no plugin before.
 - FastAPI web apps: `get_request_client_ip()` is uvicorn's `request.client.host`, which follows
   `X-Forwarded-For` only for connections from `FORWARDED_ALLOW_IPS` (default `127.0.0.1`). Tunnel
   agents must reach the app on 127.0.0.1, or the value is the agent's address. Never trust `*` on

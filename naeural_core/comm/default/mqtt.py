@@ -4,8 +4,6 @@ TODO:
    - here just a simple inherited class with init and _CONFIG should reside
   
 """
-from time import sleep
-
 from naeural_core.comm import MQTTWrapper
 from naeural_core import constants as ct
 from naeural_core.comm.base import BaseCommThread
@@ -85,9 +83,44 @@ class MQTTCommThread(BaseCommThread):
     return
 
   def _maybe_reconnect_to_server(self):
+    """
+    Connect to the broker when there is no connection, and wait out a back-off when the connect burst fails.
+
+    Does nothing while the client exists and the server connection flag is set. Otherwise it clears the send
+    and receive flags and makes one connect burst of ``BURST_RECONNECTS`` attempts (the wrapper tries each
+    configured broker at least once). A failed burst is counted, logged in red and followed by a wait of
+    ``CONNECTION_FAIL_SLEEP_TIME`` seconds (50 by default), so a running node does not retry a broker that
+    refuses it in a tight loop. The outcome of the burst is sent as a notification.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Once ``stop`` was asked the method opens no connection: it marks the server connection as gone and
+    returns. The flag is cleared because a disconnect first seen after the stop leaves it set with no client
+    behind it, and the loops send and subscribe when it is set. The lap that is running when stop is asked can
+    call this again (the heartbeat and command loops reconnect for sending and then for receiving), and a
+    burst against a broker that does not answer lasts until the client's connect timeout.
+
+    The back-off waits on the stop event, which ``stop`` sets, so it ends the moment the node closes; while
+    the node runs it lasts its whole length, as the plain sleep it replaces did.
+
+    Examples
+    --------
+    >>> self._maybe_reconnect_to_server()   # broker refuses: one burst, then up to 50 s of back-off
+    >>> self.has_server_conn
+    False
+    """
     if self.connection is None or not self.has_server_conn:
       self.has_send_conn = False
       self.has_recv_conn = False
+      if self._stop:
+        # Stopping: no new broker connection. The flag must say so: left set by a disconnect seen only now, it
+        # would make the loop send to, and subscribe with, a client that no longer exists.
+        self.has_server_conn = False
+        return
       dct_ret = self._controller.server_connect(
         max_retries=self.cfg_burst_reconnects
       )
@@ -103,7 +136,9 @@ class MQTTCommThread(BaseCommThread):
         self.P("Multiple connection retry fails occured. Sleeping comms thread for {} sec".format(
           self.cfg_connection_fail_sleep_time), color='r'
         )
-        sleep(self.cfg_connection_fail_sleep_time)
+        # The same back-off as before while the node runs; stop() sets the event, so a closing node leaves it at
+        # once instead of holding stop()'s join for the rest of the 50 s.
+        self._stop_event.wait(self.cfg_connection_fail_sleep_time)
         ##
       else:
         self._nr_conn_retry_iters = 0

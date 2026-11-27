@@ -72,6 +72,28 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       return
 
     def __get_ng_token(self):
+      """Resolve the configured or locally provisioned ngrok credential.
+
+      The debug log records which sources supply a value.
+
+      Parameters
+      ----------
+      None
+
+      Returns
+      -------
+      str or None
+        Configured token, otherwise the node's environment token.
+
+      Examples
+      --------
+      >>> plugin._NgrokMixinPlugin__get_ng_token()  # doctest: +SKIP
+
+      Notes
+      -----
+      Prefer a configured non-None value, including an empty string. The
+      environment is a fallback only. Diagnostics report presence flags.
+      """
       # TODO: At the moment multiple user auth tokens will not work on the same node
       #  if `NGROK_USE_API` is set to False.
       #  For the same node to use more than one auth token it needs to do so in separated
@@ -80,7 +102,8 @@ class _NgrokMixinPlugin(_TunnelEngineMixin):
       configured_ng_token = self.get_tunnel_engine_parameters()["NGROK_AUTH_TOKEN"]
       environment_ng_token = self.os_environ.get(_NgrokMixinPlugin.NgrokCT.NG_TOKEN, None)
       if self.cfg_debug_web_app:
-        self.P(f"Configured token: {configured_ng_token}, Environment token: {environment_ng_token}")
+        self.P(f"Ngrok credential configured: {configured_ng_token is not None}. "
+               f"Local environment credential available: {environment_ng_token is not None}.")
       return configured_ng_token if configured_ng_token is not None else environment_ng_token
 
     def get_ngrok_tunnel_kwargs(self):

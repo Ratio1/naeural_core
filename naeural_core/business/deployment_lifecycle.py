@@ -26,6 +26,7 @@ REPAIR_MAX_FUTURE_SECONDS = 180
 REPAIR_INSPECTION_INTERVAL = 5
 # Seconds a report write waits for peer confirmation before the next pass retries it.
 PUBLISH_TIMEOUT = 15
+TERMINAL_REPORT_STATES = ("stopped", "failed")
 # Repair the current field at most three times per recipient until its session or the snapshot changes.
 SOURCE_REPLAY_LIMIT = 3
 SOURCE_REPLAY_INTERVAL = 30
@@ -44,6 +45,11 @@ ERRORS = {
   "IMAGE_PULL_FAILED": "Container image could not be downloaded.",
   "SECRET_RESOLUTION_FAILED": "Protected configuration could not be resolved.",
 }
+# The failures that a later start of the workload can clear (a start, an image fetch). An instance leaves one of
+# them once its plugin no longer holds the error code (the runner reported a new status after the failure) and is
+# ready, or when a node restart starts the attempt again; before, every failure was kept for the attempt although
+# the app ran again. Every other code is still kept for the attempt.
+RECOVERABLE_ERRORS = ("WORKLOAD_START_FAILED", "IMAGE_PULL_FAILED")
 
 
 def stateless_worker_identities(config):
@@ -217,17 +223,86 @@ def deployment_source_mode(signature, pipeline, instance):
 class DeploymentLifecycle:
   """Track operation attempts independently of plugin execution threads.
 
+  Load and persist worker observations and publish signed deployment reports.
+  A report can outlive the thread that ran its workload.
+
   Parameters
   ----------
-  path : str
+  path : str or os.PathLike
       Private local journal path. Unreadable/corrupt journals fail closed.
   node_addr : str
       Blockchain address used for signed observations.
-  source_modes : bool
+  source_modes : bool, optional
       Whether the installed edge runtime supports following and pinned runners.
+
+  Returns
+  -------
+  DeploymentLifecycle
+      A journal and its in-memory observer and publisher state.
+
+  Raises
+  ------
+  ValueError
+      The primary journal is invalid JSON or its root is not a mapping.
+  OSError
+      Reading, synchronizing or migrating the primary journal failed.
+
+  Examples
+  --------
+  >>> DeploymentLifecycle("/var/cache/node/operations.json", node_addr)  # doctest: +SKIP
+
+  Notes
+  -----
+  Coordinator delivery receipts live beside the primary journal so older
+  publishers can read and sign the ordinary attempt records.
   """
 
   def __init__(self, path, node_addr, source_modes=False):
+    """
+    Load the node's deployment journal and reset the observations a restart makes stale.
+
+    Read the private journal when it exists. Restartable observations return
+    to "starting". Instances that still report return to "initializing".
+    A confirmed bound instance keeps its last observation. Inspection reports,
+    stopping and stopped attempts, and failures outside the recovery rules
+    retain their persisted status.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+      Private local journal path. Unreadable/corrupt journals fail closed.
+    node_addr : str
+      Blockchain address used for signed observations.
+    source_modes : bool, optional
+      Track source-following workloads when enabled for deployment pipelines.
+
+    Returns
+    -------
+    None
+      The journal records and empty runtime maps are set on the new object.
+
+    Raises
+    ------
+    ValueError
+      If the journal does not hold a mapping of records.
+    json.JSONDecodeError
+      If the journal is not valid JSON.
+    OSError
+      If the primary journal cannot be read, synchronized or migrated.
+
+    Examples
+    --------
+    >>> lifecycle = DeploymentLifecycle(os.path.join(data_folder, "deeploy_node_operations.json"), node_addr)
+    >>> lifecycle.records["operation|deploy"]["status"]  # persisted "failed" with WORKLOAD_START_FAILED
+    'starting'
+
+    Notes
+    -----
+    A non-aborted failed attempt recovers only if it has failed instances and
+    every failed instance has a recoverable error. Missing readiness proof
+    allows an active attempt to report again. An unchanged terminal receipt
+    suppresses replay only for the matching persisted report.
+    """
     self.path = path
     self.node_addr = node_addr
     self.source_modes = source_modes
@@ -236,12 +311,22 @@ class DeploymentLifecycle:
     # Shutdown waits for live plugin observation, independently of journal I/O and orphan cleanup.
     self._observation_lock = threading.Lock()
     self.records = {}
+    # Keep delivery receipts outside the record mapping that previous runtimes sign.
+    self._delivery_path = os.fspath(path) + ".deliveries"
+    # Start without proof so a missing file leaves eligible reports pending.
+    self._delivery_receipts = {}
     self._replacement_revisions = {}  # Durable minimum revision after replacement, indexed by job and pipeline.
     self._legacy_repair_aborts = {}  # Index only versioned conditional retirements for fast legacy startup checks.
     self.plugins = {}
     self._published = {}
+    # Attempt key -> (snapshot, final) of the last report write a chain store refused: the snapshot is reported
+    # once, and one refused for a reason no higher sequence can clear (final) is not written again while it is
+    # unchanged. Before, such a snapshot was bumped, saved, signed and refused again at every pass, once a second.
+    self._refused = {}
+    # The log method start() receives; publish() reports a refused snapshot through it.
+    self._report = None
     self._last_repair_inspection_by_job = {}  # A slow inspection only throttles another probe of the same job.
-    # Keep just the latest confirmed signed report and outstanding recipients for each active following attempt.
+    # Keep the latest signed report and its outstanding recipients for active readiness and source updates.
     self._source_delivery = {}
     self._peer_sessions = {}
     self._peer_session = None
@@ -256,21 +341,46 @@ class DeploymentLifecycle:
         raise ValueError("Invalid deployment lifecycle journal")
       # A process can restart after rename but before the directory sync was acknowledged.
       self._sync_journal_directory()
+      # Checkpoints are optional proof. Missing or unreadable proof leaves delivery pending.
+      self._load_delivery_receipts()
+      # Remove prior embedded fields before an older writer can sign them.
+      self._migrate_embedded_receipts()
       # A persisted readiness observation is not evidence after node restart.
-      for record in self.records.values():
+      for key, record in self.records.items():
+        if (record.get("active") and not record["aborted"] and record.get("ready_reported")
+            and not self._has_ready_delivery(key, record)):
+          # An older journal's quorum flag does not say whether its coordinator received readiness.
+          record.pop("ready_reported", None)
         if record.get("stateless_replacement") is True:
           self._index_stateless_replacement(record)  # Reestablish the fence before loading recovered configs.
         if (record.get("parent_operation_id") or record.get("confirm_prior_stop") is True) and "job_id" in record:
           self._legacy_repair_aborts.setdefault(record["app_id"], set()).add((str(record["job_id"]), 0))
-        if record["attempt"] != "inspect" and record["status"] not in ("stopping", "stopped", "failed"):
+        # Retry a failed start after process restart only when every failed instance can recover.
+        failures = [(instance.get("error") or {}).get("code") for instance in record["instances"]
+                    if instance["status"] == "failed"]
+        # Preserve inspection evidence and terminal stop status in the journal.
+        if record["attempt"] != "inspect" and record["status"] not in ("stopping", "stopped") and (
+          record["status"] != "failed" or (
+            not record["aborted"] and failures and all(code in RECOVERABLE_ERRORS for code in failures)
+          )
+        ):
+          # A restarted workload needs fresh readiness evidence for instances that still report.
           record["status"] = "starting"
           for instance in record["instances"]:
             # A confirmed bound instance retains its final observation in a mixed pipeline.
             if not record.get("ready_reported") or instance.get("source_mode") == "following":
-              instance["status"] = "initializing"
+              instance.update(status="initializing", error=None)
+        # Compute a terminal digest only for entries that have a receipt to validate.
+        terminal = self._delivery_receipts.get(key, {}).get("terminal")
+        if (terminal and record["status"] in TERMINAL_REPORT_STATES
+            and terminal == self._delivery_checkpoint(record, "terminal")):
+          # Only an unchanged, coordinator-confirmed terminal receipt survives as already published.
+          self._published[key] = deepcopy(self._report_fingerprint(record))
 
   def _save(self, records=None):
     """Persist a journal snapshot atomically and acknowledge its durability.
+
+    Write the primary journal in its existing record layout.
 
     Parameters
     ----------
@@ -280,28 +390,87 @@ class DeploymentLifecycle:
     Returns
     -------
     None
-      Raises on any failed write or sync.
+      The snapshot file and its directory entry have been synchronized.
+
+    Raises
+    ------
+    OSError
+      Creating, writing, replacing or syncing the snapshot failed.
+    TypeError or ValueError
+      The snapshot could not be encoded as JSON.
 
     Examples
     --------
     >>> service._save(staged_records)  # doctest: +SKIP
+
+    Notes
+    -----
+    A staged snapshot does not change the in-memory record mapping. Directory
+    synchronization can fail after replacement has made the new file visible.
     """
+    # The primary journal keeps its existing record layout for older writers.
+    self._save_json(self.path, self.records if records is None else records)
+
+  def _save_json(self, path, snapshot):
+    """Atomically write a protected file alongside the worker journal.
+
+    The journal and its receipt file share a directory and a durability barrier.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+      Journal or receipt path in the private journal directory.
+    snapshot : dict
+      Complete replacement contents.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    OSError
+      Opening, writing, replacing, syncing or removing a file failed.
+    TypeError or ValueError
+      The snapshot could not be encoded as JSON.
+
+    Examples
+    --------
+    >>> journal._save_json(journal.path, journal.records)  # doctest: +SKIP
+
+    Notes
+    -----
+    Each destination is replaced atomically by itself. A successful return
+    also requires the file and its parent directory to be synced.
+    """
+    # Write the complete snapshot to a private temporary file before replacing anything.
     folder = os.path.dirname(self.path)
+    # The first journal write may need to create its private directory.
     os.makedirs(folder, exist_ok=True)
+    # Keep the temporary file on the destination filesystem for atomic replacement.
     fd, temporary = tempfile.mkstemp(prefix=".deeploy-", dir=folder)
     try:
       with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(self.records if records is None else records, stream, sort_keys=True)
+        # Encode the entire snapshot with stable key ordering before exposing it.
+        json.dump(snapshot, stream, sort_keys=True)
+        # Transfer buffered text to the file descriptor before syncing it.
         stream.flush()
+        # Persist the new file contents before replacing the destination.
         os.fsync(stream.fileno())
-      os.replace(temporary, self.path)
+      # Replace the target only after the entire new file is durable.
+      os.replace(temporary, path)
+      # Persist the replacement directory entry as a separate durability step.
       self._sync_journal_directory()
     finally:
       if os.path.exists(temporary):
+        # Remove the staging file if a failed replacement left it behind.
         os.unlink(temporary)
 
-  def _sync_journal_directory(self):
-    """Confirm durability of the directory entry for the journal.
+  def _load_delivery_receipts(self):
+    """Load optional coordinator delivery proofs from the separate file.
+
+    An unusable receipt file leaves the authoritative journal readable and
+    allows a potentially unconfirmed report to be delivered again.
 
     Parameters
     ----------
@@ -310,11 +479,116 @@ class DeploymentLifecycle:
     Returns
     -------
     None
-      Raises if the directory cannot be synced.
+
+    Examples
+    --------
+    >>> journal._load_delivery_receipts()  # doctest: +SKIP
+
+    Notes
+    -----
+    An unreadable file or invalid JSON leaves optional proof unavailable.
+    Each receipt is validated against the primary journal before use.
+    """
+    try:
+      with open(self._delivery_path, encoding="utf-8") as stream:
+        # Parse only local state, leaving the primary journal independent of this read.
+        receipts = json.load(stream)
+    except (OSError, ValueError):
+      return
+    if isinstance(receipts, dict):
+      # Ignore malformed entries rather than using them as evidence of delivery.
+      self._delivery_receipts = {key: item for key, item in receipts.items() if isinstance(item, dict)}
+
+  def _migrate_embedded_receipts(self):
+    """Remove private receipt fields written by earlier candidate builds.
+
+    Rewrite the legacy-visible journal before saving valid receipts separately.
+    Interruption may require one new delivery of a report.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    OSError
+      Rewriting the journal or saving a migrated receipt failed.
+    TypeError or ValueError
+      The journal snapshot or receipt data could not be encoded as JSON.
+
+    Examples
+    --------
+    >>> journal._migrate_embedded_receipts()  # doctest: +SKIP
+
+    Notes
+    -----
+    During migration the old-format journal is made safe to sign before a
+    separate receipt file is updated. Interruption between writes can leave
+    the report without proof and eligible for re-delivery.
+    """
+    # Preserve all existing receipts and authoritative journal fields.
+    receipts = self._delivery_receipts.copy()
+    # Avoid rewriting a journal that never contained embedded proof.
+    rewritten = False
+    for key, record in self.records.items():
+      if "ready_coordinator_confirmed" not in record and "terminal_report_digest" not in record:
+        continue
+      # Remove these fields from every legacy-visible record before another runtime can sign it.
+      ready = record.pop("ready_coordinator_confirmed", None)
+      # Extract the terminal digest separately for comparison with the current record.
+      terminal = record.pop("terminal_report_digest", None)
+      # Even an invalid old receipt requires the authoritative file to be rewritten.
+      rewritten = True
+      # The earlier candidate stored this proof only after marking the ready record delivered.
+      entry = receipts.get(key, {}).copy()
+      if ready is True and record.get("ready_reported") is True:
+        # Bind the old readiness proof to this admitted attempt.
+        entry["ready"] = self._delivery_checkpoint(record, "ready")
+      if record["status"] in TERMINAL_REPORT_STATES and terminal == self._delivery_digest(self._report_fingerprint(record)):
+        # Import only a terminal digest that describes the record still held by the journal.
+        entry["terminal"] = self._delivery_checkpoint(record, "terminal")
+      if entry:
+        # Retain either migrated or previously saved proof under the same journal key.
+        receipts[key] = entry
+    if rewritten:
+      # Preserve the exact record contents other than the two implementation-private fields.
+      self._save()
+      if receipts != self._delivery_receipts:
+        # A lost sidecar update leaves an unproven record eligible for delivery.
+        self._save_json(self._delivery_path, receipts)
+        # Expose receipts in memory only after the sidecar update succeeds.
+        self._delivery_receipts = receipts
+
+  def _sync_journal_directory(self):
+    """Confirm durability of the directory entry for the journal.
+
+    Sync the containing directory after a file replacement or when resuming
+    a process that may have stopped before acknowledging that sync.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    OSError
+      Opening, synchronizing or closing the directory failed.
 
     Examples
     --------
     >>> service._sync_journal_directory()  # doctest: +SKIP
+
+    Notes
+    -----
+    The directory descriptor is closed even when synchronization fails.
     """
     directory = os.open(os.path.dirname(self.path), os.O_RDONLY)
     try:
@@ -1098,7 +1372,49 @@ class DeploymentLifecycle:
       self._save()
 
   def _observe(self, key, record):
-    """Aggregate plugin evidence without executing plugin workload methods."""
+    """
+    Aggregate plugin evidence into one attempt's record without executing plugin workload methods.
+
+    An aborted attempt moves its instances to "stopping", and to "stopped" once the stop is proven.
+    Otherwise each instance takes its plugin's state: "failed" with a fixed error code, "ready", or the
+    plugin's own progress status. A failure is kept for the attempt, except a start or image failure
+    (`RECOVERABLE_ERRORS`) whose plugin is ready again and no longer holds an error code: the runner
+    retried, reported a new status after the failure (which clears the code) and the workload runs, so
+    the instance leaves "failed" and the record's status is computed again from its instances. A ready
+    plugin that still holds an error code (it reported nothing new since the failure, as after a build
+    command that failed) stays "failed" with the code it holds.
+
+    Parameters
+    ----------
+    key : str
+      The attempt identity, "operation_id|attempt".
+    record : dict
+      The journal record of that attempt; it is updated in place.
+
+    Returns
+    -------
+    None
+      Statuses, errors and runtime artifacts are written into `record`.
+
+    Raises
+    ------
+    Exception
+      Whatever the scoped cleanup callback or a plugin's readiness check raises; `publish` isolates it to
+      this record.
+
+    Examples
+    --------
+    >>> lifecycle._observe("operation|deploy", record)  # a failed start, then "starting" and ready
+    >>> record["status"], record["instances"][0]["error"]
+    ('ready', None)
+
+    Notes
+    -----
+    A record whose ready report was confirmed is no longer published (NetMon owns workload liveness from
+    then on), so a later change of its status stays in the node's journal.
+    """
+    # Set when this pass takes an instance off a start or image failure, so the record's status follows.
+    recovered = False
     for instance in record["instances"]:
       if self._stop.is_set():
         return  # An in-progress Docker cleanup may finish, but shutdown must not start another.
@@ -1139,11 +1455,17 @@ class DeploymentLifecycle:
             plugin._deployment_stopped = True
         instance["status"] = "stopped" if thread_dead and stopped else "stopping"
         continue
+      # Source-following workloads can recover as new revisions arrive, including before readiness.
       follows_source = instance.get("source_mode") == "following"
-      if instance["status"] == "failed" and not (
-        follows_source and (instance.get("error") or {}).get("code") in SOURCE_FAILURES
-      ):
-        continue  # Infrastructure and bound workload failures remain terminal.
+      if instance["status"] == "failed":
+        # A rejected command or an infrastructure failure stays terminal; an image or start retry can become ready.
+        failure_code = (instance.get("error") or {}).get("code")
+        if not (follows_source and failure_code in SOURCE_FAILURES) and (
+          failure_code not in RECOVERABLE_ERRORS or not plugin.is_plugin_ready()
+        ):
+          continue
+        # The record's "failed" is computed again below; another failed instance keeps it.
+        recovered = True
       instance["error"] = None  # A recovered workload must not carry the previous failure.
       if follows_source:
         if not captured:
@@ -1171,8 +1493,9 @@ class DeploymentLifecycle:
     statuses = [instance["status"] for instance in record["instances"]]
     if record["aborted"]:
       record["status"] = "stopped" if all(status == "stopped" for status in statuses) else "stopping"
-    elif record["status"] != "failed" or (not record.get("error") and any(
-      item.get("source_mode") == "following" for item in record["instances"]
+    # Recompute after a successful retry or a new source-following runner, while command errors stay terminal.
+    elif record["status"] != "failed" or (not record.get("error") and (
+      recovered or any(item.get("source_mode") == "following" for item in record["instances"])
     )):
       record["status"] = "failed" if "failed" in statuses else "ready" if statuses and all(status == "ready" for status in statuses) else "starting"
 
@@ -1194,11 +1517,33 @@ class DeploymentLifecycle:
     Returns
     -------
     None
-        Stops taking observations when shutdown begins.
+      Stops taking observations when shutdown begins.
+
+    Raises
+    ------
+    RuntimeError
+        After every record had its publication opportunity, when observing a workload failed.
+
+    Notes
+    -----
+    A write that ends in a refusal (the setter's outcome word starts with ``refused_``) is reported in one red
+    line per snapshot: the attempt, its sequence, the word, and whether the record's node address is this
+    node's. What follows depends on whether a higher sequence can clear the refusal:
+
+    - it cannot for ``refused_token`` and ``refused_readonly`` (the stored record belongs to another writer)
+      and for ``refused_versioned`` on a record whose node address is not this node's (the signed-record rule
+      refuses the address itself): that snapshot is not bumped, saved, signed or written again until it
+      changes or the node restarts;
+    - it can for ``refused_versioned`` at the node's own address (the store holds the record at a higher
+      sequence, which the bumps catch up with) and it may for a refusal by the peers: those keep the retry of
+      every pass, as a write that was only left unconfirmed does.
+
+    Before, every refused snapshot was retried at every pass for good: one sequence bump, one journal save
+    with its two fsyncs, one signature and one refused write per second, with no line in the log.
 
     Examples
     --------
-    >>> journal.publish(setter, signer)
+    >>> lifecycle.publish(setter, signer)   # the reporter thread, once a second
     """
     with self.lock:
       pending = []
@@ -1239,8 +1584,12 @@ class DeploymentLifecycle:
           item.get("source_mode") == "following" for item in record["instances"]
         ):
           continue
-        fingerprint = {name: value for name, value in record.items() if name not in ("sequence", "updated_at", "ready_reported")}
+        # Local delivery bookkeeping has no effect on the report's content.
+        fingerprint = self._report_fingerprint(record)
         if self._published.get(key) == fingerprint:
+          continue
+        if self._refused.get(key) == (fingerprint, True):
+          # Refused for a reason no higher sequence can clear, and unchanged since: no bump, save, sign or write.
           continue
         record["sequence"] += 1
         record["updated_at"] = time.time()
@@ -1253,23 +1602,32 @@ class DeploymentLifecycle:
         self.plugins = {key: plugin for key, plugin in self.plugins.items()
                         if id(plugin) not in stopped_plugins}
       # Retiring an attempt also retires its replay cache, even if its next write cannot be confirmed.
-      for key in list(self._source_delivery):
-        if self.records[key]["aborted"] or not self.records[key].get("active"):
+      for key, (_, report, _) in list(self._source_delivery.items()):
+        # A stopped attempt can still owe its exact report to the coordinator.
+        current = self.records[key]
+        if (current["sequence"] != report["sequence"] or
+            (report["status"] not in TERMINAL_REPORT_STATES and (current["aborted"] or not current.get("active")))):
           del self._source_delivery[key]
     # Stop and failure reports drive coordinator decisions; do not queue them
     # behind writes that may each wait PUBLISH_TIMEOUT for unreachable peers.
     pending.sort(key=lambda item: not (item[1]["aborted"] or item[1]["status"] == "failed"))
-    ready_reported = []
+    acknowledged = []
     for key, record, fingerprint in pending:
       if self._stop.is_set():
         break  # Shutdown should wait only for the current write.
       # A superseded snapshot must never be replayed while its replacement awaits confirmation.
       self._source_delivery.pop(key, None)
       ready = record["status"] == "ready" and not record["aborted"]
+      # Both stopped workloads and terminal errors can finish a coordinator operation.
+      terminal = record["status"] in TERMINAL_REPORT_STATES
       peers = record.pop("peers")
       record.pop("aborted")
       record.pop("active")
       record.pop("ready_reported", None)
+      # A local acknowledgement is not part of the signed report.
+      record.pop("ready_coordinator_confirmed", None)
+      # Terminal checkpoints are private journal state as well.
+      record.pop("terminal_report_digest", None)
       for instance in record["instances"]:
         instance.pop("possibly_started", None)
         instance.pop("process_id", None)
@@ -1278,6 +1636,8 @@ class DeploymentLifecycle:
       field = key + "|" + self.node_addr
       prefix = "hs:" + hashlib.sha256(OBSERVATION_HKEY.encode()).hexdigest()[:10] + ":"
       success = True
+      # The setter writes here how the last write ended (its outcome word), on every path.
+      info = {}
       for field_name in (field + "|" + str(record["sequence"] % 8), field):
         if self._stop.is_set():
           success = False  # A partial publication is retried on the next node start.
@@ -1286,34 +1646,308 @@ class DeploymentLifecycle:
         # One unconfirmed write already fails the snapshot; skip the second wait.
         success = success and setter(storage_key, record, owner=self.node_addr, readonly=True,
                                      peers=peers, include_default_peers=False,
-                                     timeout=PUBLISH_TIMEOUT, max_retries=0)
+                                     # result_info: the outcome word tells a refusal from a write that was only
+                                     # left unconfirmed.
+                                     timeout=PUBLISH_TIMEOUT, max_retries=0, result_info=info)
       if success:
         self._published[key] = fingerprint
-        if (self._peer_session is not None and fingerprint.get("active") and not fingerprint["aborted"]
-            and any(i.get("source_mode") == "following" for i in record["instances"])):
+        # Runtimes with a peer-session reader can distinguish the designated coordinator from the quorum.
+        track_delivery = self._peer_session is not None and self._confirmed_peers is not None
+        # A standalone journal caller without peer information uses its setter's confirmation.
+        confirmed = self._confirmed_peers(storage_key) if track_delivery else peers
+        # Source-following apps keep all recipients current. A bound app must reach its coordinator.
+        following = any(instance.get("source_mode") == "following" for instance in record["instances"])
+        coordinator = record["coordinator"]
+        # A same-node coordinator reads the stored value directly without a network acknowledgement.
+        coordinator_confirmed = coordinator in confirmed or coordinator == self.node_addr
+        # Keep following reports up to date while the attempt is active.
+        following_live = following and fingerprint.get("active") and not fingerprint["aborted"]
+        # A pending terminal stop can be inactive or aborted and still need delivery to its coordinator.
+        if track_delivery and (following_live or ready or (terminal and not coordinator_confirmed)):
           # A bulk write can succeed with only one acknowledgement. Keep the exact signed current field
           # for the other recipients; never refresh its sequence, timestamp or eight history slots.
-          confirmed = self._confirmed_peers(storage_key)
+          recipients = peers if following_live else [coordinator]
+          # Keep the coordinator eligible for replay after a reconnect, even if it confirmed this publication.
           due = {peer: None if peer in confirmed else (time.monotonic() + PUBLISH_TIMEOUT, 0, False)
-                 for peer in peers if peer != self.node_addr}
+                 for peer in recipients if peer != self.node_addr}
           self._source_delivery[key] = (storage_key, record, due)
-        if ready:
-          ready_reported.append(key)
-    if ready_reported:
-      # Persist the end of reporting so a node restart does not re-announce it.
-      with self.lock:
-        for key in ready_reported:
-          self.records[key]["ready_reported"] = True
-        self._save()
+        if (ready or terminal) and coordinator_confirmed:
+          # Only the coordinator can complete the report checkpoint.
+          acknowledged.append((key, record["sequence"], record["status"]))
+      elif info and info["outcome"].startswith("refused_"):
+        # Whether the record carries this node's address: with another one, the signed-record rule refuses it
+        # whatever its sequence.
+        own = record["node_addr"] == self.node_addr
+        # Final: the stored record has another token or owner, or the address is not this node's. A refusal at
+        # the node's own address (the store holds a higher sequence) or by the peers keeps its retry.
+        final = info["outcome"] in ("refused_token", "refused_readonly") or (
+          info["outcome"] == "refused_versioned" and not own)
+        if self._refused.get(key) != (fingerprint, final):
+          # Remembered first, so each refused snapshot is reported once, not at every pass.
+          self._refused[key] = (fingerprint, final)
+          # One red line: the attempt, its sequence, the store's word, whether the address is this node's (the
+          # address itself is not printed), and what happens next.
+          self._report("Deployment report {} (sequence {}) was refused by the chain store: {}; node address {}; {}.".format(
+            key, record["sequence"], info["outcome"], "matches" if own else "differs",
+            "not retried until the report changes" if final else "retried each pass"), color='r')
     if not self._stop.is_set():
-      self._repair_source_delivery(setter)  # New reports always take precedence over a bounded repair.
+      # New reports take precedence over a bounded repair of a previously signed current field.
+      acknowledged.extend(self._repair_source_delivery(setter))
+    if acknowledged:
+      self._save_report_deliveries(acknowledged)
     if observation_failed:
       # Preserve the worker's existing throttled error notification after all
       # independently observed jobs have had their publication opportunity.
       raise RuntimeError("Deployment workload observation failed; retrying.")
 
+  @staticmethod
+  def _report_fingerprint(record):
+    """Return journal content relevant to report identity.
+
+    Ignore the publication sequence, timestamp and local delivery metadata.
+
+    Parameters
+    ----------
+    record : dict
+      Local attempt journal entry.
+
+    Returns
+    -------
+    dict
+      Report content and routing state that can supersede a previous publication.
+
+    Examples
+    --------
+    >>> DeploymentLifecycle._report_fingerprint({"sequence": 2, "status": "stopped"})
+    {'status': 'stopped'}
+
+    Notes
+    -----
+    Routing changes can supersede delivery proof even when the workload
+    observation itself did not change. The result shares nested values
+    with the input record.
+    """
+    # One projection is used for the publish loop and restart recovery.
+    return {name: value for name, value in record.items()
+            if name not in ("sequence", "updated_at", "ready_reported", "ready_coordinator_confirmed",
+                            "terminal_report_digest")}
+
+  @staticmethod
+  def _delivery_digest(content):
+    """Fingerprint the identity or content of a coordinator-confirmed report.
+
+    Use a deterministic encoding so reloading the journal preserves identity.
+
+    Parameters
+    ----------
+    content : dict
+      Attempt identity or report and routing content without delivery metadata.
+
+    Returns
+    -------
+    str
+      Hex digest for the separate delivery checkpoint.
+
+    Raises
+    ------
+    TypeError or ValueError
+      The input is not serializable by the JSON encoder.
+
+    Examples
+    --------
+    >>> len(DeploymentLifecycle._delivery_digest({"status": "stopped"}))
+    64
+
+    Notes
+    -----
+    Sorted keys and compact separators make the digest independent of field
+    insertion order and JSON spacing.
+    """
+    # The journal already uses JSON for these fields.
+    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+  def _delivery_checkpoint(self, record, kind):
+    """Bind a delivery receipt to the journal attempt and report generation.
+
+    Readiness uses the fixed attempt identity and generation because startup
+    normalizes its runtime observations. Terminal delivery also binds all
+    report content and routing so a changed stop or failure is replayed.
+
+    Parameters
+    ----------
+    record : dict
+      Persisted attempt record.
+    kind : str
+      Ready or terminal delivery receipt.
+
+    Returns
+    -------
+    list
+      Ready proof contains sequence, timestamp and an attempt identity digest.
+      Terminal proof contains sequence and a digest that includes the timestamp.
+
+    Raises
+    ------
+    KeyError
+      A required attempt identity or report generation field is absent.
+    TypeError or ValueError
+      The identity or report data cannot be encoded as JSON.
+
+    Examples
+    --------
+    >>> journal._delivery_checkpoint(journal.records["operation|deploy"], "ready")  # doctest: +SKIP
+
+    Notes
+    -----
+    The receipt holds no signed payload. A terminal report can regain proof
+    after a rollback increments its sequence and the coordinator acknowledges
+    that generation.
+    """
+    if kind == "ready":
+      # The attempt identity also remains stable while a following workload publishes newer observations.
+      content = {field: record[field] for field in (
+        "operation_id", "attempt", "revision", "app_id", "node_addr", "coordinator",
+      )}
+      return [record["sequence"], record["updated_at"], self._delivery_digest(content)]
+    # The timestamp and sequence distinguish a newly signed terminal report from a restored old one.
+    content = dict(self._report_fingerprint(record), updated_at=record["updated_at"])
+    return [record["sequence"], self._delivery_digest(content)]
+
+  def _has_ready_delivery(self, key, record):
+    """Check for readiness acknowledged by the coordinator of this attempt.
+
+    A following workload can publish newer observations after it first becomes
+    ready. Its historical receipt still belongs to the same running attempt.
+
+    Parameters
+    ----------
+    key : str
+      Local journal key.
+    record : dict
+      Attempt record before startup resets runtime observations.
+
+    Returns
+    -------
+    bool
+      Whether the supplied record has matching coordinator delivery proof.
+
+    Raises
+    ------
+    KeyError
+      A structurally valid receipt has a journal record missing an identity
+      or generation field.
+
+    Examples
+    --------
+    >>> journal._has_ready_delivery("operation|deploy", journal.records["operation|deploy"])  # doctest: +SKIP
+
+    Notes
+    -----
+    A receipt for the same generation must match the exact timestamp and
+    identity. Only an attempt with a source-following instance can reuse a
+    receipt from an earlier generation.
+    """
+    receipt = self._delivery_receipts.get(key, {}).get("ready")
+    # A malformed or future receipt cannot establish a prior coordinator acknowledgement.
+    if (not isinstance(receipt, list) or len(receipt) != 3
+        or type(receipt[0]) is not int or receipt[0] <= 0):
+      return False
+    current = self._delivery_checkpoint(record, "ready")
+    if receipt == current:
+      return True
+    # Only following instances publish newer reports while retaining the readiness flag.
+    return (receipt[0] < current[0] and receipt[2] == current[2]
+            and any(instance.get("source_mode") == "following" for instance in record["instances"]))
+
+  def _save_report_deliveries(self, acknowledgements):
+    """Persist ready or terminal observations acknowledged by their coordinators.
+
+    Ignore a receipt if the attempt changed before the journal lock was acquired.
+
+    Parameters
+    ----------
+    acknowledgements : iterable of tuple
+      Attempt key, confirmed sequence and reported status.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    OSError
+      The journal or its receipt file could not be persisted.
+
+    Examples
+    --------
+    >>> journal._save_report_deliveries([("operation|deploy", 1, "stopped")])  # doctest: +SKIP
+
+    Notes
+    -----
+    Required changes to the old-readable journal are committed before proof
+    in the separate receipt file. An I/O failure evicts the affected
+    publication cache entries so a later pass can re-establish delivery.
+    """
+    with self.lock:
+      # Only readiness needs to update the old journal's ready flag. All proof goes to the receipt file.
+      ready_updates, receipt_updates = {}, {}
+      for key, sequence, status in acknowledgements:
+        # The latest journal state may have changed while network writes were in flight.
+        record = self.records.get(key)
+        if record is None or record["sequence"] != sequence or record["status"] != status:
+          continue
+        # Match the full observation to the one that actually reached its recipients.
+        fingerprint = self._report_fingerprint(record)
+        if self._published.get(key) != fingerprint:
+          continue
+        if status == "ready" and not record["aborted"]:
+          # The legacy flag is understood by older writers and already excluded from their signed wire format.
+          kind = "ready"
+          if not record.get("ready_reported"):
+            # Stage the first durable readiness acknowledgement in the primary journal.
+            ready_updates[key] = dict(record, ready_reported=True)
+        elif status in TERMINAL_REPORT_STATES:
+          # Terminal proof belongs only in the separate receipt file.
+          kind = "terminal"
+        else:
+          continue
+        # Keep both proof types when a following attempt moves between ready and failed.
+        entry = receipt_updates.get(key, self._delivery_receipts.get(key, {}))
+        # Store proof for the report generation acknowledged by the coordinator.
+        checkpoint = self._delivery_checkpoint(record, kind)
+        if entry.get(kind) != checkpoint:
+          # Avoid rewriting an identical receipt.
+          receipt_updates[key] = {**entry, kind: checkpoint}
+      if ready_updates or receipt_updates:
+        try:
+          # Commit the journal first. New readers still require matching proof for any new ready flag.
+          if ready_updates:
+            self._save({**self.records, **ready_updates})
+          # The report itself is already durable before signing, so a terminal receipt needs only this write.
+          if receipt_updates:
+            self._save_json(self._delivery_path, {**self._delivery_receipts, **receipt_updates})
+        except OSError:
+          # A later publication can reacquire delivery proof if saving this checkpoint failed.
+          for key in ready_updates.keys() | receipt_updates.keys():
+            self._published.pop(key, None)
+          raise
+        # The worker can suppress delivery in memory only after both required writes complete.
+        self.records.update(ready_updates)
+        # Commit the same proof in memory that is now available to a restarted worker.
+        self._delivery_receipts.update(receipt_updates)
+        for key in receipt_updates:
+          record = self.records[key]
+          if record["status"] in TERMINAL_REPORT_STATES and (
+            record["aborted"] or not any(instance.get("source_mode") == "following" for instance in record["instances"])
+          ):
+            # Once the coordinator has it, a historical terminal receipt needs no reconnect replay.
+            self._source_delivery.pop(key, None)
+
   def _repair_source_delivery(self, setter):
     """Replay one current field to an oracle that missed it or restarted.
+
+    Check for delayed confirmations before selecting one due repair.
+    A peer's new session invalidates its earlier acknowledgement.
 
     Parameters
     ----------
@@ -1322,12 +1956,24 @@ class DeploymentLifecycle:
 
     Returns
     -------
-    None
+    list of tuple
+      Attempt keys, sequences and statuses acknowledged by their coordinators.
       A failed transfer remains queued up to the repair limit per snapshot and peer session.
+
+    Raises
+    ------
+    Exception
+      Errors from the confirmation lookup or the selected CStore write are
+      propagated to the publication worker.
 
     Examples
     --------
-    >>> journal._repair_source_delivery(setter)
+    >>> journal._repair_source_delivery(setter)  # doctest: +SKIP
+
+    Notes
+    -----
+    One pass sends at most one targeted write with a two-second confirmation
+    timeout. Previous-session acknowledgements cannot complete a forced repair.
     """
     now = time.monotonic()
     peers = {peer for _, _, recipients in self._source_delivery.values() for peer in recipients}
@@ -1348,7 +1994,9 @@ class DeploymentLifecycle:
         returning.add(peer)  # A peer can restart between heartbeats without appearing offline.
     self._peer_sessions.update(sessions)
     transfer = None
-    for storage_key, report, recipients in self._source_delivery.values():
+    # Delayed and targeted coordinator confirmations are equally valid.
+    acknowledged = []
+    for key, (storage_key, report, recipients) in self._source_delivery.items():
       for peer, pending in recipients.items():
         if peer in returning:
           pending = recipients[peer] = (now, 0, True)  # Ignore confirmations predating a peer restart.
@@ -1357,22 +2005,71 @@ class DeploymentLifecycle:
         due, tries, force = pending
         if not force and peer in self._confirmed_peers(storage_key):
           recipients[peer] = None  # The broadcast acknowledgement arrived after quorum; no replay needed.
+          if peer == report["coordinator"] and (report["status"] == "ready" or report["status"] in TERMINAL_REPORT_STATES):
+            # A delayed acknowledgement completes delivery without sending a duplicate.
+            acknowledged.append((key, report["sequence"], report["status"]))
         elif transfer is None or due < transfer[0]:
-          transfer = (due, peer, storage_key, report, recipients, tries)
+          # Keep the journal key with the one transfer allowed in this pass.
+          transfer = (due, key, peer, storage_key, report, recipients, tries)
     if transfer is not None and not self._stop.is_set():
-      _, peer, storage_key, report, recipients, tries = transfer
+      _, key, peer, storage_key, report, recipients, tries = transfer
       # Debiting the budget before calling the setter also bounds failures that raise.
       tries += 1
       recipients[peer] = (now + SOURCE_REPLAY_INTERVAL, tries, True) if tries < SOURCE_REPLAY_LIMIT else None
       if setter(storage_key, report, owner=self.node_addr, readonly=True, peers=[peer],
                 include_default_peers=False, timeout=2, max_retries=0, require_target_ack=True):
         recipients[peer] = None
+        if peer == report["coordinator"] and (report["status"] == "ready" or report["status"] in TERMINAL_REPORT_STATES):
+          # A targeted delivery completes the original observation.
+          acknowledged.append((key, report["sequence"], report["status"]))
+    return acknowledged
 
   def start(self, setter_provider, signer, report_error, cleanup=None, peer_session=None, confirmed_peers=None):
-    """Start an independent bounded publication worker once CStore is ready."""
+    """
+    Start an independent bounded publication worker once CStore is ready.
+
+    The worker runs ``publish`` once a second for as long as the chain-store setter is available. Calling this
+    again while the worker exists does nothing.
+
+    Parameters
+    ----------
+    setter_provider : callable
+        Returns the chain-store setter, or None while the chain store is not ready.
+    signer : callable
+        Blockchain signing function, passed to ``publish``.
+    report_error : callable
+        Log method taking a text and a ``color`` keyword. It gets the throttled "publication failed" line
+        (at most one per 60 s) and one red line per report snapshot the chain store refuses.
+    cleanup : callable, optional
+        Workload cleanup used when an aborted attempt's plugin is gone. Default None.
+    peer_session : callable, optional
+        Returns current reachability and uptime for one report recipient.
+    confirmed_peers : callable, optional
+        Returns the recipients that acknowledged the current value stored under the key.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    RuntimeError
+        The publication thread could not be started.
+
+    Examples
+    --------
+    >>> lifecycle.start(lambda: shmem.get("__chain_storage_set"), blockchain_manager.sign, self.P)
+
+    Notes
+    -----
+    Publication runs on a daemon thread. Its one-second wait is between
+    passes, and a slow pass can make the interval longer.
+    """
     if self._thread is not None:
       return
     self._cleanup = cleanup
+    # Publish refusals through the same logger that receives worker errors.
+    self._report = report_error
     self._peer_session = peer_session
     self._confirmed_peers = confirmed_peers
     def run():

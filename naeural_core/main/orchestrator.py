@@ -17,6 +17,8 @@ from naeural_core.main.net_mon import NetworkMonitor
 # Runs the periodic state saves (chain store, network monitor), each on a background thread of its own.
 from naeural_core.main.serialization_manager import SerializationManager
 from naeural_core.main.command_handlers import ExecutionEngineCommandHandlers
+# The nodes that send no start-up dAuth request (VPN deployments and seed nodes): the dAuth warning leaves them out.
+from naeural_core.main.orchestrator_mixins.managers_init import node_keeps_authorized_addrs
 from naeural_core.main.orchestrator_mixins import (
   _ValidateConfigStartupMixin,
   _ManagersInitMixin,
@@ -70,10 +72,20 @@ SHUTDOWN_DELAY = 5
 CHECK_AND_COMPLETE_ITERATIONS = 30 # how many iterations to wait for the dAuth completion
 CHECK_AND_COMPLETE_SLEEP_PERIOD = 30 # how many seconds to wait between iterations
 CHECK_AND_COMPLETE_TIMEOUT = CHECK_AND_COMPLETE_ITERATIONS * CHECK_AND_COMPLETE_SLEEP_PERIOD
+# Longest pause, in seconds, between two start-up dAuth rounds: the pause doubles after each round that brought no
+# variables and stops growing here.
+CHECK_AND_COMPLETE_MAX_PAUSE = 300
 CHECK_NODE_ORACLES_EVERY = 15 * 60  # How many seconds to wait between oracle checks
 NODE_ORACLE_REFRESH_THREAD_SLEEP = 5
 RUNTIME_SECRET_RESOLVER_POLL_SECONDS = 0.25
+# Seconds after the node's first heartbeat within which a main-loop stop before the first lap is the normal
+# start (the admin plugins are being loaded) and not a dangerous stop. A start that has not reached its first
+# lap by then is taken as hung.
+MLSTOP_STARTUP_GRACE = 600
 RUNTIME_SECRET_RETRY_MAX_SECONDS = 30
+# Longest wait, in seconds, before a pipeline's dAuth secret request is sent again after a ValueError: dAuth
+# refused it for good, or its answer or bundle cannot be accepted as it is. Any other failure keeps the 30 s above.
+RUNTIME_SECRET_REFUSED_RETRY_MAX_SECONDS = 300
 RUNTIME_SECRET_REQUEST_TIMEOUT = (5, 20)
 RUNTIME_SECRET_REQUEST_DEADLINE_SECONDS = 25
 RUNTIME_SECRET_SHUTDOWN_JOIN_SECONDS = 2
@@ -203,6 +215,8 @@ class Orchestrator(DecentrAIObject,
     self._admin_pipeline_collect_last_progress_ts = None
     self._admin_pipeline_collect_last_warning_ts = 0
     self._admin_pipeline_collect_consecutive_failures = 0
+    self._use_summary_oracle_refresh = False
+    self.__cached_summary_registry = ()
     self.__cached_node_oracles = []
     self.__node_oracle_refresh_version = 0
     self.__node_oracle_apply_version = 0
@@ -345,9 +359,11 @@ class Orchestrator(DecentrAIObject,
     Complete the node's environment variables from dAuth at start-up, retrying within a time limit.
 
     Calls ``blockchain_manager.dauth_autocomplete`` in rounds until it returns either None or a non-empty
-    dict of variables, sleeping a random 16-29 s after each round that returns an empty dict. No new round
-    starts once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed, or once a stop was requested
-    (``request_stop``, called by the SIGTERM handler); the node then continues with its local environment.
+    dict of variables, pausing after each round that returns an empty dict: a random 16-29 s after the first
+    such round, twice as long after each further one, at most ``CHECK_AND_COMPLETE_MAX_PAUSE`` (300 s). No new
+    round starts, and a pause in progress ends, once ``CHECK_AND_COMPLETE_TIMEOUT`` seconds (900 s) have passed
+    or a stop was requested (``request_stop``, called by the SIGTERM handler); the node then continues with its
+    local environment.
     When dAuth returned variables, the logger config is reloaded so they take effect.
 
     Each round first sends a new-key announcement that still waits for dAuth's confirmation
@@ -370,9 +386,24 @@ class Orchestrator(DecentrAIObject,
     last try a failure that is not "busy", such as a refused connection, a connect timeout or a status like
     530), or dAuth is not used on this deployment (with a VPN the SDK returns None without sending a
     request). A warning is logged when the node continues without dAuth variables at the time limit, after
-    a stop request, or because a later round ended on None. A None in the first round is not warned here,
-    as before: it is the normal answer on a VPN deployment. A stop request does not interrupt the request
-    or the pause in progress.
+    a stop request, or because a round ended on None on a node that asks dAuth, the first round included
+    (before, a first-round None was not warned, so a worker whose only round failed ran with no allowed
+    senders without a word). A VPN deployment and a seed node, which get None in the first round without a
+    request (``node_keeps_authorized_addrs``), are not warned. A stop request does not interrupt the request
+    in progress; it ends the pause in progress within a second.
+
+    An empty dict is also what a refusal looks like here (a node key that is not linked to a license, a
+    revoked key, a release that is too old): the answer carries no variables either. Before, every empty
+    round was followed by the same 16-29 s pause, so a refused node made about 40 rounds in its 900 s and,
+    restarted by its host, went on at that rate for good; many such nodes kept the oracles' dAuth thread busy
+    refusing. With the growing pause a node makes 6 or 7 rounds in that time. The price is paid by a
+    licensed node that meets busy oracles several times in a row: its later rounds come later. The pause that
+    is running when the time limit passes ends there, within a second, and no round follows it: the node
+    continues about 900 s after it began to ask, as it did with the short pauses, and not up to 300 s later.
+
+    Examples
+    --------
+    >>> self._check_and_complete_environment_variables()   # refused: rounds at about 0, 22, 67, 157, 337, 637 s
     """
     
     self.P(f"Node <{self.eth_address}> completing setup for network <{self.evm_network}>...")
@@ -404,18 +435,28 @@ class Orchestrator(DecentrAIObject,
 
       if not done:
         elapsed = time() - start_ts
-        self.P(f'Retrying dAuth completion({tries} tries so far in {elapsed:.1f}s)...')
-        sleep(
-          CHECK_AND_COMPLETE_SLEEP_PERIOD / 2 + 
-          np.random.randint(1, CHECK_AND_COMPLETE_SLEEP_PERIOD // 2)
-        )
+        # The random 16-29 s that followed every empty round before.
+        pause = CHECK_AND_COMPLETE_SLEEP_PERIOD / 2 + np.random.randint(1, CHECK_AND_COMPLETE_SLEEP_PERIOD // 2)
+        # Now only after the first empty round: twice as long after each further one, at most 300 s. An empty
+        # answer is a busy oracle or a refusal, and neither is helped by asking again every 16-29 s.
+        pause = min(pause * 2 ** (tries - 1), CHECK_AND_COMPLETE_MAX_PAUSE)
+        self.P(f'Retrying dAuth completion({tries} tries so far in {elapsed:.1f}s), next try in {pause:.0f}s...')
+        # Slept one second at a time: a pause of up to 300 s must not hold back a stop request, and it ends at
+        # the time limit. Slept in full, the last pause ended up to 300 s past the limit.
+        for _ in range(int(pause)):
+          if self._return_code is not None or time() - start_ts >= CHECK_AND_COMPLETE_TIMEOUT:
+            break
+          # One second of the pause.
+          sleep(1)
     # endwhile not done
 
-    # Warn also when a later round ended on None: an earlier round got an empty dict (for example from a busy
-    # oracle), and this round gave up on a failure that is not "busy". The node then runs on its local
-    # environment until it restarts, and the log must say so. Do not warn for a None in the first round: a VPN
-    # deployment also gets None there, without sending any request.
-    if not done or (dct_env_output is None and tries > 1):
+    # Warn also when a round ended on None on a node that asks dAuth: the round gave up on a failure that is not
+    # "busy" (a refused connection, a status like 530). The node then runs on its local environment, with no allowed
+    # senders from dAuth, until it restarts, and the log must say so. The first round too: before, a None there was
+    # never warned, so a worker whose only round failed refused every oracle command without a word. A VPN deployment
+    # and a seed node get None in the first round without sending any request (node_keeps_authorized_addrs: the
+    # nodes that keep their allowed senders across restarts), and are not warned.
+    if not done or (dct_env_output is None and (tries > 1 or not node_keeps_authorized_addrs())):
       self.P(f'WARNING: <{self.eth_address}> could not retrieve dAuth ({tries} rounds in {time() - start_ts:.1f}s, '
              f'limit {CHECK_AND_COMPLETE_TIMEOUT}s). Continuing with local environment...')
 
@@ -504,6 +545,38 @@ class Orchestrator(DecentrAIObject,
 
 
   def _init_all_processes(self):
+    """
+    Start the node's processes: blockchain identity, start-up dAuth, network monitor, managers and threads.
+
+    In order: the main-loop data handler and the application monitor; the private blockchain engine and the reset
+    of the allowed senders (before dAuth, which fills them again); the EVM network and the node's location; the
+    start-up dAuth (``_check_and_complete_environment_variables``) and the supervisor flag it may set; the network
+    monitor; the managers (config, comm, capture, serving, business and the others) and the runtime secret
+    resolver; then the threads: asynchronous communication, the admin pipeline's input collection when
+    configured, and the node oracle refresh.
+
+    Direct-heartbeat nodes refresh oracle identities from epoch history. A regular worker which receives
+    authorized NetMon summaries resolves registry members from fresh summary keys. A worker without
+    either source keeps its startup allowed senders and logs once when it cannot refresh.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+      When the node has no address after the blockchain engine started.
+
+    Notes
+    -----
+    Runs once, from ``main_loop`` before its first lap. The check of the allowed senders reads the
+    allowed-senders file once on a node which lacks a direct peer heartbeat feed.
+
+    Examples
+    --------
+    >>> self._init_all_processes()   # Start the configured identity feed after dAuth.
+    """
     self._data_handler = MainLoopDataHandler(log=self.log, owner=self, DEBUG=self.DEBUG)
     self._app_monitor = ApplicationMonitor(log=self.log, owner=self)
 
@@ -573,13 +646,25 @@ class Orchestrator(DecentrAIObject,
     if self.cfg_admin_pipeline_async_dispatch:
       self._start_admin_pipeline_collection_thread()
 
-    self._thread_node_oracle_refresh = Thread(
-      target=self.node_oracle_refresh_loop,
-      args=(),
-      name=ct.THREADS_PREFIX + 'node_oracle_refresh',
-      daemon=True,
-    )
-    self._thread_node_oracle_refresh.start()
+    # The communication manager records the actual CTRL subscription selected at startup.
+    no_peer_heartbeats = self._comm_manager.should_register_local_self_heartbeat
+    self._use_summary_oracle_refresh = no_peer_heartbeats and self._network_monitor.network_summary_status_enabled
+    if no_peer_heartbeats and not self._use_summary_oracle_refresh:
+      self.P("Node oracle refresh not started: this node receives no peer heartbeats and summary lookup is disabled.",
+             color='y')
+    if no_peer_heartbeats and not self.whitelist:
+      self.P("No allowed command senders after start-up dAuth. Oracle commands require a validated allowed sender.",
+             color='r')
+    if not no_peer_heartbeats or self._use_summary_oracle_refresh:
+      # Both modes use the existing bounded registry cadence and additive whitelist application.
+      self._thread_node_oracle_refresh = Thread(
+        target=self.node_oracle_refresh_loop,
+        args=(),
+        name=ct.THREADS_PREFIX + 'node_oracle_refresh',
+        daemon=True,
+      )
+      # Started; the stop joins it.
+      self._thread_node_oracle_refresh.start()
 
     if False:
       self._thread_logger_debugger = Thread(
@@ -1181,11 +1266,24 @@ class Orchestrator(DecentrAIObject,
 
     Notes
     -----
+    A versioned pipeline with no secret revision is withheld and retried like a dAuth refusal. The pass
+    catches the validation error and retries at intervals of up to 300 seconds.
+
     Object identity is a safe "nothing changed" test because ``choose_current_running_streams``, the only
     code that replaces the dict after ``__init__``, assigns a new dict whenever any pipeline differs. A side
     effect: ``$EE_*`` references are no longer re-expanded every 0.25 s while the config is unchanged, so an
     ``EE_*`` variable changed at runtime is picked up by the next full pass (a pipeline change or pending
     work), not within 0.25 s.
+
+    The retry wait doubles from 1 s. It stops at ``RUNTIME_SECRET_RETRY_MAX_SECONDS`` (30 s) for a failure
+    that can pass by itself (an unavailable service, a timeout) and at
+    ``RUNTIME_SECRET_REFUSED_RETRY_MAX_SECONDS`` (300 s) for a ``ValueError``. That is a request dAuth refused
+    as not retryable, and also every answer that cannot be used as it is: an HTTP 401 or 403, a text that is
+    not valid JSON, a signature that is not valid or not a registered oracle's, a nonce that does not match, a
+    refusal without retryability information, or a bundle that does not fit the pipeline. Before, such a
+    request was sent again every 30 s for good, per withheld pipeline. A changed pipeline or a node restart
+    asks again at once; a pipeline whose refusal came from a passing fault on the answering side recovers
+    at most 300 s after the fault ends.
 
     Examples
     --------
@@ -1264,8 +1362,14 @@ class Orchestrator(DecentrAIObject,
           if current_pipeline != pipeline_config:
             continue
           attempt = retry_state.get("attempt", 0) + 1
-          exponent = min(attempt - 1, 5)
-          delay = min(2 ** exponent, RUNTIME_SECRET_RETRY_MAX_SECONDS)
+          # A ValueError is a refusal dAuth marked as not retryable, an answer that is not authorized or not
+          # valid, or a bundle that does not fit the pipeline: the same request gets the same result, so its
+          # wait keeps doubling up to 300 s. Before, it was sent again every 30 s for good.
+          refused = isinstance(exc, ValueError)
+          # Doubling up to 2**10 s, above both limits; it was 2**5, just above the 30 s limit.
+          exponent = min(attempt - 1, 10)
+          # 1, 2, 4 ... s up to the limit of the failure's kind: 300 s after a refusal, 30 s after any other.
+          delay = min(2 ** exponent, RUNTIME_SECRET_REFUSED_RETRY_MAX_SECONDS if refused else RUNTIME_SECRET_RETRY_MAX_SECONDS)
           failure_time = now if fixed_now else time()
           self._runtime_secret_retry_state[cache_key] = {
             "attempt": attempt,
@@ -1281,6 +1385,9 @@ class Orchestrator(DecentrAIObject,
           if isinstance(exc, RuntimeSecretResolutionError)
           else type(exc).__name__
         )
+        if refused:
+          # The line says why this pipeline's retries slow down: the type name alone does not.
+          error_detail += " (refused by dAuth, or an answer that cannot be used)"
         self.P(
           "Withholding pipeline '{}' while dAuth secrets are unresolved "
           "(job {}, retry in {}s): {}".format(
@@ -1491,8 +1598,8 @@ class Orchestrator(DecentrAIObject,
     The loop leaves at its next check and closes as after a STOP command:
     SHUTDOWN-status heartbeat, then the managers and plugins are closed; the
     chain store saves its pending writes as it closes, and the
-    network-monitor or epoch state is saved once more when the
-    SerializationManager stops, as the last step of the close. During start-up no new dAuth round starts and the
+    network-monitor or epoch state is saved once more, starting as the
+    first step of the close. During start-up no new dAuth round starts and the
     main loop is not entered. The method only sets a value, so a signal
     handler may call it.
 
@@ -1526,6 +1633,31 @@ class Orchestrator(DecentrAIObject,
     return
 
   def _maybe_gracefull_stop(self):
+    """
+    First step of an orderly close: send the SHUTDOWN-status heartbeat, then stop the orchestrator's threads.
+
+    Does nothing when a shutdown or exception stop already ran. Otherwise it sets the shutdown return code,
+    queues a full SHUTDOWN heartbeat with the log, waits until the heartbeat communicator's thread has taken it
+    (5 s at most), and joins the orchestrator's own threads (``_stop``).
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Before, a fixed 5 s sleep followed the heartbeat at every stop: half of the 10 s that Docker and Podman
+    allow for a stop by default, a quarter of a 20 s limit. The communicator thread takes the heartbeat from the
+    queue within one lap when its previous message was delivered, and sends it in that lap when it has its
+    connection, so the wait now normally ends within a tenth of a second. It lasts the 5 s when the thread does
+    not take the heartbeat because it still holds an earlier message it could not send; then one red line says
+    so. A heartbeat the thread took without a connection is held, not sent: the wait ends at once, and the
+    heartbeat is lost with no line if the communicators stop before the connection is back.
+
+    Examples
+    --------
+    >>> self._maybe_gracefull_stop()   # Orchestrator.close_main_loop(), and the logger's close callback
+    """
     if self._in_shutdown:
       return
     self._in_shutdown = True
@@ -1535,8 +1667,9 @@ class Orchestrator(DecentrAIObject,
       status=ct.DEVICE_STATUS_SHUTDOWN,
       full_info=True, send_log=True, force=True,
     )
-    # TODO: implement queue empty wait instead of sleep
-    sleep(5)
+    # Wait until the heartbeat communicator's thread took the SHUTDOWN heartbeat from its queue (a stopped
+    # communicator discards what is still queued), at most the 5 s the fixed sleep here always took.
+    self._comm_manager.wait_heartbeats_sent(timeout=5)
     self._stop()
     return
 
@@ -1719,6 +1852,58 @@ class Orchestrator(DecentrAIObject,
 
 
   def _maybe_send_heartbeat(self, status=None, full_info=True, send_log=False, force=False, initiator_id=None, session_id=None, **kwargs):
+    """
+    Send a heartbeat when one is due, and watch the main loop for a stop.
+
+    A heartbeat is due when ``APP_SECONDS_HEARTBEAT`` have passed since the last one, or when forced. The
+    status is read from the application monitor and handed to the communication manager, unless the main loop
+    is in a dangerous stop. Then the lap counter is compared with its value at the previous heartbeat: an
+    unchanged counter is a stop of the main loop (logged, with a notification), a counter that moved after a
+    stop is the resume (logged, with a notification).
+
+    Parameters
+    ----------
+    status : str, optional
+      Status text of the heartbeat (for example the shutdown status). Default None.
+    full_info : bool, optional
+      Whether the heartbeat carries the full status. Default True.
+    send_log : bool, optional
+      Whether the heartbeat carries the node log. Default False.
+    force : bool, optional
+      Send now, whatever the time since the last heartbeat. Default False.
+    initiator_id : str, optional
+      Who asked for this heartbeat, written into it. Default None.
+    session_id : str, optional
+      Session of the request; not used here. Default None.
+    **kwargs
+      Ignored.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    A stop is dangerous when the stage the loop is in says so (``set_loop_stage``): its lines are labelled
+    "WARNING:", its notification is an alert, and heartbeats are withheld while it lasts and at the resume.
+    One stop is not: the one every start makes. Before its first lap the main thread loads the admin plugins
+    for 10 s to a minute, the lap counter stays at 0, and the plugin loading marks its stages as dangerous. So
+    every start raised a false alert and withheld one or more heartbeats, which other nodes saw as a gap.
+    A stop on lap counter 0 is now the normal start as long as at most ``MLSTOP_STARTUP_GRACE`` seconds (600)
+    have passed since the node's first heartbeat; past that, the start is taken as hung and the stop is
+    dangerous again. The lap counter of the stop is the one the previous heartbeat saw, so the resume of a
+    start-up stop is judged as that stop was, not by the laps made since.
+
+    The grace is counted from the first heartbeat and not from the process start: the first heartbeat comes
+    after the start-up dAuth wait, which lasts about 900 s when no dAuth round brings variables. Counted from
+    the process start, a node that waited more than 600 s for dAuth had no grace left, and its start raised
+    the false alert and withheld heartbeats as before.
+
+    Examples
+    --------
+    >>> self._maybe_send_heartbeat(status=None, full_info=True, send_log=False)   # the communication thread
+    >>> self._maybe_send_heartbeat(status=ct.DEVICE_STATUS_SHUTDOWN, send_log=True, force=True)
+    """
     
     if self._comm_manager is None:
       self.P("Cannont send heartbeat due to incomplete startup!")
@@ -1766,7 +1951,20 @@ class Orchestrator(DecentrAIObject,
       
       # TODO: add in payload upload-URL & upload date-time ???
       
-      if not self.in_mlstop or (self.in_mlstop and (not self.__is_mlstop_dangerous)):
+      if self._last_checked_main_loop_iter is None:
+        # The node's first heartbeat (no heartbeat has compared the lap counter yet): the start-up grace is
+        # counted from here. Counted from the process start, a dAuth wait of more than 600 s before this
+        # point used it up.
+        self._first_heartbeat_time = time()
+      # Whether a stop of the main loop counts as dangerous at this heartbeat. As before, the stage decides;
+      # except a stop on lap counter 0 (the counter the previous heartbeat saw: the first lap has not begun,
+      # the admin plugins are being loaded), which is the normal start until the grace has passed. Before, every
+      # start was an alert and withheld heartbeats. A lap counter of 0 means a heartbeat already ran, so the
+      # time of the first one is set when it is read.
+      mlstop_dangerous = self.__is_mlstop_dangerous and (self._last_checked_main_loop_iter != 0 or (
+        time() - self._first_heartbeat_time > MLSTOP_STARTUP_GRACE))
+      # The same decision as before, on the value above.
+      if not self.in_mlstop or (self.in_mlstop and (not mlstop_dangerous)):
         # send HB only if not stopped or if stopped but NOT dangerous
         hb_prep_time = time() - hb_prep_start
         if True:
@@ -1808,23 +2006,26 @@ class Orchestrator(DecentrAIObject,
         stage_last_change = time() - self.__main_loop_last_stage_change
         timer, elapsed = self.log.get_opened_timer()
         msg = "{} MLSTOP @ {} from start, stage stop '{}', now '{}', {} stops so far, {:.0f}s since stop, {:.0f}s since last, timer `{}={:.1f}s`,(E2 loop avg/last time {:.1f}s/{:.1f}s)".format(
-          "WARNING:" if self.__is_mlstop_dangerous else "Normal (start/stop)", 
+          # The label follows the decision above, so a start-up stop reads "Normal (start/stop)".
+          "WARNING:" if mlstop_dangerous else "Normal (start/stop)",
           self.log.elapsed_to_str(self.running_time), 
           self.__main_loop_stop_at_stage, self.__loop_stage,
           self.__main_loop_stopped_count, time() - self.__main_loop_stopped_time, 
           stage_last_change, timer, elapsed, self.avg_loop_timings, self._get_last_timing()
         )
-        self.P(msg, color='error' if self.__is_mlstop_dangerous else 'r')
+        self.P(msg, color='error' if mlstop_dangerous else 'r')
         self._create_notification(
           notif=ct.STATUS_TYPE.STATUS_ABNORMAL_FUNCTIONING, msg=msg,
-          is_alert=self.__is_mlstop_dangerous,
+          # An alert only for a dangerous stop: not for the stop every start makes.
+          is_alert=mlstop_dangerous,
           displayed=True
         )
       elif self.__main_loop_stopped:
         self.__log_main_loop_stop(end=time())
         self.__main_loop_stopped = False
         msg = "{} main loop resumed after {:.0f}s from stage '{}', {} stop-resumes so far! (E2 loop avg/last {:.1f}s/{:.1f}s)".format(
-          "WARNING:" if self.__is_mlstop_dangerous else "Normal (start/stop)", 
+          # The resume is labelled as its stop was.
+          "WARNING:" if mlstop_dangerous else "Normal (start/stop)",
           time() - self.__main_loop_stopped_time, self.__main_loop_stop_at_stage,
           self.__main_loop_stopped_count, self.avg_loop_timings, self._get_last_timing()
         )
@@ -2038,17 +2239,32 @@ class Orchestrator(DecentrAIObject,
     """
     Close the node: stop communication, plugins, serving and capture, then the state saver.
 
-    First sends the SHUTDOWN-status heartbeat, unless a shutdown or exception stop already ran. The order
-    matters. Plugins close before the SerializationManager stops, so a plugin that saves on close (the
-    chain store does) still makes that final save; the manager is stopped last: it runs once more the saves
-    registered for the stop (the network monitor's status) and waits, for at most 60 seconds in total, for
-    them and for the periodic saves that are being written at that moment (each save has its own thread).
+    First asks the SerializationManager for the last run of the saves registered for the stop (the network
+    monitor's status): each runs on its own thread while the node closes. Then sends the SHUTDOWN-status
+    heartbeat, unless a shutdown or exception stop already ran. The order matters. Plugins close before the
+    SerializationManager stops, so a plugin that saves on close (the chain store does) still makes that
+    final save; the manager is stopped last: it waits, for at most 60 seconds in total, for the last runs and
+    for the periodic saves that are being written at that moment (each save has its own thread).
 
     Returns
     -------
     None
+
+    Notes
+    -----
+    Before, the last runs were started by the manager's stop, the last step here. A close can take longer
+    than the time a host gives the node to stop, and such a stop then never reached them. Started first, a
+    last run has the whole close to be written; what is recorded after it (a few seconds of heartbeats,
+    until the communicators close) is not saved.
+
+    Examples
+    --------
+    >>> self.close_main_loop()   # the ``finally`` of the main loop
     """
     self.P('Closing connections and stopping threads...', color='m')
+    # First: the saves registered for the stop start their last run now, each on its own thread, and are
+    # written while the rest closes. As the last step they were not reached by a stop the host cut short.
+    SerializationManager.instance.start_last_saves()
     self._maybe_gracefull_stop()
     if self._comm_manager is not None:
       self._comm_manager.close()
@@ -2058,8 +2274,8 @@ class Orchestrator(DecentrAIObject,
       self._serving_manager.stop_all_servers()
     if self._capture_manager is not None:
       self._capture_manager.close()
-    # Last step: let the state saves that are being written finish and run once more the saves registered for
-    # the stop (the network monitor's status), at most 60 s for all of them, so the node does not exit in the
+    # Last step: let the state saves that are being written finish, among them the last runs started at the
+    # top (the network monitor's status), at most 60 s for all of them, so the node does not exit in the
     # middle of one. Plugins that save on close made their final saves when they closed above.
     SerializationManager.instance.stop(timeout=60)
     return
@@ -2296,6 +2512,11 @@ class Orchestrator(DecentrAIObject,
   def _collect_admin_pipeline_inputs_once(self, running_streams=None):
     """Collect and enqueue one admin-pipeline input snapshot.
 
+    The admin pipeline's capture is started when needed, its inputs are taken, built into one input per admin
+    plugin instance the business manager knows, and queued for their plugins. While the business manager knows no
+    admin instance yet (the admin bootstrap is still creating the plugins), the capture is started but its inputs
+    are left in it: the bootstrap's own collection, or the next one after it, takes them.
+
     Parameters
     ----------
     running_streams : dict or None, optional
@@ -2304,7 +2525,23 @@ class Orchestrator(DecentrAIObject,
     Returns
     -------
     int
-        Number of admin deliveries queued.
+        Number of admin deliveries queued; 0 while no admin instance is known.
+
+    Notes
+    -----
+    The collection thread starts before the admin bootstrap and runs every
+    ``ADMIN_PIPELINE_DISPATCH_POLL_SECONDS``. Before, it took the capture's inputs from the start and, with no
+    admin instance known, routed them nowhere, with no count and no log line: a node's first answers, such as
+    the answers to the chain store's first resync request, sent while the last admin plugins were still being
+    created (4 s on a node at 0.35 CPU), were lost. The capture keeps what arrives meanwhile in its own bounded
+    queue; when that is full, the listener behind it drops its oldest messages, as at any other time.
+
+    Examples
+    --------
+    >>> self._collect_admin_pipeline_inputs_once()   # during the admin bootstrap: nothing taken
+    0
+    >>> self._collect_admin_pipeline_inputs_once()   # after it: one delivery per admin plugin with inputs
+    3
     """
     if not self.cfg_admin_pipeline_async_dispatch:
       return 0
@@ -2320,6 +2557,10 @@ class Orchestrator(DecentrAIObject,
 
     with self.__capture_manager_lock:
       self._capture_manager.ensure_stream_capture(admin_stream_config, verbose=False)
+      if not self._business_manager._admin_instance_hashes:
+        # No admin instance known yet (the admin bootstrap is creating them): the inputs stay in the capture until
+        # one is, instead of being taken and routed to no plugin.
+        return 0
       dct_captures = self._capture_manager.get_single_stream_captured_data(
         ct.CONST_ADMIN_PIPELINE_NAME
       )
@@ -2848,11 +3089,20 @@ class Orchestrator(DecentrAIObject,
     with self.__node_oracle_refresh_lock:
       oracles = list(self.__cached_node_oracles)
       version = self.__node_oracle_refresh_version
-    if version == 0 or version == self.__node_oracle_apply_version:
+      registered = self.__cached_summary_registry if self._use_summary_oracle_refresh else ()
+    if not oracles or version == self.__node_oracle_apply_version:
       return 0
     try:
-      # Due to the implementation of refresh_node_oracles_cache()
-      # here oracles should be a non-empty list of (address, alias) pairs.
+      if self._use_summary_oracle_refresh:
+        # The main loop can resume well after the refresh thread populated its cache.
+        # Recheck only the registered identities, without a second RPC or trust in an expired report.
+        still_fresh = set(self.netmon.resolve_summary_oracles(registered))
+        oracles = [pair for pair in oracles if pair[0] in still_fresh]
+        if len(oracles) < max(1, len(registered) // 2):
+          with self.__node_oracle_refresh_lock:
+            if version == self.__node_oracle_refresh_version:
+              self.__node_oracle_apply_version = version  # Only retire the snapshot we actually checked.
+          return 0
       existing = set(self.whitelist_full)
       missing_oracles = []
       for oracle_data in oracles:
@@ -2872,13 +3122,18 @@ class Orchestrator(DecentrAIObject,
         missing_oracles.append(oracle_entry)
       #endfor
 
-      if len(missing_oracles) == 0:
+      # Commit to the local allowlist only while this registry snapshot is still current.
+      # Registry RPC and summary identity resolution both happen outside this short critical section.
+      with self.__node_oracle_refresh_lock:
+        if version != self.__node_oracle_refresh_version or version == self.__node_oracle_apply_version:
+          return 0
+        if missing_oracles:
+          self.blockchain_manager.add_address_to_allowed(missing_oracles)
         self.__node_oracle_apply_version = version
+      if not missing_oracles:
         self.P("All blockchain oracle nodes are already whitelisted.", color='g')
         return 0
 
-      self.blockchain_manager.add_address_to_allowed(missing_oracles)
-      self.__node_oracle_apply_version = version
       self.P("Added {} missing blockchain oracle node(s) to whitelist.".format(len(missing_oracles)), color='g')
       return len(missing_oracles)
     except Exception as exc:
@@ -2896,7 +3151,30 @@ class Orchestrator(DecentrAIObject,
     if self.blockchain_manager.evm_network == "VPN":
       return 0
     try:
-      oracles, aliases = self.bc.get_oracles(wait_interval=0)
+      if self._use_summary_oracle_refresh:
+        # Retire a previous pending snapshot before a new attempt, including a failed registry read.
+        with self.__node_oracle_refresh_lock:
+          self.__cached_node_oracles = []
+          self.__cached_summary_registry = ()
+          self.__node_oracle_refresh_version += 1  # Invalidate applications already holding a copy.
+          refresh_attempt = self.__node_oracle_refresh_version
+        try:
+          # Use the protocol registry once per cycle and count distinct identities.
+          registered = list(dict.fromkeys(address.lower() for address in self.bc.get_eth_oracles()))
+        except Exception as exc:
+          self.P("Oracle registry read failed during summary refresh: {}".format(exc), color='y')
+          return 0
+        if not registered:
+          self.P("Oracle registry returned no members during summary refresh.", color='y')
+          return 0
+        oracles = self.netmon.resolve_summary_oracles(registered)
+        if len(oracles) < max(1, len(registered) // 2):
+          self.P("Fresh summaries resolve {} of {} registered oracles; keeping the current allowlist.".format(
+            len(oracles), len(registered)), color='y')
+          return 0
+        aliases = []
+      else:
+        oracles, aliases = self.bc.get_oracles(wait_interval=0)
       if len(oracles) == 0:
         self.P("No blockchain oracle nodes found. Nothing new to cache.", color='y')
         return 0
@@ -2905,6 +3183,10 @@ class Orchestrator(DecentrAIObject,
         oracle_alias = aliases[idx] if idx < len(aliases) else ""
         cached_oracles.append((oracle_addr, oracle_alias))
       with self.__node_oracle_refresh_lock:
+        if self._use_summary_oracle_refresh:
+          if refresh_attempt != self.__node_oracle_refresh_version:
+            return 0  # A newer attempt already retired this result while its registry read was in flight.
+          self.__cached_summary_registry = tuple(registered)
         self.__cached_node_oracles = cached_oracles
         self.__node_oracle_refresh_version += 1
       return len(oracles)

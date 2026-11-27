@@ -1,5 +1,4 @@
 import json
-import gc
 import os
 import sys
 
@@ -7,7 +6,8 @@ import traceback
 
 from collections import OrderedDict
 
-from time import time, sleep, perf_counter
+# No sleep any more: its one use was the pause after each plugin stop.
+from time import time, perf_counter
 from threading import Event, Lock, Thread
 from queue import Queue, Empty, Full
 from copy import deepcopy
@@ -104,25 +104,48 @@ class BusinessManager(Manager):
   def startup(self):
     """Start the business manager and admin async dispatch lane.
 
+    Share the plugin instance registry with the base manager and start
+    the deployment reporter when its journal has been installed.
+
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     None
       Initializes manager state, maps current instances to subalterns, and logs
       plugin timing diagnostics when enabled.
+
+    Raises
+    ------
+    RuntimeError
+      Starting a background worker failed.
+
+    Examples
+    --------
+    >>> manager.startup()  # doctest: +SKIP
+
+    Notes
+    -----
+    The reporter reads positive CStore acknowledgements for target repair.
+    A refusal or expired hand-off settles a peer without proving delivery.
     """
     super().startup()
     self._dct_current_instances = self._dct_subalterns # this allows usage of `self.get_subaltern(instance_hash)`
     self._initialize_admin_async_dispatch()
+    # The config manager installs the deployment journal before business startup.
     lifecycle = self.shmem.get(SERVICE_KEY)
     if lifecycle is not None:
+      # Bind the reporter to the live chain store and local signing identity.
       lifecycle.start(
         lambda: self.plugins_shmem.get("__chain_storage_set"),
         self.owner.blockchain_manager.sign,
         self.P,
         cleanup=self._cleanup_deployment_instance,
         peer_session=self._deployment_peer_session,
-        # CStore records confirmations only from authenticated recipients of this exact value.
-        confirmed_peers=lambda key: self.plugins_shmem.get("__chain_storage", {}).get(key, {}).get("confirmed_peers", ()),
+        # Refusals and expired hand-offs also settle a peer in CStore; repair needs positive acknowledgements.
+        confirmed_peers=lambda key: self.plugins_shmem.get("__chain_storage", {}).get(key, {}).get("acknowledged_peers", ()),
       )
     if self.config_data.get('PLUGINS_DEBUG_LOAD_TIMINGS', True):
       self.P(
@@ -1060,6 +1083,20 @@ class BusinessManager(Manager):
     -------
     bool
         True only when this instance can be removed from runtime tracking.
+
+    Notes
+    -----
+    Nothing follows the removal. Before, each stop ended with a 0.1 s sleep and a full ``gc.collect()``. The
+    collection held the interpreter for one to several seconds on a node with a large heap, for every thread
+    of the node, and it could not free the plugin it followed, which the caller still holds; at a close that
+    stops 15-20 plugins these pauses added up to most of the close (read from the gaps in the close log; the
+    collection itself was not timed). The automatic collector reclaims the stopped plugin's cycles later, as
+    it does for every other object.
+
+    Examples
+    --------
+    >>> self._stop_plugin(instance_hash)   # forced stop: thread joined, instance removed
+    True
     """
     plugin = self._dct_current_instances[instance_hash]
 
@@ -1079,9 +1116,6 @@ class BusinessManager(Manager):
     plugin = self._dct_current_instances.pop(instance_hash)
     self._dct_stop_timings.pop(instance_hash, None)
     del plugin
-  
-    sleep(0.1)
-    gc.collect()
     return True
 
   def maybe_stop_finished_plugins(self):
@@ -1145,6 +1179,32 @@ class BusinessManager(Manager):
     return
 
   def close(self):
+    """
+    Stop every plugin instance at the node's close: dAuth, then the other pipelines' instances, then the admin plugins.
+
+    The admin dispatch thread is stopped first. The dAuth instance closes before all others, as before. The
+    remaining instances are stopped one after another, each with a forced stop that joins its thread: first the
+    instances of every pipeline other than the admin pipeline, in the order they were started, then the admin
+    pipeline's instances in theirs. Last, the deployment lifecycle service is closed when the node has one.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Before, the instances stopped in start order, and the admin pipeline is started first, so the other
+    pipelines' instances (the apps a node hosts) came last. An app's stop is the slow part of a close (a
+    container is stopped and removed), so a host that ends the node a fixed time after the stop signal ended it
+    before any app was asked to stop. With the apps first, what such a host cuts short is the admin plugins'
+    close, and the admin plugins keep running while the apps close, so an app that uses one of them at its stop
+    still finds it. The chain store's periodic save goes on until its own close, so a cut there loses only
+    the writes accepted after its last periodic save.
+
+    Examples
+    --------
+    >>> self._business_manager.close()   # Orchestrator.close_main_loop()
+    """
     self.P("Stopping all business plugins...", color='y')
     # End observation before healthy plugin threads are stopped for node shutdown.
     lifecycle = self.shmem.get(SERVICE_KEY)
@@ -1155,6 +1215,9 @@ class BusinessManager(Manager):
     self.__maybe_shutdown_special_instances()
     # Now, we can shutdown normal instances
     keys = list(self._dct_current_instances.keys())
+    # Instances outside the admin pipeline first (False sorts before True; the sort keeps the start order inside
+    # each group): their stop is the slow one, and before it came after every admin plugin's.
+    keys.sort(key=lambda instance_hash: self._dct_hash_mappings[instance_hash][0] == ct.CONST_ADMIN_PIPELINE_NAME)
     for _hash in keys:
       self._send_stop_signal_to_plugin(instance_hash=_hash, forced=True)
     self.P("Done stopping all business plugins.", color='y')

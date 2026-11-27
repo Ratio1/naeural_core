@@ -531,6 +531,24 @@ class TestEpochsManager(unittest.TestCase):
     self.assertEqual(save.call_count, 3)
     self.assertTrue(all(call.kwargs["raise_on_error"] for call in save.call_args_list))
 
+  def test_legacy_writer_cannot_acknowledge_a_missing_stage(self):
+    import tempfile
+    from pathlib import Path
+    from naeural_core.main.epochs_manager import FN_NAME
+    persist = self.manager._EpochsManager__persist_full_data_snapshot
+    with tempfile.TemporaryDirectory() as directory:
+      def legacy_writer(data, fn, subfolder_path=None):
+        staged = Path(directory, fn)
+        if data != "failed":
+          staged.write_text(data)  # The old SDK returns this filename on either outcome.
+        return str(staged)
+      self.log.save_pickle_to_data = legacy_writer
+      self.assertTrue(persist("first", 1))
+      self.assertFalse(persist("failed", 3))
+      self.assertTrue(persist("pending", 2))
+      self.assertEqual(list(Path(directory).iterdir()), [Path(directory, FN_NAME)])
+      self.assertEqual(Path(directory, FN_NAME).read_text(), "pending")
+
   def test_local_self_rollover_updates_owner_without_recalculating_cached_peer(self):
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = "1"
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = "60"

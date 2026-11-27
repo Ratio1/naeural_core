@@ -127,6 +127,33 @@ def _local_heartbeat_envelope(**fields):
 
 class TestNetmonSummaryStatus(unittest.TestCase):
 
+  def test_summary_oracle_index_requires_fresh_authorized_keys_and_caches_derivations(self):
+    netmon, env = _make_netmon(ttl_seconds=90)
+    self.addCleanup(env.stop)
+    received = datetime.now()
+    key = "A" * 44
+    new_key = "B" * 44
+    invalid = "C" * 44
+    registry = ["0x" + char * 40 for char in "1234"]
+    first = _summary_node("0xai_" + key)
+    second = _summary_node("aixp_" + new_key)
+    broken = _summary_node("0xai_" + invalid)
+    def derive(addr):
+      if addr == "0xai_" + invalid:
+        raise ValueError("invalid point")
+      return registry[[key, new_key].index(addr[5:])]
+    with mock.patch.object(netmon, "node_address_to_eth_address", side_effect=derive) as convert:
+      netmon.register_network_status_snapshot("REPORTER", {"a": first}, False, received)
+      self.assertEqual(netmon.resolve_summary_oracles(registry, received), [])
+      convert.assert_not_called()
+      netmon.register_network_status_snapshot("REPORTER", {"a": first, "broken": broken}, True, received)
+      netmon.register_network_status_snapshot("REPORTER", {"a": first, "b": second, "broken": broken}, True, received)
+      self.assertEqual(convert.call_count, 3)
+      self.assertEqual(netmon.resolve_summary_oracles([registry[1].upper(), registry[3]], received), ["0xai_" + new_key])
+      self.assertEqual(netmon.resolve_summary_oracles(registry, received + timedelta(seconds=91)), [])
+      self.assertEqual(netmon.resolve_summary_oracles(registry, received - timedelta(seconds=1)), [])
+      self.assertEqual(netmon.epoch_manager.calls, 0)
+
   def test_report_replay_can_detect_restart_from_authorized_summary_uptime(self):
     netmon, patcher = _make_netmon(summary_enabled=True)
     self.addCleanup(patcher.stop)

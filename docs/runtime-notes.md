@@ -82,6 +82,11 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
 
 ## NetMon and epochs
 
+- A regular worker receiving authorized `NET_MON_01` summaries resolves registered oracle addresses on the normal
+  15-minute refresh. It derives the Ethereum identity from the reported public key and requires fresh observations
+  and the registry conversion threshold. Direct-heartbeat oracles retain epoch-based resolution. A registry or
+  summary gap preserves existing allowed senders. Summary observations never populate heartbeat or epoch history.
+
 - NetMon keeps each node's newest heartbeat complete and reduces older ones to `HISTORY_HB_KEYS`
   in `main/net_mon.py`. A field missing from that tuple exists only in the newest heartbeat, so a
   new field read from history must be added there. Nodes silent for over 24 hours keep one

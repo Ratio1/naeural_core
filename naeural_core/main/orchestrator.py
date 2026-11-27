@@ -215,6 +215,8 @@ class Orchestrator(DecentrAIObject,
     self._admin_pipeline_collect_last_progress_ts = None
     self._admin_pipeline_collect_last_warning_ts = 0
     self._admin_pipeline_collect_consecutive_failures = 0
+    self._use_summary_oracle_refresh = False
+    self.__cached_summary_registry = ()
     self.__cached_node_oracles = []
     self.__node_oracle_refresh_version = 0
     self.__node_oracle_apply_version = 0
@@ -553,11 +555,9 @@ class Orchestrator(DecentrAIObject,
     resolver; then the threads: asynchronous communication, the admin pipeline's input collection when
     configured, and the node oracle refresh.
 
-    The node oracle refresh runs only on a node that receives peer heartbeats. On a node whose heartbeat receive
-    the comm manager removed (a non-supervisor in oracle-only heartbeat mode) it is not started, with one yellow
-    line saying why: no oracle maps to a node address there, so before it failed at every pass (every 15 minutes,
-    a red traceback each time). Such a node's allowed senders are those dAuth gave it at start, so when that list
-    is empty one red line says that every oracle command will be refused until the node restarts.
+    Direct-heartbeat nodes refresh oracle identities from epoch history. A regular worker which receives
+    authorized NetMon summaries resolves registry members from fresh summary keys. A worker without
+    either source keeps its startup allowed senders and logs once when it cannot refresh.
 
     Returns
     -------
@@ -571,11 +571,11 @@ class Orchestrator(DecentrAIObject,
     Notes
     -----
     Runs once, from ``main_loop`` before its first lap. The check of the allowed senders reads the
-    allowed-senders file once, only on a node that starts no oracle refresh.
+    allowed-senders file once on a node which lacks a direct peer heartbeat feed.
 
     Examples
     --------
-    >>> self._init_all_processes()   # a worker in oracle-only heartbeat mode: "Node oracle refresh not started: ..."
+    >>> self._init_all_processes()   # Start the configured identity feed after dAuth.
     """
     self._data_handler = MainLoopDataHandler(log=self.log, owner=self, DEBUG=self.DEBUG)
     self._app_monitor = ApplicationMonitor(log=self.log, owner=self)
@@ -646,19 +646,17 @@ class Orchestrator(DecentrAIObject,
     if self.cfg_admin_pipeline_async_dispatch:
       self._start_admin_pipeline_collection_thread()
 
-    if self._comm_manager.should_register_local_self_heartbeat:
-      # True only when the comm manager removed this node's heartbeat receive (a non-supervisor in oracle-only
-      # heartbeat mode): no peer heartbeat fills its node table, so no registry oracle maps to a node address and the
-      # refresh fails at every pass. Before, workers found 0 of 14 every 15 minutes and logged a red traceback each
-      # time, about 96 a day; the allowed senders of such a node are the ones dAuth gave it at start.
-      self.P("Node oracle refresh not started: this node receives no peer heartbeats (oracle-only heartbeat mode), so "
-             "no oracle maps to a node address here; the allowed senders are those dAuth gave at start.", color='y')
-      if not self.whitelist:
-        self.P("No allowed command senders after start-up dAuth, and no oracle refresh on this node: every oracle "
-               "command is refused until the node restarts and dAuth answers.", color='r')
-    else:
-      # A node that receives peer heartbeats refreshes its oracles as before, every CHECK_NODE_ORACLES_EVERY seconds on
-      # a thread of its own.
+    # The communication manager records the actual CTRL subscription selected at startup.
+    no_peer_heartbeats = self._comm_manager.should_register_local_self_heartbeat
+    self._use_summary_oracle_refresh = no_peer_heartbeats and self._network_monitor.network_summary_status_enabled
+    if no_peer_heartbeats and not self._use_summary_oracle_refresh:
+      self.P("Node oracle refresh not started: this node receives no peer heartbeats and summary lookup is disabled.",
+             color='y')
+    if no_peer_heartbeats and not self.whitelist:
+      self.P("No allowed command senders after start-up dAuth. Oracle commands require a validated allowed sender.",
+             color='r')
+    if not no_peer_heartbeats or self._use_summary_oracle_refresh:
+      # Both modes use the existing bounded registry cadence and additive whitelist application.
       self._thread_node_oracle_refresh = Thread(
         target=self.node_oracle_refresh_loop,
         args=(),
@@ -3091,11 +3089,18 @@ class Orchestrator(DecentrAIObject,
     with self.__node_oracle_refresh_lock:
       oracles = list(self.__cached_node_oracles)
       version = self.__node_oracle_refresh_version
+      registered = self.__cached_summary_registry if self._use_summary_oracle_refresh else ()
     if version == 0 or version == self.__node_oracle_apply_version:
       return 0
     try:
-      # Due to the implementation of refresh_node_oracles_cache()
-      # here oracles should be a non-empty list of (address, alias) pairs.
+      if self._use_summary_oracle_refresh:
+        # The main loop can resume well after the refresh thread populated its cache.
+        # Recheck only the registered identities, without a second RPC or trust in an expired report.
+        still_fresh = set(self.netmon.resolve_summary_oracles(registered))
+        oracles = [pair for pair in oracles if pair[0] in still_fresh]
+        if len(oracles) < max(1, len(registered) // 2):
+          self.__node_oracle_apply_version = version
+          return 0
       existing = set(self.whitelist_full)
       missing_oracles = []
       for oracle_data in oracles:
@@ -3139,7 +3144,28 @@ class Orchestrator(DecentrAIObject,
     if self.blockchain_manager.evm_network == "VPN":
       return 0
     try:
-      oracles, aliases = self.bc.get_oracles(wait_interval=0)
+      if self._use_summary_oracle_refresh:
+        # Retire a previous pending snapshot before a new attempt, including a failed registry read.
+        with self.__node_oracle_refresh_lock:
+          self.__cached_node_oracles = []
+          self.__cached_summary_registry = ()
+        try:
+          # Use the protocol registry once per cycle and count distinct identities.
+          registered = list(dict.fromkeys(address.lower() for address in self.bc.get_eth_oracles()))
+        except Exception as exc:
+          self.P("Oracle registry read failed during summary refresh: {}".format(exc), color='y')
+          return 0
+        if not registered:
+          self.P("Oracle registry returned no members during summary refresh.", color='y')
+          return 0
+        oracles = self.netmon.resolve_summary_oracles(registered)
+        if len(oracles) < max(1, len(registered) // 2):
+          self.P("Fresh summaries resolve {} of {} registered oracles; keeping the current allowlist.".format(
+            len(oracles), len(registered)), color='y')
+          return 0
+        aliases = []
+      else:
+        oracles, aliases = self.bc.get_oracles(wait_interval=0)
       if len(oracles) == 0:
         self.P("No blockchain oracle nodes found. Nothing new to cache.", color='y')
         return 0
@@ -3149,6 +3175,8 @@ class Orchestrator(DecentrAIObject,
         cached_oracles.append((oracle_addr, oracle_alias))
       with self.__node_oracle_refresh_lock:
         self.__cached_node_oracles = cached_oracles
+        if self._use_summary_oracle_refresh:
+          self.__cached_summary_registry = tuple(registered)
         self.__node_oracle_refresh_version += 1
       return len(oracles)
     except Exception as exc:

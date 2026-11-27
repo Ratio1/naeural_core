@@ -8,7 +8,7 @@ import math
 import re
 import numpy as np
 
-from time import time, sleep
+from time import time, sleep, monotonic
 from copy import deepcopy
 from collections import deque, OrderedDict
 from itertools import islice
@@ -300,6 +300,9 @@ class NetworkMonitor(DecentrAIObject):
     self.__network_heartbeats = {}
     self.network_hashinfo = {}
     self.__network_summary_statuses = {}
+    # Cache immutable key derivations only while these nodes keep appearing in accepted reports.
+    self.__summary_keys = OrderedDict()
+    self.__summary_nodes_by_eth = {}
     # simple pipeline caching mechanism for live node monitoring
     self.__nodes_pipelines = {} 
     self.__registered_hb_pipelines = 0
@@ -1560,7 +1563,17 @@ class NetworkMonitor(DecentrAIObject):
       if not reporter_no_prefix:
         return 0
       registered = 0
+      # Use monotonic arrival order for inexpensive incremental eviction, including replayed packets.
+      ttl = self.network_summary_ttl_seconds
       with self.log.managed_lock_resource(NETMON_MUTEX):
+        arrival = monotonic()
+        while self.__summary_keys:
+          oldest_key, (old_eth, last_arrival) = next(iter(self.__summary_keys.items()))
+          if arrival - last_arrival <= ttl:
+            break
+          self.__summary_keys.popitem(last=False)
+          if old_eth is not None:
+            self.__summary_nodes_by_eth.pop(old_eth, None)
         for _, node_info in current_network.items():
           if not isinstance(node_info, dict):
             continue
@@ -1572,6 +1585,20 @@ class NetworkMonitor(DecentrAIObject):
             continue
           node_snapshot = deepcopy(node_info)
           node_snapshot[ct.PAYLOAD_DATA.NETMON_ADDRESS] = self._add_address_prefix(node_no_prefix)
+          # The SDK encodes a compressed 33-byte public key as 44 URL-safe characters.
+          # Reject alternate text encodings before caching the registry identity.
+          if re.fullmatch(r"[A-Za-z0-9_-]{44}", node_no_prefix):
+            if node_no_prefix in self.__summary_keys:
+              eth_addr, _ = self.__summary_keys.pop(node_no_prefix)
+            else:
+              try:
+                eth_addr = self.node_address_to_eth_address(node_snapshot[ct.PAYLOAD_DATA.NETMON_ADDRESS]).lower()
+              except (ValueError, TypeError, AttributeError):
+                # An invalid point affects only this row and is cached for repeated reports.
+                eth_addr = None
+            self.__summary_keys[node_no_prefix] = (eth_addr, arrival)
+            if eth_addr is not None:
+              self.__summary_nodes_by_eth[eth_addr] = node_no_prefix
           if node_no_prefix not in self.__network_summary_statuses:
             self.__network_summary_statuses[node_no_prefix] = {}
           self.__network_summary_statuses[node_no_prefix][reporter_no_prefix] = {
@@ -1582,6 +1609,47 @@ class NetworkMonitor(DecentrAIObject):
           }
           registered += 1
       return registered
+
+    def resolve_summary_oracles(self, registered, dt_now=None):
+      """Resolve registry identities from fresh, authorized NetMon reports.
+
+      The reverse index selects only requested keys. Summary evidence never enters epoch history.
+
+      Parameters
+      ----------
+      registered : iterable of str
+        Ethereum addresses returned by the protocol oracle registry.
+      dt_now : datetime, optional
+        Wall clock used for the existing summary freshness checks.
+
+      Returns
+      -------
+      list of str
+        Canonical internal addresses with a fresh reporter and node observation, in registry order.
+
+      Examples
+      --------
+      >>> monitor.resolve_summary_oracles([])
+      []
+      """
+      if not self.network_summary_status_enabled:
+        return []
+      dt_now = dt_now or dt.now()
+      # Resolve under the same lock as report registration, then reuse NetMon's per-node freshness selection.
+      with self.log.managed_lock_resource(NETMON_MUTEX):
+        candidates = [self.__summary_nodes_by_eth.get(eth.lower()) for eth in registered]
+      resolved = []
+      for addr in candidates:
+        if addr is None:
+          continue
+        entry = self.__network_node_summary_entry(addr, dt_now=dt_now)
+        if entry is None or not isinstance(entry["node"].get(ct.PAYLOAD_DATA.NETMON_STATUS_KEY), str):
+          continue
+        age = self.__network_summary_effective_age_seconds(entry, dt_now=dt_now)
+        if age is not None and age <= self.network_summary_ttl_seconds:
+          # Use only the derived identity. Display aliases do not belong in the command authorization file.
+          resolved.append(self._add_address_prefix(addr))
+      return resolved
 
     def __network_has_direct_node(self, addr):
       addr = self.__remove_address_prefix(addr)

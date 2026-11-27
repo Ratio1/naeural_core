@@ -111,6 +111,7 @@ class TestOrchestratorNodeOracleRefresh(unittest.TestCase):
     orchestrator.config_data = {}
     orchestrator._blockchain_manager = _FakeBlockchainManager(whitelist=whitelist)
     orchestrator._bc = _FakeBCWrapper(oracles or [])
+    orchestrator._use_summary_oracle_refresh = False
     orchestrator._last_oracle_update = 0
     setattr(orchestrator, self.LOCK_ATTR, Lock())
     setattr(orchestrator, self.CACHED_ATTR, [])
@@ -131,6 +132,35 @@ class TestOrchestratorNodeOracleRefresh(unittest.TestCase):
     self.assertEqual(refreshed_count, 2)
     self.assertEqual(getattr(orchestrator, self.CACHED_ATTR), [("oracle_1", "oracle_a"), ("oracle_2", "oracle_b")])
     self.assertEqual(getattr(orchestrator, self.REFRESH_VERSION_ATTR), 1)
+
+  def test_summary_refresh_requires_threshold_and_adds_only_new_registered_nodes(self):
+    node = self._make_orchestrator(whitelist=["0xai_seen"])
+    node._use_summary_oracle_refresh = True
+    registry = [f"0x{i:040x}" for i in range(14)]
+    node._bc = mock.Mock()
+    node._bc.get_eth_oracles.return_value = registry
+    node._network_monitor = mock.Mock()
+    resolved = ["0xai_seen"] + [f"0xai_node_{i}" for i in range(11)]
+    node.netmon.resolve_summary_oracles.return_value = resolved
+    self.assertEqual(node.refresh_node_oracles_cache(), 12)
+    node._bc.get_eth_oracles.assert_called_once_with()
+    node.netmon.resolve_summary_oracles.assert_called_once_with(registry)
+    self.assertEqual(node.apply_cached_node_oracles_to_whitelist(), 11)
+    node.netmon.resolve_summary_oracles.return_value = ["0xai_insufficient"]
+    self.assertEqual(node.refresh_node_oracles_cache(), 0)
+    self.assertEqual(node.apply_cached_node_oracles_to_whitelist(), 0)
+    node._bc.get_eth_oracles.side_effect = TimeoutError("registry deadline")
+    self.assertEqual(node.refresh_node_oracles_cache(), 0)
+    self.assertEqual(node.whitelist_full, resolved)
+    self.assertTrue(any("registry read failed" in msg for msg, _, _ in node._messages))
+    node._bc.get_oracles.assert_not_called()
+    # A fresh result waiting on a busy main loop cannot authorize keys after its summary expires.
+    node._bc.get_eth_oracles.side_effect = None
+    node.netmon.resolve_summary_oracles.return_value = resolved + ["0xai_late"]
+    self.assertEqual(node.refresh_node_oracles_cache(), 13)
+    node.netmon.resolve_summary_oracles.return_value = []
+    self.assertEqual(node.apply_cached_node_oracles_to_whitelist(), 0)
+    self.assertNotIn("0xai_late", node.whitelist_full)
 
   def test_appends_only_missing_oracles(self):
     orchestrator = self._make_orchestrator(whitelist=["existing_node"])
@@ -241,7 +271,7 @@ class _RecordedThread:
     self.started = True
 
 
-def start_node(receives_heartbeats, whitelist):
+def start_node(receives_heartbeats, whitelist, summaries=False):
   """
   Run the real ``_init_all_processes`` on a stand-in node and give the threads it started and the lines it logged.
 
@@ -287,7 +317,8 @@ def start_node(receives_heartbeats, whitelist):
        mock.patch.object(orchestrator_module, "MainLoopDataHandler", mock.MagicMock()), \
        mock.patch.object(orchestrator_module, "ApplicationMonitor", mock.MagicMock()), \
        mock.patch.object(orchestrator_module, "NetworkMonitor", mock.MagicMock()):
-    # The real start, on the stand-in node.
+    # Pass the configured summary capability to the monitor constructed during startup.
+    orchestrator_module.NetworkMonitor.return_value.network_summary_status_enabled = summaries
     Orchestrator._init_all_processes(node)
   # The threads started, by name without the node's thread prefix, and the lines.
   return [thread.name[len(ct.THREADS_PREFIX):] for thread in _RecordedThread.made if thread.started], lines
@@ -319,6 +350,11 @@ class TestNodeOracleRefreshStart(unittest.TestCase):
     # The yellow line, then the red one.
     self.assertEqual([(color, "No allowed command senders" in text) for text, color in lines if color in ("y", "r")],
                      [("y", False), ("r", True)])
+
+  def test_summary_worker_starts_refresh_and_keeps_the_empty_startup_diagnostic(self):
+    started, lines = start_node(receives_heartbeats=False, whitelist=[], summaries=True)
+    self.assertEqual(started, ["async_comm", "node_oracle_refresh"])
+    self.assertTrue(any("No allowed command senders" in message and color == "r" for message, color in lines))
 
   def test_a_node_that_receives_peer_heartbeats_starts_the_refresh_as_before(self):
     """An oracle, or any node whose heartbeat receive is kept, starts the comm thread and the oracle refresh and

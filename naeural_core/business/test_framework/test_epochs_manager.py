@@ -521,6 +521,16 @@ class TestEpochsManager(unittest.TestCase):
     self.assertFalse(saver.is_alive())
     self.assertEqual(written[-1][SYNC_NODES][self.owner.node_addr][EPCT.CURRENT_EPOCH][EPCT.ID], 1)
 
+  def test_failed_newer_save_keeps_older_pending_generation_eligible(self):
+    persist = self.manager._EpochsManager__persist_full_data_snapshot
+    with patch.object(self.log, "save_pickle_to_data", side_effect=[None, OSError("disk full"), None]) as save:
+      self.assertTrue(persist({"epoch": 1}, 1))
+      self.assertFalse(persist({"epoch": 3}, 3))  # The newer snapshot failed to replace generation 1.
+      self.assertTrue(persist({"epoch": 2}, 2))  # A delayed but newer-than-disk writer can still recover.
+      self.assertFalse(persist({"epoch": 1}, 1))
+    self.assertEqual(save.call_count, 3)
+    self.assertTrue(all(call.kwargs["raise_on_error"] for call in save.call_args_list))
+
   def test_local_self_rollover_updates_owner_without_recalculating_cached_peer(self):
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVALS_KEY] = "1"
     os.environ[ct.BASE_CT.EE_EPOCH_INTERVAL_SECONDS_KEY] = "60"

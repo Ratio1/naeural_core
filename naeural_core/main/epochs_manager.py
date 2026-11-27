@@ -599,7 +599,7 @@ class EpochsManager(Singleton):
     Returns
     -------
     bool
-      True if this snapshot was submitted to the disk writer.
+      True if the atomic writer installed this snapshot on disk.
 
     Examples
     --------
@@ -608,7 +608,13 @@ class EpochsManager(Singleton):
     with self.__persist_lock:
       if generation <= self.__last_persisted_generation:
         return False  # The newer snapshot already represents this state.
-      self.log.save_pickle_to_data(data=snapshot, fn=FN_NAME, subfolder_path=FN_SUBFOLDER)
+      try:
+        self.log.save_pickle_to_data(
+          data=snapshot, fn=FN_NAME, subfolder_path=FN_SUBFOLDER, raise_on_error=True,
+        )  # Only a confirmed atomic replacement can supersede a waiting saver.
+      except Exception as exc:
+        self.P(f"Could not persist epochs snapshot {generation} ({type(exc).__name__}): {exc}", color="r")
+        return False  # Leave the last successful generation eligible as the recovery baseline.
       self.__last_persisted_generation = generation
       return True
 
@@ -632,7 +638,7 @@ class EpochsManager(Singleton):
     snapshot, dirty_signature_epochs, generation = self.__snapshot_full_data_for_save(with_lock=True)
     lock_elapsed = time() - lock_start
     if not self.__persist_full_data_snapshot(snapshot, generation):
-      return  # The rollover or periodic save that superseded this one already logged its result.
+      return  # A newer snapshot reached disk or the writer already reported the failure.
     elapsed = time() - save_start
     self.P(
       "Epochs status saved in {:.2f} seconds (epochmon_mutex={:.4f}s, dirty_signature_epochs={})".format(

@@ -3,7 +3,8 @@ import random
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
-from threading import Lock
+from threading import Event, Lock, Thread
+from unittest.mock import patch
 
 from naeural_core import constants as ct
 from naeural_core.core_logging import Logger
@@ -78,6 +79,9 @@ class _StubOwner:
 
   def network_node_hb_interval(self, addr=None):  # pylint: disable=unused-argument
     return 10
+
+  def network_node_info_available(self, node_addr):
+    return True  # Every fixture node initially has NetMon telemetry.
 
   def network_node_is_online(self, node_addr, dt_now=None):  # pylint: disable=unused-argument
     return True
@@ -612,6 +616,90 @@ class TestEpochsManager(unittest.TestCase):
       f"Stress timings register={register_time:.2f}s, "
       f"accum_avail={accum_time:.2f}s, legacy_avail={legacy_time:.2f}s"
     )
+
+
+  def test_cached_stats_remain_detached_while_refresh_is_blocked_or_fails(self):
+    node = self.owner.node_addr
+    self.assertIn('error', self.manager.get_cached_stats())
+    good = {'error': None, node: {'tags': ['original'], 'is_online': False}}
+    with patch.object(self.manager, '_EpochsManager__get_stats', return_value=good):
+      self.manager.get_stats(force_refresh=True)[node]['tags'].clear()
+    self.assertEqual(self.manager.get_cached_stats()[node]['tags'], ['original'])
+    entered, proceed = Event(), Event()
+    def blocked(**kwargs):
+      entered.set()
+      proceed.wait(timeout=3)
+      return {'error': 'partial build', node: {'tags': ['partial']}}
+    with patch.object(self.manager, '_EpochsManager__get_stats', side_effect=blocked):
+      worker = Thread(target=self.manager.get_stats, kwargs={'force_refresh': True})
+      worker.start()
+      self.assertTrue(entered.wait(timeout=2))
+      try:
+        self.assertEqual(self.manager.get_cached_stats(node_addrs=[node]), {node: good[node]})
+        self.assertEqual(self.manager.get_cached_stats(online_only=True), {'error': None})
+      finally:
+        proceed.set()
+        worker.join(timeout=2)
+    self.assertEqual(self.manager.get_cached_stats(), good)
+
+  def test_rebuild_rechecks_expiry_after_another_publisher_and_obeys_force(self):
+    entered, proceed = Event(), Event()
+    def build(**kwargs):
+      entered.set()
+      proceed.wait(timeout=3)
+      return {'error': None, 'node': {'tags': ['complete']}}
+    with patch.object(self.manager, '_EpochsManager__get_stats', side_effect=build) as rebuild:
+      workers = [Thread(target=self.manager.get_stats) for _ in range(2)]
+      for worker in workers:
+        worker.start()
+      self.assertTrue(entered.wait(timeout=2))
+      proceed.set()
+      for worker in workers:
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+      self.assertEqual(rebuild.call_count, 1)
+      self.manager.get_stats(force_refresh=True)
+      self.assertEqual(rebuild.call_count, 2)
+
+  def test_failing_known_telemetry_preserves_good_generation(self):
+    self._build_manager(current_epoch=5)  # Statistics require a completed epoch range.
+    node = self.owner.node_addr
+    self.manager.maybe_update_cached_data(force=True)
+    good = self.manager.get_stats(force_refresh=True)
+    self.assertIsNone(good['error'])
+    self.assertIn(node, good)
+    with patch.object(self.owner, 'get_network_node_tags', side_effect=ValueError('telemetry broken')):
+      self.manager.get_stats(force_refresh=True)
+    self.assertEqual(self.manager.get_cached_stats(), good)
+    with patch.object(self.owner, 'get_network_node_tags', return_value=['recovered']):
+      self.manager.get_stats(force_refresh=True)
+    self.assertEqual(self.manager.get_cached_stats()[node]['tags'], ['recovered'])
+
+  def test_stalled_snapshot_logs_age_once_per_interval_and_recovers(self):
+    node = self.owner.node_addr
+    row = {'error': None, node: {'tags': []}}
+    with patch('naeural_core.main.epochs_manager.time', return_value=100), patch.object(self.manager, '_EpochsManager__get_stats', return_value=row):
+      self.manager.get_stats(force_refresh=True)
+    with patch('naeural_core.main.epochs_manager.time', return_value=500), patch.object(self.manager, 'P') as log:
+      self.assertEqual(self.manager.get_cached_stats(), row)
+      self.manager.get_cached_stats()
+      log.assert_called_once()
+      self.assertIn('400s', log.call_args.args[0])
+
+  def test_external_references_do_not_mutate_transferred_epoch(self):
+    node = self.owner.node_addr
+    timestamp = self.manager.get_current_date()
+    self.manager.register_data(node, self._make_hb(timestamp))
+    external = [self.manager.data[node], self.manager.full_data[SYNC_NODES][node], self.manager.get_full_node_state(node)]
+    old_record = self.manager._EpochsManager__data[node][EPCT.CURRENT_EPOCH]
+    self.manager._set_dbg_date(timestamp + timedelta(seconds=self.manager.epoch_length))
+    self.manager.maybe_close_epoch()
+    current = self.manager._EpochsManager__data[node]
+    self.assertIs(current[EPCT.LAST_EPOCH], old_record)
+    self.assertIsNot(current[EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS], old_record[EPCT.HB_TIMESTAMPS])
+    for view in external:
+      view[EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS].clear()
+    self.assertEqual(current[EPCT.LAST_EPOCH][EPCT.HB_TIMESTAMPS], {timestamp})
 
 
 class TestNetMonDuplicates(unittest.TestCase):

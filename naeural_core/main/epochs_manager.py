@@ -210,8 +210,11 @@ class EpochsManager(Singleton):
     # Internal addresses already in `__eth_to_node`, so a lookup miss converts only new nodes.
     self.__eth_mapped_nodes = set()
     
-    self.__current_stats = None
-    self.__current_stats_timestamp = 0
+    # Readers capture one generation, including its successful publication time.
+    self.__stats_snapshot = (None, None)
+    self.__last_stats_attempt = None  # Throttle failed builds without refreshing the age of good data.
+    self.__stats_started = time()  # Track a stalled first build as well as old snapshots.
+    self.__last_stats_warning = 0
     
     try:
       debug = int(debug)
@@ -237,13 +240,42 @@ class EpochsManager(Singleton):
     )
     return
 
+  def __diagnostic_snapshot(self, source):
+    """Detach an epoch diagnostic view while holding the node table stable.
+
+    Datetime values are immutable. A shallow copy of each timestamp set preserves
+    exact values and avoids re-serializing every datetime while holding the mutex.
+
+    Parameters
+    ----------
+    source : dict
+      The live node table or its containing full-state dictionary.
+
+    Returns
+    -------
+    dict
+      A detached snapshot, including any historical extension fields.
+
+    Examples
+    --------
+    The public data and full_data properties share this snapshot operation.
+    """
+    with self.log.managed_lock_resource(EPOCHMON_MUTEX):
+      memo = {}
+      for node in self.__data.values():
+        for key in (EPCT.CURRENT_EPOCH, EPCT.LAST_EPOCH):
+          timestamps = node.get(key, {}).get(EPCT.HB_TIMESTAMPS)
+          if isinstance(timestamps, set):
+            memo[id(timestamps)] = timestamps.copy()  # Only immutable datetimes are shared.
+      return deepcopy(source, memo)  # Other mutable fields retain normal recursive-copy semantics.
+
   @property
   def data(self):
-    return self.__data
-  
+    return self.__diagnostic_snapshot(self.__data)
+
   @property
   def full_data(self):
-    return self.__full_data
+    return self.__diagnostic_snapshot(self.__full_data)
 
 
   @property
@@ -906,9 +938,10 @@ class EpochsManager(Singleton):
     node_addr : str
       The node address.
     """
-    self.__data[node_addr][EPCT.LAST_EPOCH] = deepcopy(self.__data[node_addr][EPCT.CURRENT_EPOCH])
-    self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS] = set()
-    self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.ID] = self.get_time_epoch()
+    # Only the manager owns these live records; diagnostic and persistence views are detached.
+    self.__data[node_addr][EPCT.LAST_EPOCH] = self.__data[node_addr][EPCT.CURRENT_EPOCH]
+    # Heartbeats for the new epoch receive a distinct record and timestamp set.
+    self.__data[node_addr][EPCT.CURRENT_EPOCH] = {EPCT.HB_TIMESTAMPS: set(), EPCT.ID: self.get_time_epoch()}
     self.__data[node_addr][EPCT.CURR_AVAIL_SECONDS] = 0
     self.__data[node_addr][EPCT.CURR_SEGMENT_START] = None
     self.__data[node_addr][EPCT.CURR_LAST_HB] = None
@@ -1230,7 +1263,7 @@ class EpochsManager(Singleton):
     ):
       avail_seconds = self.__get_accumulated_avail_seconds(node_addr)
       current_epoch = self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.ID]
-      lst_timestamps = sorted(list(self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS]))
+      lst_timestamps = self.__data[node_addr][EPCT.CURRENT_EPOCH][EPCT.HB_TIMESTAMPS]  # Used only for debug endpoints below.
     else:
       avail_seconds, lst_timestamps, current_epoch = self.__calc_node_avail_seconds(
         node_addr, time_between_heartbeats=time_between_heartbeats,
@@ -1251,8 +1284,8 @@ class EpochsManager(Singleton):
         node_name = node_name[:8]
         start_date, end_date = None, None
         if len(lst_timestamps) >= 1:
-          start_date = self.date_to_str(lst_timestamps[0])
-          end_date = self.date_to_str(lst_timestamps[-1])
+          start_date = self.date_to_str(min(lst_timestamps))
+          end_date = self.date_to_str(max(lst_timestamps))
         str_node_addr = node_addr[:8] + '...' + node_addr[-3:]
         log_msg = "{:<8}<{}> avail in ep {}: {} ({:.2f}%) from {} to {}".format(
           node_name, str_node_addr, current_epoch, 
@@ -1268,6 +1301,8 @@ class EpochsManager(Singleton):
         self.P(log_msg, color=log_msg_color)
       # endif log_msg is not None
     # endif debug
+    if return_msg:
+      return prc_available, current_epoch, None, None  # Keep the caller's result shape when debug is disabled.
     return prc_available, current_epoch
 
 
@@ -1315,13 +1350,15 @@ class EpochsManager(Singleton):
           extra_logs=False,
         )
         self.stop_timer('recalc_node_epoch')
-        logs.append(log_msg)
-        logs_colors.append(log_msg_color)
+        if log_msg is not None:  # A non-debug rollover has no per-node diagnostic text.
+          logs.append(log_msg)
+          logs_colors.append(log_msg_color)
       self.stop_timer('recalc_all_nodes_epoch')
       all_logs_color = 'r' if 'r' in logs_colors else None
       all_logs_str = f"Recalculated epoch {current_epoch} availability for all nodes:\n\t"
       all_logs_str += '\n\t'.join(logs)
-      self.P(all_logs_str, color=all_logs_color)
+      if logs:
+        self.P(all_logs_str, color=all_logs_color)
     # endif current node was not 100% available
     return
 
@@ -1525,7 +1562,7 @@ class EpochsManager(Singleton):
     """
     Returns the list of nodes.
     """
-    return list(self.data.keys())
+    return list(self.__data.keys())
   
   
   def get_node_state(self, node_addr):
@@ -1929,7 +1966,7 @@ class EpochsManager(Singleton):
       } # add either online or non-node keys
     if display:
       self.P("Overall statistics:\n{}".format(json.dumps(stats, indent=2)))
-    return stats
+    return deepcopy(stats)  # Keep mutable legacy callers outside the published generation.
   
   
   def get_stats_light(self, display=False, online_only=False):
@@ -1954,18 +1991,87 @@ class EpochsManager(Singleton):
     return stats
 
 
+  def get_cached_stats(self, node_addrs=None, online_only=False):
+    """Read one completed statistics generation without acquiring the rebuild lock.
+
+    NetMon publishes a new generation after each successful rebuild. Metadata
+    readers can select the nodes they need and mutate their returned copy.
+
+    Parameters
+    ----------
+    node_addrs : iterable of str, optional
+      Internal addresses to select. Omission returns all rows.
+    online_only : bool, optional
+      Apply the same online filter as `get_stats`.
+
+    Returns
+    -------
+    dict
+      Detached rows plus the existing error field. On cold start the error
+      explains that the first successful statistics snapshot is still pending.
+
+    Examples
+    --------
+    >>> rows = manager.get_cached_stats(node_addrs=[addr])
+    """
+    # Capture both halves together, even when a publisher advances during this read.
+    stats, completed = self.__stats_snapshot
+    now = time()
+    age = now - (completed if completed is not None else self.__stats_started)
+    if age > 3 * STATS_CACHE_REFRESH_SECONDS and now - self.__last_stats_warning >= STATS_CACHE_REFRESH_SECONDS:
+      self.__last_stats_warning = now  # Limit stale diagnostics across frequent reward requests.
+      self.P(f"Network statistics refresh delayed for {age:.0f}s (last success: {completed}).", color='y')
+    if stats is None:
+      return {'error': 'Network statistics are awaiting their first successful refresh.'}
+    if node_addrs is not None:
+      # A sixteen-license request only copies the corresponding rows.
+      stats = {key: stats[key] for key in node_addrs if key in stats}
+    if online_only:
+      stats = {k: v for k, v in stats.items() if not isinstance(v, dict) or v.get('is_online') in (True, None)}
+    return deepcopy(stats)  # Nested tags and resources must not alias a later reader's response.
+
   def _maybe_calculate_stats(self, force_refresh=False):
-    
-    if time() > (self.__current_stats_timestamp + STATS_CACHE_REFRESH_SECONDS) or self.__current_stats is None or force_refresh:
+    """Refresh the statistics snapshot once per interval, retaining the last success.
+
+    Concurrent refreshers recheck the interval inside the writer lock.
+
+    Parameters
+    ----------
+    force_refresh : bool, optional
+      Recalculate even if another caller just completed a refresh.
+
+    Returns
+    -------
+    dict
+      Latest successful generation, or an error when no generation is available.
+
+    Examples
+    --------
+    >>> stats = manager._maybe_calculate_stats()
+    """
+    def due():
+      # A failed build should retry on the next normal interval, including at cold start.
+      return force_refresh or self.__last_stats_attempt is None or time() - self.__last_stats_attempt >= STATS_CACHE_REFRESH_SECONDS
+
+    if due():
       with self.log.managed_lock_resource(NETWORK_STATS_MUTEX):
-        self.P(f"Calculating overall statistics for all nodes ...")
-        # Maybe calculate must allways calculate for ALL the nodes not just the online ones
-        self.__current_stats = self.__get_stats(display=False, online_only=False, light=False)
-        self.__current_stats_timestamp = time()
-        self.P("Overall statistics calculated.")
-      # endwith lock
-    # endif cache expired or no stats
-    return self.__current_stats
+        if due():  # Another caller may have completed the build while we waited.
+          self.P("Calculating overall statistics for all nodes ...")
+          try:
+            stats = self.__get_stats(display=False, online_only=False, light=False)
+            if stats.get('error') is not None:
+              raise ValueError(stats['error'])  # A failed scan may already contain some node rows.
+            detached = deepcopy(stats)  # Detach live lists such as the Oracle state save history.
+            self.__stats_snapshot = (detached, time())  # Publish rows and success timestamp together.
+            self.P("Overall statistics calculated.")
+          except Exception as exc:
+            self.P(f"Network statistics refresh failed: {exc}", color='y')
+            if self.__stats_snapshot[0] is None:
+              return {'error': str(exc)}  # Discard any partially built rows.
+          finally:
+            self.__last_stats_attempt = time()  # Failed attempts affect retry cadence only.
+    stats = self.__stats_snapshot[0]
+    return stats if stats is not None else {'error': 'Network statistics are awaiting their first successful refresh.'}
 
 
   def __get_stats(self, display=False, online_only=False, light=False):
@@ -1998,7 +2104,7 @@ class EpochsManager(Singleton):
       start_epoch = max(1, current_epoch - NR_HIST)
       certainty = self.get_self_supervisor_capacity(as_float=True, start_epoch=start_epoch)
       oracle_state = None if light else self.get_oracle_state()
-      for node_addr in self.data:        
+      for node_addr in list(self.__data):  # Node registration may run during this build.
         try:
           is_online = self.owner.network_node_is_online(
             node_addr, dt_now=self.get_current_date()
@@ -2058,9 +2164,13 @@ class EpochsManager(Singleton):
               'debug_device_id' : debug_device_id,
             }
           # end DEBUG
-        except:
-          continue
-        
+        except Exception:
+          # Historical nodes without telemetry cannot contribute metadata. A known node's failed lookup
+          # instead invalidates this rebuild so a partial generation cannot replace the last good one.
+          if light or not self.owner.network_node_info_available(node_addr):
+            continue
+          raise
+
         netmon_last_seen = self.date_to_str(dt_netmon_last_seen) if dt_netmon_last_seen is not None else 'N/A'
         node_name = self.get_node_name(node_addr)
         dct_epochs = self.get_node_epochs(node_addr, as_list=False, autocomplete=True) or defaultdict(int)
@@ -2071,7 +2181,7 @@ class EpochsManager(Singleton):
         node_current_epoch_last_hb = None
         node_current_epoch_id = None
         try: 
-          node_current_epoch_data = self.data[node_addr][EPCT.CURRENT_EPOCH]
+          node_current_epoch_data = self.__data[node_addr][EPCT.CURRENT_EPOCH]
           node_current_epoch_id = node_current_epoch_data[EPCT.ID]
           node_current_epoch_hb_timestamps = node_current_epoch_data[EPCT.HB_TIMESTAMPS]
           node_current_epoch_1st_hb = min(node_current_epoch_hb_timestamps) if len(node_current_epoch_hb_timestamps) > 0 else None
@@ -2082,7 +2192,7 @@ class EpochsManager(Singleton):
         
         
         # process the previous epoch hb data
-        node_last_epoch_data = self.data[node_addr][EPCT.LAST_EPOCH]
+        node_last_epoch_data = self.__data[node_addr][EPCT.LAST_EPOCH]
         node_last_epoch_id = node_last_epoch_data[EPCT.ID]
         node_last_epoch_hb_timestamps = node_last_epoch_data[EPCT.HB_TIMESTAMPS]
         node_last_epoch_1st_hb = min(node_last_epoch_hb_timestamps) if len(node_last_epoch_hb_timestamps) > 0 else None
@@ -2121,8 +2231,8 @@ class EpochsManager(Singleton):
         # It is harmful, but can cause log spamming
         nr_eps = len(epochs) - (0 in dct_epochs)
         prev_epoch = self.get_time_epoch() - 1
-        first_seen = self.data[node_addr][EPCT.FIRST_SEEN]
-        last_seen = self.data[node_addr][EPCT.LAST_SEEN]
+        first_seen = self.__data[node_addr][EPCT.FIRST_SEEN]
+        last_seen = self.__data[node_addr][EPCT.LAST_SEEN]
         eth_addr = self.owner.node_address_to_eth_address(node_addr)
         if nr_eps != prev_epoch:
           msg = "Epochs mismatch for node: {} - total {} vs prev {}".format(

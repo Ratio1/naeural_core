@@ -564,6 +564,21 @@ class TestChainStoreHsync(unittest.TestCase):
     self.assertEqual(set_result["kwargs"]["include_default_peers"], False)
     self.assertEqual(hsync_result["kwargs"]["include_default_peers"], False)
 
+  def test_background_sync_targets_one_peer_without_plugin_timers_or_startup_wait(self):
+    plugin = _PeerSelectionHarness()
+    plugin.start_timer = plugin.end_timer = plugin.sleep = lambda *args: self.fail("touched plugin thread state")
+    result = plugin.chainstore_hsync_from_peer('players', 'peer-A', 2.5)
+    self.assertEqual(result['kwargs'], {'peers': ['peer-A'], 'timeout': 2.5, 'include_default_peers': False, 'debug': False})
+    for timeout in (None, 0, -1, True, float('nan'), float('inf')):
+      with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+        plugin.chainstore_hsync_from_peer('players', 'peer-A', timeout)
+    for invalid in (None, '', 'peer-self', ['peer-A', 'peer-B']):
+      with self.subTest(peer=invalid), self.assertRaises(ValueError):
+        plugin.chainstore_hsync_from_peer('players', invalid, 1)
+    plugin.plugins_shmem.clear()
+    with self.assertRaisesRegex(ValueError, 'not ready'):
+      plugin.chainstore_hsync_from_peer('players', 'peer-A', 1)
+
   def test_hsync_uses_backend_default_peers_when_no_explicit_targets(self):
     requester = _ChainStoreRuntimeHarness("peer-requester", default_peers=["peer-1"])
     responder = _ChainStoreRuntimeHarness(

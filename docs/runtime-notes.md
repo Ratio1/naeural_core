@@ -99,6 +99,13 @@ Dedicated docs: [CStore](CSTORE.md), [Deeploy node lifecycle](DEEPLOY_NODE_LIFEC
   `get_full_node_state()` for full debug state so heartbeat registration does not wait on copies.
 - `save_status` keeps detached per-epoch caches of `SYNC_SIGNATURES`, `SYNC_AGREEMENT_CID` and
   `SYNC_SIGNATURES_CID`, refreshing only dirty epochs before saving.
+- The supervisor NetMon loop publishes completed statistics generations. Use
+  `get_cached_stats(node_addrs=...)` to read a detached view during a rebuild.
+  Cold reads carry an error, and failed rebuilds retain the preceding generation.
+  `get_stats(force_refresh=True)` still requests a rebuild.
+- `EpochsManager.data` and `full_data` provide detached diagnostic snapshots.
+  Use `get_node_list()` for addresses and `get_full_node_state(addr)` for one node.
+  Closing an epoch transfers its timestamp set and allocates a fresh current record.
 - NetMon's pipeline cache is refreshed by `NET_CONFIG_MONITOR` payloads, not only by heartbeats.
 
 ## Plugins and business manager

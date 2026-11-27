@@ -19,6 +19,7 @@ EE_EPOCH_INTERVAL_SECONDS=3600
 import uuid
 import json
 import os
+from inspect import Parameter, signature
 
 import numpy as np
 
@@ -609,14 +610,55 @@ class EpochsManager(Singleton):
       if generation <= self.__last_persisted_generation:
         return False  # The newer snapshot already represents this state.
       try:
-        self.log.save_pickle_to_data(
-          data=snapshot, fn=FN_NAME, subfolder_path=FN_SUBFOLDER, raise_on_error=True,
-        )  # Only a confirmed atomic replacement can supersede a waiting saver.
+        writer = self.log.save_pickle_to_data
+        parameters = signature(writer).parameters  # Earlier drafts have the same SDK version but a different writer.
+        if "raise_on_error" in parameters or any(p.kind == Parameter.VAR_KEYWORD for p in parameters.values()):
+          writer(data=snapshot, fn=FN_NAME, subfolder_path=FN_SUBFOLDER, raise_on_error=True)
+        else:
+          self.__write_with_legacy_pickle_api(writer, snapshot)
       except Exception as exc:
         self.P(f"Could not persist epochs snapshot {generation} ({type(exc).__name__}): {exc}", color="r")
         return False  # Leave the last successful generation eligible as the recovery baseline.
       self.__last_persisted_generation = generation
       return True
+
+  def __write_with_legacy_pickle_api(self, writer, snapshot):
+    """Install a snapshot through an SDK writer that returns its target path on failure.
+
+    Parameters
+    ----------
+    writer : callable
+      The earlier SDK's bound save_pickle_to_data method.
+    snapshot : dict
+      Detached state in the existing epoch pickle format.
+
+    Returns
+    -------
+    None
+      A successful return confirms that the new file replaced the target.
+
+    Examples
+    --------
+    During a rolling upgrade an old SDK can still persist the closed epoch.
+    """
+    # The old SDK produces this unique sibling only after completing its own atomic save.
+    staged = writer(data=snapshot, fn=f"{FN_NAME}.{uuid.uuid4().hex}.stage", subfolder_path=FN_SUBFOLDER)
+    directory = os.path.dirname(staged)
+    try:
+      os.replace(staged, os.path.join(directory, FN_NAME))  # A false success from the old writer raises here.
+    finally:
+      try:
+        os.unlink(staged)  # Clean up a successful staging write whose final rename failed.
+      except FileNotFoundError:
+        pass
+    try:
+      descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+      try:
+        os.fsync(descriptor)  # Persist the final directory entry on filesystems supporting directory sync.
+      finally:
+        os.close(descriptor)
+    except OSError:
+      pass  # Match the SDK's best-effort directory sync on platforms that cannot open a directory.
 
   def save_status(self):
     """
